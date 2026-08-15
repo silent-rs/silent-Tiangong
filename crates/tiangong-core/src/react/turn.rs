@@ -130,11 +130,16 @@ pub(crate) async fn run_turn(
     // ── 成功终态发布最终答复快照 ──
     // 放在最终落盘之后：落盘失败降级路径已回收相位并发布 React 快照，
     // 此处只剩成功路径——失败终态不得发布 Summary 快照。
+    // 按**本轮候选 ID** 查找（与失败回收同一 ID）：插件在 on_turn_finished
+    // 追加 Summary 相位消息时，发布的仍是模型候选而非插件消息。
     if matches!(outcome, TurnExecutionOutcome::Success)
-        && let Some(message) = ctx.session.messages.iter().rev().find(|message| {
-            message.role == MessageRole::Assistant
-                && message.phase == crate::session::MessagePhase::Summary
-        })
+        && let Some(message_id) = finalized_candidate_id.as_ref()
+        && let Some(message) = ctx
+            .session
+            .messages
+            .iter()
+            .find(|message| &message.id == message_id)
+        && message.phase == crate::session::MessagePhase::Summary
     {
         let mut snapshot = message.clone();
         snapshot.clear_transient_data();

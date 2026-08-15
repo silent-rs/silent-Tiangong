@@ -2827,8 +2827,29 @@ mod tests {
 
         let mut events = EventLog::new(stream_rx);
         events.pump();
+        // 取消确实发生（模型请求被中断、无成功终态）；落盘失败覆盖终态为
+        // 唯一的 Failed 错误（生产语义：保存失败不虚报，取消状态被改写 Failed）。
+        events.assert_single_failure_terminal("最终会话持久化失败");
+        assert!(
+            !events
+                .seen()
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Done { .. })),
+            "取消 + 落盘失败不得出现成功终态"
+        );
         let reloaded =
             Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
+        let current_user = reloaded
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .expect("本轮用户消息必须保留");
+        assert_eq!(
+            current_user.turn_status,
+            Some(TurnStatus::Failed),
+            "取消 + 落盘失败后用户消息最终为 Failed（落盘失败覆盖）"
+        );
         // 取消 + 落盘失败：上一轮 Summary 不得被降级。
         let summary_replies: Vec<&crate::session::Message> = reloaded
             .messages
@@ -2893,13 +2914,22 @@ mod tests {
 
         let mut events = EventLog::new(stream_rx);
         events.pump();
-        // 唯一失败终态（补偿失败不重复发布）。
+        // 唯一失败终态（补偿失败不重复发布）；无任何成功终态；事件流中不出现
+        // 候选的 Summary 快照（持续失败期间候选已在内存回收）。
         events.assert_single_failure_terminal("最终会话持久化失败");
-        // 磁盘恢复后重载（持续失败期间收尾数据未写入——持久化失败不虚报成功）。
+        assert!(
+            !events.seen().iter().any(|event| matches!(
+                event,
+                StreamEvent::SessionMessageUpsert { message, .. }
+                    if message.text_content().contains(FINAL_CANDIDATE_MARKER)
+                        && message.phase == MessagePhase::Summary
+            )),
+            "持续失败期间不得发布候选的 Summary 快照"
+        );
+        // 磁盘恢复后重载的是最后一次成功保存的状态（本轮收尾数据未写入，
+        // 不虚报成功）；不声称磁盘上已有最终状态。
         crate::core::test_support::clear_persistent_persistence_failure(&session_id);
-        let reloaded =
-            Session::load_from_storage(&storage_root, &session_id).expect("磁盘恢复后应可重载");
-        let _ = reloaded;
+        let _disk = Session::load_from_storage(&storage_root, &session_id).expect("磁盘应可重载");
         provider.assert_request_count_and_latest_user_contains(1, "你好");
     }
 
@@ -2974,6 +3004,78 @@ mod tests {
                     && message.phase == MessagePhase::Summary
             }),
             "插件追加的 Summary 不被误伤"
+        );
+    }
+
+    /// 插件在 on_turn_finished 追加 Summary 相位消息、最终保存正常成功时：
+    /// 发布的最终答复快照必须是**模型候选**（按候选 ID），插件消息不得被
+    /// 作为最终答复发布。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn success_snapshot_publishes_model_candidate_not_plugin_summary() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        const PLUGIN_MARKER: &str = "PLUGIN-APPENDED-SUMMARY-SUCCESS";
+
+        struct AppendSummaryPlugin;
+        impl ToolOverrideHandler for AppendSummaryPlugin {}
+        impl ToolSpecProvider for AppendSummaryPlugin {}
+        impl PromptSectionProvider for AppendSummaryPlugin {}
+        impl MentionCandidateProvider for AppendSummaryPlugin {}
+        impl Plugin for AppendSummaryPlugin {
+            fn id(&self) -> &str {
+                "append-summary"
+            }
+            fn on_turn_finished(&self, session: &mut Session, _: usize) {
+                // 追加在消息尾部：倒序查找会优先命中这条。
+                let mut appended = Message::new(MessageRole::Assistant, PLUGIN_MARKER);
+                appended.phase = MessagePhase::Summary;
+                session.messages.push(appended);
+            }
+        }
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+        let plugin = Arc::new(AppendSummaryPlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![plugin],
+        );
+        let TestHarness { ctx, stream_rx, .. } = harness;
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        events.assert_single_success_terminal();
+        // 成功终态前发布的 Summary 快照必须是模型候选，不是插件追加的消息。
+        let published: Vec<&crate::session::Message> = events
+            .seen()
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::SessionMessageUpsert { message, .. } => Some(message),
+                _ => None,
+            })
+            .filter(|message| message.phase == MessagePhase::Summary)
+            .collect();
+        assert_eq!(
+            published.len(),
+            1,
+            "成功终态只发布一条 Summary 快照（模型候选）"
+        );
+        assert!(
+            published[0].text_content().contains(FINAL_CANDIDATE_MARKER),
+            "发布的快照必须是模型候选"
+        );
+        assert!(
+            !published[0].text_content().contains(PLUGIN_MARKER),
+            "插件追加的 Summary 不得被作为最终答复发布"
         );
     }
 
