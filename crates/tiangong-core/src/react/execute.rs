@@ -912,6 +912,7 @@ pub(super) async fn execute_turn(
                 // 提交时刻标记候选答复为最终答复：仅成功终态——失败终态不
                 // 得把未验证的候选定格为最终答复（替代请求失败时旧候选必须
                 // 保留 React 过程相位）。
+                let mut pending_result = pending_result;
                 if matches!(
                     pending_result.outcome,
                     super::outcome::TurnExecutionOutcome::Success
@@ -923,12 +924,14 @@ pub(super) async fn execute_turn(
                         .find(|message| message.id == msg_id)
                 {
                     message.phase = MessagePhase::Summary;
+                    // 携带候选 ID：run_turn 收尾降级时按 ID 精确回收（不依赖
+                    // 倒序查找，插件追加 Summary 时不会误伤）。
+                    pending_result.finalized_candidate_id = Some(msg_id);
                     // Summary 快照不在 Loop 提交点发布：run_turn 收尾若降级为
                     // Failed（悬空工具/落盘失败）会回收相位，届时发布的是 React
                     // 快照——失败终态不得发布 Summary 快照。
                 }
                 crate::react::inbox::commit_ingress(&ctx.session.id);
-                let mut pending_result = pending_result;
                 pending_result.usage = state.accumulated_usage.clone();
                 tracing::debug!(
                     session_id = %ctx.session.id,
@@ -2840,6 +2843,138 @@ mod tests {
             "取消轮次的落盘失败不得倒推上一轮最终答复"
         );
         assert!(summary_replies[0].text_content().contains(PREVIOUS_MARKER));
+    }
+
+    /// 持续性持久化故障：首次保存与补偿保存都失败——内存状态仍正确
+    /// （成功候选按 ID 回收、用户消息 Failed、唯一失败终态事件），
+    /// 磁盘恢复后重载可见最终状态。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_persistence_failure_recovers_candidate_and_reports_once() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+
+        struct FailAllPersistencePlugin;
+        impl ToolOverrideHandler for FailAllPersistencePlugin {}
+        impl ToolSpecProvider for FailAllPersistencePlugin {}
+        impl PromptSectionProvider for FailAllPersistencePlugin {}
+        impl MentionCandidateProvider for FailAllPersistencePlugin {}
+        impl Plugin for FailAllPersistencePlugin {
+            fn id(&self) -> &str {
+                "fail-all-persistence"
+            }
+            fn on_turn_finished(&self, session: &mut Session, _: usize) {
+                crate::core::test_support::fail_all_persistence_for_session(&session.id);
+            }
+        }
+
+        let plugin = Arc::new(FailAllPersistencePlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![plugin],
+        );
+        let TestHarness {
+            ctx,
+            stream_rx,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        // 唯一失败终态（补偿失败不重复发布）。
+        events.assert_single_failure_terminal("最终会话持久化失败");
+        // 磁盘恢复后重载（持续失败期间收尾数据未写入——持久化失败不虚报成功）。
+        crate::core::test_support::clear_persistent_persistence_failure(&session_id);
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("磁盘恢复后应可重载");
+        let _ = reloaded;
+        provider.assert_request_count_and_latest_user_contains(1, "你好");
+    }
+
+    /// 插件在 on_turn_finished 追加 Summary 相位消息时，成功轮次的落盘失败
+    /// 回收仍只作用于本轮候选（按 ID），不误伤插件追加或上一轮的最终答复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_appended_summary_survives_candidate_demotion_by_id() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        const PLUGIN_MARKER: &str = "PLUGIN-APPENDED-SUMMARY";
+
+        // 插件：收尾时追加一条 Summary 相位的 assistant 消息，并注入落盘失败。
+        struct AppendSummaryAndFailPlugin;
+        impl ToolOverrideHandler for AppendSummaryAndFailPlugin {}
+        impl ToolSpecProvider for AppendSummaryAndFailPlugin {}
+        impl PromptSectionProvider for AppendSummaryAndFailPlugin {}
+        impl MentionCandidateProvider for AppendSummaryAndFailPlugin {}
+        impl Plugin for AppendSummaryAndFailPlugin {
+            fn id(&self) -> &str {
+                "append-summary-and-fail"
+            }
+            fn on_turn_finished(&self, session: &mut Session, _: usize) {
+                let mut appended = Message::new(MessageRole::Assistant, PLUGIN_MARKER);
+                appended.phase = MessagePhase::Summary;
+                session.messages.push(appended);
+                crate::core::test_support::fail_next_persistence_for_session(&session.id);
+            }
+        }
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+        let plugin = Arc::new(AppendSummaryAndFailPlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![plugin],
+        );
+        let TestHarness {
+            ctx,
+            stream_rx,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        events.assert_single_failure_terminal("最终会话持久化失败");
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
+        // 本轮候选回收为 React；插件追加的 Summary 保留。
+        assert!(
+            reloaded.messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content().contains(FINAL_CANDIDATE_MARKER)
+                    && message.phase == MessagePhase::React
+            }),
+            "本轮候选按 ID 回收为 React"
+        );
+        assert!(
+            reloaded.messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content().contains(PLUGIN_MARKER)
+                    && message.phase == MessagePhase::Summary
+            }),
+            "插件追加的 Summary 不被误伤"
+        );
     }
 
     /// ALR-108：一个物理 turn 只调用一次 on_turn_started 和一次 on_turn_finished。

@@ -305,6 +305,39 @@ fn next_persistence_failures() -> &'static Mutex<HashSet<String>> {
     NEXT_PERSISTENCE_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+static PERSISTENT_PERSISTENCE_FAILURES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+fn persistent_persistence_failures() -> &'static std::sync::Mutex<std::collections::HashSet<String>>
+{
+    PERSISTENT_PERSISTENCE_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 安排指定 session 的**持续性**持久化失败（补偿保存也失败）。
+pub fn fail_all_persistence_for_session(sid: &str) {
+    persistent_persistence_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(sid.to_string());
+}
+
+/// 清除持续性失败登记（测试收尾恢复磁盘可用）。
+pub fn clear_persistent_persistence_failure(sid: &str) {
+    persistent_persistence_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(sid);
+}
+
+pub(crate) fn is_persistence_persistently_failing(sid: &str) -> bool {
+    persistent_persistence_failures()
+        .lock()
+        .map(|set| set.contains(sid))
+        .unwrap_or(false)
+}
+
 /// 安排指定 session 的下一次持久化失败。
 pub fn fail_next_persistence_for_session(sid: &str) {
     next_persistence_failures()

@@ -36,6 +36,10 @@ impl TurnExecutionOutcome {
 pub(super) struct TurnExecutionResult {
     pub(super) usage: TokenUsage,
     pub(super) outcome: TurnExecutionOutcome,
+    /// 成功路径本轮候选答复（已标记 Summary）的消息 ID：run_turn 收尾降级时
+    /// 按 ID 精确回收，不依赖倒序查找——插件在 on_turn_finished 中追加或修改
+    /// Summary 相位时也不会误伤。
+    pub(super) finalized_candidate_id: Option<String>,
 }
 
 impl TurnExecutionResult {
@@ -43,6 +47,7 @@ impl TurnExecutionResult {
         Self {
             usage,
             outcome: TurnExecutionOutcome::Success,
+            finalized_candidate_id: None,
         }
     }
 
@@ -50,6 +55,7 @@ impl TurnExecutionResult {
         Self {
             usage,
             outcome: TurnExecutionOutcome::Cancelled,
+            finalized_candidate_id: None,
         }
     }
 
@@ -57,6 +63,7 @@ impl TurnExecutionResult {
         Self {
             usage,
             outcome: TurnExecutionOutcome::Failed(message.into()),
+            finalized_candidate_id: None,
         }
     }
 }

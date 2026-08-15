@@ -379,7 +379,9 @@ impl Session {
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
         #[cfg(test)]
-        if crate::core::test_support::take_persistence_failure_for_session(&self.id) {
+        if crate::core::test_support::is_persistence_persistently_failing(&self.id)
+            || crate::core::test_support::take_persistence_failure_for_session(&self.id)
+        {
             return Err(format!("测试注入的 session 持久化失败（{}）", self.id));
         }
 

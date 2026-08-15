@@ -58,6 +58,7 @@ pub(crate) async fn run_turn(
     drop(cmd_rx);
     let usage = execution.usage;
     let mut outcome = execution.outcome;
+    let mut finalized_candidate_id = execution.finalized_candidate_id;
     ctx.session.token_usage.accumulate(&usage);
 
     // ── 修复消息协议 ──
@@ -79,7 +80,7 @@ pub(crate) async fn run_turn(
     }
     if had_interrupted_tools && matches!(outcome, TurnExecutionOutcome::Success) {
         outcome = TurnExecutionOutcome::Failed("本轮仍有未完成的工具调用，已安全中断".to_string());
-        demote_finalized_candidate(&mut ctx.session, &stream_tx);
+        demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
     }
 
     // ── 提交轮次状态与插件收尾 ──
@@ -113,11 +114,11 @@ pub(crate) async fn run_turn(
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
         // 候选回收只在原本成功时执行：原本 Failed/Cancelled 的轮次没有本轮
-        // 候选，倒序查找会误伤**上一轮**的最终答复。
+        // 候选，按 ID 回收不会误伤**上一轮**或插件追加的最终答复。
         let was_success = matches!(outcome, TurnExecutionOutcome::Success);
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
         if was_success {
-            demote_finalized_candidate(&mut ctx.session, &stream_tx);
+            demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
         }
         if let Some(idx) = ctx.session.latest_user_message_index() {
             ctx.session.messages[idx]
@@ -151,25 +152,27 @@ pub(crate) async fn run_turn(
 /// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
 /// assistant 候选退回 React 过程相位——失败终态下未验证的候选不得保持
 /// 最终答复身份（run_turn 收尾晚于 execute 的提交标记，需在此回收）。
+/// 按**本轮候选 ID** 精确回收最终答复相位（不使用倒序查找）：插件在
+/// on_turn_finished 中追加或修改 Summary 时，回收仍只作用于本轮候选。
 fn demote_finalized_candidate(
     session: &mut crate::session::Session,
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    candidate_id: Option<String>,
 ) {
-    let finalized = session
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|message| {
-            message.role == MessageRole::Assistant
-                && message.phase == crate::session::MessagePhase::Summary
-        })
-        .map(|message| {
-            message.phase = crate::session::MessagePhase::React;
-            message.id.clone()
-        });
-    let Some(message_id) = finalized else {
+    let Some(message_id) = candidate_id else {
         return;
     };
+    let Some(message) = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == message_id)
+    else {
+        return;
+    };
+    if message.phase != crate::session::MessagePhase::Summary {
+        return;
+    }
+    message.phase = crate::session::MessagePhase::React;
     let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
         message: session
             .messages
