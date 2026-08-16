@@ -36,19 +36,6 @@ pub(crate) enum CompressionInterrupt {
     Closed,
 }
 
-/// `run` 的命令策略。
-pub(crate) enum CommandPolicy<'a> {
-    /// 任何命令都取消压缩并上抛，由调用方（主循环）统一处理（Auto/Forced）。
-    Relay,
-    /// 终止类命令（Cancel/Shutdown）取消并上抛；新输入（引导消息/工具注入）
-    /// 经 `defer_input` 转 Inbox 排队后**继续等待压缩完成**（压缩是独立维护
-    /// 活动，不因新输入让路，ALR-104：压缩完成后由同一 driver 继续排队的
-    /// 输入）；配置类就地消化。转排队失败时取消压缩并上抛（不丢）。
-    ConsumeLocally {
-        defer_input: &'a mut (dyn FnMut(Command) -> Result<(), Command> + Send + Sync),
-    },
-}
-
 /// 一次统一的上下文压缩会话：启动 → 等待（命令可中断）→ 提交。
 ///
 /// 三种压缩场景（请求前压力、溢出强制、手动）共用同一份等待与提交逻辑，
@@ -119,56 +106,22 @@ impl ContextCompression {
         &mut self,
         ctx: &mut TurnContext,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        mut policy: CommandPolicy<'_>,
     ) -> std::result::Result<CompressionResult, CompressionInterrupt> {
-        loop {
-            tokio::select! {
-                biased;
-                command = cmd_rx.recv() => {
-                    let command = match command {
-                        Some(command) => command,
-                        None => {
-                            self.cancel(ctx).await;
-                            return Err(CompressionInterrupt::Closed);
-                        }
-                    };
-                    match policy {
-                        CommandPolicy::Relay => {
-                            self.cancel(ctx).await;
-                            return Err(CompressionInterrupt::Command(command));
-                        }
-                        CommandPolicy::ConsumeLocally {
-                            ref mut defer_input,
-                        } => match command {
-                            Command::Cancel | Command::Shutdown => {
-                                self.cancel(ctx).await;
-                                return Err(CompressionInterrupt::Command(command));
-                            }
-                            // 压缩独立于用户意图：新输入转 Inbox 排队，压缩继续；
-                            // 转排队失败（会话关闭）才取消并上抛（不丢）。
-                            Command::InjectUserMessage { .. } | Command::InjectTool { .. } => {
-                                if let Err(command) = defer_input(command) {
-                                    self.cancel(ctx).await;
-                                    return Err(CompressionInterrupt::Command(command));
-                                }
-                            }
-                            // 配置类命令就地消化（保持原手动压缩行为）。
-                            Command::SetReasoningEffort(effort) => {
-                                ctx.agent_config.reasoning_effort = effort.clone();
-                                ctx.session.reasoning_effort = Some(effort);
-                            }
-                            Command::SetTrustMode(mode) => {
-                                ctx.trust_mode = mode;
-                                ctx.session.trust_mode = mode;
-                            }
-                            _ => {}
-                        },
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv() => {
+                match command {
+                    Some(command) => {
+                        self.cancel(ctx).await;
+                        Err(CompressionInterrupt::Command(command))
+                    }
+                    None => {
+                        self.cancel(ctx).await;
+                        Err(CompressionInterrupt::Closed)
                     }
                 }
-                task_result = &mut self.task => {
-                    return Ok(resolve_task_result(task_result));
-                }
             }
+            task_result = &mut self.task => Ok(resolve_task_result(task_result)),
         }
     }
 
@@ -242,7 +195,6 @@ fn complete_with_turn_usage(
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    defer_input: &mut (dyn FnMut(Command) -> Result<(), Command> + Send + Sync),
 ) -> Option<CompressionInterrupt> {
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
@@ -253,20 +205,13 @@ pub(crate) async fn run_manual_context_compression(
         return None;
     }
     let mut compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
-    match compression
-        .run(
-            &mut ctx,
-            cmd_rx,
-            CommandPolicy::ConsumeLocally { defer_input },
-        )
-        .await
-    {
+    match compression.run(&mut ctx, cmd_rx).await {
         Ok(result) => {
             compression.complete(&mut ctx, result, None);
             None
         }
-        // 中断类命令已取消压缩，未应用任何结果；引导消息/工具注入原样上抛，
-        // 由调用方转入 Inbox 排队（不丢失，ALR-102/202）。
+        // 中断类命令已取消压缩，未应用任何结果；命令原样上抛，
+        // 由调用方（手动压缩任务）决定接续动作（用户消息起新轮等）。
         Err(interrupt) => Some(interrupt),
     }
 }

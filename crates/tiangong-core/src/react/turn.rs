@@ -30,9 +30,11 @@ pub(crate) async fn run_turn(
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
-        return StreamEvent::Error {
+        let event = StreamEvent::Error {
             message: "本轮 Session 缺少用户消息".to_string(),
         };
+        let _ = stream_tx.send(event.clone());
+        return event;
     };
     let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
@@ -143,8 +145,10 @@ pub(crate) async fn run_turn(
     }
 
     // ── 生成终态 ──
-    // 是否发布由唯一 Driver 在检查同一命令通道后决定，避免连续任务之间暴露 Idle。
-    outcome.terminal_event(usage)
+    // 每轮独立终态：turn 收尾完成即发布（连续轮次各自拥有自己的终态事件）。
+    let terminal = outcome.terminal_event(usage);
+    let _ = stream_tx.send(terminal.clone());
+    terminal
 }
 
 /// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
@@ -217,7 +221,7 @@ fn spawn_title_generation(ctx: &TurnContext) {
         if clean.is_empty() {
             return;
         }
-        let _ = crate::react::inbox::send_command(
+        let _ = crate::shared_runtime::send_command(
             &session_id,
             Command::SetTitle {
                 title: clean,

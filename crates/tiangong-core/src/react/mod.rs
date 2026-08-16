@@ -4,7 +4,6 @@ pub(crate) mod compression;
 pub mod context;
 mod execute;
 mod helpers;
-pub mod inbox;
 mod interrupt;
 pub mod message;
 mod outcome;

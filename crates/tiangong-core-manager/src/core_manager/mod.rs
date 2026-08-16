@@ -310,7 +310,7 @@ impl CoreManager {
         let sid = session_id.to_string();
         let sid_for_err = sid.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = tiangong_core::react::inbox::shutdown_agent(&sid);
+            let _ = tiangong_core::shared_runtime::cancel_and_join(&sid);
             drop(core);
         })
         .await

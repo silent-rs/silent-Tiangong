@@ -4,7 +4,7 @@
 //! 按命令顺序处理。插件不持有 Session、用量收集器或前端事件发送端。
 
 use crate::core::command::Command;
-use crate::react::inbox::CommandIngress;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 插件向 Core 投递的会话注入反馈。
 #[derive(Debug, Clone)]
@@ -28,12 +28,12 @@ impl PluginFeedback {
 /// 不会进入后续 turn。
 #[derive(Clone)]
 pub struct PluginFeedbackTx {
-    ingress: CommandIngress,
+    sender: UnboundedSender<Command>,
 }
 
 impl PluginFeedbackTx {
-    pub(crate) fn new(ingress: CommandIngress) -> Self {
-        Self { ingress }
+    pub(crate) fn new(sender: UnboundedSender<Command>) -> Self {
+        Self { sender }
     }
 
     /// 将插件产生的结构化内容注入当前会话。
@@ -45,10 +45,12 @@ impl PluginFeedbackTx {
     /// 入队后、消费前结束，命令仍可能丢失。彻底消除该竞态需配合 turn 侧在
     /// Agent Loop 结束后立即 drop 接收端（见 `run_turn`）。
     pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) -> bool {
-        self.ingress.send(Command::InjectTool {
-            tool_name: tool_name.into(),
-            payload,
-        })
+        self.sender
+            .send(Command::InjectTool {
+                tool_name: tool_name.into(),
+                payload,
+            })
+            .is_ok()
     }
 
     /// 上报插件内部模型调用产生的用量，并向前端发送用量事件。
@@ -59,11 +61,13 @@ impl PluginFeedbackTx {
         usage: tiangong_types::TokenUsage,
         source: impl Into<String>,
     ) -> bool {
-        self.ingress.send(Command::ReportUsage {
-            usage,
-            source: source.into(),
-            emit_event: true,
-        })
+        self.sender
+            .send(Command::ReportUsage {
+                usage,
+                source: source.into(),
+                emit_event: true,
+            })
+            .is_ok()
     }
 
     /// 将已经逐笔通知过前端的嵌套执行用量并入当前 turn，不重复发送用量事件。
@@ -74,25 +78,27 @@ impl PluginFeedbackTx {
         usage: tiangong_types::TokenUsage,
         source: impl Into<String>,
     ) -> bool {
-        self.ingress.send(Command::ReportUsage {
-            usage,
-            source: source.into(),
-            emit_event: false,
-        })
+        self.sender
+            .send(Command::ReportUsage {
+                usage,
+                source: source.into(),
+                emit_event: false,
+            })
+            .is_ok()
     }
 
     /// 向当前 turn 投递一个前端流事件。
     pub fn send_stream_event(&self, event: tiangong_types::StreamEvent) {
-        let _ = self.ingress.send(Command::EmitStreamEvent(Box::new(event)));
+        let _ = self.sender.send(Command::EmitStreamEvent(Box::new(event)));
     }
 
     pub fn is_closed(&self) -> bool {
-        self.ingress.is_closed()
+        self.sender.is_closed()
     }
 
-    /// 当前唯一通道是否仍可接收命令。Agent 关闭后返回 `false`。
+    /// 当前通道是否仍可接收命令。turn 结束后返回 `false`。
     pub fn is_accepting(&self) -> bool {
-        self.ingress.is_accepting()
+        !self.sender.is_closed()
     }
 }
 
@@ -113,7 +119,7 @@ mod tests {
     #[test]
     fn usage_reports_use_the_turn_command_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
+        let feedback = PluginFeedbackTx::new(tx);
 
         feedback.report_token_usage(usage(), "attachment");
         feedback.accumulate_token_usage(usage(), "child");
@@ -140,7 +146,7 @@ mod tests {
     #[test]
     fn inject_tool_returns_true_when_consumer_alive() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
+        let feedback = PluginFeedbackTx::new(tx);
 
         assert!(feedback.inject_tool("browser_data", serde_json::json!({"url": "x"})));
         match rx.try_recv() {
@@ -153,7 +159,7 @@ mod tests {
     fn inject_tool_returns_false_after_receiver_dropped() {
         // 模拟 turn 收尾窗口：Agent Loop 已退出，接收端被显式 drop。
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
+        let feedback = PluginFeedbackTx::new(tx);
         drop(rx);
 
         // drop 接收端后，is_closed() 应为 true，inject_tool 也必须返回 false。

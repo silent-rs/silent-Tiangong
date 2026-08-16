@@ -1914,17 +1914,9 @@ mod tests {
             }
         });
 
-        let mut defer_never =
-            |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
-                Err(command)
-            };
         tokio::time::timeout(
             Duration::from_secs(10),
-            crate::react::compression::run_manual_context_compression(
-                ctx,
-                &mut cmd_rx,
-                &mut defer_never,
-            ),
+            crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx),
         )
         .await
         .expect("取消手动压缩后任务应及时结束");
@@ -1950,73 +1942,6 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn manual_context_compression_preserves_runtime_settings() {
-        let server = MockServer::start().await;
-        mount_completion(
-            &server,
-            "[[SUMMARY]]\n历史摘要",
-            "stop",
-            100,
-            20,
-            Some(Duration::from_millis(200)),
-        )
-        .await;
-
-        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let TestHarness {
-            ctx,
-            stream_rx,
-            cmd_tx,
-            mut cmd_rx,
-            ..
-        } = harness;
-        let storage_root = ctx
-            .session
-            .bound_storage_root()
-            .expect("测试 Session 必须绑定存储目录")
-            .to_path_buf();
-        let session_id = ctx.session.id.clone();
-        let _cmd_tx_guard = cmd_tx.clone();
-        let update_task = tokio::task::spawn_blocking(move || {
-            loop {
-                let event = stream_rx
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("等待手动压缩开始事件超时");
-                if matches!(event, StreamEvent::ContextCompressing { .. }) {
-                    cmd_tx
-                        .send(Command::SetReasoningEffort("max".to_string()))
-                        .unwrap();
-                    cmd_tx
-                        .send(Command::SetTrustMode(TrustMode::Supervised))
-                        .unwrap();
-                    break;
-                }
-            }
-        });
-
-        let mut defer_never =
-            |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
-                Err(command)
-            };
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            crate::react::compression::run_manual_context_compression(
-                ctx,
-                &mut cmd_rx,
-                &mut defer_never,
-            ),
-        )
-        .await
-        .expect("手动压缩应及时完成");
-        update_task.await.unwrap();
-
-        let persisted =
-            Session::load_from_storage(&storage_root, &session_id).expect("手动压缩结果应持久化");
-        assert_eq!(persisted.reasoning_effort.as_deref(), Some("max"));
-        assert_eq!(persisted.trust_mode, TrustMode::Supervised);
     }
 
     /// 发送 `Command::Cancel` 应中断执行并返回 `Cancelled`(覆盖本次重构的
@@ -2255,14 +2180,14 @@ mod tests {
         let stream_rx = harness.stream_rx;
         let terminal = run_turn(harness.ctx, &mut cmd_rx).await;
 
-        // run_turn 只生成终态，由唯一 Driver 在确认没有后续任务后发布。
+        // 每轮独立终态：run_turn 收尾完成即在内部发布 Done（返回值同源）。
         assert!(matches!(terminal, StreamEvent::Done { .. }));
         let events: Vec<StreamEvent> = stream_rx.try_iter().collect();
         let done = events
             .iter()
             .filter(|e| matches!(e, StreamEvent::Done { .. }))
             .count();
-        assert_eq!(done, 0, "Driver 发布前不应提前发送 Done");
+        assert_eq!(done, 1, "turn 收尾应恰好发布一次 Done");
 
         // ALR-107 最新消息锚点：重载磁盘 session，最新用户消息应有 turn_status。
         let reloaded =

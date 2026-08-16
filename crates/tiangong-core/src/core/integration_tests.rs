@@ -383,7 +383,7 @@ async fn idle_injection_deferred_into_next_request() {
         serde_json::json!({"summary": "页面加载完成-INJECT-MARK", "url": "https://example.com"}),
     ))
     .expect("空闲注入应被接受");
-    assert!(!crate::react::inbox::is_running(&sid));
+    assert!(!crate::shared_runtime::is_running(&sid));
     assert!(server.received_requests().await.unwrap().is_empty());
 
     send_message(&core, "msg-1", "INJECT-QUESTION 根据页面情况回答");
@@ -747,7 +747,7 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
 
     let shutdown = std::thread::spawn(move || core.shutdown_join());
     let deadline = std::time::Instant::now() + WAIT;
-    while crate::react::inbox::is_alive(&sid) {
+    while crate::shared_runtime::is_running(&sid) {
         assert!(
             std::time::Instant::now() < deadline,
             "等待 Core 停止接收超时"
@@ -771,7 +771,7 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn queued_next_turn_publishes_done_only_after_agent_becomes_idle() {
+async fn queued_next_turn_runs_after_current_turn_completes() {
     let (env, sid) = TestEnv::new("continuous-done");
     let server = MockServer::start().await;
     let routes = mount_prompt_router(
@@ -796,7 +796,7 @@ async fn queued_next_turn_publishes_done_only_after_agent_becomes_idle() {
     send_message(&core, "msg-first", "CONTINUOUS-FIRST 第一个任务");
     finish.wait_frozen();
     send_message(&core, "msg-second", "CONTINUOUS-SECOND 第二个任务");
-    assert!(crate::react::inbox::is_running(&sid));
+    assert!(crate::shared_runtime::is_running(&sid));
     finish.release();
 
     assert_eq!(
@@ -805,7 +805,8 @@ async fn queued_next_turn_publishes_done_only_after_agent_becomes_idle() {
     );
     wait_idle(&sid).await;
     events.wait_done();
-    events.assert_done_count(1);
+    // 新语义：每轮独立终态——收尾窗口到达的排队消息接续起轮，两轮各自 Done。
+    events.assert_done_count(2);
     assert!(events.seen().iter().any(
         |event| matches!(event, tiangong_types::StreamEvent::UserMessage { message_id, .. } if message_id == "msg-second")
     ));

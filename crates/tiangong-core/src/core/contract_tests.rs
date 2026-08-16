@@ -65,33 +65,10 @@ async fn accepted_and_saved_message_survives_shutdown() {
     routes["shutdown-active"].assert_hits(1);
 }
 
-/// 空闲期工具注入应被接受并保留，但不得唤醒 driver 或主动发起模型请求。
+/// 手动压缩期间的用户消息取消压缩并立即起轮（压缩可随时重新发起）。
+/// 压缩请求走非流式 completion，接续消息走 prompt 路由错误响应。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn idle_tool_injection_accepted_without_wake() {
-    let (env, sid) = TestEnv::new("idle-inject");
-    let server = wiremock::MockServer::start().await;
-    let core = core_for(&env, &sid, &server.uri());
-
-    core.deliver(AgentInputKind::tool(
-        "browser_observation",
-        serde_json::json!({"summary": "页面加载完成", "url": "https://example.com"}),
-    ))
-    .expect("空闲期 inject 应被 Inbox 接受");
-    assert!(
-        !crate::react::inbox::is_running(&sid),
-        "inject 不得唤醒 driver 或启动 turn"
-    );
-    assert!(
-        server.received_requests().await.unwrap().is_empty(),
-        "空闲 inject 不得主动发起模型请求"
-    );
-    core.shutdown_join().expect("关闭失败");
-}
-
-/// 手动压缩期间的用户消息转入 Inbox 顺延；压缩独立完成后，同一 driver 自动
-/// 执行该消息。压缩请求走非流式 completion，顺延消息走 prompt 路由错误响应。
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steer_during_manual_compression_defers_to_next_turn() {
+async fn steer_during_manual_compression_cancels_and_starts_turn() {
     let (env, sid) = TestEnv::new("steer-compress");
     let server = wiremock::MockServer::start().await;
     let routes = mount_prompt_router(
@@ -156,23 +133,22 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
         }
         assert!(
             Instant::now() < deadline,
-            "压缩期间的引导消息应在压缩完成后自动顺延执行"
+            "压缩期间的引导消息应取消压缩并立即起轮"
         );
         tokio::time::sleep(POLL).await;
     };
     assert_eq!(
         status,
         TurnStatus::Failed,
-        "顺延消息的失败响应必须形成 Failed 终态"
+        "接续消息的失败响应必须形成 Failed 终态"
     );
     wait_idle(&sid).await;
     events.wait_error_containing("deferred steer failed");
     events.assert_single_failure_terminal("deferred steer failed");
     let session = env.load_session(&sid);
     assert_eq!(
-        session.context_summary.as_deref(),
-        Some("压缩完成的历史摘要"),
-        "压缩不得因顺延消息取消"
+        session.context_summary, None,
+        "压缩被用户消息取消，未应用任何结果"
     );
     routes["manual-compression"].assert_hits(1);
     routes["deferred-steer"].assert_hits(2);

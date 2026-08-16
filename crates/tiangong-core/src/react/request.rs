@@ -17,7 +17,7 @@ use crate::model::TokenUsage;
 use crate::turn_context::TurnContext;
 
 use super::command::Deferred;
-use super::compression::{CommandPolicy, CompressionInterrupt, ContextCompression};
+use super::compression::{CompressionInterrupt, ContextCompression};
 
 /// 请求前准备的结果。
 pub(super) enum RequestPreparation {
@@ -49,7 +49,7 @@ pub(super) async fn prepare_before_request(
         return RequestPreparation::Ready;
     }
     let mut compression = ContextCompression::auto(ctx, organizer, observed_tokens);
-    match compression.run(ctx, cmd_rx, CommandPolicy::Relay).await {
+    match compression.run(ctx, cmd_rx).await {
         Ok(result) => {
             compression.complete(ctx, result, Some(accumulated_usage));
             RequestPreparation::Ready
@@ -66,7 +66,7 @@ pub(super) async fn recover_context_overflow(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> ContextRecovery {
     let mut compression = ContextCompression::forced(ctx, organizer);
-    match compression.run(ctx, cmd_rx, CommandPolicy::Relay).await {
+    match compression.run(ctx, cmd_rx).await {
         Ok(result) => {
             // 边界未推进的压缩（无可压缩历史）重试无意义。
             let previous = ctx.session.summary_up_to;

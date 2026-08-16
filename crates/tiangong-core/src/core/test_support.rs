@@ -1240,11 +1240,11 @@ pub async fn try_wait_requests(server: &MockServer, n: usize, budget: Duration) 
 /// 等待 driver 回到空闲（超时即失败）。
 pub async fn wait_idle(sid: &str) {
     let deadline = Instant::now() + WAIT;
-    while crate::react::inbox::is_running(sid) && Instant::now() < deadline {
+    while crate::shared_runtime::is_running(sid) && Instant::now() < deadline {
         tokio::time::sleep(POLL).await;
     }
     assert!(
-        !crate::react::inbox::is_running(sid),
+        !crate::shared_runtime::is_running(sid),
         "等待 driver 空闲超时"
     );
 }
