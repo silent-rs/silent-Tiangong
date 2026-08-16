@@ -129,9 +129,7 @@ impl BrowserWatcher {
                 POLL_TICK
             };
             sleep(tick).await;
-            // feedback channel 关闭表示旧轮已结束：**不退出观察循环**（观察器是
-            // 插件级单例，跨 session 复用；新轮会经 set_feedback_tx 注入新通道，
-            // 此处空转等待即可）。退出会导致新旧轮交接窗口内观察永久停止。
+            // feedback channel 关闭时退出，避免 session 结束后 task 泄漏
             let closed = self
                 .feedback_tx
                 .read()
@@ -139,8 +137,9 @@ impl BrowserWatcher {
                 .and_then(|g| g.as_ref().map(|tx| tx.is_closed()))
                 .unwrap_or(true);
             if closed {
-                // 通道已关闭：跳过本轮 observe/inject，等下一 tick 检查新通道。
-                continue;
+                tracing::debug!("browser watcher: feedback channel closed, stopping");
+                self.started.store(false, Ordering::SeqCst);
+                break;
             }
             self.maybe_observe_and_inject().await;
         }
@@ -159,11 +158,6 @@ impl BrowserWatcher {
         };
         let Some(tx) = tx else { return };
         if tx.is_closed() {
-            return;
-        }
-        // 封口（Sealing/Committing）期间拒绝注入：保留本次变化，等下一轮恢复。
-        // 兜底由 inject_tool 的返回值负责（判断与投递之间的竞态窗口）。
-        if !tx.is_accepting() {
             return;
         }
 
@@ -248,7 +242,7 @@ impl BrowserWatcher {
             .iter()
             .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
             .collect();
-        let delivered = tx.inject_tool(
+        tx.inject_tool(
             "browser_data",
             json!({
                 "title": snapshot.title,
@@ -259,19 +253,6 @@ impl BrowserWatcher {
                 "feedback": feedback,
             }),
         );
-        if !delivered {
-            // 注入被拒绝（判断后进入封口/通道关闭的竞态窗口）：不更新已推送快照，
-            // 保留本次变化，下一 tick 会重新观察并尝试注入——封口窗口不丢插件反馈。
-            tracing::debug!(
-                url = %snapshot.url,
-                title = %snapshot.title,
-                text_len = snapshot.text.len(),
-                events_len = snapshot.events.len(),
-                has_feedback,
-                "browser watcher: inject rejected (sealing/closed), keeping snapshot for retry"
-            );
-            return;
-        }
         tracing::info!(
             url = %snapshot.url,
             title = %snapshot.title,

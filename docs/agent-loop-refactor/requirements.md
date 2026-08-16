@@ -79,9 +79,6 @@
 - **ALR-403 结构化日志**：至少记录 session、turn/step 序号、Inbox 操作、driver 状态、唤醒原因、取消原因、工具批次和最终结果；不记录敏感正文。
 - **ALR-404 行为测试优先**：测试公开行为、消息顺序、生命周期、取消收敛、工具协议、持久化和用量，不固化无业务必要的内部阶段名。
 - **ALR-405 小步可回滚**：Inbox、最小 Loop、策略外置和旧兼容层删除必须分任务实施，每步有独立验证与删除点。
-- **ALR-406 Provider 可注入**：Core 的模型请求边界允许测试注入可控 Provider 响应，使状态测试无需监听端口或建立 socket；正式运行默认仍走现有 Provider 构造、协议路由和请求路径，不改变默认行为。
-- **ALR-407 测试职责分层**：Core 状态测试只验证 turn 状态、Session、生命周期、事件和终态；请求映射、鉴权头、流式解析、回退、重试和其他传输协议细节由 `tiangong-llm` 的 Provider 协议测试负责。
-- **ALR-408 小范围迁移**：本次只迁移三个新增 Core 状态测试到可注入 Provider，不扩展到其他既有 Core 测试，也不把 Provider 协议测试迁入 Core。
 
 ## 4. 明确删除的旧目标
 
@@ -147,13 +144,6 @@
 
 仍有独立价值的请求失败、取消、用量和消息落盘断言，应抽离后并入对应公开行为测试，不随旧策略测试一起删除。
 
-### 5.4 Provider 注入测试范围（基础设施完成，生产缺陷待修复）
-
-- Core 无 socket 测试使用可控响应驱动完整 turn，只断言 Core 自己拥有的状态、Session、生命周期、事件和终态。
-- Provider 协议测试继续覆盖请求映射、鉴权、流式与非流式响应、回退、重试和传输错误，不在 Core 状态测试中重复。
-- 本次已迁移 `cancel_during_candidate_seal_preserves_react_candidate_without_summary`、`run_turn_unfinished_tool_downgrade_never_finalizes_candidate`、`run_turn_final_persistence_failure_never_finalizes_candidate` 三个新增 Core 测试；严格断言已稳定暴露封口取消和两类收尾过早定格问题。
-- 其他既有 Core 测试和 Provider 协议测试不在本次迁移范围；实际验证结果见 `progress.md`。
-
 ## 6. 范围
 
 ### 6.1 本轮简化做
@@ -164,7 +154,6 @@
 - 将审批并入工具流水线。
 - 将压缩、请求重试和失控预算移到 Loop 外策略。
 - 重新组织测试与模块边界。
-- 增加测试可注入 Provider，并将本次三个新增 Core 状态测试迁为无 socket 测试。
 - 保持现有 Session 格式和插件外部接口，必要时只增加 core 内部适配层。
 
 ### 6.2 本轮简化不做
@@ -173,7 +162,7 @@
 - 原样复制 Harness 的 TypeScript 包结构或事件名称；
 - 改变权限模型本身；
 - 重写 Provider 客户端或插件业务；
-- 迁移本次三个新增 Core 状态测试之外的既有测试，或改变 Provider 协议测试的归属；
+- 增加 LLM Provider 测试注入能力，或改变 Provider 协议测试的归属；
 - 提供进程崩溃后的内存 Inbox 恢复；
 - 与 Loop 简化无关的前端或性能改造。
 
@@ -190,4 +179,3 @@
 9. 删除或改写全部旧 Summary/ForceFinal/continuation 策略测试；新测试覆盖 Inbox、turn/step 边界、wake latch、工具义务、协议修复和关闭可靠性。
 10. 格式、静态检查、核心测试、相关插件测试和代表性连续交互场景全部通过。
 11. 交付前审查确认没有临时双轨、无人消费队列、静默丢消息、虚假工具完成或重复生命周期路径。
-12. 三个指定 Core 状态测试不监听端口、不建立 socket；Provider 协议覆盖仍留在 `tiangong-llm`，正式默认 Provider 行为不变。
