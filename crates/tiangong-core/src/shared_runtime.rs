@@ -1,7 +1,7 @@
 //! 进程级共享 tokio runtime + turn task 管理。
 //!
 //! 所有 TiangongCore 的 turn task 都跑在这个共享 runtime 上。
-//! turn task 在 deliver(Message) 时 spawn,turn 结束后自动清理。
+//! turn task 在 deliver(Message) 空闲起轮时 spawn，结束（含取消）后自动清理。
 //!
 //! runtime 必须是 multi-thread：LLM crate 的 `provider_client` 内部使用
 //! `tokio::task::block_in_place`（仅在 multi-thread runtime 可用）。
@@ -27,8 +27,9 @@ static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 /// turn task 注册表: session_id → 当前代任务。
 ///
-/// cmd_tx 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx,
-/// deliver(Cancel/Approval) 通过 send_command 投递到活跃 turn task。
+/// cmd_tx 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx，
+/// deliver 侧通过 send_command 投递到活跃 turn task；任务结束移除条目后
+/// 迟到命令发送失败（天然反馈封口）。
 struct TurnTask {
     generation: u64,
     cmd_tx: UnboundedSender<Command>,
@@ -61,8 +62,8 @@ pub fn shared_runtime() -> &'static Runtime {
 /// 同步完成任务启动前的准备并生成 Future。只有上述步骤全部成功后才注册并启动任务，
 /// 避免留下半初始化运行态。
 ///
-/// turn task 正常结束时，wrapper 会按任务代际立即清理。
-/// panic 的任务保留在表中，供关闭路径等待并上报。
+/// turn task 正常结束时，wrapper 会按任务代际立即清理；panic 的任务保留在表中，
+/// 供关闭路径等待并上报。
 pub fn spawn_turn<F, Fut>(
     context: TurnContext,
     future_factory: F,
@@ -134,6 +135,16 @@ fn remove_turn_if_current(session_id: &str, generation: u64) {
             .get(session_id)
             .is_some_and(|task| task.generation == generation)
     {
+        tasks.remove(session_id);
+    }
+}
+
+/// 立即注销指定会话的活跃任务条目。
+///
+/// 供任务 wrapper 在结束前需要后继动作（如手动压缩被用户消息打断后起新轮）时
+/// 腾出注册表槽位使用；普通结束路径无需调用（wrapper 自动按代际清理）。
+pub fn release_agent(session_id: &str) {
+    if let Ok(mut tasks) = turn_tasks().lock() {
         tasks.remove(session_id);
     }
 }

@@ -306,7 +306,7 @@ impl CoreManager {
         // 先发取消信号并摘除 Core。
         let _ = self.cancel_core(session_id);
         let core = self.take_core(session_id);
-        // 等 worker 真正退出（有活跃 turn 时等取消生效；无活跃 turn 时立即返回）。
+        // 等 Agent driver 真正退出（有活跃 turn 时等取消生效并收敛；空闲时立即返回）。
         let sid = session_id.to_string();
         let sid_for_err = sid.clone();
         tokio::task::spawn_blocking(move || {

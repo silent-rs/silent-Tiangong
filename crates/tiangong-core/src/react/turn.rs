@@ -20,20 +20,22 @@ use super::timer::TurnElapsedTimer;
 /// Agent Loop、消息协议收尾、轮次状态提交和最终持久化。
 pub(crate) async fn run_turn(
     mut ctx: TurnContext,
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-) {
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+) -> StreamEvent {
     // ── 固定轮次锚点 ──
-    // 当前用户消息已在 deliver 阶段写入 Session。后续插件回调、耗时与状态都使用
-    // 同一消息索引和 ID，避免执行过程中追加的消息改变本轮归属。
+    // 生命周期锚点 turn_start_idx 在 turn 开始时固定，供 on_turn_started/
+    // on_turn_finished 使用同一消息范围（ALR-108：一个物理 turn 只触发一次）。
+    // 最终 turn_status 锚点不同：写入**提交时最新**的用户消息（ALR-107）——运行中
+    // 注入的引导消息成为当前任务锚点，原始用户消息保留无最终状态。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
-        let _ = stream_tx.send(StreamEvent::Error {
+        let event = StreamEvent::Error {
             message: "本轮 Session 缺少用户消息".to_string(),
-        });
-        return;
+        };
+        let _ = stream_tx.send(event.clone());
+        return event;
     };
-    let user_msg_id = ctx.session.messages[turn_start_idx].id.clone();
     let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
     // ── 启动插件生命周期 ──
@@ -49,14 +51,10 @@ pub(crate) async fn run_turn(
 
     // ── 执行 Agent Loop ──
     // execute_turn 返回明确的执行结果和累计用量，不在内部发送终态事件。
-    let execution = execute_turn(&mut ctx, &mut cmd_rx).await;
-    // Agent Loop 结束后，本函数的收尾阶段（消息协议修复、插件回调、持久化）不再
-    // 消费命令通道。显式 drop 接收端，使所有 PluginFeedbackTx 的 is_closed() 立即
-    // 返回 true——否则 turn task 退出前会出现"通道未关闭但已无人消费"的窗口，
-    // 此时 watcher 经 inject_tool 投递的终端命令会成功入队但随队列销毁而丢失。
-    drop(cmd_rx);
+    let execution = execute_turn(&mut ctx, cmd_rx).await;
     let usage = execution.usage;
     let mut outcome = execution.outcome;
+    let mut finalized_candidate_id = execution.finalized_candidate_id;
     ctx.session.token_usage.accumulate(&usage);
 
     // ── 修复消息协议 ──
@@ -78,53 +76,167 @@ pub(crate) async fn run_turn(
     }
     if had_interrupted_tools && matches!(outcome, TurnExecutionOutcome::Success) {
         outcome = TurnExecutionOutcome::Failed("本轮仍有未完成的工具调用，已安全中断".to_string());
+        demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
     }
 
-    // ── 提交轮次状态与插件收尾 ──
-    // 先把明确结果写入本轮用户消息，让取消钩子和结束钩子看到一致状态。
+    // ── 提交轮次状态 ──
+    // 测试同步点：Agent Loop 已提交结果，turn 尚未执行最终收尾。
+    #[cfg(test)]
+    crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
+    // 结果写入**提交时最新**的用户消息（ALR-107）：运行中注入的引导消息成为当前
+    // 任务锚点；生命周期锚点 turn_start_idx 保持 turn 开始时的值不变。
     elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
-    if let Some(msg) = ctx
-        .session
-        .messages
-        .iter_mut()
-        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
-    {
-        msg.set_turn_result(elapsed_ms, status);
-    }
-    if status == tiangong_types::TurnStatus::Cancelled {
-        for plugin in &ctx.plugins {
-            plugin.on_cancel(&mut ctx.session).await;
-        }
-    }
-    // on_turn_finished 使用与 on_turn_started 相同的起点，并可在最终落盘前处理
-    // 本轮新增消息（例如建立索引或提交记忆任务）。
-    for plugin in &ctx.plugins {
-        plugin.on_turn_finished(&mut ctx.session, turn_start_idx);
+    if let Some(idx) = ctx.session.latest_user_message_index() {
+        ctx.session.messages[idx].set_turn_result(elapsed_ms, status);
     }
 
-    // ── 清理运行态并最终持久化 ──
+    // ── 清理运行态并最终持久化（不等待插件收尾）──
     // base64 等瞬态内容只用于本轮模型请求，不能进入磁盘会话合同。
+    // 关键路径顺序：落盘 → 快照 → 终态。插件收尾（含 on_cancel）移到终态之后，
+    // 任何插件或 Sidecar 阻塞都不得吞掉本轮终态——用户看到结束事件不再取决于
+    // 插件收尾速度。
     ctx.session.clear_transient_content();
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
+        // 候选回收只在原本成功时执行：原本 Failed/Cancelled 的轮次没有本轮
+        // 候选，按 ID 回收不会误伤**上一轮**或插件追加的最终答复。
+        let was_success = matches!(outcome, TurnExecutionOutcome::Success);
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
-        if let Some(msg) = ctx
-            .session
-            .messages
-            .iter_mut()
-            .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
-        {
-            msg.set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
+        if was_success {
+            demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
+        }
+        if let Some(idx) = ctx.session.latest_user_message_index() {
+            ctx.session.messages[idx]
+                .set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
         }
         let _ = ctx.session.try_persist_to_disk();
     }
 
-    // ── 发布唯一终态 ──
-    // 宿主在收到终态后从磁盘重载权威 Session，不再需要额外的最终消息快照。
-    let _ = stream_tx.send(outcome.terminal_event(usage));
+    // ── 成功终态发布最终答复快照 ──
+    // 放在最终落盘之后：落盘失败降级路径已回收相位并发布 React 快照，
+    // 此处只剩成功路径——失败终态不得发布 Summary 快照。
+    // 按**本轮候选 ID** 查找（与失败回收同一 ID）：插件在 on_turn_finished
+    // 追加 Summary 相位消息时，发布的仍是模型候选而非插件消息。
+    if matches!(outcome, TurnExecutionOutcome::Success)
+        && let Some(message_id) = finalized_candidate_id.as_ref()
+        && let Some(message) = ctx
+            .session
+            .messages
+            .iter()
+            .find(|message| &message.id == message_id)
+        && message.phase == crate::session::MessagePhase::Summary
+    {
+        let mut snapshot = message.clone();
+        snapshot.clear_transient_data();
+        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message: snapshot,
+            deferred_tool_injections: None,
+        });
+    }
+
+    // ── 生成终态 ──
+    // 每轮独立终态：turn 收尾完成即发布（连续轮次各自拥有自己的终态事件）。
+    let terminal = outcome.terminal_event(usage);
+    let _ = stream_tx.send(terminal.clone());
+
+    // ── 插件收尾（终态已发布，尽力而为）──
+    // on_cancel / on_turn_finished 可处理本轮新增消息（建立索引、提交记忆任务、
+    // 取消回滚）。二者都不得无限阻塞 turn 任务：超时或失败只记录告警，不吞终态。
+    // 注意 on_turn_finished 是同步方法（插件内部可能同步请求 Sidecar，会阻塞
+    // worker 线程），必须放进 spawn_blocking 才能被限时；超时后放弃整个收尾
+    // 快照（session 留在阻塞线程），turn 任务照常结束、注册表槽位照常释放。
+    let session_id = ctx.session.id.clone();
+    if status == tiangong_types::TurnStatus::Cancelled {
+        let cancelled = tokio::time::timeout(PLUGIN_FINISH_TIMEOUT, async {
+            for plugin in &ctx.plugins {
+                plugin.on_cancel(&mut ctx.session).await;
+            }
+        })
+        .await;
+        if cancelled.is_err() {
+            tracing::warn!(
+                session_id = %session_id,
+                "取消收尾（on_cancel）超时：剩余取消回滚被丢弃，终态不受影响"
+            );
+        }
+    }
+    let plugins = ctx.plugins.clone();
+    let mut finish_session = ctx.session;
+    let finished = tokio::time::timeout(
+        PLUGIN_FINISH_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            for plugin in &plugins {
+                plugin.on_turn_finished(&mut finish_session, turn_start_idx);
+            }
+            finish_session
+        }),
+    )
+    .await;
+    match finished {
+        Ok(Ok(session)) => {
+            ctx.session = session;
+            if let Err(error) = ctx.session.try_persist_to_disk() {
+                tracing::warn!(%error, session_id = %session_id, "插件收尾后的增量落盘失败");
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, session_id = %session_id, "插件收尾任务异常退出，收尾丢弃");
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                timeout_millis = PLUGIN_FINISH_TIMEOUT.as_millis() as u64,
+                "插件收尾（on_turn_finished）超时：收尾快照被丢弃，本轮终态不受影响"
+            );
+        }
+    }
+    terminal
+}
+
+/// 插件收尾的宽限上限：正常收尾（快速入队/轻量索引）应为毫秒级，超时意味着
+/// 插件或其 Sidecar 异常——丢弃收尾以保证 turn 任务可结束、注册表槽位释放。
+#[cfg(not(test))]
+const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 测试使用短超时，便于验证超时保护行为。
+#[cfg(test)]
+const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
+/// assistant 候选退回 React 过程相位——失败终态下未验证的候选不得保持
+/// 最终答复身份（run_turn 收尾晚于 execute 的提交标记，需在此回收）。
+/// 按**本轮候选 ID** 精确回收最终答复相位（不使用倒序查找）：插件在
+/// on_turn_finished 中追加或修改 Summary 时，回收仍只作用于本轮候选。
+fn demote_finalized_candidate(
+    session: &mut crate::session::Session,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    candidate_id: Option<String>,
+) {
+    let Some(message_id) = candidate_id else {
+        return;
+    };
+    let Some(message) = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == message_id)
+    else {
+        return;
+    };
+    if message.phase != crate::session::MessagePhase::Summary {
+        return;
+    }
+    message.phase = crate::session::MessagePhase::React;
+    let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+        message: session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .cloned()
+            .expect("刚降级的消息必然存在"),
+        deferred_tool_injections: None,
+    });
 }
 
 /// 标题仍是默认值时，并行用 lite 模型据首条用户消息生成标题。

@@ -378,6 +378,13 @@ impl Session {
     /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
+        #[cfg(test)]
+        if crate::core::test_support::is_persistence_persistently_failing(&self.id)
+            || crate::core::test_support::take_persistence_failure_for_session(&self.id)
+        {
+            return Err(format!("测试注入的 session 持久化失败（{}）", self.id));
+        }
+
         let storage_root = self.storage_root.as_ref().ok_or_else(|| {
             "session 未绑定 storage_root（创建或加载 Session 时必须绑定）".to_string()
         })?;

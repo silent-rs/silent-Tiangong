@@ -17,7 +17,6 @@ pub struct ContextCompressor {
 #[derive(Debug, Clone)]
 pub struct CompressionUpdate {
     pub summary: String,
-    pub current_task: Option<String>,
     pub usage: TokenUsage,
     pub previous_summary_up_to: usize,
     pub summary_up_to: usize,
@@ -70,7 +69,6 @@ impl ContextCompressor {
         self,
         split_point: usize,
         max_output_tokens: u32,
-        include_current_task: bool,
     ) -> std::result::Result<CompressionUpdate, CompressionError> {
         let previous_summary_up_to = self.session.summary_up_to;
         let split_point = split_point.min(self.session.messages.len());
@@ -89,12 +87,7 @@ impl ContextCompressor {
         }
 
         let boundary_message_id = self.session.messages[split_point - 1].id.clone();
-        let request = Self::summary_request(
-            &self.session,
-            split_point,
-            max_output_tokens,
-            include_current_task,
-        );
+        let request = Self::summary_request(&self.session, split_point, max_output_tokens);
         let response = self
             .client
             .complete_async(&request)
@@ -107,12 +100,11 @@ impl ContextCompressor {
                 usage,
             ));
         }
-        let (summary, current_task) = Self::parse_output(&response.text, include_current_task)
+        let summary = Self::parse_output(&response.text)
             .map_err(|error| CompressionError::with_usage(error, usage.clone()))?;
 
         Ok(CompressionUpdate {
             summary,
-            current_task,
             usage,
             previous_summary_up_to,
             summary_up_to: split_point,
@@ -124,7 +116,6 @@ impl ContextCompressor {
         session: &Session,
         split_point: usize,
         max_output_tokens: u32,
-        include_current_task: bool,
     ) -> ModelRequest {
         let split_point = split_point.min(session.messages.len());
         let start = session.summary_up_to.min(split_point);
@@ -144,7 +135,7 @@ impl ContextCompressor {
         );
         context.push(Message::new(
             MessageRole::User,
-            Self::compress_instruction(session, max_output_tokens, include_current_task),
+            Self::compress_instruction(session, max_output_tokens),
         ));
 
         ModelRequest {
@@ -157,11 +148,7 @@ impl ContextCompressor {
         }
     }
 
-    fn compress_instruction(
-        session: &Session,
-        max_output_tokens: u32,
-        include_current_task: bool,
-    ) -> String {
+    fn compress_instruction(session: &Session, max_output_tokens: u32) -> String {
         let existing_summary = session
             .context_summary
             .as_deref()
@@ -172,67 +159,22 @@ impl ContextCompressor {
         } else {
             ""
         };
-
-        if include_current_task {
-            format!(
-                "请压缩以上对话历史。{merge_hint}\
-                 总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
-                 保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
-                 不要回答用户，严格按以下顺序输出：\n\n\
-                 [[CURRENT_TASK]]\n\
-                 用户最近提问：<原文摘录>\n\
-                 已完成：<已得到的关键结果>\n\
-                 进行中：<当前事项，若无则填“无”>\n\
-                 下一步：<下一步动作，若无则填“无”>\n\n\
-                 [[SUMMARY]]\n\
-                 <合并后的历史摘要>"
-            )
-        } else {
-            format!(
-                "请压缩以上对话历史。{merge_hint}\
-                 总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
-                 保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
-                 不要回答用户，严格按以下格式输出：\n\n\
-                 [[SUMMARY]]\n\
-                 <合并后的历史摘要>"
-            )
-        }
+        format!(
+            "请压缩以上对话历史。{merge_hint}\
+             总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
+             保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
+             不要回答用户，严格按以下格式输出：\n\n\
+             [[SUMMARY]]\n\
+             <合并后的历史摘要>"
+        )
     }
 
-    fn parse_output(
-        text: &str,
-        include_current_task: bool,
-    ) -> std::result::Result<(String, Option<String>), String> {
-        const TASK_MARKER: &str = "[[CURRENT_TASK]]";
+    fn parse_output(text: &str) -> std::result::Result<String, String> {
         const SUMMARY_MARKER: &str = "[[SUMMARY]]";
         let text = text.trim();
         if text.is_empty() {
             return Err("上下文压缩返回空内容，拒绝推进摘要边界".to_string());
         }
-
-        if include_current_task {
-            let task_start = text
-                .find(TASK_MARKER)
-                .ok_or_else(|| "上下文压缩缺少 CURRENT_TASK 段落".to_string())?;
-            let summary_start = text
-                .find(SUMMARY_MARKER)
-                .ok_or_else(|| "上下文压缩缺少 SUMMARY 段落".to_string())?;
-            if task_start >= summary_start {
-                return Err(
-                    "上下文压缩段落顺序错误：CURRENT_TASK 必须位于 SUMMARY 之前".to_string()
-                );
-            }
-            let task = text[task_start + TASK_MARKER.len()..summary_start].trim();
-            let summary = text[summary_start + SUMMARY_MARKER.len()..].trim();
-            if task.is_empty() {
-                return Err("上下文压缩返回空 CURRENT_TASK，拒绝推进摘要边界".to_string());
-            }
-            if summary.is_empty() {
-                return Err("上下文压缩返回空摘要，拒绝推进摘要边界".to_string());
-            }
-            return Ok((summary.to_string(), Some(task.to_string())));
-        }
-
         let summary = text
             .split_once(SUMMARY_MARKER)
             .map_or(text, |(_, summary)| summary)
@@ -240,7 +182,7 @@ impl ContextCompressor {
         if summary.is_empty() {
             return Err("上下文压缩返回空摘要，拒绝推进摘要边界".to_string());
         }
-        Ok((summary.to_string(), None))
+        Ok(summary.to_string())
     }
 }
 
@@ -274,7 +216,7 @@ mod tests {
         session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
         session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
 
-        let request = ContextCompressor::summary_request(&session, 2, 10_000, true);
+        let request = ContextCompressor::summary_request(&session, 2, 10_000);
 
         assert_eq!(request.max_output_tokens, Some(10_000));
         assert_eq!(request.context.len(), 4);
@@ -283,7 +225,7 @@ mod tests {
         assert_eq!(request.context[2].text_content(), "你好，有什么可以帮你？");
         let instruction = request.context[3].text_content();
         assert!(instruction.contains("不得超过 10000 tokens"));
-        assert!(instruction.find("[[CURRENT_TASK]]") < instruction.find("[[SUMMARY]]"));
+        assert!(instruction.contains("[[SUMMARY]]"));
     }
 
     #[test]
@@ -291,21 +233,23 @@ mod tests {
         let mut session = Session::new("test");
         session.context_summary = Some("不应重复出现的旧摘要正文".to_string());
 
-        let instruction = ContextCompressor::compress_instruction(&session, 50_000, true);
+        let instruction = ContextCompressor::compress_instruction(&session, 50_000);
 
         assert!(instruction.contains("系统提示中已经包含此前对话摘要"));
         assert!(!instruction.contains("不应重复出现的旧摘要正文"));
     }
 
+    /// 旧版本会话可能仍含 CompressedResume 消息：压缩请求应继续把它们纳入
+    /// 上下文（数据兼容，新架构不再产生）。
     #[test]
-    fn summary_request_keeps_the_previous_resume_as_user_anchor() {
+    fn summary_request_keeps_legacy_resume_messages() {
         let mut session = Session::new("test");
         session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
         let mut resume = user("上一轮续接状态");
         resume.phase = MessagePhase::CompressedResume;
         session.messages = vec![resume, assistant("后续交互")];
 
-        let request = ContextCompressor::summary_request(&session, 2, 10_000, true);
+        let request = ContextCompressor::summary_request(&session, 2, 10_000);
 
         assert_eq!(request.context[1].role, MessageRole::User);
         assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
@@ -314,33 +258,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_task_before_summary() {
-        let text = "[[CURRENT_TASK]]\n用户最近提问：X\n下一步：Y\n\n[[SUMMARY]]\n历史摘要";
-
-        let (summary, task) = ContextCompressor::parse_output(text, true).unwrap();
-
-        assert_eq!(summary, "历史摘要");
-        assert_eq!(task.as_deref(), Some("用户最近提问：X\n下一步：Y"));
+    fn parses_marked_summary() {
+        let text = "[[SUMMARY]]\n历史摘要";
+        assert_eq!(ContextCompressor::parse_output(text).unwrap(), "历史摘要");
     }
 
     #[test]
-    fn rejects_empty_or_incomplete_output() {
-        assert!(ContextCompressor::parse_output("", true).is_err());
-        assert!(ContextCompressor::parse_output("[[SUMMARY]]\n摘要", true).is_err());
-        assert!(ContextCompressor::parse_output("[[CURRENT_TASK]]\n任务", true).is_err());
-        assert!(
-            ContextCompressor::parse_output("[[CURRENT_TASK]]\n\n[[SUMMARY]]\n摘要", true).is_err()
-        );
-        assert!(
-            ContextCompressor::parse_output("[[CURRENT_TASK]]\n任务\n[[SUMMARY]]", true).is_err()
-        );
+    fn rejects_empty_or_summary_missing_output() {
+        assert!(ContextCompressor::parse_output("").is_err());
+        assert!(ContextCompressor::parse_output("[[SUMMARY]]").is_err());
+        assert!(ContextCompressor::parse_output("[[SUMMARY]]\n   ").is_err());
     }
 
     #[test]
-    fn manual_output_accepts_plain_non_empty_summary() {
-        let (summary, task) = ContextCompressor::parse_output("普通摘要", false).unwrap();
-
-        assert_eq!(summary, "普通摘要");
-        assert!(task.is_none());
+    fn plain_non_empty_text_is_accepted_as_summary() {
+        assert_eq!(
+            ContextCompressor::parse_output("普通摘要").unwrap(),
+            "普通摘要"
+        );
     }
 }

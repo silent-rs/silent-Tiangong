@@ -3,9 +3,8 @@
 //! 会话注入、用量上报和流事件都通过当前 turn 的命令通道投递，由 Agent Loop
 //! 按命令顺序处理。插件不持有 Session、用量收集器或前端事件发送端。
 
-use tokio::sync::mpsc::UnboundedSender;
-
 use crate::core::command::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 插件向 Core 投递的会话注入反馈。
 #[derive(Debug, Clone)]
@@ -29,12 +28,12 @@ impl PluginFeedback {
 /// 不会进入后续 turn。
 #[derive(Clone)]
 pub struct PluginFeedbackTx {
-    tx: UnboundedSender<Command>,
+    sender: UnboundedSender<Command>,
 }
 
 impl PluginFeedbackTx {
-    pub(crate) fn new(tx: UnboundedSender<Command>) -> Self {
-        Self { tx }
+    pub(crate) fn new(sender: UnboundedSender<Command>) -> Self {
+        Self { sender }
     }
 
     /// 将插件产生的结构化内容注入当前会话。
@@ -46,7 +45,7 @@ impl PluginFeedbackTx {
     /// 入队后、消费前结束，命令仍可能丢失。彻底消除该竞态需配合 turn 侧在
     /// Agent Loop 结束后立即 drop 接收端（见 `run_turn`）。
     pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) -> bool {
-        self.tx
+        self.sender
             .send(Command::InjectTool {
                 tool_name: tool_name.into(),
                 payload,
@@ -55,34 +54,51 @@ impl PluginFeedbackTx {
     }
 
     /// 上报插件内部模型调用产生的用量，并向前端发送用量事件。
-    pub fn report_token_usage(&self, usage: tiangong_types::TokenUsage, source: impl Into<String>) {
-        let _ = self.tx.send(Command::ReportUsage {
-            usage,
-            source: source.into(),
-            emit_event: true,
-        });
+    /// 返回 `true` 表示已成功投递到当前 turn 的命令队列；`false` 表示封口或
+    /// 通道关闭导致投递被拒。调用方应据此记录丢失，不能静默忽略。
+    pub fn report_token_usage(
+        &self,
+        usage: tiangong_types::TokenUsage,
+        source: impl Into<String>,
+    ) -> bool {
+        self.sender
+            .send(Command::ReportUsage {
+                usage,
+                source: source.into(),
+                emit_event: true,
+            })
+            .is_ok()
     }
 
     /// 将已经逐笔通知过前端的嵌套执行用量并入当前 turn，不重复发送用量事件。
+    /// 返回 `true` 表示已成功投递到当前 turn 的命令队列；`false` 表示封口或
+    /// 通道关闭导致投递被拒。调用方应据此记录丢失，不能静默忽略。
     pub fn accumulate_token_usage(
         &self,
         usage: tiangong_types::TokenUsage,
         source: impl Into<String>,
-    ) {
-        let _ = self.tx.send(Command::ReportUsage {
-            usage,
-            source: source.into(),
-            emit_event: false,
-        });
+    ) -> bool {
+        self.sender
+            .send(Command::ReportUsage {
+                usage,
+                source: source.into(),
+                emit_event: false,
+            })
+            .is_ok()
     }
 
     /// 向当前 turn 投递一个前端流事件。
     pub fn send_stream_event(&self, event: tiangong_types::StreamEvent) {
-        let _ = self.tx.send(Command::EmitStreamEvent(Box::new(event)));
+        let _ = self.sender.send(Command::EmitStreamEvent(Box::new(event)));
     }
 
     pub fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.sender.is_closed()
+    }
+
+    /// 当前通道是否仍可接收命令。turn 结束后返回 `false`。
+    pub fn is_accepting(&self) -> bool {
+        !self.sender.is_closed()
     }
 }
 

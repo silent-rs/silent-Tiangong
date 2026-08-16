@@ -12,8 +12,6 @@ pub enum Command {
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
     SetReasoningEffort(String),
     /// 更新会话标题。
-    /// `only_if_default=true` 时仅当当前标题仍是默认值（"新对话"/"会话 X"）才覆盖，
-    /// 用于 lite 自动生成（用户手动改过则不覆盖）；false 时无条件覆盖（用户手动编辑）。
     SetTitle {
         title: String,
         only_if_default: bool,
@@ -23,6 +21,11 @@ pub enum Command {
         tool_name: String,
         payload: serde_json::Value,
     },
+    /// 运行中注入用户消息。
+    InjectUserMessage {
+        message_id: String,
+        content: Vec<tiangong_types::ContentBlock>,
+    },
     /// 插件投递的流事件。
     EmitStreamEvent(Box<tiangong_types::StreamEvent>),
     /// 插件内部模型调用产生的 token 用量。
@@ -31,6 +34,29 @@ pub enum Command {
         source: String,
         emit_event: bool,
     },
-    /// 关闭
+    /// 手动压缩上下文。
+    CompressContext,
+    /// 重置上下文。
+    ResetContext,
+    /// 关闭。
     Shutdown,
+}
+
+impl Command {
+    pub(crate) fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Cancel => "Cancel",
+            Self::Approval { .. } => "ApprovalResponse",
+            Self::SetTrustMode(_) => "SetTrustMode",
+            Self::SetReasoningEffort(_) => "SetReasoningEffort",
+            Self::SetTitle { .. } => "SetTitle",
+            Self::InjectTool { .. } => "InjectTool",
+            Self::InjectUserMessage { .. } => "InjectUserMessage",
+            Self::EmitStreamEvent(_) => "EmitStreamEvent",
+            Self::ReportUsage { .. } => "ReportUsage",
+            Self::CompressContext => "CompressContext",
+            Self::ResetContext => "ResetContext",
+            Self::Shutdown => "Shutdown",
+        }
+    }
 }

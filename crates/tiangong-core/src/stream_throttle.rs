@@ -24,7 +24,10 @@ pub(crate) enum StreamTextKind {
     Delta,
     /// ReAct 工具执行阶段的过程性文本（发送 ReactText）
     React,
-    /// 总结阶段的最终回复（发送 SummaryText）
+    /// 历史总结阶段的最终回复（发送 SummaryText）。任务 15 起不再发起独立
+    /// Summary 请求，该变体保留以维持前端事件契约；最终回复现在以 ReactText
+    /// 流出并经消息 upsert（phase=Summary）提交，任务 18 前端联调后定去留。
+    #[allow(dead_code)]
     Summary,
 }
 
