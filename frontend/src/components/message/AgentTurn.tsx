@@ -66,7 +66,7 @@ function AgentTurnView({
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
   const currentMatchStart = useSearchStore((s) => s.currentMatchStart);
   const caseSensitive = useSearchStore((s) => s.caseSensitive);
-  const toolGroupExpansion = useExpansionState(isActive);
+  const toolGroupExpansion = useExpansionState();
   const agents = useStore((state) => state.agents);
   const resolvedTheme = useResolvedTheme();
 
