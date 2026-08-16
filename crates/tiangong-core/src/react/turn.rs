@@ -21,7 +21,7 @@ use super::timer::TurnElapsedTimer;
 pub(crate) async fn run_turn(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) {
+) -> StreamEvent {
     // ── 固定轮次锚点 ──
     // 生命周期锚点 turn_start_idx 在 turn 开始时固定，供 on_turn_started/
     // on_turn_finished 使用同一消息范围（ALR-108：一个物理 turn 只触发一次）。
@@ -30,10 +30,9 @@ pub(crate) async fn run_turn(
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
-        let _ = stream_tx.send(StreamEvent::Error {
+        return StreamEvent::Error {
             message: "本轮 Session 缺少用户消息".to_string(),
-        });
-        return;
+        };
     };
     let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
@@ -143,9 +142,9 @@ pub(crate) async fn run_turn(
         });
     }
 
-    // ── 发布唯一终态 ──
-    // 宿主在收到终态后从磁盘重载权威 Session，不再需要额外的最终消息快照。
-    let _ = stream_tx.send(outcome.terminal_event(usage));
+    // ── 生成终态 ──
+    // 是否发布由唯一 Driver 在检查同一命令通道后决定，避免连续任务之间暴露 Idle。
+    outcome.terminal_event(usage)
 }
 
 /// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的

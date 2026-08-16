@@ -94,10 +94,19 @@ impl AgentScheduling {
     }
 
     pub(crate) fn deliver(&self, command: Command) -> Result<(), crate::core::CoreError> {
-        self.ingress
-            .send(command)
-            .then_some(())
-            .ok_or(crate::core::CoreError::WorkerStopped)
+        let marks_running = matches!(
+            command,
+            Command::InjectUserMessage { .. } | Command::CompressContext
+        );
+        let mut state = self.lock_state();
+        if self.ingress.send(command) {
+            if marks_running {
+                state.running = true;
+            }
+            Ok(())
+        } else {
+            Err(crate::core::CoreError::WorkerStopped)
+        }
     }
 
     pub(crate) fn take_receiver(&self) -> UnboundedReceiver<Command> {
@@ -108,8 +117,27 @@ impl AgentScheduling {
             .expect("唯一 Driver 只能领取一次命令 Receiver")
     }
 
-    pub(crate) fn set_running(&self, running: bool) {
-        self.lock_state().running = running;
+    /// Driver 在准备阻塞前原子检查通道并完成状态收尾。
+    /// 若已有下一条命令则保持 Running；若通道为空，则先切换 Idle，再发布上一活动的终态。
+    /// `deliver` 与这里共用状态锁，确保终态发布和后续输入之间存在唯一顺序。
+    pub(crate) fn try_recv_or_finish(
+        &self,
+        receiver: &mut UnboundedReceiver<Command>,
+        terminal_event: &mut Option<tiangong_types::StreamEvent>,
+        stream_tx: &std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
+    ) -> Result<Option<Command>, tokio::sync::mpsc::error::TryRecvError> {
+        let mut state = self.lock_state();
+        match receiver.try_recv() {
+            Ok(command) => Ok(Some(command)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                state.running = false;
+                if let Some(event) = terminal_event.take() {
+                    let _ = stream_tx.send(event);
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -285,5 +313,48 @@ mod tests {
             })
             .expect("第二条消息不应 Busy");
         shutdown_agent(&sid).expect("关闭 Agent");
+    }
+
+    #[test]
+    fn running_stays_true_until_no_active_or_queued_user_work_remains() {
+        let entry = AgentScheduling::new();
+        let mut receiver = entry.take_receiver();
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let mut terminal_event = None;
+
+        entry
+            .deliver(Command::InjectUserMessage {
+                message_id: "first".to_string(),
+                content: vec![],
+            })
+            .expect("首条消息应投递成功");
+        assert!(entry.is_running(), "消息进入唯一通道后应立即视为运行中");
+        assert!(matches!(
+            entry.try_recv_or_finish(&mut receiver, &mut terminal_event, &stream_tx),
+            Ok(Some(Command::InjectUserMessage { message_id, .. })) if message_id == "first"
+        ));
+
+        entry
+            .deliver(Command::InjectUserMessage {
+                message_id: "second".to_string(),
+                content: vec![],
+            })
+            .expect("连续消息应投递成功");
+        assert!(matches!(
+            entry.try_recv_or_finish(&mut receiver, &mut terminal_event, &stream_tx),
+            Ok(Some(Command::InjectUserMessage { message_id, .. })) if message_id == "second"
+        ));
+        assert!(entry.is_running(), "领取后续消息时不得短暂切换为空闲");
+
+        terminal_event = Some(tiangong_types::StreamEvent::Done { usage: None });
+        assert!(matches!(
+            entry.try_recv_or_finish(&mut receiver, &mut terminal_event, &stream_tx),
+            Ok(None)
+        ));
+        assert!(!entry.is_running(), "活动和通道都为空时才应进入空闲");
+        assert!(matches!(
+            stream_rx.try_recv(),
+            Ok(tiangong_types::StreamEvent::Done { .. })
+        ));
     }
 }

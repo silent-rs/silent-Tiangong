@@ -428,15 +428,14 @@ impl TurnSpawner {
         content: Vec<tiangong_types::ContentBlock>,
         cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
         deferred_tools: &mut std::collections::VecDeque<Command>,
-    ) {
+    ) -> StreamEvent {
         let mut ctx = match self.build_turn_context() {
             Ok(ctx) => ctx,
             Err(error) => {
                 tracing::warn!(%error, session_id = %self.session_id, "构建 turn 上下文失败");
-                let _ = self.stream_tx.send(StreamEvent::Error {
+                return StreamEvent::Error {
                     message: format!("会话上下文构建失败：{error}"),
-                });
-                return;
+                };
             }
         };
         // on_session_ready 仅在本 Core 实例的首次 turn 执行（会话级一次性初始化）。
@@ -455,10 +454,9 @@ impl TurnSpawner {
             .try_append_prepared_user_message_with_id(message_id.clone(), content.clone())
         {
             tracing::warn!(%error, session_id = %self.session_id, "用户消息保存失败");
-            let _ = self.stream_tx.send(StreamEvent::Error {
+            return StreamEvent::Error {
                 message: format!("用户消息保存失败：{error}"),
-            });
-            return;
+            };
         }
         let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
             message_id: message_id.clone(),
@@ -487,9 +485,7 @@ impl TurnSpawner {
         while let Some(command) = deferred_tools.pop_front() {
             let _ = ingress.send(command);
         }
-        scheduling.set_running(true);
-        run_turn(ctx, cmd_rx).await;
-        scheduling.set_running(false);
+        run_turn(ctx, cmd_rx).await
     }
 
     /// 空闲期手动上下文压缩（作为 Inbox 控制输入由 driver 执行）。
@@ -524,7 +520,6 @@ impl TurnSpawner {
         for plugin in &ctx.plugins {
             plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(ingress.clone()));
         }
-        scheduling.set_running(true);
         let mut defer_input = |command: Command| -> Result<(), Command> {
             pending_commands.push_back(command);
             Ok(())
@@ -535,7 +530,6 @@ impl TurnSpawner {
             &mut defer_input,
         )
         .await;
-        scheduling.set_running(false);
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -616,14 +610,29 @@ async fn drive_agent(scheduling: Arc<AgentScheduling>, spawner: TurnSpawner) {
     let mut receiver = scheduling.take_receiver();
     let mut pending_commands = std::collections::VecDeque::new();
     let mut deferred_tools = std::collections::VecDeque::new();
+    let mut terminal_event = None;
     loop {
         let command = match pending_commands.pop_front() {
             Some(command) => command,
-            None => match receiver.recv().await {
-                Some(command) => command,
-                None => {
+            None => match scheduling.try_recv_or_finish(
+                &mut receiver,
+                &mut terminal_event,
+                &spawner.stream_tx,
+            ) {
+                Ok(Some(command)) => command,
+                Ok(None) => match receiver.recv().await {
+                    Some(command) => command,
+                    None => {
+                        crate::react::inbox::remove_agent(&spawner.session_id);
+                        return;
+                    }
+                },
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     crate::react::inbox::remove_agent(&spawner.session_id);
                     return;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    unreachable!("空通道已在 try_recv_or_finish 中处理")
                 }
             },
         };
@@ -640,15 +649,17 @@ async fn drive_agent(scheduling: Arc<AgentScheduling>, spawner: TurnSpawner) {
                 message_id,
                 content,
             } => {
-                spawner
-                    .run_user_turn(
-                        &scheduling,
-                        message_id,
-                        content,
-                        &mut receiver,
-                        &mut deferred_tools,
-                    )
-                    .await;
+                terminal_event = Some(
+                    spawner
+                        .run_user_turn(
+                            &scheduling,
+                            message_id,
+                            content,
+                            &mut receiver,
+                            &mut deferred_tools,
+                        )
+                        .await,
+                );
             }
             Command::InjectTool { .. } => deferred_tools.push_back(command),
             Command::CompressContext => {

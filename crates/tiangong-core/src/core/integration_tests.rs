@@ -769,3 +769,47 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
     assert!(pending.turn_status.is_none(), "未执行的 B 不应有最终状态");
     routes["shutdown-a"].assert_hits(1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_next_turn_publishes_done_only_after_agent_becomes_idle() {
+    let (env, sid) = TestEnv::new("continuous-done");
+    let server = MockServer::start().await;
+    let routes = mount_prompt_router(
+        &server,
+        vec![
+            PromptRoute::new(
+                "second-answer",
+                latest_user_contains("CONTINUOUS-SECOND"),
+                MockReply::sse(stream_text_chunks(&["第二轮", "完成。"])),
+            ),
+            PromptRoute::new(
+                "first-answer",
+                latest_user_contains("CONTINUOUS-FIRST"),
+                MockReply::sse(stream_text_chunks(&["第一轮", "完成。"])),
+            ),
+        ],
+    )
+    .await;
+    let (core, mut events) = core_for(&env, &sid, &server.uri());
+    let mut finish = arm_turn_finish(&sid);
+
+    send_message(&core, "msg-first", "CONTINUOUS-FIRST 第一个任务");
+    finish.wait_frozen();
+    send_message(&core, "msg-second", "CONTINUOUS-SECOND 第二个任务");
+    assert!(crate::react::inbox::is_running(&sid));
+    finish.release();
+
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-second").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    events.wait_done();
+    events.assert_done_count(1);
+    assert!(events.seen().iter().any(
+        |event| matches!(event, tiangong_types::StreamEvent::UserMessage { message_id, .. } if message_id == "msg-second")
+    ));
+    routes["first-answer"].assert_hits(1);
+    routes["second-answer"].assert_hits(1);
+    core.shutdown_join().expect("关闭失败");
+}

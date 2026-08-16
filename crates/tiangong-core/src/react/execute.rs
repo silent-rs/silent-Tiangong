@@ -2253,18 +2253,16 @@ mod tests {
         let session_id = harness.ctx.session.id.clone();
         let (_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         let stream_rx = harness.stream_rx;
-        run_turn(harness.ctx, &mut cmd_rx).await;
+        let terminal = run_turn(harness.ctx, &mut cmd_rx).await;
 
-        // ALR-109 唯一终态：恰好一个 Done。
+        // run_turn 只生成终态，由唯一 Driver 在确认没有后续任务后发布。
+        assert!(matches!(terminal, StreamEvent::Done { .. }));
         let events: Vec<StreamEvent> = stream_rx.try_iter().collect();
         let done = events
             .iter()
             .filter(|e| matches!(e, StreamEvent::Done { .. }))
             .count();
-        assert_eq!(
-            done, 1,
-            "一个物理 turn 只发一次 Done（ALR-109），实际: {done}"
-        );
+        assert_eq!(done, 0, "Driver 发布前不应提前发送 Done");
 
         // ALR-107 最新消息锚点：重载磁盘 session，最新用户消息应有 turn_status。
         let reloaded =
