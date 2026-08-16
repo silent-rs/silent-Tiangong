@@ -55,15 +55,6 @@ impl ExecutionPhase {
 pub(super) struct ExecutionBudget {
     /// 物理 turn 内的全局请求编号（仅日志/流事件，不参与重置决策）。
     pub(super) request_round: usize,
-    /// 当前 ReAct 阶段内的轮数（达到 `max_tool_rounds` 时安全终止）。
-    pub(super) react_rounds_in_phase: usize,
-}
-
-impl ExecutionBudget {
-    /// 新用户意图：清阶段级计数，保留全局请求编号。
-    pub(super) fn reset_for_new_intent(&mut self) {
-        self.react_rounds_in_phase = 0;
-    }
 }
 
 /// 已就绪待执行的单个工具调用。

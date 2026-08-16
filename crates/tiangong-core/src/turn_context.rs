@@ -54,9 +54,6 @@ pub struct TurnContext {
     // ===== turn 级配置 =====
     /// 当前执行单元可用的工具集
     pub tools: Vec<ToolSpec>,
-    /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次
-    #[builder(default = crate::MAX_TOOL_ROUNDS)]
-    pub max_tool_rounds: usize,
 }
 
 impl TurnContext {

@@ -2365,3 +2365,58 @@ async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
             .any(|call| call.id == "call_invalid")
     }));
 }
+
+/// 插件收尾（on_turn_finished）同步阻塞超过宽限时：终态仍及时发布、
+/// turn 任务在有限时间内结束（收尾被丢弃，不吞终态）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalling_plugin_finish_does_not_swallow_terminal() {
+    use super::super::turn::run_turn;
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("普通答复。"), usage_chunk(10, 2)],
+    )
+    .await;
+
+    struct StallingFinishPlugin;
+    impl crate::tool_override::ToolSpecProvider for StallingFinishPlugin {}
+    impl crate::tool_override::ToolOverrideHandler for StallingFinishPlugin {}
+    impl crate::tool_override::PromptSectionProvider for StallingFinishPlugin {}
+    impl crate::tool_override::MentionCandidateProvider for StallingFinishPlugin {}
+    impl Plugin for StallingFinishPlugin {
+        fn id(&self) -> &str {
+            "stalling-finish"
+        }
+        fn on_turn_finished(&self, _session: &mut Session, _turn_start_idx: usize) {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+
+    let harness = TestHarness::new_with_plugins(
+        &server,
+        Vec::new(),
+        HashMap::new(),
+        vec![Arc::new(StallingFinishPlugin)],
+    );
+    let TestHarness {
+        ctx,
+        stream_rx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    let terminal = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        run_turn(ctx, &mut cmd_rx),
+    )
+    .await
+    .expect("插件收尾阻塞不得无限卡住 turn 任务");
+    assert!(
+        matches!(terminal, StreamEvent::Done { .. }),
+        "终态必须正常发布，实际: {terminal:?}"
+    );
+    let done = stream_rx
+        .try_iter()
+        .filter(|e| matches!(e, StreamEvent::Done { .. }))
+        .count();
+    assert_eq!(done, 1, "Done 事件必须已到达事件流");
+}

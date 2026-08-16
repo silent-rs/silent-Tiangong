@@ -79,7 +79,7 @@ pub(crate) async fn run_turn(
         demote_finalized_candidate(&mut ctx.session, &stream_tx, finalized_candidate_id.take());
     }
 
-    // ── 提交轮次状态与插件收尾 ──
+    // ── 提交轮次状态 ──
     // 测试同步点：Agent Loop 已提交结果，turn 尚未执行最终收尾。
     #[cfg(test)]
     crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
@@ -91,19 +91,12 @@ pub(crate) async fn run_turn(
     if let Some(idx) = ctx.session.latest_user_message_index() {
         ctx.session.messages[idx].set_turn_result(elapsed_ms, status);
     }
-    if status == tiangong_types::TurnStatus::Cancelled {
-        for plugin in &ctx.plugins {
-            plugin.on_cancel(&mut ctx.session).await;
-        }
-    }
-    // on_turn_finished 使用与 on_turn_started 相同的起点，并可在最终落盘前处理
-    // 本轮新增消息（例如建立索引或提交记忆任务）。
-    for plugin in &ctx.plugins {
-        plugin.on_turn_finished(&mut ctx.session, turn_start_idx);
-    }
 
-    // ── 清理运行态并最终持久化 ──
+    // ── 清理运行态并最终持久化（不等待插件收尾）──
     // base64 等瞬态内容只用于本轮模型请求，不能进入磁盘会话合同。
+    // 关键路径顺序：落盘 → 快照 → 终态。插件收尾（含 on_cancel）移到终态之后，
+    // 任何插件或 Sidecar 阻塞都不得吞掉本轮终态——用户看到结束事件不再取决于
+    // 插件收尾速度。
     ctx.session.clear_transient_content();
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
@@ -148,8 +141,68 @@ pub(crate) async fn run_turn(
     // 每轮独立终态：turn 收尾完成即发布（连续轮次各自拥有自己的终态事件）。
     let terminal = outcome.terminal_event(usage);
     let _ = stream_tx.send(terminal.clone());
+
+    // ── 插件收尾（终态已发布，尽力而为）──
+    // on_cancel / on_turn_finished 可处理本轮新增消息（建立索引、提交记忆任务、
+    // 取消回滚）。二者都不得无限阻塞 turn 任务：超时或失败只记录告警，不吞终态。
+    // 注意 on_turn_finished 是同步方法（插件内部可能同步请求 Sidecar，会阻塞
+    // worker 线程），必须放进 spawn_blocking 才能被限时；超时后放弃整个收尾
+    // 快照（session 留在阻塞线程），turn 任务照常结束、注册表槽位照常释放。
+    let session_id = ctx.session.id.clone();
+    if status == tiangong_types::TurnStatus::Cancelled {
+        let cancelled = tokio::time::timeout(PLUGIN_FINISH_TIMEOUT, async {
+            for plugin in &ctx.plugins {
+                plugin.on_cancel(&mut ctx.session).await;
+            }
+        })
+        .await;
+        if cancelled.is_err() {
+            tracing::warn!(
+                session_id = %session_id,
+                "取消收尾（on_cancel）超时：剩余取消回滚被丢弃，终态不受影响"
+            );
+        }
+    }
+    let plugins = ctx.plugins.clone();
+    let mut finish_session = ctx.session;
+    let finished = tokio::time::timeout(
+        PLUGIN_FINISH_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            for plugin in &plugins {
+                plugin.on_turn_finished(&mut finish_session, turn_start_idx);
+            }
+            finish_session
+        }),
+    )
+    .await;
+    match finished {
+        Ok(Ok(session)) => {
+            ctx.session = session;
+            if let Err(error) = ctx.session.try_persist_to_disk() {
+                tracing::warn!(%error, session_id = %session_id, "插件收尾后的增量落盘失败");
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, session_id = %session_id, "插件收尾任务异常退出，收尾丢弃");
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                timeout_millis = PLUGIN_FINISH_TIMEOUT.as_millis() as u64,
+                "插件收尾（on_turn_finished）超时：收尾快照被丢弃，本轮终态不受影响"
+            );
+        }
+    }
     terminal
 }
+
+/// 插件收尾的宽限上限：正常收尾（快速入队/轻量索引）应为毫秒级，超时意味着
+/// 插件或其 Sidecar 异常——丢弃收尾以保证 turn 任务可结束、注册表槽位释放。
+#[cfg(not(test))]
+const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 测试使用短超时，便于验证超时保护行为。
+#[cfg(test)]
+const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
 /// assistant 候选退回 React 过程相位——失败终态下未验证的候选不得保持

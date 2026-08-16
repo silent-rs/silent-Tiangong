@@ -746,19 +746,6 @@ pub(super) async fn execute_turn(
         match phase {
             // ── Ready：需要下一次 ReAct 模型请求 ──
             ExecutionPhase::NeedModel => {
-                if state.budget.react_rounds_in_phase >= ctx.max_tool_rounds {
-                    // 安全限制（ALR-305）：连续工具调用轮次达到上限时明确失败，
-                    // 不强迫模型生成一个看起来完成的回答。
-                    let message = format!(
-                        "连续工具执行轮次达到安全上限（{}），本轮已终止",
-                        ctx.max_tool_rounds
-                    );
-                    persist_error(ctx, &message);
-                    state.install_phase(ExecutionPhase::PendingFinish(
-                        TurnExecutionResult::failed(state.accumulated_usage.clone(), message),
-                    ));
-                    continue 'agent_loop;
-                }
                 // ── 请求前策略（ALR-303/304）──
                 // 上下文溢出恢复优先于常规压力压缩；两者都在请求前内联完成，
                 // 压缩不再形成 Agent 顶层阶段。压缩期间到达的命令交还驱动处理。
@@ -1030,7 +1017,6 @@ fn complete_llm_request(
                 None,
             );
             state.budget.request_round += 1;
-            state.budget.react_rounds_in_phase += 1;
             // 记录观测压力，交给下一次请求前策略统一判断（ALR-303）；
             // 同步到 session，跨 turn 的请求前策略也能读取该信号。
             let observed_tokens = observed_total_tokens(&response.usage);

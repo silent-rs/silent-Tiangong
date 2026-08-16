@@ -1,6 +1,3 @@
-/// 单次工具执行阶段（ReAct Loop 内层）的最大轮次（安全上限，达到后明确失败）。
-pub const MAX_TOOL_ROUNDS: usize = 30;
-
 /// @提及候选（见 [`tiangong_types::MentionCandidate`]）。
 pub use tiangong_types::MentionCandidate;
 

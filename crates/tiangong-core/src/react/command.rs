@@ -44,7 +44,6 @@ pub(super) fn save_user_message_and_restart(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"
     );
-    state.budget.reset_for_new_intent();
     state.reset_tool_history();
     Ok(())
 }
