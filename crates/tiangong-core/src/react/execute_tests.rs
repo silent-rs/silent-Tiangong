@@ -1115,8 +1115,21 @@ impl Plugin for LifecycleCountingPlugin {
     fn on_turn_started(&self, _: &mut Session, _: usize) {
         self.started.fetch_add(1, Ordering::SeqCst);
     }
-    fn on_turn_finished(&self, _: &mut Session, _: usize) {
+    fn on_turn_finished(&self, _: &Session, _: usize) {
         self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// 等待原子计数器达到期望值（通知型钩子在后台线程执行，断言前需等它落地）。
+fn wait_for_counter(counter: &AtomicU32, expected: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while counter.load(Ordering::SeqCst) != expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待钩子通知超时：期望 {expected}，实际 {}",
+            counter.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -1145,10 +1158,11 @@ async fn run_turn_invokes_lifecycle_hooks_exactly_once() {
         1,
         "on_turn_started 应只调用一次（ALR-108）"
     );
+    wait_for_counter(&finished, 1);
     assert_eq!(
         finished.load(Ordering::SeqCst),
         1,
-        "on_turn_finished 应只调用一次（ALR-108）"
+        "on_turn_finished 应只通知一次（ALR-108，后台投递）"
     );
 }
 
@@ -2366,8 +2380,8 @@ async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
     }));
 }
 
-/// 插件收尾（on_turn_finished）同步阻塞超过宽限时：终态仍及时发布、
-/// turn 任务在有限时间内结束（收尾被丢弃，不吞终态）。
+/// 插件收尾（on_turn_finished）同步阻塞：通知型钩子后台投递、turn 不等待——
+/// 终态正常发布、turn 任务立即结束（issue #404）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalling_plugin_finish_does_not_swallow_terminal() {
     use super::super::turn::run_turn;
@@ -2387,7 +2401,7 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
         fn id(&self) -> &str {
             "stalling-finish"
         }
-        fn on_turn_finished(&self, _session: &mut Session, _turn_start_idx: usize) {
+        fn on_turn_finished(&self, _session: &Session, _turn_start_idx: usize) {
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
     }
@@ -2405,11 +2419,11 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
         ..
     } = harness;
     let terminal = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(1),
         run_turn(ctx, &mut cmd_rx),
     )
     .await
-    .expect("插件收尾阻塞不得无限卡住 turn 任务");
+    .expect("turn 任务不得等待慢速插件收尾（通知即返回）");
     assert!(
         matches!(terminal, StreamEvent::Done { .. }),
         "终态必须正常发布，实际: {terminal:?}"

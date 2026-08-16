@@ -225,12 +225,11 @@ impl Plugin for WasmPluginAdapter {
         );
     }
 
-    /// 轮次结束：序列化 session 并有序转发。
+    /// 轮次结束：序列化 session 只读快照转发（通知型钩子）。
     ///
-    /// Memory 等插件必须在这里完成的只是将后台任务快速入队；真正耗时工作由 sidecar
-    /// 自己处理。同步等待入队确认可保证本轮 on_turn_finished 一定先于下一轮
-    /// on_turn_started，且不会让后台收尾线程继续持有 WASM 实例锁。
-    fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
+    /// Core 已在后台通知线程中调用本方法（issue #404），此处同步转发即可；
+    /// Memory 等插件在 WASM 内同步确认 sidecar 入队，耗时被隔离在通知线程。
+    fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
         self.forward_session_hook_with_idx(
             "on_turn_finished",
             session,
@@ -241,9 +240,10 @@ impl Plugin for WasmPluginAdapter {
 
     /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
     ///
-    /// 同样采用 fire-and-forget：投递到独立线程立即返回，不阻塞 finalize 关键路径。
-    fn on_session_ended(&self, session: &mut Session) {
-        self.forward_session_hook_detached("on_session_ended", session, |plugin, json| {
+    /// 通知型钩子：Core 已在后台通知线程中调用本方法（issue #404），此处同步
+    /// 转发，不再自行 detached。
+    fn on_session_ended(&self, session: &Session) {
+        self.forward_session_hook("on_session_ended", session, |plugin, json| {
             plugin.on_session_ended(json)
         });
     }
@@ -367,54 +367,6 @@ impl WasmPluginAdapter {
         let idx = turn_start_idx as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
-        }
-    }
-
-    /// 与 [`forward_session_hook`](Self::forward_session_hook) 相同的序列化逻辑，
-    /// 但把 WASM 调用投递到独立 OS 线程后立即返回，不阻塞调用方。
-    ///
-    /// 用于收尾类钩子（`on_turn_finished` / `on_session_ended`）：这类钩子只需保证
-    /// 通知最终送达 sidecar，结果对当前路径无影响（失败本就只 warn），因此可以
-    /// 完全脱离关键路径，避免 sidecar 建连与往返开销拖慢回复收尾。
-    ///
-    /// 使用 `std::thread::spawn` 而非 `tokio::spawn_blocking`，是为了在 session
-    /// end 等 `spawn_blocking` 上下文中同样安全（那里没有 tokio runtime）。
-    fn forward_session_hook_detached(
-        &self,
-        hook: &'static str,
-        session: &Session,
-        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync + 'static,
-    ) {
-        let plugin_session = tiangong_types::PluginSession::from(session);
-        let json = match serde_json::to_string(&plugin_session) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
-                return;
-            }
-        };
-        if let Ok(mut context) = self.context.lock() {
-            context.session_json = Some(json.clone());
-        }
-        if !self.is_enabled() {
-            return;
-        }
-        let Some(inner) = self.current_inner() else {
-            return;
-        };
-        let plugin_id = self.id.clone();
-        let hook_thread_id = plugin_id.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name(format!("wasm-hook-{plugin_id}-{hook}"))
-            .spawn(move || {
-                if let Err(error) =
-                    call_wasm_off_runtime(inner, move |plugin| call(plugin, json))
-                {
-                    tracing::warn!(plugin_id = %hook_thread_id, hook, %error, "wasm 生命周期钩子失败");
-                }
-            })
-        {
-            tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
         }
     }
 }
