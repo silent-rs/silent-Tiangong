@@ -142,12 +142,10 @@ pub(crate) async fn run_turn(
     let terminal = outcome.terminal_event(usage);
     let _ = stream_tx.send(terminal.clone());
 
-    // ── 插件收尾（终态已发布，尽力而为）──
-    // on_cancel / on_turn_finished 可处理本轮新增消息（建立索引、提交记忆任务、
-    // 取消回滚）。二者都不得无限阻塞 turn 任务：超时或失败只记录告警，不吞终态。
-    // 注意 on_turn_finished 是同步方法（插件内部可能同步请求 Sidecar，会阻塞
-    // worker 线程），必须放进 spawn_blocking 才能被限时；超时后放弃整个收尾
-    // 快照（session 留在阻塞线程），turn 任务照常结束、注册表槽位照常释放。
+    // ── 插件收尾（终态已发布，通知即返回）──
+    // on_cancel 处理本轮取消回滚（限时等待，超时丢弃剩余回滚，终态不受影响）；
+    // on_turn_finished 是通知型钩子：后台线程投递、不等待完成，收尾成败与产出
+    // 由插件自行负责（issue #404），turn 任务与注册表槽位立即释放。
     let session_id = ctx.session.id.clone();
     if status == tiangong_types::TurnStatus::Cancelled {
         let cancelled = tokio::time::timeout(PLUGIN_FINISH_TIMEOUT, async {
@@ -163,41 +161,13 @@ pub(crate) async fn run_turn(
             );
         }
     }
-    let plugins = ctx.plugins.clone();
-    let mut finish_session = ctx.session;
-    let finished = tokio::time::timeout(
-        PLUGIN_FINISH_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            for plugin in &plugins {
-                plugin.on_turn_finished(&mut finish_session, turn_start_idx);
-            }
-            finish_session
-        }),
-    )
-    .await;
-    match finished {
-        Ok(Ok(session)) => {
-            ctx.session = session;
-            if let Err(error) = ctx.session.try_persist_to_disk() {
-                tracing::warn!(%error, session_id = %session_id, "插件收尾后的增量落盘失败");
-            }
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, session_id = %session_id, "插件收尾任务异常退出，收尾丢弃");
-        }
-        Err(_) => {
-            tracing::warn!(
-                session_id = %session_id,
-                timeout_millis = PLUGIN_FINISH_TIMEOUT.as_millis() as u64,
-                "插件收尾（on_turn_finished）超时：收尾快照被丢弃，本轮终态不受影响"
-            );
-        }
-    }
+    crate::core::plugin::notify_turn_finished(&ctx.plugins, &ctx.session, turn_start_idx);
     terminal
 }
 
-/// 插件收尾的宽限上限：正常收尾（快速入队/轻量索引）应为毫秒级，超时意味着
-/// 插件或其 Sidecar 异常——丢弃收尾以保证 turn 任务可结束、注册表槽位释放。
+/// 取消回滚（on_cancel）的宽限上限：正常回滚应为毫秒级，超时意味着插件或其
+/// Sidecar 异常——丢弃剩余回滚以保证 turn 任务可结束、注册表槽位释放。
+/// on_turn_finished 为通知型钩子，后台投递不等待，不受此限时约束（issue #404）。
 #[cfg(not(test))]
 const PLUGIN_FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// 测试使用短超时，便于验证超时保护行为。

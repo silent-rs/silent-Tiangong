@@ -576,10 +576,20 @@ impl Coordinator {
         for runtime in runtimes.values() {
             runtime.prepare_shutdown();
         }
-        for (agent_id, runtime) in runtimes {
-            if let Err(error) = runtime.shutdown().await {
-                tracing::warn!(%agent_id, %error, "关闭子 Agent Core 失败");
-            }
+        // 并行关闭全部子 Agent：子 Core 的收敛落盘在共享 runtime / blocking 线程
+        // 上完成，超时 detach（issue #404）后仍会自然跑完。
+        let handles: Vec<_> = runtimes
+            .into_iter()
+            .map(|(agent_id, runtime)| {
+                tokio::spawn(async move {
+                    if let Err(error) = runtime.shutdown().await {
+                        tracing::warn!(%agent_id, %error, "关闭子 Agent Core 失败");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.await;
         }
     }
 

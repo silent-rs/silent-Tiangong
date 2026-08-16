@@ -149,6 +149,11 @@ pub trait Plugin:
     /// 一个对话轮次结束后调用：执行时长与 `turn_result` 已写入用户消息，
     /// **最终持久化尚未发生**。
     ///
+    /// 通知型钩子：Core 在后台线程投递、不等待完成（turn 终态不受插件收尾
+    /// 速度影响），钩子收到的是**会话快照**（只读），对 session 的修改不会被
+    /// 持久化。实现应只做快速入队/通知，重活交给插件自身后台（sidecar 或后台
+    /// 任务）；失败/超时由实现自行记录日志。
+    ///
     /// 相位合同：本轮成功候选此时已被标记为最终答复（Summary），但这是
     /// **暂定**状态——若随后的最终落盘失败，该标记会被回收（退回过程相位）。
     /// 在本钩子中做不可回滚副作用（建立索引、提交记忆等）的插件必须容忍
@@ -157,10 +162,15 @@ pub trait Plugin:
     ///
     /// `turn_start_idx` 与 [`Plugin::on_turn_started`] 接收的值一致，可用于取出本轮
     /// 新增的消息做后处理（如批量写入索引）。
-    fn on_turn_finished(&self, _session: &mut crate::session::Session, _turn_start_idx: usize) {}
+    fn on_turn_finished(&self, _session: &crate::session::Session, _turn_start_idx: usize) {}
 
     /// 会话结束、worker 即将退出前调用（finalize 用）。
     ///
+    /// 通知型钩子：Core 在后台线程投递、不等待完成（关闭会话/退出应用不被
+    /// 插件阻塞），钩子收到的是**会话快照**（只读），对 session 的修改不会被
+    /// 持久化。实现应快速返回或自身可被 detach；耗时收尾应自带超时上限，
+    /// 失败/超时由实现自行记录日志。
+    ///
     /// 注意：此时 stream 通道可能已关闭，钩子内不应再投递流事件。
-    fn on_session_ended(&self, _session: &mut crate::session::Session) {}
+    fn on_session_ended(&self, _session: &crate::session::Session) {}
 }

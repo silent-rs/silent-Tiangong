@@ -16,6 +16,14 @@ use crate::constants::{PLUGIN_ID, TOOL_CREATE_AGENT, TOOL_DISMISS_AGENT};
 use crate::coordinator::Coordinator;
 use crate::tools::{error_result, root_tool_specs};
 
+/// 团队关闭的限时上限：超时后 detach 剩余子 Agent（共享 runtime 自然收敛落盘），
+/// 防止通知线程自身永久滞留；Core 对会话结束钩子本就不等待（issue #404）。
+#[cfg(not(test))]
+const TEAM_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// 测试使用短超时，便于验证 detach 合同（留足正常关闭收敛余量）。
+#[cfg(test)]
+const TEAM_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct AgentTeamPlugin {
     coordinator: Arc<Coordinator>,
     feedback: RwLock<Option<PluginFeedbackTx>>,
@@ -134,27 +142,32 @@ impl Plugin for AgentTeamPlugin {
         })
     }
 
-    fn on_session_ended(&self, session: &mut Session) {
+    fn on_session_ended(&self, session: &Session) {
+        // 通知型钩子：Core 已在后台通知线程中调用本方法（issue #404），无需再
+        // 自建线程。限时关闭子 Agent，超时后 detach——子任务在共享 runtime 上
+        // 自然收敛落盘（与 Core Drop 空操作同一合同）。
         let coordinator = self.coordinator.clone();
         let session_id = session.id.clone();
-        let result = std::thread::Builder::new()
-            .name(format!("agent-team-shutdown-{session_id}"))
-            .spawn(move || -> Result<(), String> {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| format!("创建 Agent Team 关闭运行时失败：{error}"))?;
-                runtime.block_on(coordinator.shutdown());
-                Ok(())
-            })
-            .and_then(|thread| {
-                thread
-                    .join()
-                    .map_err(|_| std::io::Error::other("Agent Team 关闭线程异常退出"))?
-                    .map_err(std::io::Error::other)
-            });
-        if let Err(error) = result {
-            tracing::warn!(%session_id, %error, "Agent Team 团队销毁失败");
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(%session_id, %error, "创建 Agent Team 关闭运行时失败");
+                return;
+            }
+        };
+        let shutdown = runtime.block_on(async {
+            tokio::time::timeout(TEAM_SHUTDOWN_TIMEOUT, coordinator.shutdown()).await
+        });
+        match shutdown {
+            Ok(()) => {}
+            Err(_) => tracing::warn!(
+                %session_id,
+                timeout_millis = TEAM_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                "Agent Team 关闭超时：剩余子 Agent 已 detach，由共享 runtime 自然收敛落盘"
+            ),
         }
     }
 }
@@ -185,6 +198,7 @@ mod tests {
 
     struct SlowSessionEndedState {
         started: AtomicBool,
+        finished: AtomicBool,
         released: Mutex<bool>,
         changed: Condvar,
         safety_limit_reached: AtomicBool,
@@ -194,6 +208,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 started: AtomicBool::new(false),
+                finished: AtomicBool::new(false),
                 released: Mutex::new(false),
                 changed: Condvar::new(),
                 safety_limit_reached: AtomicBool::new(false),
@@ -236,7 +251,7 @@ mod tests {
             "test-slow-session-ended"
         }
 
-        fn on_session_ended(&self, _session: &mut Session) {
+        fn on_session_ended(&self, _session: &Session) {
             let released = self
                 .state
                 .released
@@ -256,6 +271,7 @@ mod tests {
                     .safety_limit_reached
                     .store(true, Ordering::Release);
             }
+            self.state.finished.store(true, Ordering::Release);
         }
     }
 
@@ -620,9 +636,11 @@ mod tests {
         }));
     }
 
+    /// 通知型会话结束钩子合同（issue #404）：父 Core 关闭不等待子插件的
+    /// `on_session_ended`（不受其阻塞），通知链仍穿透到子插件钩子，
+    /// 释放后钩子线程正常完成。
     #[test]
-    #[ignore = "耗时故障诊断，仅在手动复测 Agent Team 关闭阻塞时执行"]
-    fn parent_shutdown_waits_for_child_session_ended_hook() {
+    fn parent_shutdown_does_not_block_on_child_session_ended_hook() {
         let _guard = storage_test_guard();
         let storage = tempfile::tempdir().unwrap();
         let server = ParentChildSseServer::start();
@@ -689,34 +707,33 @@ mod tests {
         let shutdown_thread = std::thread::spawn(move || {
             let _ = shutdown_tx.send(parent_core.shutdown_join());
         });
-        let child_hook_started = slow_state.wait_until_started(Duration::from_secs(2));
-        let early_shutdown = shutdown_rx.recv_timeout(Duration::from_millis(250));
-        let shutdown_was_blocked = matches!(
-            &early_shutdown,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        );
-
-        slow_state.release();
-        let shutdown_result = match early_shutdown {
-            Ok(result) => result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => shutdown_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("释放子插件后父 Core 应在 2 秒内完成关闭"),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("父 Core 关闭线程在返回结果前断开")
-            }
-        };
+        // 新合同：父 Core 关闭不等子插件钩子释放，在限时内直接完成。
+        let shutdown_result = shutdown_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("子插件会话结束钩子阻塞时，父 Core 关闭应在 2 秒内完成（通知即返回）");
         shutdown_thread
             .join()
             .expect("父 Core 关闭线程不应异常退出");
 
-        assert!(parent_turn_completed, "父子 Agent 完整轮次应在 8 秒内结束");
-        assert!(child_hook_started, "父 Core 关闭应进入子插件会话结束钩子");
+        // 通知链穿透：子插件的会话结束钩子最终被触发（后台异步展开）。
+        let child_hook_started = slow_state.wait_until_started(Duration::from_secs(8));
         assert!(
-            shutdown_was_blocked,
-            "子插件会话结束钩子未释放前，父 Core 关闭不应完成"
+            child_hook_started,
+            "父 Core 关闭后，通知链应到达子插件会话结束钩子"
         );
-        shutdown_result.expect("释放子插件后父 Core 应正常关闭");
+        // 释放后钩子线程正常完成（未被超时截断）。
+        slow_state.release();
+        let finish_deadline = Instant::now() + Duration::from_secs(2);
+        while !slow_state.finished.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < finish_deadline,
+                "释放后子插件钩子线程应在 2 秒内完成"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(parent_turn_completed, "父子 Agent 完整轮次应在 8 秒内结束");
+        shutdown_result.expect("父 Core 关闭应正常完成");
         assert!(
             !slow_state.safety_limit_reached.load(Ordering::Acquire),
             "测试必须由显式释放完成，不能依赖 10 秒自动释放上限"

@@ -504,22 +504,19 @@ impl TiangongCore {
     }
 
     fn finalize_session(&self) -> Result<Session, CoreError> {
-        // 取消活跃 turn 并等待任务收敛，再执行插件收尾与最终落盘。
+        // 取消活跃 turn 并等待任务收敛，再投递插件收尾通知、返回最终 session。
         crate::shared_runtime::cancel_and_join(&self.session_id)?;
-        let mut session = self.load_session()?;
-        self.finalize_plugins(&mut session);
-        session.try_persist_to_disk().map_err(|error| {
-            tracing::warn!(%error, session_id = %self.session_id, "持久化会话结束钩子结果失败");
-            CoreError::WorkerStopped
-        })?;
+        let session = self.load_session()?;
+        self.finalize_plugins(&session);
         Ok(session)
     }
 
-    /// 遍历插件调用 on_session_ended（worker 退出前的 finalize 钩子）。
-    fn finalize_plugins(&self, session: &mut Session) {
-        for plugin in &self.plugins {
-            plugin.on_session_ended(session);
-        }
+    /// 投递全部 `on_session_ended` 通知（worker 退出前的 finalize 钩子）。
+    ///
+    /// 通知型钩子：后台线程投递、不等待完成——关闭会话/退出应用不被任何插件
+    /// 无限阻塞（issue #404）。钩子收到只读快照，收尾成败与产出由插件自行负责。
+    fn finalize_plugins(&self, session: &Session) {
+        crate::core::plugin::notify_session_ended(&self.plugins, session);
     }
 }
 

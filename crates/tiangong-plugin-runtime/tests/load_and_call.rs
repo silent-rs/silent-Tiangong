@@ -466,8 +466,8 @@ fn lifecycle_hooks_forward_session_without_panic() {
     // 全部钩子调用不应 panic。
     <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
     <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, 0);
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
-    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter, &mut session);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
+    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter, &session);
 }
 
 #[test]
@@ -482,9 +482,9 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = WasmPluginAdapter::new(plugin, config);
 
-    let mut session = test_session_with_user_message();
+    let session = test_session_with_user_message();
     // 有用户消息时，on_turn_finished 应有序投递反刍任务并等待 sidecar 入队确认。
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
     assert!(sidecar.called("run_enhanced_micro_rumination"));
     let payload = sidecar.payload("run_enhanced_micro_rumination");
@@ -511,8 +511,8 @@ fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
     let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
     let finish_adapter = Arc::clone(&adapter);
     let finish_thread = std::thread::spawn(move || {
-        let mut session = session;
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &mut session, 0);
+        let session = session;
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &session, 0);
         let _ = finish_tx.send(());
     });
     assert!(sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1)));
@@ -544,14 +544,14 @@ fn every_tenth_turn_forwards_meta_rumination() {
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = WasmPluginAdapter::new(plugin, config);
-    let mut session = test_session_with_user_message();
+    let session = test_session_with_user_message();
 
     for _ in 0..9 {
-        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
     }
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 9));
     assert!(!sidecar.called("run_meta_rumination"));
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &session, 0);
     assert!(sidecar.wait_for_call_count("run_meta_rumination", 1));
     assert!(sidecar.called("run_meta_rumination"));
 }
