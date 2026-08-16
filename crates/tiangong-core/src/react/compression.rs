@@ -45,7 +45,7 @@ pub(crate) enum CommandPolicy<'a> {
     /// 活动，不因新输入让路，ALR-104：压缩完成后由同一 driver 继续排队的
     /// 输入）；配置类就地消化。转排队失败时取消压缩并上抛（不丢）。
     ConsumeLocally {
-        defer_input: &'a (dyn Fn(Command) -> Result<(), Command> + Send + Sync),
+        defer_input: &'a mut (dyn FnMut(Command) -> Result<(), Command> + Send + Sync),
     },
 }
 
@@ -119,7 +119,7 @@ impl ContextCompression {
         &mut self,
         ctx: &mut TurnContext,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        policy: CommandPolicy<'_>,
+        mut policy: CommandPolicy<'_>,
     ) -> std::result::Result<CompressionResult, CompressionInterrupt> {
         loop {
             tokio::select! {
@@ -137,7 +137,9 @@ impl ContextCompression {
                             self.cancel(ctx).await;
                             return Err(CompressionInterrupt::Command(command));
                         }
-                        CommandPolicy::ConsumeLocally { defer_input } => match command {
+                        CommandPolicy::ConsumeLocally {
+                            ref mut defer_input,
+                        } => match command {
                             Command::Cancel | Command::Shutdown => {
                                 self.cancel(ctx).await;
                                 return Err(CompressionInterrupt::Command(command));
@@ -239,8 +241,8 @@ fn complete_with_turn_usage(
 /// 在独立 turn task 中执行手动压缩。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    defer_input: &(dyn Fn(Command) -> Result<(), Command> + Send + Sync),
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    defer_input: &mut (dyn FnMut(Command) -> Result<(), Command> + Send + Sync),
 ) -> Option<CompressionInterrupt> {
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
@@ -254,7 +256,7 @@ pub(crate) async fn run_manual_context_compression(
     match compression
         .run(
             &mut ctx,
-            &mut cmd_rx,
+            cmd_rx,
             CommandPolicy::ConsumeLocally { defer_input },
         )
         .await

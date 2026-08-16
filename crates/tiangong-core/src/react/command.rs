@@ -191,6 +191,10 @@ pub(super) async fn handle_command(
             // PendingFinish，提交时统一刷新为最新用量（ALR-111）。
             CommandEffect::KeepCurrent
         }
+        Deferred::Command(Command::CompressContext | Command::ResetContext) => {
+            // 维护命令由常驻 Driver 在 turn 结束后的空闲边界执行。
+            CommandEffect::KeepCurrent
+        }
         Deferred::Command(Command::Cancel | Command::Shutdown) => {
             unreachable!("Cancel/Shutdown 已在上方取消分支处理")
         }

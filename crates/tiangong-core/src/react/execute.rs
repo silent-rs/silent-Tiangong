@@ -839,82 +839,15 @@ pub(super) async fn execute_turn(
                 state.install_phase(ExecutionPhase::WaitingModel(active));
             }
 
-            // ── Ready：暂定完成，终态封口后提交 ──
-            // 阶段变体只含结果（结构上保证不持有主循环活动资源，不变量 4）。
-            // 封口（ALR-201）：原子 Accepting → Sealing，此后新命令不再入当前
-            // 队列（send_command 返回 false，deliver 把用户消息排入下一轮）；
-            // 封口前已入队的命令在此排空处理：决定性命令（取消/关闭/保存失败）
-            // 直接形成终态；继续命令（引导/工具注入）恢复 Accepting 并重启；
-            // 无决定性命令 → Committing，刷新为最新累计用量后提交（ALR-111）。
-            ExecutionPhase::PendingFinish(result) => {
-                // 命令处理（取消/引导/审批分支）会 take 当前阶段：先装回自身，
-                // 否则排空窗口到达的决定性命令在 take_phase 断言上崩溃。
-                state.install_phase(ExecutionPhase::PendingFinish(result));
-                crate::react::inbox::begin_seal(&ctx.session.id);
-                // 测试同步点（仅测试构建）：候选答复已生成且入口已进入
-                // Sealing，提交尚未开始。用户 steer 仍可进入当前轮，其他命令
-                // 必须按真实封口门控处理。
-                #[cfg(test)]
-                crate::core::test_support::seal_barrier(&ctx.session.id).await;
-                loop {
-                    let next = match cmd_rx.try_recv() {
-                        Ok(command) => Some(Deferred::Command(command)),
-                        Err(tokio_mpsc::error::TryRecvError::Empty) => None,
-                        Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
-                            Some(Deferred::Closed)
-                        }
-                    };
-                    let Some(deferred_command) = next else { break };
-                    match handle_command(
-                        cmd_rx,
-                        deferred_command,
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        &mut trust_mode,
-                        &plugins,
-                        &stream_tx,
-                        context_limit,
-                    )
-                    .await
-                    {
-                        CommandEffect::KeepCurrent => {}
-                        CommandEffect::ToPhase(phase) => {
-                            // 继续命令：恢复接收，回到主循环驱动新阶段。
-                            crate::react::inbox::reopen(&ctx.session.id);
-                            state.install_phase(phase);
-                            continue 'agent_loop;
-                        }
-                        CommandEffect::Terminate(terminal) => {
-                            crate::react::inbox::commit_ingress(&ctx.session.id);
-                            break 'agent_loop terminal;
-                        }
-                    }
-                }
-                // 候选完成检查（design.md 4.2.4）：封口竞态到达的 `next_step`
-                //（inject 在 Sealing 期间被拒后落入 Inbox）原子领取——有积压
-                // 则撤销暂定结果，注入生效后继续处理，不得滞留或丢失。
-                let sealed_steps = crate::react::inbox::take_pending_steps(&ctx.session.id);
-                if !sealed_steps.is_empty() {
-                    crate::react::inbox::reopen(&ctx.session.id);
-                    for command in sealed_steps {
-                        crate::react::inbox::send_command(&ctx.session.id, command);
-                    }
-                    // 撤销提交：装回 NeedModel 前清出占位的 PendingFinish。
-                    state.take_phase();
-                    state.install_phase(ExecutionPhase::NeedModel);
-                    continue 'agent_loop;
-                }
-                // 排空完毕无继续命令：取回占位的暂定结果，正式提交。
-                let ExecutionPhase::PendingFinish(pending_result) = state.take_phase() else {
-                    unreachable!("排空循环保持 PendingFinish 在位");
-                };
-                // 提交时刻标记候选答复为最终答复：仅成功终态——失败终态不
-                // 得把未验证的候选定格为最终答复（替代请求失败时旧候选必须
-                // 保留 React 过程相位）。
-                let mut pending_result = pending_result;
+            // ── Ready：候选完成并交给统一 turn 收尾 ──
+            // 阶段变体只含结果，不持有主循环活动资源。唯一 Receiver 不切换、
+            // 不封口；提交窗口到达的命令保持在单通道中，由当前 turn 结束后的
+            // 常驻 Driver 按 FIFO 继续处理。
+            ExecutionPhase::PendingFinish(mut result) => {
+                // 候选完成后不再封口或切换命令入口。唯一 Receiver 继续归 Driver/Loop
+                // 所有；提交窗口到达的命令按 FIFO 留在通道，当前 turn 收尾后处理。
                 if matches!(
-                    pending_result.outcome,
+                    result.outcome,
                     super::outcome::TurnExecutionOutcome::Success
                 ) && let Some(msg_id) = state.pending_summary_msg_id.take()
                     && let Some(message) = ctx
@@ -924,22 +857,10 @@ pub(super) async fn execute_turn(
                         .find(|message| message.id == msg_id)
                 {
                     message.phase = MessagePhase::Summary;
-                    // 携带候选 ID：run_turn 收尾降级时按 ID 精确回收（不依赖
-                    // 倒序查找，插件追加 Summary 时不会误伤）。
-                    pending_result.finalized_candidate_id = Some(msg_id);
-                    // Summary 快照不在 Loop 提交点发布：run_turn 收尾若降级为
-                    // Failed（悬空工具/落盘失败）会回收相位，届时发布的是 React
-                    // 快照——失败终态不得发布 Summary 快照。
+                    result.finalized_candidate_id = Some(msg_id);
                 }
-                crate::react::inbox::commit_ingress(&ctx.session.id);
-                pending_result.usage = state.accumulated_usage.clone();
-                tracing::debug!(
-                    session_id = %ctx.session.id,
-                    event = "ingress_committed",
-                    detail = state.budget.debug_summary(),
-                    "终态封口完成，提交暂定结果（ALR-201/301）"
-                );
-                break 'agent_loop pending_result;
+                result.usage = state.accumulated_usage.clone();
+                break 'agent_loop result;
             }
 
             // ── Waiting：模型请求（流式驱动，命令与 chunk 双路 select）──
@@ -1978,7 +1899,7 @@ mod tests {
             ctx,
             stream_rx,
             cmd_tx,
-            cmd_rx,
+            mut cmd_rx,
             ..
         } = harness;
         let cancel_task = tokio::task::spawn_blocking(move || {
@@ -1993,13 +1914,17 @@ mod tests {
             }
         });
 
-        let defer_never =
+        let mut defer_never =
             |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
                 Err(command)
             };
         tokio::time::timeout(
             Duration::from_secs(10),
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_never),
+            crate::react::compression::run_manual_context_compression(
+                ctx,
+                &mut cmd_rx,
+                &mut defer_never,
+            ),
         )
         .await
         .expect("取消手动压缩后任务应及时结束");
@@ -2045,7 +1970,7 @@ mod tests {
             ctx,
             stream_rx,
             cmd_tx,
-            cmd_rx,
+            mut cmd_rx,
             ..
         } = harness;
         let storage_root = ctx
@@ -2072,13 +1997,17 @@ mod tests {
             }
         });
 
-        let defer_never =
+        let mut defer_never =
             |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
                 Err(command)
             };
         tokio::time::timeout(
             Duration::from_secs(2),
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_never),
+            crate::react::compression::run_manual_context_compression(
+                ctx,
+                &mut cmd_rx,
+                &mut defer_never,
+            ),
         )
         .await
         .expect("手动压缩应及时完成");
@@ -2322,9 +2251,9 @@ mod tests {
         // 标题为 "test-session"（非默认），spawn_title_generation 跳过。
         let storage_root = harness.storage_root.clone();
         let session_id = harness.ctx.session.id.clone();
-        let (_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let (_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         let stream_rx = harness.stream_rx;
-        run_turn(harness.ctx, cmd_rx).await;
+        run_turn(harness.ctx, &mut cmd_rx).await;
 
         // ALR-109 唯一终态：恰好一个 Done。
         let events: Vec<StreamEvent> = stream_rx.try_iter().collect();
@@ -2394,8 +2323,8 @@ mod tests {
         });
         let harness =
             TestHarness::new_with_plugins(&server, Vec::new(), HashMap::new(), vec![plugin]);
-        let (_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
-        run_turn(harness.ctx, cmd_rx).await;
+        let (_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        run_turn(harness.ctx, &mut cmd_rx).await;
         assert_eq!(
             started.load(Ordering::SeqCst),
             1,
@@ -2543,7 +2472,7 @@ mod tests {
         // 生产中发送端由 TurnTask 注册表持有；测试克隆一份保持通道开启，否则任务
         // 结束后通道关闭会被 execute_turn 当作取消。
         let started_wait = started.clone();
-        let (inject_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let (inject_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         let _keep_channel_open = inject_tx.clone();
         let inject_task = tokio::spawn(async move {
             tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
@@ -2556,7 +2485,7 @@ mod tests {
                 })
                 .unwrap();
         });
-        run_turn(ctx, cmd_rx).await;
+        run_turn(ctx, &mut cmd_rx).await;
         let _ = inject_task.await;
 
         // 磁盘重载验证：最新用户消息（注入的）有 turn_status，原始消息无。
@@ -2673,7 +2602,7 @@ mod tests {
         // 顺序驱动：等工具启动 → 注入 → 等第二次工具启动 → 显式取消。
         let started_wait = started.clone();
         let cancelled_probe = cancelled.clone();
-        let (tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let (tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         let _keep_open = tx.clone();
         let cmd_task = tokio::spawn(async move {
             tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
@@ -2695,7 +2624,7 @@ mod tests {
             );
             tx.send(Command::Cancel).unwrap();
         });
-        run_turn(ctx, cmd_rx).await;
+        run_turn(ctx, &mut cmd_rx).await;
         let _ = cmd_task.await;
         assert_eq!(
             cancelled.load(Ordering::SeqCst),

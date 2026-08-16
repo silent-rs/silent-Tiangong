@@ -12,7 +12,7 @@ use typed_builder::TypedBuilder;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
-use crate::react::inbox::{AgentScheduling, CommandIngress, TurnInput};
+use crate::react::inbox::AgentScheduling;
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
@@ -78,11 +78,10 @@ pub struct TiangongCore {
 }
 
 impl TiangongCore {
-    /// 向活跃 turn task 发送命令(无活跃 task 则忽略)。
+    /// 向 Agent 唯一物理命令通道投递命令。
     fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
-        crate::react::inbox::send_command(&self.session_id, cmd)
-            .then_some(())
-            .ok_or(CoreError::WorkerStopped)
+        let scheduling = self.ensure_scheduling()?;
+        scheduling.deliver(cmd)
     }
 
     pub fn session_id(&self) -> &str {
@@ -208,21 +207,11 @@ impl TiangongCore {
     }
 
     fn compress_context(&self) -> Result<(), CoreError> {
-        if self.is_busy() {
-            return Err(CoreError::Busy);
-        }
-        // 手动压缩作为控制输入进入 Inbox，由唯一 driver 在空闲时执行，
-        // 与后续用户消息天然串行（不再独立 spawn）。
-        let scheduling = self.ensure_scheduling()?;
-        scheduling.deliver_input(TurnInput::ManualCompression)
+        self.send_cmd(Command::CompressContext)
     }
 
     fn reset_context(&self) -> Result<(), CoreError> {
-        if self.is_busy() {
-            return Err(CoreError::Busy);
-        }
-        let scheduling = self.ensure_scheduling()?;
-        scheduling.deliver_input(TurnInput::ResetContext)
+        self.send_cmd(Command::ResetContext)
     }
 
     /// 关闭并获取最终 session。
@@ -269,20 +258,14 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
-            }) => {
-                // 消息排队策略归 app 层：core 空闲时直接执行（单槽交接），
-                // 运行中按引导注入当前轮；封口瞬间到达的占用单槽等当前轮
-                // 结束。确认事件在 driver 校验并成功保存后才发送（ALR-102/202）。
-                let msg_id = message_id.unwrap_or_else(scru128::new_string);
-                let scheduling = self.ensure_scheduling()?;
-                scheduling.push_steer(msg_id, prepared)
-            }
-            AgentInputKind::Tool(tool) => {
-                // inject：不唤醒 driver；空闲期积压在 next_step，由下一个 turn
-                // 开始时领取（ALR-102/103）。
-                let scheduling = crate::react::inbox::ensure_inbox(&self.session_id)?;
-                scheduling.push_inject(tool.tool_name().to_string(), tool.render())
-            }
+            }) => self.send_cmd(Command::InjectUserMessage {
+                message_id: message_id.unwrap_or_else(scru128::new_string),
+                content: prepared,
+            }),
+            AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
+                tool_name: tool.tool_name().to_string(),
+                payload: tool.render(),
+            }),
             AgentInputKind::Approval(ApprovalInput::Response {
                 request_id,
                 approved,
@@ -293,8 +276,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
                 CommandInput::SetTrustMode(trust_mode) => {
-                    self.set_trust_mode(trust_mode);
-                    Ok(())
+                    *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner()) = trust_mode;
+                    for plugin in &self.plugins {
+                        plugin.set_trust_mode(trust_mode);
+                    }
+                    self.send_cmd(Command::SetTrustMode(trust_mode))
                 }
                 CommandInput::CompressContext => self.compress_context(),
                 CommandInput::ResetContext => self.reset_context(),
@@ -440,7 +426,8 @@ impl TurnSpawner {
         scheduling: &AgentScheduling,
         message_id: String,
         content: Vec<tiangong_types::ContentBlock>,
-        pending_steps: Vec<Command>,
+        cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+        deferred_tools: &mut std::collections::VecDeque<Command>,
     ) {
         let mut ctx = match self.build_turn_context() {
             Ok(ctx) => ctx,
@@ -492,22 +479,26 @@ impl TurnSpawner {
             tracing::warn!(%error, "持久化本轮系统提示失败");
         }
 
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
-        let ingress = CommandIngress::new(cmd_tx);
+        let ingress = scheduling.ingress();
         for plugin in &ctx.plugins {
             plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(ingress.clone()));
         }
-        // turn 开始时领取的 next_step（inject）先于模型请求进入本轮（ALR-103）。
-        for cmd in pending_steps {
-            let _ = ingress.send(cmd);
+        // 空闲期收到的工具注入在真正开始用户 turn 时按 FIFO 应用。
+        while let Some(command) = deferred_tools.pop_front() {
+            let _ = ingress.send(command);
         }
-        scheduling.begin_turn(ingress);
+        scheduling.set_running(true);
         run_turn(ctx, cmd_rx).await;
-        scheduling.end_turn();
+        scheduling.set_running(false);
     }
 
     /// 空闲期手动上下文压缩（作为 Inbox 控制输入由 driver 执行）。
-    async fn run_manual_compression(&self, scheduling: &AgentScheduling) {
+    async fn run_manual_compression(
+        &self,
+        scheduling: &AgentScheduling,
+        cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+        pending_commands: &mut std::collections::VecDeque<Command>,
+    ) {
         let ctx = match self.build_turn_context() {
             Ok(ctx) => ctx,
             Err(error) => {
@@ -529,37 +520,22 @@ impl TurnSpawner {
         ctx.session.rebuild_system_prompt(
             &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
         );
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
-        let ingress = CommandIngress::new(cmd_tx);
+        let ingress = scheduling.ingress();
         for plugin in &ctx.plugins {
             plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(ingress.clone()));
         }
-        scheduling.begin_turn(ingress);
-        // 压缩独立于用户意图：期间到达的新输入（引导消息/工具注入）在压缩
-        // 等待循环内即时转入 Inbox 排队，压缩继续完成；只有终止类命令或
-        // 转排队失败（会话关闭）才会取消压缩，此处无需再处理上抛。
-        let defer_input = |command: Command| -> Result<(), Command> {
-            let queued = match &command {
-                Command::InjectUserMessage {
-                    message_id,
-                    content,
-                } => scheduling
-                    .deliver_input(crate::react::inbox::TurnInput::UserMessage {
-                        message_id: message_id.clone(),
-                        content: content.clone(),
-                    })
-                    .is_ok(),
-                Command::InjectTool { tool_name, payload } => scheduling
-                    .push_inject(tool_name.clone(), payload.clone())
-                    .is_ok(),
-                _ => false,
-            };
-            if queued { Ok(()) } else { Err(command) }
+        scheduling.set_running(true);
+        let mut defer_input = |command: Command| -> Result<(), Command> {
+            pending_commands.push_back(command);
+            Ok(())
         };
-        let _ =
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_input)
-                .await;
-        scheduling.end_turn();
+        let _ = crate::react::compression::run_manual_context_compression(
+            ctx,
+            cmd_rx,
+            &mut defer_input,
+        )
+        .await;
+        scheduling.set_running(false);
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -590,60 +566,44 @@ impl TurnSpawner {
         crate::react::compression::notify_cleared(&self.stream_tx, &session);
     }
 
-    /// 关闭时持久化 Inbox 中未处理的已确认用户消息（ALR-206：可恢复，不静默丢弃）。
-    ///
-    /// 持久化成功发送 `UserMessage` 确认事件（消息已进入会话，用户重开可见）；
-    /// 无法持久化时发送明确错误事件。控制输入（压缩/重置）直接丢弃，无用户数据。
-    fn persist_pending_on_shutdown(&self, scheduling: &AgentScheduling) {
-        let pending = scheduling.drain_pending();
-        let user_messages: Vec<(String, Vec<tiangong_types::ContentBlock>)> = pending
-            .into_iter()
-            .filter_map(|input| match input {
-                TurnInput::UserMessage {
+    /// 关闭时持久化唯一通道中尚未处理的用户消息。
+    fn persist_pending_on_shutdown(
+        &self,
+        scheduling: &AgentScheduling,
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+        pending_commands: &mut std::collections::VecDeque<Command>,
+    ) {
+        while let Ok(command) = receiver.try_recv() {
+            pending_commands.push_back(command);
+        }
+        let user_messages = pending_commands
+            .drain(..)
+            .filter_map(|command| match command {
+                Command::InjectUserMessage {
                     message_id,
                     content,
                 } => Some((message_id, content)),
-                TurnInput::ManualCompression | TurnInput::ResetContext => None,
+                _ => None,
             })
-            .collect();
+            .collect::<Vec<_>>();
         if user_messages.is_empty() {
             return;
         }
-        // 任何失败（加载会话/单条保存/落盘）都记录到调度状态，由
-        // shutdown_agent 在 join 后向调用方返回明确失败，并逐条发送错误
-        // 事件——已接受消息不得静默丢失（ALR-202/206）。
-        let mut failed: Vec<String> = Vec::new();
+        let mut failed = Vec::new();
         match self.load_session() {
             Ok(mut session) => {
                 for (message_id, content) in user_messages {
-                    match session
+                    if let Err(error) = session
                         .try_append_prepared_user_message_with_id(message_id.clone(), content)
                     {
-                        Ok(()) => {
-                            let _ = self.stream_tx.send(StreamEvent::Error {
-                                message: format!(
-                                    "会话已关闭，消息 {message_id} 已保存但未处理；重新打开会话后可继续"
-                                ),
-                            });
-                        }
-                        Err(error) => {
-                            failed.push(format!("消息 {message_id} 保存失败：{error}"));
-                            let _ = self.stream_tx.send(StreamEvent::Error {
-                                message: format!("会话已关闭，消息 {message_id} 未能保存：{error}"),
-                            });
-                        }
+                        failed.push(format!("消息 {message_id} 保存失败：{error}"));
                     }
                 }
                 if let Err(error) = session.try_persist_to_disk() {
                     failed.push(format!("关闭排空落盘失败：{error}"));
                 }
             }
-            Err(error) => {
-                failed.push(format!("关闭排空加载会话失败：{error}"));
-                let _ = self.stream_tx.send(StreamEvent::Error {
-                    message: "会话已关闭，未处理消息未能持久化".to_string(),
-                });
-            }
+            Err(error) => failed.push(format!("关闭排空加载会话失败：{error}")),
         }
         if !failed.is_empty() {
             scheduling.set_close_error(failed.join("；"));
@@ -651,38 +611,83 @@ impl TurnSpawner {
     }
 }
 
-/// 唯一 driver 主循环：排空 Inbox、连续执行 turn、空闲挂起等待唤醒。
-///
-/// - 领取与唤醒判定同临界区（`try_park`），取消收敛窗口到达的消息不丢失（ALR-105）；
-/// - 每个 turn 从最新 Session 构建（ALR-204），同一 driver 连续处理（ALR-104）；
-/// - 关闭后不再执行新 turn，未处理输入持久化后退出（ALR-206）。
+/// 唯一常驻 Driver：持续消费同一个 Receiver，并按命令类型驱动活动。
 async fn drive_agent(scheduling: Arc<AgentScheduling>, spawner: TurnSpawner) {
+    let mut receiver = scheduling.take_receiver();
+    let mut pending_commands = std::collections::VecDeque::new();
+    let mut deferred_tools = std::collections::VecDeque::new();
     loop {
-        if !scheduling.is_accepting() {
-            spawner.persist_pending_on_shutdown(&scheduling);
+        let command = match pending_commands.pop_front() {
+            Some(command) => command,
+            None => match receiver.recv().await {
+                Some(command) => command,
+                None => {
+                    crate::react::inbox::remove_agent(&spawner.session_id);
+                    return;
+                }
+            },
+        };
+
+        if matches!(command, Command::Shutdown) || !scheduling.is_accepting() {
+            pending_commands.push_front(command);
+            spawner.persist_pending_on_shutdown(&scheduling, &mut receiver, &mut pending_commands);
             crate::react::inbox::remove_agent(&spawner.session_id);
             return;
         }
-        let Some(input) = scheduling.take_input() else {
-            if scheduling.try_park() {
-                scheduling.wait_wake().await;
-            }
-            continue;
-        };
-        match input {
-            TurnInput::UserMessage {
+
+        match command {
+            Command::InjectUserMessage {
                 message_id,
                 content,
             } => {
-                // next_step 只在真正开始用户 turn 时领取（ALR-103）；维护操作
-                // （压缩/重置）不 drain，积压保留给下一次用户活动。
-                let pending_steps = scheduling.take_next_steps();
                 spawner
-                    .run_user_turn(&scheduling, message_id, content, pending_steps)
+                    .run_user_turn(
+                        &scheduling,
+                        message_id,
+                        content,
+                        &mut receiver,
+                        &mut deferred_tools,
+                    )
                     .await;
             }
-            TurnInput::ManualCompression => spawner.run_manual_compression(&scheduling).await,
-            TurnInput::ResetContext => spawner.run_reset_context(),
+            Command::InjectTool { .. } => deferred_tools.push_back(command),
+            Command::CompressContext => {
+                spawner
+                    .run_manual_compression(&scheduling, &mut receiver, &mut pending_commands)
+                    .await;
+            }
+            Command::ResetContext => spawner.run_reset_context(),
+            Command::SetTrustMode(mode) => {
+                *spawner.trust_mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+                for plugin in &spawner.plugins {
+                    plugin.set_trust_mode(mode);
+                }
+            }
+            Command::SetReasoningEffort(effort) => {
+                spawner
+                    .config
+                    .update(|config| config.reasoning_effort = effort.clone());
+            }
+            Command::SetTitle {
+                title,
+                only_if_default,
+            } => {
+                if let Ok(mut session) = spawner.load_session()
+                    && (!only_if_default || is_default_title(&session.title))
+                {
+                    session.title = title.clone();
+                    session.updated_at = tiangong_types::now_text();
+                    let _ = session.try_persist_to_disk();
+                    let _ = spawner.stream_tx.send(StreamEvent::TitleChanged { title });
+                }
+            }
+            Command::EmitStreamEvent(event) => {
+                let _ = spawner.stream_tx.send(*event);
+            }
+            Command::Approval { .. } | Command::Cancel | Command::ReportUsage { .. } => {
+                tracing::debug!(session_id = %spawner.session_id, "空闲期命令无活动可处理，已忽略");
+            }
+            Command::Shutdown => unreachable!("关闭命令已处理"),
         }
     }
 }

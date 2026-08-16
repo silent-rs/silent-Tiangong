@@ -64,14 +64,6 @@ impl ExecutionBudget {
     pub(super) fn reset_for_new_intent(&mut self) {
         self.react_rounds_in_phase = 0;
     }
-
-    /// 诊断摘要（迁移日志用，ALR-301）。
-    pub(super) fn debug_summary(&self) -> String {
-        format!(
-            "budget: request_round={} react_rounds={}",
-            self.request_round, self.react_rounds_in_phase,
-        )
-    }
 }
 
 /// 已就绪待执行的单个工具调用。

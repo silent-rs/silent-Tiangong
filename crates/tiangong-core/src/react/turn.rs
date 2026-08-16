@@ -20,7 +20,7 @@ use super::timer::TurnElapsedTimer;
 /// Agent Loop、消息协议收尾、轮次状态提交和最终持久化。
 pub(crate) async fn run_turn(
     mut ctx: TurnContext,
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) {
     // ── 固定轮次锚点 ──
     // 生命周期锚点 turn_start_idx 在 turn 开始时固定，供 on_turn_started/
@@ -50,12 +50,7 @@ pub(crate) async fn run_turn(
 
     // ── 执行 Agent Loop ──
     // execute_turn 返回明确的执行结果和累计用量，不在内部发送终态事件。
-    let execution = execute_turn(&mut ctx, &mut cmd_rx).await;
-    // Agent Loop 结束后，本函数的收尾阶段（消息协议修复、插件回调、持久化）不再
-    // 消费命令通道。显式 drop 接收端，使所有 PluginFeedbackTx 的 is_closed() 立即
-    // 返回 true——否则 turn task 退出前会出现"通道未关闭但已无人消费"的窗口，
-    // 此时 watcher 经 inject_tool 投递的终端命令会成功入队但随队列销毁而丢失。
-    drop(cmd_rx);
+    let execution = execute_turn(&mut ctx, cmd_rx).await;
     let usage = execution.usage;
     let mut outcome = execution.outcome;
     let mut finalized_candidate_id = execution.finalized_candidate_id;
@@ -84,8 +79,7 @@ pub(crate) async fn run_turn(
     }
 
     // ── 提交轮次状态与插件收尾 ──
-    // 测试同步点：Agent Loop 已提交结果且 ingress 已进入 Committing，但 turn 尚未
-    // 写入终态。屏障只等待独立释放信号，不消费真实命令通道。
+    // 测试同步点：Agent Loop 已提交结果，turn 尚未执行最终收尾。
     #[cfg(test)]
     crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
     // 结果写入**提交时最新**的用户消息（ALR-107）：运行中注入的引导消息成为当前

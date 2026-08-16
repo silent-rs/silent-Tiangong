@@ -90,8 +90,7 @@ impl PluginFeedbackTx {
         self.ingress.is_closed()
     }
 
-    /// 当前是否可接收命令（`Accepting` 状态）。封口（`Sealing`/`Committing`）
-    /// 或通道关闭期间返回 `false`，插件不应投递并需要保留数据待重试（ALR-201）。
+    /// 当前唯一通道是否仍可接收命令。Agent 关闭后返回 `false`。
     pub fn is_accepting(&self) -> bool {
         self.ingress.is_accepting()
     }
@@ -114,7 +113,7 @@ mod tests {
     #[test]
     fn usage_reports_use_the_turn_command_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
+        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
 
         feedback.report_token_usage(usage(), "attachment");
         feedback.accumulate_token_usage(usage(), "child");
@@ -141,7 +140,7 @@ mod tests {
     #[test]
     fn inject_tool_returns_true_when_consumer_alive() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
+        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
 
         assert!(feedback.inject_tool("browser_data", serde_json::json!({"url": "x"})));
         match rx.try_recv() {
@@ -154,7 +153,7 @@ mod tests {
     fn inject_tool_returns_false_after_receiver_dropped() {
         // 模拟 turn 收尾窗口：Agent Loop 已退出，接收端被显式 drop。
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
+        let feedback = PluginFeedbackTx::new(CommandIngress::new_for_test(tx));
         drop(rx);
 
         // drop 接收端后，is_closed() 应为 true，inject_tool 也必须返回 false。

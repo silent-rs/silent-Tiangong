@@ -390,6 +390,9 @@ fn handle_ambient_command(
                 emit_event,
             );
         }
+        Command::CompressContext | Command::ResetContext => {
+            // Driver 在 turn 结束后的空闲边界执行维护命令。
+        }
         // 迟到或不匹配的审批：明确忽略。
         Command::Approval { .. } | Command::Cancel | Command::Shutdown => {}
         Command::InjectUserMessage { .. } => unreachable!("中断类命令已在上方分流"),

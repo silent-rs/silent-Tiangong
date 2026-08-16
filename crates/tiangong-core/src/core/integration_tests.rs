@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tiangong_types::{StreamEvent, TurnStatus};
+use tiangong_types::TurnStatus;
 use wiremock::MockServer;
 
 use super::test_support::*;
@@ -271,7 +271,11 @@ async fn steering_message_aborts_and_restarts_current_turn() {
             ),
             PromptRoute::new(
                 "slow-original",
-                latest_user_contains("STEER-ORIGINAL"),
+                |request| {
+                    request.latest_user_text().is_some_and(|text| {
+                        text.contains("STEER-ORIGINAL") && !text.contains("STEER-NEW-INTENT")
+                    })
+                },
                 MockReply::delayed_sse(
                     stream_text_chunks(&["长时间", "任务执行中"]),
                     Duration::from_secs(3),
@@ -645,15 +649,24 @@ async fn handoff_during_commit_starts_next_turn_from_pending_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn occupied_pending_slot_returns_busy() {
+async fn multiple_messages_share_single_channel_without_busy() {
     let (env, sid) = TestEnv::new("busy");
     let server = MockServer::start().await;
     let routes = mount_prompt_router(
         &server,
         vec![
             PromptRoute::new(
+                "busy-c",
+                latest_user_contains("BUSY-C"),
+                MockReply::sse(stream_text_chunks(&["C ", "完成。"])),
+            ),
+            PromptRoute::new(
                 "busy-b",
-                latest_user_contains("BUSY-B"),
+                |request| {
+                    request
+                        .latest_user_text()
+                        .is_some_and(|text| text.contains("BUSY-B") && !text.contains("BUSY-C"))
+                },
                 MockReply::sse(stream_text_chunks(&["B ", "完成。"])),
             ),
             PromptRoute::new(
@@ -674,24 +687,35 @@ async fn occupied_pending_slot_returns_busy() {
         "msg-c",
         vec![tiangong_types::ContentBlock::text("BUSY-C 第三个问题")],
     ));
-    assert!(matches!(c_result, Err(crate::core::CoreError::Busy)));
+    assert!(c_result.is_ok(), "单通道不得因已有消息返回 Busy");
     finish.release();
 
     assert_eq!(
-        wait_turn_status(&env, &sid, "msg-b").await,
+        wait_turn_status(&env, &sid, "msg-c").await,
         TurnStatus::Success
     );
     wait_idle(&sid).await;
+    let session = env.load_session(&sid);
+    assert!(
+        session
+            .messages
+            .iter()
+            .find(|message| message.id == "msg-b")
+            .is_some_and(|message| message.turn_status.is_none()),
+        "同一活动 turn 中被后续消息引导时，B 保留为无独立终态的意图"
+    );
     events.wait_done_count(2);
     events.assert_done_count(2);
     assert!(
-        !env.load_session(&sid)
+        env.load_session(&sid)
             .messages
             .iter()
-            .any(|m| m.id == "msg-c")
+            .any(|m| m.id == "msg-c"),
+        "已接受的第三条消息必须被处理"
     );
     routes["busy-a"].assert_hits(1);
-    routes["busy-b"].assert_hits(1);
+    routes["busy-b"].assert_hits(0);
+    routes["busy-c"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
 
@@ -744,144 +768,4 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
         .expect("已接受未执行的 B 必须在关闭时保存");
     assert!(pending.turn_status.is_none(), "未执行的 B 不应有最终状态");
     routes["shutdown-a"].assert_hits(1);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn user_message_during_candidate_finish_steers_to_new_intent() {
-    let (env, sid) = TestEnv::new("candidate-steer");
-    let server = MockServer::start().await;
-    let routes = mount_prompt_router(
-        &server,
-        vec![
-            PromptRoute::new(
-                "candidate-new",
-                latest_user_contains("CANDIDATE-NEW"),
-                MockReply::sse(stream_text_chunks(&["基于新要求", "的最终回答。"])),
-            ),
-            PromptRoute::new(
-                "candidate-old",
-                latest_user_contains("CANDIDATE-OLD"),
-                MockReply::sse(stream_text_chunks(&["旧的候选", "答复内容。"])),
-            ),
-        ],
-    )
-    .await;
-    let (core, mut events) = core_for(&env, &sid, &server.uri());
-
-    let mut seal = arm_seal(&sid);
-    send_message(&core, "msg-a", "CANDIDATE-OLD 原始请求");
-    seal.wait_frozen();
-    send_message(&core, "msg-b", "CANDIDATE-NEW 按新要求重新处理");
-    seal.release();
-
-    assert_eq!(
-        wait_turn_status(&env, &sid, "msg-b").await,
-        TurnStatus::Success
-    );
-    wait_idle(&sid).await;
-    let session = env.load_session(&sid);
-    let original = session
-        .messages
-        .iter()
-        .find(|message| message.id == "msg-a")
-        .expect("被引导接管的原始消息必须保留");
-    assert!(original.turn_status.is_none());
-    assert!(!session.messages.iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message.text_content().contains("旧的候选答复")
-            && message.phase == crate::session::MessagePhase::Summary
-    }));
-    assert!(session.messages.iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message.text_content().contains("基于新要求的最终回答")
-            && message.phase == crate::session::MessagePhase::Summary
-    }));
-    events.pump();
-    assert!(!events.seen().iter().any(|event| {
-        matches!(
-            event,
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.text_content().contains("旧的候选答复")
-                    && message.phase == crate::session::MessagePhase::Summary
-        )
-    }));
-    events.wait_done();
-    events.assert_single_success_terminal();
-    routes["candidate-old"].assert_hits(1);
-    routes["candidate-new"].assert_hits(1);
-    core.shutdown_join().expect("关闭失败");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn candidate_guidance_then_replacement_llm_failure_never_finalizes_stale_candidate() {
-    let (env, sid) = TestEnv::new("candidate-failure");
-    let server = MockServer::start().await;
-    let routes = mount_prompt_router(
-        &server,
-        vec![
-            PromptRoute::new(
-                "replacement-failure",
-                latest_user_contains("CANDIDATE-FAIL-NEW"),
-                MockReply::error(400, "replacement llm failed"),
-            ),
-            PromptRoute::new(
-                "stale-candidate",
-                latest_user_contains("CANDIDATE-FAIL-OLD"),
-                MockReply::sse(stream_text_chunks(&[
-                    "STALE-CANDIDATE-",
-                    "MUST-NOT-FINALIZE",
-                ])),
-            ),
-        ],
-    )
-    .await;
-    let (core, mut events) = core_for(&env, &sid, &server.uri());
-
-    let mut seal = arm_seal(&sid);
-    send_message(&core, "msg-a", "CANDIDATE-FAIL-OLD 原始请求");
-    seal.wait_frozen();
-    send_message(&core, "msg-b", "CANDIDATE-FAIL-NEW 新要求触发替代请求失败");
-    seal.release();
-
-    assert_eq!(
-        wait_turn_status(&env, &sid, "msg-b").await,
-        TurnStatus::Failed
-    );
-    wait_idle(&sid).await;
-    events.wait_error_containing("replacement llm failed");
-    events.assert_single_failure_terminal("replacement llm failed");
-
-    let session = env.load_session(&sid);
-    let original = session
-        .messages
-        .iter()
-        .find(|message| message.id == "msg-a")
-        .expect("替代请求失败后原始消息仍必须保留");
-    assert!(original.turn_status.is_none());
-    assert!(!session.messages.iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message
-                .text_content()
-                .contains("STALE-CANDIDATE-MUST-NOT-FINALIZE")
-            && message.phase == crate::session::MessagePhase::Summary
-    }));
-    assert!(!events.seen().iter().any(|event| {
-        matches!(
-            event,
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.text_content().contains("STALE-CANDIDATE-MUST-NOT-FINALIZE")
-                    && message.phase == crate::session::MessagePhase::Summary
-        )
-    }));
-    routes["stale-candidate"].assert_hits(1);
-    routes["replacement-failure"].assert_hits(2);
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(
-        requests.len(),
-        3,
-        "旧候选一次请求，替代失败包含流式与非流式回退"
-    );
-    assert!(chat_request_at(&server, 1).await.is_stream());
-    assert!(!chat_request_at(&server, 2).await.is_stream());
-    core.shutdown_join().expect("关闭失败");
 }

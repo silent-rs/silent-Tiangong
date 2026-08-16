@@ -85,8 +85,7 @@ pub(crate) fn take_persistence_failure_for_session(sid: &str) -> bool {
         .remove(sid)
 }
 
-/// 测试同步屏障：在 Core 的真实封口期（候选已生成、ingress 已进入 Sealing、
-/// 提交未开始）与 turn 收尾前（ingress 已是 Committing，消息只能进单槽）
+/// 测试同步屏障：候选生成后与 turn 最终收尾前提供确定性同步
 /// 提供确定性同步。
 ///
 /// 协议：测试端 [`arm_seal`]/[`arm_turn_finish`] 按 session 预置；Core 到达屏障点
@@ -174,13 +173,13 @@ async fn wait_gate(gate: &SealGate, sid: &str) {
     let _ = gate.release_rx.await;
 }
 
-/// 候选已经生成、ingress 已进入 Sealing、提交尚未开始。屏障只等待独立
+/// 候选已经生成、提交尚未开始。屏障只等待独立
 /// 释放信号，不读取命令通道。
 pub async fn seal_barrier(sid: &str) {
     wait_gate(&seal_gates().seal, sid).await;
 }
 
-/// Agent Loop 已提交结果、turn 尚未收尾。此时 ingress 为 Committing，外部用户
+/// Agent Loop 已提交结果、turn 尚未收尾。外部用户
 /// 消息只能进入待执行单槽。屏障不消费 Cancel/Shutdown 等真实命令。
 pub async fn turn_finish_barrier(sid: &str) {
     wait_gate(&seal_gates().turn_finish, sid).await;
@@ -191,7 +190,7 @@ pub fn arm_seal(sid: &str) -> SealHandle {
     seal_gates().seal.arm(sid)
 }
 
-/// 测试端：预置 turn 收尾屏障（Committing，消息只能进单槽）。
+/// 测试端：预置 turn 收尾屏障。
 pub fn arm_turn_finish(sid: &str) -> SealHandle {
     seal_gates().turn_finish.arm(sid)
 }

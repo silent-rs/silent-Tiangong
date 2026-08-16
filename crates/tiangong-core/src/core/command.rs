@@ -41,6 +41,10 @@ pub enum Command {
         source: String,
         emit_event: bool,
     },
+    /// 手动压缩上下文；空闲时执行，运行中保留到当前 turn 结束后。
+    CompressContext,
+    /// 重置上下文；空闲时执行，运行中保留到当前 turn 结束后。
+    ResetContext,
     /// 关闭
     Shutdown,
 }
