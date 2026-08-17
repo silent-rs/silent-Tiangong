@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Globe, Plus, TerminalSquare, X } from 'lucide-react';
+import { Globe, Grid3x3, Plus, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
 import type { TabKind, TabState } from '@/api/tauri';
@@ -15,6 +15,8 @@ interface TabsContainerProps {
   requestedTerminalTabId?: string | null;
   terminalSyncVersion?: number;
   onClose: () => void;
+  /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
+  onShowMatrix?: () => void;
   onActiveKindChange?: (kind: TabKind | null) => void;
 }
 
@@ -71,6 +73,7 @@ export function TabsContainer({
   requestedTerminalTabId,
   terminalSyncVersion = 0,
   onClose,
+  onShowMatrix,
   onActiveKindChange,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -586,7 +589,13 @@ export function TabsContainer({
       // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
       void api.browserHide(terminalSessionId).catch(console.error);
       void api.browserSwitchSession(terminalSessionId, null).catch(console.error);
-      onClose();
+      // 拓展区三态：全部 tab 关闭后回到 App 矩阵态（面板保持展开）；
+      // 未提供矩阵回调时沿用旧行为直接收起。
+      if (onShowMatrix) {
+        onShowMatrix();
+      } else {
+        onClose();
+      }
       return;
     }
 
@@ -596,7 +605,7 @@ export function TabsContainer({
         void api.browserHide(terminalSessionId).catch(console.error);
       }
     }
-  }, [onClose, terminalSessionId]);
+  }, [onClose, onShowMatrix, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
     void api.browserHide(terminalSessionId).catch(console.error);
@@ -662,6 +671,18 @@ export function TabsContainer({
     <div className="flex h-full flex-1 flex-col bg-background">
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {onShowMatrix && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+              onClick={onShowMatrix}
+              title="启动台（回到拓展区矩阵）"
+              aria-label="启动台"
+            >
+              <Grid3x3 className="h-3.5 w-3.5" />
+            </Button>
+          )}
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
             const Icon = tab.kind === 'browser' ? Globe : TerminalSquare;

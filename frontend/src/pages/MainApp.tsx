@@ -13,6 +13,7 @@ import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { TabsContainer } from '@/components/TabsContainer';
+import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -113,6 +114,11 @@ export function MainApp() {
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
+  // 拓展区三态（设计文档 6.7.2）：面板展开时区分矩阵态（App 矩阵）与 App 态
+  // （聚焦某类 App 实例）；关闭态由 showWorkspacePanel=false 表达。
+  const [workspaceMode, setWorkspaceMode] = useState<'app' | 'matrix'>('matrix');
+  // 当前会话是否存在任一 App tab（浏览器/终端）：拓展区按钮高亮的数据源。
+  const [sessionHasTabs, setSessionHasTabs] = useState(false);
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
   const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
@@ -181,15 +187,8 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
-    const requestId = workspaceOpenRequestIdRef.current + 1;
-    workspaceOpenRequestIdRef.current = requestId;
-    workspaceTabKindRef.current = kind;
-    setWorkspaceTabKind(kind);
-    setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
-    setWorkspaceOpenRequestVersion((version) => version + 1);
-    setSidebarOpenByLayout(false);
-
+  /// 展开拓展区面板（记录原窗口宽度、扩窗、压聊天栏）。矩阵态与 App 态共用。
+  const ensureWorkspacePanelExpanded = useCallback(async () => {
     if (!showWorkspacePanelRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -201,15 +200,28 @@ export function MainApp() {
     setShowWorkspacePanel(true);
 
     await expandWindowForBrowser(lockResize, unlockResize);
-    if (workspaceOpenRequestIdRef.current !== requestId) return;
     workspaceExpandedForBrowserRef.current = true;
     chatPanelWidthRef.current = MIN_CHAT_WIDTH;
     setChatPanelWidth(MIN_CHAT_WIDTH);
+  }, [lockResize, unlockResize]);
+
+  const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
+    const requestId = workspaceOpenRequestIdRef.current + 1;
+    workspaceOpenRequestIdRef.current = requestId;
+    workspaceTabKindRef.current = kind;
+    setWorkspaceTabKind(kind);
+    setWorkspaceMode('app');
+    setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
+    setWorkspaceOpenRequestVersion((version) => version + 1);
+    setSidebarOpenByLayout(false);
+
+    await ensureWorkspacePanelExpanded();
+    if (workspaceOpenRequestIdRef.current !== requestId) return;
 
     if (kind === 'terminal') {
       await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     }
-  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+  }, [ensureWorkspacePanelExpanded, setSidebarOpenByLayout]);
 
   // 刷新浏览器/终端的"使用中"标记。
   // 数据源用持久化的 getSessionTabs（而非各插件的 runtime tab_list）：
@@ -228,6 +240,7 @@ export function MainApp() {
       }
       setBrowserAgentActive(hasBrowser);
       setTerminalAgentActive(hasTerminal);
+      setSessionHasTabs(hasBrowser || hasTerminal);
     } catch {
       // 会话 tabs 未就绪时静默
     }
@@ -281,6 +294,35 @@ export function MainApp() {
     setTerminalAgentActive(false);
     void openWorkspacePanel('terminal');
   }, [openWorkspacePanel]);
+
+  /// 拓展区按钮（三态切换，设计文档 6.7.2）：
+  /// 面板展开 → 收起；面板收起且有已打开 tab → 回到上次 App 态；否则进入矩阵态。
+  const handleToggleExtension = useCallback(() => {
+    if (showWorkspacePanelRef.current) {
+      void closeWorkspacePanel();
+      return;
+    }
+    // 用户主动查看拓展区，清除"使用中"标记
+    setBrowserAgentActive(false);
+    setTerminalAgentActive(false);
+    if (sessionHasTabs) {
+      void openWorkspacePanel(workspaceTabKindRef.current);
+    } else {
+      setWorkspaceMode('matrix');
+      setSidebarOpenByLayout(false);
+      void ensureWorkspacePanelExpanded();
+    }
+  }, [closeWorkspacePanel, ensureWorkspacePanelExpanded, openWorkspacePanel, sessionHasTabs, setSidebarOpenByLayout]);
+
+  /// 启动台按钮：App 态切回矩阵态（面板保持展开，App 实例隐藏保活）。
+  const handleShowMatrix = useCallback(() => {
+    setWorkspaceMode('matrix');
+    // 矩阵态不显示浏览器表面，避免后台 webview 覆盖矩阵
+    const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
+    if (sessionId) {
+      void api.browserHide(sessionId).catch(console.error);
+    }
+  }, []);
 
   const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
     if (!kind) return;
@@ -637,12 +679,9 @@ export function MainApp() {
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
       <div className="flex flex-col h-screen w-full overflow-hidden">
         <LazyStatusPanel
-          browserActive={showWorkspacePanel && workspaceTabKind === 'browser'}
-          browserAgentActive={browserAgentActive}
-          onOpenBrowser={handleToggleBrowser}
-          terminalActive={showWorkspacePanel && workspaceTabKind === 'terminal'}
-          terminalAgentActive={terminalAgentActive}
-          onOpenTerminal={handleToggleTerminal}
+          extensionActive={sessionHasTabs}
+          extensionAgentActive={browserAgentActive || terminalAgentActive}
+          onToggleExtension={handleToggleExtension}
         />
 
         <div className="flex flex-1 min-h-0">
@@ -670,15 +709,33 @@ export function MainApp() {
 
               {workspacePanelMounted && (
                 <div className={`min-w-0 flex-1 ${showWorkspacePanel ? 'flex' : 'hidden'}`}>
-                  <TabsContainer
-                    initialTabKind={workspaceTabKind}
-                    isVisible={showWorkspacePanel}
-                    openRequestVersion={workspaceOpenRequestVersion}
-                    requestedTerminalTabId={requestedTerminalTabId}
-                    terminalSyncVersion={terminalSyncVersion}
-                    onClose={() => { void closeWorkspacePanel(); }}
-                    onActiveKindChange={handleWorkspaceActiveKindChange}
-                  />
+                  {/* App 态实例保持挂载（display 隐藏），矩阵态覆盖显示；
+                      避免矩阵往返销毁浏览器/终端实例。 */}
+                  <div
+                    className={`min-w-0 flex-1 ${workspaceMode === 'matrix' ? 'hidden' : 'flex flex-col'}`}
+                  >
+                    <TabsContainer
+                      initialTabKind={workspaceTabKind}
+                      isVisible={showWorkspacePanel && workspaceMode === 'app'}
+                      openRequestVersion={workspaceOpenRequestVersion}
+                      requestedTerminalTabId={requestedTerminalTabId}
+                      terminalSyncVersion={terminalSyncVersion}
+                      onClose={() => { void closeWorkspacePanel(); }}
+                      onShowMatrix={handleShowMatrix}
+                      onActiveKindChange={handleWorkspaceActiveKindChange}
+                    />
+                  </div>
+                  {workspaceMode === 'matrix' && (
+                    <ExtensionMatrix
+                      onOpenApp={(kind) => {
+                        if (kind === 'browser') {
+                          void handleToggleBrowser();
+                        } else {
+                          handleToggleTerminal();
+                        }
+                      }}
+                    />
+                  )}
                 </div>
               )}
             </div>

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search, TerminalSquare, Puzzle } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useSearchStore } from '@/store/useSearchStore';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
@@ -19,12 +19,12 @@ import {
 const appWindow = getCurrentWindow();
 
 interface StatusPanelProps {
-  browserActive?: boolean;
-  browserAgentActive?: boolean;
-  onOpenBrowser?: () => void;
-  terminalActive?: boolean;
-  terminalAgentActive?: boolean;
-  onOpenTerminal?: () => void;
+  /** 拓展区按钮高亮：当前会话存在任一已打开的 App tab。 */
+  extensionActive?: boolean;
+  /** 任一 App 被 agent 使用中（用户未打开拓展区时显示绿点）。 */
+  extensionAgentActive?: boolean;
+  /** 点击「拓展区」按钮：面板开则收起，关则进入矩阵态或上次 App 态。 */
+  onToggleExtension?: () => void;
 }
 
 function SearchButton() {
@@ -48,7 +48,7 @@ function SearchButton() {
   );
 }
 
-export function StatusPanel({ browserActive, browserAgentActive, onOpenBrowser, terminalActive, terminalAgentActive, onOpenTerminal }: StatusPanelProps) {
+export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExtension }: StatusPanelProps) {
   const { activeSessionId, isNewConversation, sessions, startNewConversation, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -233,46 +233,27 @@ export function StatusPanel({ browserActive, browserAgentActive, onOpenBrowser, 
         >
           <Puzzle className="w-4 h-4" />
         </button>
-        {onOpenTerminal && (
+        {onToggleExtension && (
           <button
             data-no-drag
-            onClick={onOpenTerminal}
+            onClick={onToggleExtension}
             className={`relative transition-colors ${
-              terminalActive
+              extensionActive
                 ? 'text-primary'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
-            title={terminalActive ? '终端已打开' : '打开终端'}
+            title={extensionActive ? '拓展区已打开' : '打开拓展区'}
           >
-            <TerminalSquare className="w-4 h-4" />
-            {terminalAgentActive && !terminalActive && (
+            <Grid3x3 className="w-4 h-4" />
+            {extensionAgentActive && (
               <span
                 className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500"
-                title="终端在使用中"
-                aria-label="终端在使用中"
+                title="Agent 正在使用拓展区应用"
+                aria-label="Agent 正在使用拓展区应用"
               />
             )}
           </button>
         )}
-        <button
-          data-no-drag
-          onClick={onOpenBrowser}
-          className={`relative transition-colors ${
-            browserActive
-              ? 'text-primary'
-              : 'text-muted-foreground hover:text-foreground'
-          }`}
-          title={browserActive ? '浏览器已打开' : '打开浏览器'}
-        >
-          <Globe className="w-4 h-4" />
-          {browserAgentActive && !browserActive && (
-            <span
-              className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500"
-              title="Agent 正在使用浏览器"
-              aria-label="Agent 正在使用浏览器"
-            />
-          )}
-        </button>
         <button
           data-no-drag
           onClick={cycleTheme}
