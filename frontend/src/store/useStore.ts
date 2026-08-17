@@ -200,7 +200,6 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.tool_name === right.tool_name
     && left.tool_result_is_error === right.tool_result_is_error
     && left.compact === right.compact
-    && left.model_excluded === right.model_excluded
     && left.phase === right.phase
     && left.created_at === right.created_at
     && sameJsonValue(left.media, right.media)
@@ -316,7 +315,6 @@ function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
     role: 'user',
     content: blocks,
     reasoning_content: '',
-    model_excluded: event.model_excluded || false,
     created_at: existing?.created_at || new Date().toISOString(),
   });
 }
@@ -371,13 +369,12 @@ function applyAgentOutput(messages: Message[], event: StreamEvent): Message[] {
       content: [{ type: 'text', text: `Worker: ${event.agent_label} (@${event.agent_role})` }],
       reasoning_content: '',
       worker_id: workerId,
-      model_excluded: true,
       created_at: new Date().toISOString(),
     }];
   }
   for (const message of event.messages) {
     const role = message.role === 'tool' || message.role === 'system' ? 'system' : message.role;
-    const workerMessage = { ...message, role, worker_id: workerId, model_excluded: true } as Message;
+    const workerMessage = { ...message, role, worker_id: workerId } as Message;
     const index = next.findIndex((item) => item.id === message.id && item.worker_id === workerId);
     if (index < 0) {
       next = [...next, workerMessage];
@@ -402,7 +399,6 @@ function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[]
     role: 'system',
     content: [{ type: 'text', text }],
     reasoning_content: '',
-    model_excluded: true,
     created_at: new Date().toISOString(),
   });
 }

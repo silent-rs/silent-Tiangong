@@ -508,7 +508,7 @@ fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
 ///
 /// 排除规则：
 /// - CompressedResume 消息不算轮次起点
-/// - model_excluded 消息不进入任何提取
+/// - System/Notice 通知不进入任何提取
 /// - recall_memory 等只读工具结果不生成候选（避免召回结果回写）
 fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
@@ -533,7 +533,12 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
     let user_input = extract_message_text(start_msg);
     let messages = all_messages[idx..]
         .iter()
-        .filter(|message| !message.model_excluded)
+        .filter(|message| {
+            !matches!(
+                message.role,
+                tiangong_types::MessageRole::System | tiangong_types::MessageRole::Notice
+            )
+        })
         .collect::<Vec<_>>();
     let turn_status = messages
         .iter()

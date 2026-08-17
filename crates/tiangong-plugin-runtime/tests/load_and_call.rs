@@ -441,7 +441,6 @@ fn test_session_with_user_message() -> Session {
         tool_name: None,
         tool_result_is_error: false,
         compact: false,
-        model_excluded: false,
         phase: tiangong_types::MessagePhase::Normal,
         created_at: "2026-08-01T00:00:00".to_string(),
         elapsed_ms: None,

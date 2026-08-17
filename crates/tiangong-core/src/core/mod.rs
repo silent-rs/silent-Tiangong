@@ -304,7 +304,6 @@ impl TiangongCore {
             content: tiangong_types::content_blocks_text(&content),
             content_blocks: tiangong_types::stable_content_blocks(&content),
             media: Vec::new(),
-            model_excluded: false,
         });
         let session_ready = self.session_ready.clone();
         let core = self.clone();

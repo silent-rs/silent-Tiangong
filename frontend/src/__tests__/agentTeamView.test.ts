@@ -76,10 +76,10 @@ describe('agent team view routing', () => {
     expect(result.phase).toBe('summary');
   });
 
-  it('keeps model exclusion changes and checks the requested streaming id', () => {
+  it('keeps message content changes and checks the requested streaming id', () => {
     const sessionId = 'session-model-exclusion';
     const visible = systemMessage('agent-process', '执行过程');
-    const excluded = { ...visible, model_excluded: true };
+    const excluded = { ...visible, content: [{ type: 'text', text: '执行过程（更新）' }] };
 
     useStore.setState({
       activeSessionId: sessionId,
@@ -92,7 +92,7 @@ describe('agent team view routing', () => {
       event: { type: 'session_message_upsert', message: excluded },
     }]);
 
-    expect(useStore.getState().messages[0].model_excluded).toBe(true);
+    expect(useStore.getState().messages[0].content).toEqual(excluded.content);
     expect(hasMessage([visible], 'missing')).toBe(false);
     expect(hasMessage([visible], visible.id)).toBe(true);
   });

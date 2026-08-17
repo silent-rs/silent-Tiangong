@@ -237,9 +237,7 @@ fn compression_split_point(session: &Session) -> Option<usize> {
     let start = session.summary_up_to.min(session.messages.len());
     let last_visible = (start..session.messages.len()).rev().find(|&index| {
         let message = &session.messages[index];
-        !message.model_excluded
-            && message.role != MessageRole::System
-            && message.role != MessageRole::Notice
+        message.role != MessageRole::System && message.role != MessageRole::Notice
     })?;
     let last_message = &session.messages[last_visible];
     let recent_start = if last_message.role == MessageRole::Tool {
@@ -287,7 +285,7 @@ fn folded_anchor_text(session: &Session, folded_end: usize) -> Option<String> {
         .rev()
         .find(|index| {
             let message = &session.messages[*index];
-            !message.model_excluded && message.role == MessageRole::User
+            message.role == MessageRole::User
         })
         .map(|index| session.messages[index].text_content())
         .filter(|text| !text.trim().is_empty())
@@ -369,7 +367,7 @@ fn apply_compression(
     let needs_anchor = candidate
         .messages
         .get(update.summary_up_to)
-        .is_none_or(|message| message.role != MessageRole::User || message.model_excluded);
+        .is_none_or(|message| message.role != MessageRole::User);
     if needs_anchor
         && let Some(anchor_text) = folded_anchor_text(&ctx.session, update.summary_up_to)
     {
@@ -594,8 +592,7 @@ mod tests {
             "最近工具结果",
             false,
         ));
-        let mut hidden = Message::new(MessageRole::System, "仅前端可见状态");
-        hidden.model_excluded = true;
+        let hidden = Message::new(MessageRole::System, "仅前端可见状态");
         session.messages.push(hidden);
 
         // 锚点用户消息允许被折叠（由锚点消息机制续接）：保留最近工具批次。

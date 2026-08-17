@@ -373,13 +373,11 @@ fn user_message_event_preserves_content_blocks_without_serializing_image_data() 
             data: Some("SECRET_BASE64".into()),
         }],
         media: Vec::new(),
-        model_excluded: true,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("content_blocks"));
     assert!(json.contains("/tmp/image.png"));
     assert!(!json.contains("SECRET_BASE64"));
-    assert!(json.contains("\"model_excluded\":true"));
 
     let legacy = r#"{
         "type":"user_message",
@@ -392,12 +390,10 @@ fn user_message_event_preserves_content_blocks_without_serializing_image_data() 
         StreamEvent::UserMessage {
             content_blocks,
             media,
-            model_excluded,
             ..
         } => {
             assert!(content_blocks.is_empty());
             assert_eq!(media.len(), 1);
-            assert!(!model_excluded);
         }
         _ => panic!("应反序列化为 UserMessage"),
     }

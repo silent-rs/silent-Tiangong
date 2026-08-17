@@ -110,7 +110,6 @@ fn merge_agent_output_messages(
         );
         header.id = header_id;
         header.worker_id = Some(worker_id.clone());
-        header.model_excluded = true;
         view.push(header);
     }
 
@@ -143,8 +142,6 @@ fn merge_agent_output_messages(
         let mut worker_message = message.clone();
         worker_message.role = role;
         worker_message.worker_id = Some(worker_id.clone());
-        // 即使未来误把缓存副本传入 Core，也不得进入父 Agent 上下文。
-        worker_message.model_excluded = true;
         view.push(worker_message);
     }
 }
@@ -949,7 +946,8 @@ mod tests {
 
         let messages = app.agent_worker_view_messages("parent-a");
         assert_eq!(messages.len(), 2, "应包含稳定标题和一条合并后的回复");
-        assert!(messages.iter().all(|message| message.model_excluded));
+        // 视图消息全部携带 worker_id：仅存在于内存视图，不进入 Core 会话状态。
+        assert!(messages.iter().all(|message| message.worker_id.is_some()));
         let reply = messages
             .iter()
             .find(|message| message.id == "agent:child:assistant:reply")

@@ -985,7 +985,6 @@ fn append_descriptor_message(parent: &mut Session, descriptor: &AgentDescriptor)
             descriptor.label, descriptor.role, descriptor.agent_id
         ),
     );
-    message.model_excluded = true;
     if let Ok(json) = serde_json::to_string(descriptor) {
         message
             .content
@@ -1011,7 +1010,6 @@ fn append_agent_status_message(
         ),
     );
     message.id = message_id.clone();
-    message.model_excluded = true;
     if let Some(existing) = parent
         .messages
         .iter_mut()
