@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Globe, Grid3x3, TerminalSquare, X } from 'lucide-react';
+import { Globe, Grid3x3, Puzzle, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
 import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
-import type { TabKind, TabState } from '@/api/tauri';
+import type { SandboxKind, TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { BrowserTabContent } from './BrowserTabContent';
+import { PluginAppTabContent } from './PluginAppTabContent';
 import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
 import {
@@ -44,8 +45,16 @@ const BUSY_TERMINAL_PHASES = new Set(['UserActive', 'Running', 'Interactive']);
 /** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
 export interface AppTabCommand {
   kind: TabKind;
-  action: 'new' | 'close-all';
+  action: 'new' | 'close-all' | 'open-plugin';
   version: number;
+  /** open-plugin 携带的三方 App 元数据。 */
+  app?: {
+    pluginId: string;
+    contributionId: string;
+    title: string;
+    sandbox: SandboxKind;
+    multi: boolean;
+  };
 }
 
 function nowText(): string {
@@ -482,6 +491,16 @@ export function TabsContainer({
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
     if (!sessionId) return;
+    // plugin（三方 App）实例的创建/聚焦统一走宿主命令通道（open-plugin），
+    // 此处聚焦已有实例即可。
+    if (kind === 'plugin') {
+      const existing = tabsRef.current.find((tab) => tab.kind === 'plugin');
+      if (existing) {
+        activeTabIdRef.current = existing.id;
+        setActiveTabId(existing.id);
+      }
+      return;
+    }
 
     const currentTabs = tabsRef.current;
     const currentActiveId = activeTabIdRef.current;
@@ -607,9 +626,10 @@ export function TabsContainer({
     const closingTab = currentTabs[closedIndex];
     if (closingTab.kind === 'browser') {
       void api.browserTabClose(terminalSessionId, tabId).catch(console.error);
-    } else {
+    } else if (closingTab.kind === 'terminal') {
       void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
     }
+    // plugin（三方 App）实例无后端运行时，仅移除前端状态与持久化引用
 
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     const currentActiveId = activeTabIdRef.current;
@@ -654,13 +674,45 @@ export function TabsContainer({
 
   // 宿主（矩阵右键菜单）下发的实例命令：新建走既有 handleNewTab（宿主并行
   // 切换 App 态）；关闭全部按 id 快照逐个走 handleCloseTab（末 tab 关闭会
-  // 触发回矩阵/收起的既有逻辑，处于矩阵态时 onShowMatrix 幂等）。
+  // 触发回矩阵/收起的既有逻辑，处于矩阵态时 onShowMatrix 幂等）；
+  // open-plugin 按 open_mode 分派——单例聚焦已有实例，多例每次新建。
   const lastAppCommandVersionRef = useRef(0);
   useEffect(() => {
     if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
     lastAppCommandVersionRef.current = appCommand.version;
     if (appCommand.action === 'new') {
       void handleNewTab(appCommand.kind);
+      return;
+    }
+    if (appCommand.action === 'open-plugin' && appCommand.app) {
+      const { pluginId, contributionId, title, sandbox, multi } = appCommand.app;
+      const existing = multi
+        ? null
+        : tabsRef.current.find(
+          (tab) => tab.kind === 'plugin'
+            && tab.plugin_id === pluginId
+            && tab.contribution_id === contributionId,
+        );
+      if (existing) {
+        activeTabIdRef.current = existing.id;
+        setActiveTabId(existing.id);
+        return;
+      }
+      const nextTab: TabState = {
+        id: `plugin-${crypto.randomUUID()}`,
+        kind: 'plugin',
+        title,
+        url: '',
+        created_at: new Date().toISOString(),
+        plugin_id: pluginId,
+        contribution_id: contributionId,
+        sandbox,
+      };
+      const nextTabs = [...tabsRef.current, nextTab];
+      tabsRef.current = nextTabs;
+      activeTabIdRef.current = nextTab.id;
+      setTabs(nextTabs);
+      setActiveTabId(nextTab.id);
       return;
     }
     const targetIds = tabsRef.current
@@ -748,7 +800,7 @@ export function TabsContainer({
           )}
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
-            const Icon = tab.kind === 'browser' ? Globe : TerminalSquare;
+            const Icon = tab.kind === 'browser' ? Globe : tab.kind === 'plugin' ? Puzzle : TerminalSquare;
             const busy = tab.kind === 'terminal'
               && Boolean(tab.phase && BUSY_TERMINAL_PHASES.has(tab.phase));
             return (
@@ -849,6 +901,12 @@ export function TabsContainer({
               key={`${terminalSessionId}:${tab.id}`}
               sessionId={terminalSessionId}
               tabId={tab.id}
+              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
+            />
+          ) : tab.kind === 'plugin' ? (
+            <PluginAppTabContent
+              key={`${terminalSessionId}:${tab.id}`}
+              tab={tab}
               isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
             />
           ) : (

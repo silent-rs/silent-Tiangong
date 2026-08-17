@@ -15,6 +15,9 @@ use tiangong_core::session::atomic_replace_file;
 pub enum WorkspaceTabKind {
     Browser,
     Terminal,
+    /// 三方 App（extension.tab 贡献）实例：无插件侧运行时存储，
+    /// 元数据由布局层的 `plugin_tabs` 直接持有。
+    Plugin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +27,15 @@ pub struct WorkspaceTabState {
     pub title: String,
     pub url: String,
     pub created_at: String,
+    /// plugin tab 专属：贡献来源插件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// plugin tab 专属：extension.tab 贡献 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contribution_id: Option<String>,
+    /// plugin tab 专属：沙箱级别（shadow/iframe）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,6 +56,9 @@ pub struct WorkspaceTabsLayout {
     pub order: Vec<WorkspaceTabRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<WorkspaceTabRef>,
+    /// 三方 App 实例的完整元数据（无插件侧存储，布局层直接持有）。
+    #[serde(default)]
+    pub plugin_tabs: Vec<WorkspaceTabState>,
 }
 
 pub fn load_layout(session_id: &str) -> WorkspaceTabsLayout {
@@ -78,6 +93,7 @@ fn layout_from_tabs(
     active_tab_id: Option<&str>,
 ) -> WorkspaceTabsLayout {
     let mut order = Vec::with_capacity(tabs.len());
+    let mut plugin_tabs = Vec::new();
     for tab in tabs {
         let reference = WorkspaceTabRef {
             kind: tab.kind,
@@ -85,6 +101,9 @@ fn layout_from_tabs(
         };
         if !order.contains(&reference) {
             order.push(reference);
+        }
+        if tab.kind == WorkspaceTabKind::Plugin {
+            plugin_tabs.push(tab.clone());
         }
     }
     let active = active_tab_id.and_then(|active_id| {
@@ -95,7 +114,11 @@ fn layout_from_tabs(
                 id: tab.id.clone(),
             })
     });
-    WorkspaceTabsLayout { order, active }
+    WorkspaceTabsLayout {
+        order,
+        active,
+        plugin_tabs,
+    }
 }
 
 pub fn reconcile_tabs(
@@ -238,7 +261,15 @@ fn migrate_legacy_layout_at(root: &Path, session_id: &str, value: &Value) -> Res
         .get("active_tab_id")
         .and_then(Value::as_str)
         .and_then(|active| order.iter().find(|tab| tab.id == active).cloned());
-    save_layout_state_at(root, session_id, &WorkspaceTabsLayout { order, active })
+    save_layout_state_at(
+        root,
+        session_id,
+        &WorkspaceTabsLayout {
+            order,
+            active,
+            plugin_tabs: Vec::new(),
+        },
+    )
 }
 
 fn save_layout_state_at(root: &Path, session_id: &str, layout: &WorkspaceTabsLayout) -> Result<()> {
@@ -288,6 +319,9 @@ mod tests {
                 title: "不会写入布局".to_string(),
                 url: "/secret".to_string(),
                 created_at: "now".to_string(),
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             },
             WorkspaceTabState {
                 id: "terminal-1".to_string(),
@@ -295,6 +329,9 @@ mod tests {
                 title: "重复项".to_string(),
                 url: String::new(),
                 created_at: "later".to_string(),
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             },
         ];
         let layout = layout_from_tabs(&tabs, Some("terminal-1"));
@@ -314,6 +351,9 @@ mod tests {
             title: "终端".to_string(),
             url: String::new(),
             created_at: "1".to_string(),
+            plugin_id: None,
+            contribution_id: None,
+            sandbox: None,
         };
         let browser = WorkspaceTabState {
             id: "browser-1".to_string(),
@@ -321,6 +361,9 @@ mod tests {
             title: "网页".to_string(),
             url: "https://example.com".to_string(),
             created_at: String::new(),
+            plugin_id: None,
+            contribution_id: None,
+            sandbox: None,
         };
         let added = WorkspaceTabState {
             id: "browser-2".to_string(),
@@ -328,6 +371,9 @@ mod tests {
             title: "新增".to_string(),
             url: "about:blank".to_string(),
             created_at: String::new(),
+            plugin_id: None,
+            contribution_id: None,
+            sandbox: None,
         };
         let layout = WorkspaceTabsLayout {
             order: vec![
@@ -348,6 +394,7 @@ mod tests {
                 kind: WorkspaceTabKind::Browser,
                 id: "stale".to_string(),
             }),
+            plugin_tabs: Vec::new(),
         };
         let fallback = [WorkspaceTabRef {
             kind: WorkspaceTabKind::Terminal,
@@ -360,6 +407,34 @@ mod tests {
             vec!["browser-1", "terminal-1", "browser-2"]
         );
         assert_eq!(active.as_deref(), Some("terminal-1"));
+    }
+
+    #[test]
+    fn plugin_tabs_metadata_roundtrip() {
+        let plugin_tab = WorkspaceTabState {
+            id: "plugin-1".to_string(),
+            kind: WorkspaceTabKind::Plugin,
+            title: "看板".to_string(),
+            url: String::new(),
+            created_at: "1".to_string(),
+            plugin_id: Some("com.example.board".to_string()),
+            contribution_id: Some("board".to_string()),
+            sandbox: Some("shadow".to_string()),
+        };
+        let layout = layout_from_tabs(std::slice::from_ref(&plugin_tab), Some("plugin-1"));
+        // 三方 App 实例元数据由布局层持有，序列化保留
+        assert_eq!(layout.plugin_tabs.len(), 1);
+        assert_eq!(
+            layout.plugin_tabs[0].plugin_id.as_deref(),
+            Some("com.example.board")
+        );
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains("com.example.board"));
+        // reconcile 从布局元数据恢复 plugin tab
+        let (tabs, active) = reconcile_tabs(layout.plugin_tabs.clone(), layout, &[]);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].contribution_id.as_deref(), Some("board"));
+        assert_eq!(active.as_deref(), Some("plugin-1"));
     }
 
     #[test]

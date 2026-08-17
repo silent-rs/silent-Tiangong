@@ -47,20 +47,22 @@ export interface LoadedSession {
   reasoning_effort: string;
 }
 
-export type TabKind = 'browser' | 'terminal';
+export type TabKind = 'browser' | 'terminal' | 'plugin';
 export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
 
 /** 内置 App 的打开模式（设计文档 6.6）：浏览器单实例（重复打开聚焦），
- *  终端多实例（每次新建）。tab 操作与矩阵菜单按此约束。 */
+ *  终端多实例（每次新建）；plugin（三方 App）按贡献声明的 open_mode。 */
 export const BUILTIN_TAB_KIND_MULTI: Record<TabKind, boolean> = {
   browser: false,
   terminal: true,
+  plugin: false,
 };
 
 /** 内置 App 展示名。 */
 export const TAB_KIND_NAME: Record<TabKind, string> = {
   browser: '浏览器',
   terminal: '终端',
+  plugin: '应用',
 };
 
 export interface TabState {
@@ -70,6 +72,12 @@ export interface TabState {
   url: string;
   created_at: string;
   phase?: TerminalPhase;
+  /** plugin tab 专属：贡献来源插件（三方 App 实例）。 */
+  plugin_id?: string;
+  /** plugin tab 专属：extension.tab 贡献 ID。 */
+  contribution_id?: string;
+  /** plugin tab 专属：沙箱级别（shadow/iframe）。 */
+  sandbox?: SandboxKind;
 }
 
 export interface SessionTabs {

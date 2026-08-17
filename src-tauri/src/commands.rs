@@ -307,6 +307,9 @@ pub async fn get_session_tabs(
                 title: tab.title.clone(),
                 url: tab.url.clone(),
                 created_at: String::new(),
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             })
             .collect();
         let terminal =
@@ -323,13 +326,24 @@ pub async fn get_session_tabs(
                 title: tab.title,
                 url: String::new(),
                 created_at: tab.created_at,
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             })
             .collect();
+        let layout = crate::workspace_tabs::load_layout(&session_id);
         let available = terminal_tabs
             .into_iter()
             .chain(browser_tabs)
+            // 三方 App 实例元数据由布局层持有（无插件侧存储）
+            .chain(layout.plugin_tabs.iter().filter_map(|tab| {
+                if tab.kind == crate::workspace_tabs::WorkspaceTabKind::Plugin {
+                    Some(tab.clone())
+                } else {
+                    None
+                }
+            }))
             .collect::<Vec<_>>();
-        let layout = crate::workspace_tabs::load_layout(&session_id);
         let fallback_active = browser_active
             .map(|id| WorkspaceTabRef {
                 kind: TabKind::Browser,

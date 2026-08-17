@@ -1,6 +1,7 @@
-import { Globe, TerminalSquare } from 'lucide-react';
-import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
-import type { TabKind } from '@/api/tauri';
+import { useEffect, useState } from 'react';
+import { Globe, Puzzle, TerminalSquare } from 'lucide-react';
+import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME, api } from '@/api/tauri';
+import type { AppEntry, TabKind } from '@/api/tauri';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -27,6 +28,8 @@ export interface ExtensionMatrixProps {
   onNewAppTab?: (kind: TabKind) => void;
   /** 关闭该 App 的全部已打开实例（无实例时不显示菜单项）。 */
   onCloseApp?: (kind: TabKind) => void;
+  /** 打开三方 App（extension.tab 贡献，按 open_mode 分派聚焦/新建）。 */
+  onOpenPluginApp?: (app: AppEntry) => void;
 }
 
 const OFFICIAL_APPS: Array<{
@@ -57,7 +60,26 @@ export function ExtensionMatrix({
   runningKinds = [],
   onNewAppTab,
   onCloseApp,
+  onOpenPluginApp,
 }: ExtensionMatrixProps) {
+  const [thirdPartyApps, setThirdPartyApps] = useState<AppEntry[]>([]);
+
+  // 三方 App（extension.tab 贡献）经 App 元数据命令加载；图标名暂不映射
+  // lucide，统一用拼图图标（T016 SDK 阶段随 UI Kit 细化）。
+  useEffect(() => {
+    let active = true;
+    api.listExtensionApps()
+      .then((apps) => {
+        if (active) setThirdPartyApps(apps);
+      })
+      .catch(() => {
+        if (active) setThirdPartyApps([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-6 place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3 lg:grid-cols-8">
       {OFFICIAL_APPS.map((app) => {
@@ -109,6 +131,30 @@ export function ExtensionMatrix({
           </ContextMenu>
         );
       })}
+      {onOpenPluginApp && thirdPartyApps.map((app) => (
+        <ContextMenu key={`${app.plugin_id}:${app.contribution_id}`}>
+          <ContextMenuTrigger asChild>
+            <button
+              type="button"
+              onClick={() => onOpenPluginApp(app)}
+              className="group flex w-full cursor-default flex-col items-center gap-1"
+              title={`${app.title}（${app.open_mode === 'multi' ? '多实例' : '单实例'}）—— ${app.description}`}
+            >
+              <span className="relative flex h-12 w-12 items-center justify-center rounded-lg border bg-muted/50 transition-colors group-hover:border-primary/50 group-hover:bg-accent">
+                <Puzzle className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
+              </span>
+              <span className="max-w-full truncate text-[11px] text-foreground/90">
+                {app.title}
+              </span>
+            </button>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem onClick={() => onOpenPluginApp(app)}>
+              打开{app.title}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      ))}
     </div>
   );
 }

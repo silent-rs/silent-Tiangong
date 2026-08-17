@@ -749,6 +749,23 @@ export function MainApp() {
                         onCloseApp={(kind) => {
                           setAppTabCommand({ kind, action: 'close-all', version: Date.now() });
                         }}
+                        onOpenPluginApp={(app) => {
+                          // 三方 App：按 open_mode 分派（命令通道内单例聚焦/多例新建），
+                          // 同时切换拓展区到 App 态。
+                          setAppTabCommand({
+                            kind: 'plugin',
+                            action: 'open-plugin',
+                            version: Date.now(),
+                            app: {
+                              pluginId: app.plugin_id,
+                              contributionId: app.contribution_id,
+                              title: app.title,
+                              sandbox: app.sandbox,
+                              multi: app.open_mode === 'multi',
+                            },
+                          });
+                          void openWorkspacePanel('plugin');
+                        }}
                       />
                     }
                     appCommand={appTabCommand}
