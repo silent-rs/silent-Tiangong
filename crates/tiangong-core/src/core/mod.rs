@@ -556,10 +556,12 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Approval(ApprovalInput::Response {
                 request_id,
                 approved,
+                always_allow,
             }) => self.deliver_to_turn(
                 Command::Approval {
                     request_id,
                     approved,
+                    always_allow,
                 },
                 "ApprovalResponse",
             ),

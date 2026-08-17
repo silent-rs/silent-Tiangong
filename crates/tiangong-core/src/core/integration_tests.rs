@@ -162,7 +162,7 @@ async fn approval_granted_executes_tool_and_completes() {
     send_message(&core, "msg-1", "审批后执行 echo");
     let request_id = events.wait_approval_needed();
     assert_eq!(tool.count(), 0, "审批前工具不得执行");
-    core.deliver(AgentInputKind::approval(request_id, true))
+    core.deliver(AgentInputKind::approval(request_id, true, false))
         .expect("批准投递应成功");
 
     assert_eq!(
@@ -223,7 +223,7 @@ async fn approval_rejected_records_result_and_model_explains() {
 
     send_message(&core, "msg-1", "拒绝执行 echo");
     let request_id = events.wait_approval_needed();
-    core.deliver(AgentInputKind::approval(request_id, false))
+    core.deliver(AgentInputKind::approval(request_id, false, false))
         .expect("拒绝投递应成功");
 
     assert_eq!(

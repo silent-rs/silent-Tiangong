@@ -2116,6 +2116,7 @@ async fn rejects_supervised_tool_after_approval_response() {
                     .send(Command::Approval {
                         request_id,
                         approved: false,
+                        always_allow: false,
                     })
                     .unwrap();
                 break;
@@ -2188,6 +2189,7 @@ async fn executes_supervised_tool_after_approval_response() {
                     .send(Command::Approval {
                         request_id,
                         approved: true,
+                        always_allow: false,
                     })
                     .unwrap();
                 break;
@@ -2433,4 +2435,140 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
         .filter(|e| matches!(e, StreamEvent::Done { .. }))
         .count();
     assert_eq!(done, 1, "Done 事件必须已到达事件流");
+}
+
+/// 审批等待超时按拒绝闭合（fail-closed）：不响应审批时工具不执行、轮次收敛。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_timeout_fails_closed() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_timeout", "echo", "{}"),
+            usage_chunk(8, 2),
+        ],
+    )
+    .await;
+    // 超时拒绝后模型看到结果，解释结束。
+    mount_sse(
+        &server,
+        vec![
+            text_delta_chunk("等待确认超时，已按拒绝处理。"),
+            usage_chunk(10, 3),
+        ],
+    )
+    .await;
+
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert(
+        "echo".to_string(),
+        Arc::new(EchoTool {
+            invocations: invocations.clone(),
+        }),
+    );
+    let harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+    let TestHarness {
+        mut ctx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    // 短超时触发 fail-closed；Supervised 模式触发审批等待。
+    ctx.approval_timeout = Duration::from_millis(150);
+    ctx.trust_mode = TrustMode::Supervised;
+
+    let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+    assert!(
+        matches!(result.outcome, TurnExecutionOutcome::Success),
+        "超时拒绝后的结果: {:?}",
+        result.outcome
+    );
+    assert!(invocations.lock().unwrap().is_empty(), "超时后工具不应执行");
+    assert!(
+        ctx.session
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("超时"))
+    );
+}
+
+/// 「始终允许」后同工具本会话直接放行：第二次调用不再等待审批。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn always_allow_skips_subsequent_approval() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![tool_call_chunk("call_1", "echo", "{}"), usage_chunk(8, 2)],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_2", "echo", r#"{"x":1}"#),
+            usage_chunk(12, 3),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("两次执行完成。"), usage_chunk(14, 4)],
+    )
+    .await;
+
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert(
+        "echo".to_string(),
+        Arc::new(EchoTool {
+            invocations: invocations.clone(),
+        }),
+    );
+    let harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+    let TestHarness {
+        mut ctx,
+        stream_rx,
+        cmd_tx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    cmd_tx
+        .send(Command::SetTrustMode(TrustMode::Supervised))
+        .unwrap();
+    // 只响应第一次审批（always_allow），第二次调用应直接放行不再产生审批事件。
+    let approval_cmd_tx = cmd_tx.clone();
+    let approval_task = tokio::task::spawn_blocking(move || {
+        let mut got_approval = false;
+        for _ in 0..200 {
+            let Ok(event) = stream_rx.recv_timeout(Duration::from_millis(200)) else {
+                break;
+            };
+            if let StreamEvent::ApprovalNeeded { request_id, .. } = event {
+                assert!(!got_approval, "始终允许后不应再次发起审批");
+                got_approval = true;
+                approval_cmd_tx
+                    .send(Command::Approval {
+                        request_id,
+                        approved: true,
+                        always_allow: true,
+                    })
+                    .unwrap();
+            }
+        }
+        got_approval
+    });
+
+    let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+    let got_approval = approval_task.await.unwrap();
+
+    assert!(
+        matches!(result.outcome, TurnExecutionOutcome::Success),
+        "始终允许后的结果: {:?}",
+        result.outcome
+    );
+    assert!(got_approval, "第一次调用应产生审批");
+    assert_eq!(invocations.lock().unwrap().len(), 2, "两次调用都应执行");
+    assert!(
+        ctx.session.approved_tools.iter().any(|name| name == "echo"),
+        "会话应记录始终允许的工具"
+    );
 }

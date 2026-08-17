@@ -129,8 +129,17 @@ impl CoreManager {
     }
 
     /// 向指定会话的 core 发送审批响应。
-    pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
-        self.deliver_to_core_if_live(session_id, AgentInputKind::approval(request_id, approved));
+    pub fn respond_approval_to_core(
+        &self,
+        session_id: &str,
+        request_id: String,
+        approved: bool,
+        always_allow: bool,
+    ) {
+        self.deliver_to_core_if_live(
+            session_id,
+            AgentInputKind::approval(request_id, approved, always_allow),
+        );
     }
 
     /// 设置指定会话 core 的信任模式（实时生效）。

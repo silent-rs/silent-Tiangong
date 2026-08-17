@@ -4,9 +4,13 @@
 pub enum Command {
     /// 取消当前执行
     Cancel,
-    /// 审批响应
+    /// 审批响应；approved=true 且 always_allow=true 时同工具本会话后续放行
     #[allow(dead_code)]
-    Approval { request_id: String, approved: bool },
+    Approval {
+        request_id: String,
+        approved: bool,
+        always_allow: bool,
+    },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。

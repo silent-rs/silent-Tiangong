@@ -50,6 +50,8 @@ pub(super) enum ToolBatchOutcome {
 enum ApprovalDecision {
     Approved,
     Rejected,
+    /// 审批等待超时：按拒绝闭合（fail-closed，需求 #57）。
+    TimedOut,
     /// 审批等待被中断类命令打断（待审批工具已按拒绝闭合）。
     Interrupted(Deferred),
 }
@@ -109,11 +111,23 @@ pub(super) async fn execute_tool_batch(
                         dedupe_key,
                     };
                     let trust_mode_label = format!("{trust_mode:?}");
-                    if *trust_mode == TrustMode::FullTrust {
+                    if *trust_mode == TrustMode::FullTrust
+                        || ctx
+                            .session
+                            .approved_tools
+                            .iter()
+                            .any(|name| name == &tool.call.name)
+                    {
+                        // FullTrust 放行一切；用户「始终允许」过的工具本会话直接放行
+                        //（审计仍记录，标签区分放行来源）。
                         ctx.observer.audit_permission(
                             &ctx.session.id,
                             &tool.call.name,
-                            "approved",
+                            if *trust_mode == TrustMode::FullTrust {
+                                "approved"
+                            } else {
+                                "approved_always_allowed"
+                            },
                             &trust_mode_label,
                             (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
                         );
@@ -158,6 +172,16 @@ pub(super) async fn execute_tool_batch(
                             // 门控判定——必需义务被拒不会虚假成功（ALR-307）。
                             injections.commit(ctx);
                             close_pending_calls(ctx, stream_tx, "工具调用因审批被拒绝而未执行。");
+                            return ToolBatchOutcome::Completed;
+                        }
+                        ApprovalDecision::TimedOut => {
+                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
+                            injections.commit(ctx);
+                            close_pending_calls(
+                                ctx,
+                                stream_tx,
+                                "工具调用因等待审批超时被拒绝（fail-closed）。",
+                            );
                             return ToolBatchOutcome::Completed;
                         }
                         ApprovalDecision::Interrupted(deferred_command) => {
@@ -275,7 +299,8 @@ pub(super) async fn execute_tool_batch(
     ToolBatchOutcome::Completed
 }
 
-/// 等待审批结论：审批/FullTrust 解锁/中断三类出口；其余命令就地消化。
+/// 等待审批结论：审批/FullTrust 解锁/中断/超时四类出口；其余命令就地消化。
+/// 超时按拒绝闭合（fail-closed），时限自请求发出起算（ambient 命令不重置）。
 #[allow(clippy::too_many_arguments)]
 async fn wait_approval(
     ctx: &mut TurnContext,
@@ -289,22 +314,36 @@ async fn wait_approval(
     request_id: &str,
     tool: &PreparedToolCall,
 ) -> ApprovalDecision {
-    let _ = tool;
+    let deadline = tokio::time::Instant::now() + ctx.approval_timeout;
+    let mut tool_name = tool.call.name.clone();
     loop {
-        let command = match cmd_rx.recv().await {
-            Some(command) => command,
-            None => return ApprovalDecision::Interrupted(Deferred::Closed),
+        let command = tokio::select! {
+            command = cmd_rx.recv() => match command {
+                Some(command) => command,
+                None => return ApprovalDecision::Interrupted(Deferred::Closed),
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::warn!(request_id, tool = %tool_name, "等待审批超时，按拒绝闭合");
+                return ApprovalDecision::TimedOut;
+            }
         };
         match command {
             Command::Approval {
                 request_id: responded,
                 approved,
+                always_allow,
             } if responded == request_id => {
-                return if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Rejected
-                };
+                if approved {
+                    // 始终允许：记录到会话并落盘，同工具本会话后续放行。
+                    if always_allow && !ctx.session.approved_tools.contains(&tool_name) {
+                        ctx.session
+                            .approved_tools
+                            .push(std::mem::take(&mut tool_name));
+                        ctx.session.persist_to_disk();
+                    }
+                    return ApprovalDecision::Approved;
+                }
+                return ApprovalDecision::Rejected;
             }
             Command::SetTrustMode(mode) => {
                 set_runtime_trust_mode(trust_mode, plugins, mode);

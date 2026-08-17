@@ -96,6 +96,10 @@ pub struct Session {
     /// 会话级信任模式；应用级默认值只在新建会话时复制到这里。
     #[serde(default)]
     pub trust_mode: TrustMode,
+    /// 会话级「始终允许」的工具名集合：用户在审批时选择始终允许后，
+    /// 同工具在本会话后续调用直接放行（Supervised 下跳过审批，审计仍记录）。
+    #[serde(default)]
+    pub approved_tools: Vec<String>,
     /// 会话级思考强度；为空时使用应用级默认值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -276,6 +280,7 @@ impl Session {
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
+            approved_tools: Vec::new(),
             reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,
@@ -312,6 +317,7 @@ impl Session {
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),
+            approved_tools: Vec::new(),
             reasoning_effort: None,
             context_summary: None,
             summary_up_to: 0,

@@ -11,6 +11,7 @@
 //! 运行时。完整约束见 `docs/plugin-development.md` 的“WASM Runtime 公共中立约束”。
 
 pub mod adapter;
+pub mod approval;
 pub mod artifacts;
 pub mod bindings;
 pub mod bridge;
@@ -27,6 +28,10 @@ pub mod signature;
 pub mod slots;
 
 pub use adapter::WasmPluginAdapter;
+pub use approval::{
+    ApprovalDecisionKind, ApprovalHandler, ApprovalRequest, ApprovalResponse, ApprovalRisk,
+    ApprovalRouter, DEFAULT_HANDLER,
+};
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, bridge_call, bridge_emit, bridge_subscribe,
     bridge_unsubscribe, set_event_emitter,

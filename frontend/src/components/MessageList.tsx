@@ -946,6 +946,18 @@ export function MessageList() {
                     允许
                   </button>
                   <button
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-green-600/80 hover:bg-green-700/90 text-white text-xs transition-colors"
+                    title="本会话内同工具不再询问"
+                    onClick={() => {
+                      if (approvalRequestId) {
+                        api.respondApproval(approvalRequestId, true, true).catch(console.error);
+                      }
+                    }}
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    始终允许
+                  </button>
+                  <button
                     className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs transition-colors"
                     onClick={() => {
                       if (approvalRequestId) {

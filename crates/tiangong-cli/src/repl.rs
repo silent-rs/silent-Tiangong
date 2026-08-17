@@ -325,28 +325,31 @@ impl ResponseState {
             } => {
                 self.end_active_stream();
                 output::approval_needed(tool_name, args_summary);
-                // 等待用户输入 y/n
-                let approved = loop {
-                    eprint!("\x1b[1;33m  允许执行？(y/n): \x1b[0m");
+                // 等待用户输入 y/a/n（a = 始终允许本会话）
+                let (approved, always_allow) = loop {
+                    eprint!("\x1b[1;33m  允许执行？(y=允许 a=始终允许 n=拒绝): \x1b[0m");
                     let mut buf = String::new();
                     if std::io::stdin().read_line(&mut buf).is_err() {
-                        break false;
+                        break (false, false);
                     }
                     match buf.trim().to_lowercase().as_str() {
-                        "y" | "yes" => break true,
-                        "n" | "no" => break false,
+                        "y" | "yes" => break (true, false),
+                        "a" | "always" => break (true, true),
+                        "n" | "no" => break (false, false),
                         _ => {
-                            eprintln!("  请输入 y 或 n");
+                            eprintln!("  请输入 y、a 或 n");
                         }
                     }
                 };
                 if !core_manager.deliver_to_core_if_live(
                     session_id,
-                    AgentInputKind::approval(request_id.clone(), approved),
+                    AgentInputKind::approval(request_id.clone(), approved, always_allow),
                 ) {
                     tracing::warn!(%session_id, "审批响应投递失败（Core 可能已停止）");
                 }
-                if approved {
+                if approved && always_allow {
+                    output::status("已允许（本会话内同工具不再询问）");
+                } else if approved {
                     output::status("已允许");
                 } else {
                     output::warn("已拒绝");

@@ -793,8 +793,8 @@ export const api = {
       baseContent,
     }),
 
-  respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
-    invoke('respond_approval', { requestId, approved }),
+  respondApproval: (requestId: string, approved: boolean, alwaysAllow?: boolean): Promise<boolean> =>
+    invoke('respond_approval', { requestId, approved, alwaysAllow: alwaysAllow ?? false }),
 
   getTrustMode: (sessionId?: string): Promise<string> =>
     invoke('get_trust_mode', { sessionId }),

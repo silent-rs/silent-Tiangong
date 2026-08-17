@@ -1445,20 +1445,23 @@ pub async fn append_message(
     Ok(true)
 }
 
-/// 响应工具审批请求
+/// 响应工具审批请求；always_allow=true 时同工具本会话后续放行
 #[tauri::command]
 pub async fn respond_approval(
     request_id: String,
     approved: bool,
+    always_allow: Option<bool>,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
     let session_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
-    state
-        .inner()
-        .core_manager
-        .respond_approval_to_core(&session_id, request_id, approved);
+    state.inner().core_manager.respond_approval_to_core(
+        &session_id,
+        request_id,
+        approved,
+        always_allow.unwrap_or(false),
+    );
     Ok(true)
 }
 

@@ -85,11 +85,12 @@ impl AgentInputKind {
         })
     }
 
-    /// 便捷构造：审批响应。
-    pub fn approval(request_id: impl Into<String>, approved: bool) -> Self {
+    /// 便捷构造：审批响应。always_allow=true 时同工具本会话后续放行。
+    pub fn approval(request_id: impl Into<String>, approved: bool, always_allow: bool) -> Self {
         AgentInputKind::Approval(ApprovalInput::Response {
             request_id: request_id.into(),
             approved,
+            always_allow,
         })
     }
 
@@ -126,7 +127,12 @@ pub enum MessageInput {
 /// 审批层输入。
 pub enum ApprovalInput {
     /// 审批响应（解锁当前阻塞等待审批的 turn）。
-    Response { request_id: String, approved: bool },
+    /// approved=true 且 always_allow=true 时，同工具本会话后续放行。
+    Response {
+        request_id: String,
+        approved: bool,
+        always_allow: bool,
+    },
 }
 
 // ===== Command 层 =====
