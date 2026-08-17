@@ -1,4 +1,4 @@
-import { Globe, Grid3x3, TerminalSquare } from 'lucide-react';
+import { Globe, TerminalSquare } from 'lucide-react';
 import type { TabKind } from '@/api/tauri';
 
 /**
@@ -41,12 +41,7 @@ const OFFICIAL_APPS: Array<{
 
 export function ExtensionMatrix({ onOpenApp, runningKinds = [] }: ExtensionMatrixProps) {
   return (
-    <div className="flex h-full flex-1 flex-col bg-background">
-      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
-        <Grid3x3 className="h-3.5 w-3.5" />
-        拓展区
-      </div>
-      <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-6 place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3 lg:grid-cols-8">
+    <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-6 place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3 lg:grid-cols-8">
         {OFFICIAL_APPS.map((app) => {
           const Icon = app.icon;
           const running = runningKinds.includes(app.kind);
@@ -74,7 +69,6 @@ export function ExtensionMatrix({ onOpenApp, runningKinds = [] }: ExtensionMatri
             </button>
           );
         })}
-      </div>
     </div>
   );
 }

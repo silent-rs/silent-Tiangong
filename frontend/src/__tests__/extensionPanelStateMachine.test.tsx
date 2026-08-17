@@ -174,11 +174,11 @@ describe('拓展区三态状态机（T008）', () => {
     const tabsHost = container!.querySelector('[data-testid="tabs-container"]')!;
     expect(tabsHost.getAttribute('data-mode')).toBe('app');
 
-    // 启动台 → 矩阵态：容器保留、模式切换、矩阵内容出现
+    // 启动台 → 矩阵态：容器保留、模式切换、矩阵内容出现（官方 App 卡片）
     await click('[data-testid="show-matrix"]');
     const matrixHost = container!.querySelector('[data-testid="tabs-container"]')!;
     expect(matrixHost.getAttribute('data-mode')).toBe('matrix');
-    expect(matrixHost.textContent).toContain('拓展区');
+    expect(matrixHost.textContent).toContain('浏览器');
 
     // 矩阵态再点拓展按钮 → 收起（关闭态）
     await click('[data-testid="extension-toggle"]');
