@@ -561,6 +561,12 @@ export interface SlotContributionEntry {
   source: 'wasm' | 'manifest';
 }
 
+/** 插件入口资源响应（字节数组 + MIME）。 */
+export interface PluginEntryResource {
+  data: number[];
+  mime: string;
+}
+
 export type ProvisionStatus =
   | { status: 'pending'; retry_after?: number }
   | { status: 'success' }
@@ -1305,6 +1311,14 @@ export const api = {
   /// 读取 v2 manifest UI 贡献的入口 HTML。
   pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>
     invoke('plugin_open_entry', { pluginId, contributionId }),
+
+  /// 读取 v2 manifest UI 贡献的相对资源（沙箱容器加载外链脚本/样式）。
+  pluginReadEntryResource: (
+    pluginId: string,
+    contributionId: string,
+    path: string,
+  ): Promise<PluginEntryResource> =>
+    invoke('plugin_read_entry_resource', { pluginId, contributionId, path }),
 
   // ── 宿主桥接（Host Bridge）：插件 UI ↔ 宿主统一通道 ──
   // method 按命名空间路由：plugin.* 转发到本插件 WASM，其余命名空间按接缝任务接入。

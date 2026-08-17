@@ -18,7 +18,8 @@ import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
-import { PluginIframe } from './PluginSettingsPanel';
+import { PluginIframe } from './PluginIframe';
+import { PluginSandbox } from './PluginSandbox';
 import { PluginManagerSettings } from './PluginManagerSettings';
 import { type SlotContributionEntry } from '../api/tauri';
 
@@ -1642,7 +1643,16 @@ function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <PluginIframe pluginId={contribution.plugin_id} html={html} />
+      {contribution.source === 'manifest' ? (
+        <PluginSandbox
+          pluginId={contribution.plugin_id}
+          contributionId={contribution.contribution_id}
+          sandbox={contribution.sandbox}
+          html={html}
+        />
+      ) : (
+        <PluginIframe pluginId={contribution.plugin_id} html={html} />
+      )}
     </div>
   );
 }

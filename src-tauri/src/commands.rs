@@ -4474,6 +4474,30 @@ pub async fn plugin_open_entry(
         .map_err(|error| error.to_string())
 }
 
+/// 读取 v2 manifest UI 贡献的相对资源（以 entry 所在目录为根，沙箱容器加载
+/// 外链脚本/样式用；路径逃出插件目录会被拒绝）。
+#[tauri::command]
+pub async fn plugin_read_entry_resource(
+    plugin_id: String,
+    contribution_id: String,
+    path: String,
+) -> Result<PluginEntryResource, String> {
+    let (data, mime) = tiangong_plugin_runtime::registry::read_manifest_resource(
+        &plugin_id,
+        &contribution_id,
+        &path,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(PluginEntryResource { data, mime })
+}
+
+/// 插件入口资源响应（字节数组 + MIME）。
+#[derive(serde::Serialize)]
+pub struct PluginEntryResource {
+    pub data: Vec<u8>,
+    pub mime: String,
+}
+
 /// 列出已安装插件、当前加载版本和 sidecar 状态。
 #[tauri::command]
 pub async fn list_plugins(

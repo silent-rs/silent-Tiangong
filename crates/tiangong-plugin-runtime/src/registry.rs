@@ -610,6 +610,79 @@ pub fn open_manifest_view(plugin_id: &str, contribution_id: &str) -> Result<Stri
     std::fs::read_to_string(&path).with_context(|| format!("读取插件页面失败: {}", path.display()))
 }
 
+/// 读取 v2 manifest UI 贡献的相对资源文件（以 entry 所在目录为根）。
+///
+/// 供 Shadow/iframe 容器加载入口 HTML 引用的脚本与样式：路径按 Web 相对语义
+/// 解析（`./`、子目录），规范化后不得逃出插件安装目录。MIME 按扩展名推断。
+pub fn read_manifest_resource(
+    plugin_id: &str,
+    contribution_id: &str,
+    path: &str,
+) -> Result<(Vec<u8>, String)> {
+    let (directory, entry) = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let contribution = loaded
+            .manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|item| item.id == contribution_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("插件 {plugin_id} 无 manifest 贡献 {contribution_id}")
+            })?;
+        (loaded.directory.clone(), contribution.entry)
+    };
+
+    let base_dir = directory
+        .join(&entry)
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| directory.clone());
+    let resource = base_dir.join(path);
+    // 规范化后必须仍在插件目录内，拒绝 `../` 逃逸。
+    let resolved = resource
+        .canonicalize()
+        .with_context(|| format!("资源路径无效: {path}"))?;
+    let plugin_root = directory
+        .canonicalize()
+        .with_context(|| format!("插件目录无效: {}", directory.display()))?;
+    if !resolved.starts_with(&plugin_root) {
+        bail!("插件 {plugin_id} 资源路径 {path} 逃出插件目录，已拒绝");
+    }
+    let bytes = std::fs::read(&resolved)
+        .with_context(|| format!("读取插件资源失败: {}", resolved.display()))?;
+    Ok((bytes, mime_of(&resolved)))
+}
+
+/// 按扩展名推断资源 MIME（容器加载脚本/样式用，未知类型按二进制流返回）。
+fn mime_of(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 /// 按 Slot 查询得到的统一 UI 贡献项。
 #[derive(Debug, Clone, Serialize)]
 pub struct SlotContribution {
