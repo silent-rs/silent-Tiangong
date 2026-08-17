@@ -5,13 +5,14 @@
 ;   https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
 ;
 ; productName is ASCII "tiangong" so the Debian Package field is valid, but the
-; user-facing installer/Add-Remove-Programs name must stay "天工". ${PRODUCTNAME}
-; (= "tiangong") is intentionally kept for all identity/path/shortcut/registry-key
-; usages so upgrades keep matching prior installs; only display strings use
-; ${DISPLAYNAME} ("天工") below.
+; user-facing installer/Add-Remove-Programs/shortcut names must stay "天工".
+; ${PRODUCTNAME} (= "tiangong") is intentionally kept for identity/path/
+; registry-key usages so upgrades keep matching prior installs; display strings
+; and shortcut file names use ${DISPLAYNAME} ("天工") below.
 ;
 ; Maintenance: when upgrading the tauri dependency, diff this file against the
-; upstream default and re-apply the DISPLAYNAME usages on the display lines.
+; upstream default and re-apply the DISPLAYNAME usages on the display/shortcut
+; lines.
 ; =============================================================================
 
 Unicode true
@@ -842,26 +843,26 @@ Section Uninstall
 
     ; Remove start menu shortcut
     !insertmacro MUI_STARTMENU_GETFOLDER Application $AppStartMenuFolder
-    !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Pop $0
     ${If} $0 = 1
-      !insertmacro UnpinShortcut "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
-      Delete "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+      !insertmacro UnpinShortcut "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk"
+      Delete "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk"
       RMDir "$SMPROGRAMS\$AppStartMenuFolder"
     ${EndIf}
-    !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro IsShortcutTarget "$SMPROGRAMS\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Pop $0
     ${If} $0 = 1
-      !insertmacro UnpinShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk"
-      Delete "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+      !insertmacro UnpinShortcut "$SMPROGRAMS\${DISPLAYNAME}.lnk"
+      Delete "$SMPROGRAMS\${DISPLAYNAME}.lnk"
     ${EndIf}
 
     ; Remove desktop shortcuts
-    !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro IsShortcutTarget "$DESKTOP\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Pop $0
     ${If} $0 = 1
-      !insertmacro UnpinShortcut "$DESKTOP\${PRODUCTNAME}.lnk"
-      Delete "$DESKTOP\${PRODUCTNAME}.lnk"
+      !insertmacro UnpinShortcut "$DESKTOP\${DISPLAYNAME}.lnk"
+      Delete "$DESKTOP\${DISPLAYNAME}.lnk"
     ${EndIf}
   ${EndIf}
 
@@ -933,17 +934,17 @@ Function CreateOrUpdateStartMenuShortcut
   ; migrate old shortcuts to target the new MAINBINARYNAME
   StrCpy $R0 0
 
-  !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
+  !insertmacro IsShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1
-    !insertmacro SetShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetShortcutTarget "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     StrCpy $R0 1
   ${EndIf}
 
-  !insertmacro IsShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
+  !insertmacro IsShortcutTarget "$SMPROGRAMS\${DISPLAYNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1
-    !insertmacro SetShortcutTarget "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetShortcutTarget "$SMPROGRAMS\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     StrCpy $R0 1
   ${EndIf}
 
@@ -962,21 +963,21 @@ Function CreateOrUpdateStartMenuShortcut
 
   !if "${STARTMENUFOLDER}" != ""
     CreateDirectory "$SMPROGRAMS\$AppStartMenuFolder"
-    CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"
+    CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\$AppStartMenuFolder\${DISPLAYNAME}.lnk"
   !else
-    CreateShortcut "$SMPROGRAMS\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${PRODUCTNAME}.lnk"
+    CreateShortcut "$SMPROGRAMS\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${DISPLAYNAME}.lnk"
   !endif
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
   ; We used to use product name as MAINBINARYNAME
   ; migrate old shortcuts to target the new MAINBINARYNAME
-  !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
+  !insertmacro IsShortcutTarget "$DESKTOP\${DISPLAYNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
   Pop $0
   ${If} $0 = 1
-    !insertmacro SetShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+    !insertmacro SetShortcutTarget "$DESKTOP\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
     Return
   ${EndIf}
 
@@ -989,6 +990,6 @@ Function CreateOrUpdateDesktopShortcut
     ${EndIf}
   ${EndIf}
 
-  CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
-  !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
+  CreateShortcut "$DESKTOP\${DISPLAYNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  !insertmacro SetLnkAppUserModelId "$DESKTOP\${DISPLAYNAME}.lnk"
 FunctionEnd
