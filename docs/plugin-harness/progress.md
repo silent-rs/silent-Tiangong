@@ -5,8 +5,9 @@
 
 ## 当前状态
 
-- **阶段**：M2 内置插件化已完成（官方 App 统一目录 + Agent Team 面板）。
-- **当前建议任务**：T016 三方体验（SDK/脚手架/示例）。
+- **阶段**：全部里程碑完成（M0-M4，T001-T016）。插件 Harness 首轮建设收官。
+- **当前建议任务**：真实使用反馈驱动的迭代（示例插件 GUI 冒烟、风险分级、事件源接入）。
+- **当前阻塞**：无。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
 - **下一步**：T007 → T008 → T009/T010 串行推进。
@@ -30,7 +31,7 @@
 | T013 | Agent Team 插件化迁移 | M2 | 已完成 | feature/plugin-harness | `f3147276` | 见下方验证记录 | 编排策略仍在 Core |
 | T014 | 审批接缝 | M3 | 已完成 | feature/plugin-harness | `8e92b68d` | 见下方验证记录 | 风险分级策略待工具元数据扩展 |
 | T015 | 交互接缝（选择/填写） | M3 | 已完成 | feature/plugin-harness | `07cddec7` | 见下方验证记录 | 三方交互处理器待插件生态 |
-| T016 | SDK/脚手架/UI Kit/示例 | M4 | 未开始 | — | — | — | — |
+| T016 | SDK/脚手架/UI Kit/示例 | M4 | 已完成 | feature/plugin-harness | `d39d3be5` | 见下方验证记录 | UI Kit 组件库按需迭代 |
 
 ## 任务依赖表
 
@@ -59,7 +60,7 @@
 | M1 | UI 接缝与能力矩阵（T006-T010） | 基本完成（T008 `41a3a2d2` 系列、T009/T010 `97eb63ca`；GUI 冒烟待三方制品） |
 | M2 | 内置插件化（T011-T013） | 已完成（2026-08-18，`f3147276`） |
 | M3 | 交互接缝（T014-T015） | 已完成（2026-08-17，`8e92b68d`/`07cddec7`） |
-| M4 | 三方体验（T016） | 未开始 |
+| M4 | 三方体验（T016） | 已完成（2026-08-18，`d39d3be5`） |
 
 ## 提交记录
 
@@ -76,6 +77,7 @@
 | `8e92b68d` | feat(plugin): T014 审批接缝——契约/路由骨架 + 超时 fail-closed + 始终允许 |
 | `07cddec7` | feat(plugin): T015 交互接缝——ask_user 工具与 choice/form/confirm 交互 |
 | `f3147276` | feat(plugin): M2 内置插件化——官方 App 进统一目录与 Agent Team 面板 |
+| `d39d3be5` | feat(plugin): T016 三方体验——纯 UI 插件/SDK/脚手架/文档 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -175,6 +177,21 @@
   （补 T009 遗留项）。
 - 验证：官方 App 目录测试（置顶/模式/native）、状态机测试适配、前端 202 项全绿、
   clippy 零警告。
+
+### T016（2026-08-18，`d39d3be5`）
+
+- 纯 UI 插件（设计 9.1）：manifest v2 wasm 可省略，registry 全链路支持；「UI 优先」
+  开发模型落地——只会 JS/TS 也能做拓展区 App。
+- storage.* 宿主路由（设计 7.8）：get/set/delete/list 落盘插件私有 data 目录，纯 UI
+  插件即有持久化。
+- @tiangong/plugin-sdk：类型 + createTiangongBridge（Shadow/iframe 双容器适配）+
+  pluginStorage 封装。
+- 脚手架：xtask new-plugin 生成看板示例骨架（无构建原生 JS），导入即用。
+- 文档：plugin-development.md v2 章节。
+- 验证：纯 UI 插件端到端测试（安装/目录/贡献/storage 往返/落盘/plugin.* 拒绝），
+  后端 68 项全绿，clippy 零警告。
+- 遗留：@tiangong/plugin-ui-kit 组件库按需迭代；npm 发布渠道待定；示例插件的
+  GUI 手动冒烟待用户执行。
 
 ### T007（2026-08-17，`3cb5dbd9`）
 
