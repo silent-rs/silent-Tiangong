@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-- **阶段**：M0 接缝地基已完成（T001-T005），进入 M1 UI 接缝（T006 起）。
-- **当前建议任务**：T006（Shadow/iframe 沙箱容器组件）。
+- **阶段**：M0 已完成；M1 进行中（T006 已完成，T007 进行中）。
+- **当前建议任务**：T007（extension.tab Slot 注册 + App 元数据）。
 - **当前阻塞**：无。
-- **下一步**：开始 T006 开发，M1 内 T006 → T007 → T008 → T009/T010 串行推进。
+- **下一步**：T007 → T008 → T009/T010 串行推进。
 
 ## 任务总览表
 
@@ -19,7 +19,7 @@
 | T003 | Host Bridge 后端命令层 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | 事件源接入在 T007 后按需补 |
 | T004 | settings.plugin-page Slot 前端容器 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | GUI 手动冒烟待用户确认 |
 | T005 | 端到端验证：旧插件经新桥接渲染设置页 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | Memory 双向通信需 sidecar，GUI 冒烟待用户确认 |
-| T006 | Shadow/iframe 沙箱容器组件 | M1 | 未开始 | — | — | — | — |
+| T006 | Shadow/iframe 沙箱容器组件 | M1 | 已完成 | feature/plugin-harness | `414f9c05` | 见下方验证记录 | 媒体资源代理、深度 JS 沙箱后续迭代 |
 | T007 | extension.tab Slot 注册 + App 元数据 | M1 | 未开始 | — | — | — | — |
 | T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 未开始 | — | — | — | — |
 | T009 | App 矩阵视图 + 启动台按钮 | M1 | 未开始 | — | — | — | — |
@@ -55,7 +55,7 @@
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
 | M0 | 接缝地基（T001-T005） | 已完成（2026-08-17，提交 `585d1d74`） |
-| M1 | UI 接缝与能力矩阵（T006-T010） | 未开始 |
+| M1 | UI 接缝与能力矩阵（T006-T010） | 进行中（T006 完成，`414f9c05`） |
 | M2 | 内置插件化（T011-T013） | 未开始 |
 | M3 | 交互接缝（T014-T015） | 未开始 |
 | M4 | 三方体验（T016） | 未开始 |
@@ -68,6 +68,7 @@
 | `cbe28c7b` | docs(plugin): 新增插件 Harness 需求、任务 spec 与进度记录 |
 | `585d1d74` | feat(plugin): 落地插件 Harness M0 接缝地基（T001-T005） |
 | `ea18699f` | fix(plugin): bridge 权限校验对 v1 插件一律放行 plugin.*（M0 回归修复） |
+| `414f9c05` | feat(plugin): T006 Shadow/iframe 沙箱容器组件 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -114,6 +115,12 @@
 
 1. **mcp 插件设置页布局异常**（2026-08-17 GUI 冒烟发现，与 Harness 修改无关）：MCP 服务器连接失败时（如 dbx、brave-search），页面内错误文本过长无折行/截断，溢出服务器条目与右侧操作按钮重叠。属 mcp 插件页面自身样式缺陷（iframe 容器与桥接通道行为正常，数据可正常读写），后续在插件侧修复。
 2. 事件订阅（bridge.on）为登记骨架，事件源接入在 T007 之后按需补充。
+
+### T006（2026-08-17，`414f9c05`）
+
+- `cargo check -p tiangong-app`、`cargo clippy -p tiangong-plugin-runtime --all-targets --tests` 零警告；`cargo test -p tiangong-plugin-runtime` 57 项全绿（新增 v2 manifest 贡献链路集成测试：Slot 列出/entry 读取/资源读取/`../` 逃逸拒绝）。
+- 前端 `tsc --noEmit`、`yarn build`、`yarn test` 200 项全绿（新增沙箱容器组件测试 8 项：shadow 挂载、内联/外链脚本受控执行、外链样式注入、桥接 call 转发、bridge.on 按 plugin_id 分发、卸载退订清理、:host token 注入、iframe/native 分发）。
+- 任务 spec：`./tasks/006-沙箱容器组件.md`。
 
 ## 更新规则
 

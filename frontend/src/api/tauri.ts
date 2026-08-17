@@ -530,6 +530,19 @@ export interface PluginCapabilities {
   events: string[];
 }
 
+/** 拓展区 App 元数据（声明 extension.tab 贡献的插件）。 */
+export interface AppEntry {
+  plugin_id: string;
+  contribution_id: string;
+  /** 插件名（矩阵主标题）。 */
+  name: string;
+  title: string;
+  description: string;
+  icon: string;
+  open_mode: OpenMode;
+  sandbox: SandboxKind;
+}
+
 /** Slot 元数据（来自后端 SlotDescriptor）。 */
 export interface SlotDescriptorInfo {
   id: SlotId;
@@ -1307,6 +1320,10 @@ export const api = {
   /// 按挂载点列出 UI 贡献（v1 WASM 设置页 + v2 manifest 声明合并）。
   listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
     invoke('list_slot_contributions', { slot }),
+
+  /// 列出拓展区 App（声明 extension.tab 贡献的插件，能力矩阵数据源）。
+  listExtensionApps: (): Promise<AppEntry[]> =>
+    invoke('list_extension_apps'),
 
   /// 读取 v2 manifest UI 贡献的入口 HTML。
   pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>

@@ -542,7 +542,7 @@ pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
                     contribution_id: contribution.id.clone(),
                     slot: contribution.slot.clone(),
                     title: contribution.title.clone(),
-                    description: String::new(),
+                    description: contribution.description.clone(),
                     icon: contribution.icon.clone(),
                     group: String::new(),
                     has_view: true,
@@ -709,6 +709,65 @@ pub enum ContributionSource {
     Wasm,
     /// v2：manifest `ui.contributions` 声明。
     Manifest,
+}
+
+/// 拓展区 App 元数据：声明 `extension.tab` 贡献的插件即可作为 App 打开
+/// （设计文档 6.6）。供能力矩阵与实例管理消费。
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionApp {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    /// 插件 descriptor 名称（矩阵主标题）。
+    pub name: String,
+    /// 贡献标题（缺省回落 plugin_id）。
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    /// singleton：全局至多一个 tab，重复打开聚焦；multi：每次打开新建。
+    pub open_mode: crate::slots::OpenMode,
+    pub sandbox: crate::slots::SandboxKind,
+}
+
+/// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
+/// `extension.tab` 的贡献与插件 descriptor 名称。v1 插件无 manifest UI
+/// 贡献，不进入 App 列表；官方内置能力（浏览器/终端）在插件化迁移后
+/// 以同一形态并入。
+pub fn list_extension_apps() -> Vec<ExtensionApp> {
+    let mut apps = Vec::new();
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return apps;
+    };
+    for (plugin_id, loaded) in plugins.iter() {
+        if !loaded.enabled {
+            continue;
+        }
+        let plugin_name = loaded
+            .descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.name.clone())
+            .unwrap_or_else(|| plugin_id.clone());
+        for contribution in loaded.manifest.ui_contributions() {
+            if contribution.slot != "extension.tab" {
+                continue;
+            }
+            apps.push(ExtensionApp {
+                plugin_id: plugin_id.clone(),
+                contribution_id: contribution.id.clone(),
+                name: plugin_name.clone(),
+                title: contribution.title.clone(),
+                description: contribution.description.clone(),
+                icon: contribution.icon.clone(),
+                open_mode: contribution.open_mode,
+                sandbox: contribution.sandbox,
+            });
+        }
+    }
+    apps.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then(left.contribution_id.cmp(&right.contribution_id))
+    });
+    apps
 }
 
 /// 打开插件页面，返回入口 HTML。

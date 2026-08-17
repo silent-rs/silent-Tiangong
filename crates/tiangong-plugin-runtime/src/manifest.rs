@@ -95,6 +95,9 @@ pub struct UiContributionDecl {
     /// 展示标题，缺省用 `id`。
     #[serde(default)]
     pub title: String,
+    /// 用途说明（矩阵卡片等展示位）。
+    #[serde(default)]
+    pub description: String,
     /// 图标名或内联 SVG。
     #[serde(default)]
     pub icon: String,
@@ -336,6 +339,7 @@ impl PluginManifest {
                 } else {
                     decl.title.clone()
                 },
+                description: decl.description.clone(),
                 id: decl.id.clone(),
                 icon: decl.icon.clone(),
                 entry: decl.entry.clone(),

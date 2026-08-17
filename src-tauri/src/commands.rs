@@ -4464,6 +4464,13 @@ pub async fn list_slot_contributions(
     ))
 }
 
+/// 列出拓展区 App：声明 `extension.tab` 贡献的已启用插件（能力矩阵数据源）。
+#[tauri::command]
+pub async fn list_extension_apps(
+) -> Result<Vec<tiangong_plugin_runtime::registry::ExtensionApp>, String> {
+    Ok(tiangong_plugin_runtime::registry::list_extension_apps())
+}
+
 /// 读取 v2 manifest UI 贡献的入口 HTML（entry 相对插件目录）。
 #[tauri::command]
 pub async fn plugin_open_entry(

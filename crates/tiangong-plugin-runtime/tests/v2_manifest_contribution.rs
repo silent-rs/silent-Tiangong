@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use tiangong_plugin_runtime::registry::{
-    ContributionSource, list_slot_contributions, open_manifest_view, preload_installed_plugins,
-    read_manifest_resource,
+    ContributionSource, list_extension_apps, list_slot_contributions, open_manifest_view,
+    preload_installed_plugins, read_manifest_resource,
 };
 
 fn wasm_path(name: &str) -> PathBuf {
@@ -21,6 +21,9 @@ fn wasm_path(name: &str) -> PathBuf {
     path.push(name);
     path
 }
+
+/// 全局插件注册表是进程级单例，本文件用例经此锁串行执行。
+static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 准备 v2 清单插件：prompt wasm + shadow/iframe 两条设置页贡献 + entry 资源文件。
 fn stage_v2_plugin(root: &std::path::Path) {
@@ -79,6 +82,7 @@ fn stage_v2_plugin(root: &std::path::Path) {
 
 #[test]
 fn v2_manifest_贡献经_slot_列出并可读取_entry_与资源() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
     let wasm = wasm_path("tiangong_plugin_prompt_wasm.wasm");
     if !wasm.exists() {
         eprintln!(
@@ -98,7 +102,11 @@ fn v2_manifest_贡献经_slot_列出并可读取_entry_与资源() {
     );
 
     // ── 贡献按 Slot 列出，source=manifest，sandbox 归一化正确 ──
-    let contributions = list_slot_contributions("settings.plugin-page");
+    // （注册表为进程级单例，其他用例可能注入别的插件，按 plugin_id 过滤）
+    let contributions = list_slot_contributions("settings.plugin-page")
+        .into_iter()
+        .filter(|item| item.plugin_id == "prompt")
+        .collect::<Vec<_>>();
     assert_eq!(contributions.len(), 2, "应列出两条 manifest 贡献");
     assert!(
         contributions
@@ -138,4 +146,105 @@ fn v2_manifest_贡献经_slot_列出并可读取_entry_与资源() {
 
     // ── 未知贡献拒绝 ──
     assert!(open_manifest_view("prompt", "nonexistent").is_err());
+}
+
+/// 准备声明 extension.tab 的 v2 插件（memory 制品，独立插件 ID 避免与
+/// settings 用例的 prompt 注册项在全局注册表冲突）。
+fn stage_extension_tab_plugin(root: &std::path::Path, manifest: &str) {
+    let dir = root.join("plugins").join("memory");
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::copy(
+        wasm_path("tiangong_plugin_memory_wasm.wasm"),
+        dir.join("tiangong_plugin_memory_wasm.wasm"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("plugin.json"), manifest).unwrap();
+    std::fs::write(
+        dir.join("app").join("index.html"),
+        "<html><body>board</body></html>",
+    )
+    .unwrap();
+}
+
+#[test]
+fn extension_tab_贡献聚合为_app_元数据() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let wasm = wasm_path("tiangong_plugin_memory_wasm.wasm");
+    if !wasm.exists() {
+        eprintln!("跳过测试：未找到 wasm 组件 {}", wasm.display());
+        return;
+    }
+
+    let root = tempfile::TempDir::new().unwrap();
+    stage_extension_tab_plugin(
+        root.path(),
+        r#"{
+            "schema_version": 2,
+            "id": "memory",
+            "version": "0.1.1",
+            "wasm": { "binary": "tiangong_plugin_memory_wasm.wasm" },
+            "permissions": ["bridge.call"],
+            "ui": {
+                "contributions": [
+                    {
+                        "slot": "extension.tab",
+                        "id": "board",
+                        "title": "看板",
+                        "description": "任务看板面板",
+                        "icon": "board",
+                        "entry": "app/index.html",
+                        "open_mode": "multi"
+                    },
+                    {
+                        "slot": "extension.tab",
+                        "id": "chart",
+                        "title": "图表",
+                        "entry": "app/index.html"
+                    },
+                    {
+                        "slot": "settings.plugin-page",
+                        "id": "settings",
+                        "entry": "app/index.html"
+                    }
+                ]
+            }
+        }"#,
+    );
+
+    assert_eq!(preload_installed_plugins(root.path()), 1);
+
+    // ── App 列表：仅 extension.tab 贡献，settings 贡献不进入 ──
+    let apps = list_extension_apps();
+    let memory_apps = apps
+        .iter()
+        .filter(|app| app.plugin_id == "memory")
+        .collect::<Vec<_>>();
+    assert_eq!(memory_apps.len(), 2, "两条 extension.tab 贡献聚合为 App");
+    let board = memory_apps
+        .iter()
+        .find(|app| app.contribution_id == "board")
+        .unwrap();
+    assert_eq!(board.plugin_id, "memory");
+    assert_eq!(board.name, "Memory", "插件 descriptor 名称作为 App 名");
+    assert_eq!(board.title, "看板");
+    assert_eq!(board.description, "任务看板面板");
+    assert_eq!(board.open_mode, tiangong_plugin_runtime::OpenMode::Multi);
+    assert_eq!(board.sandbox, tiangong_plugin_runtime::SandboxKind::Shadow);
+
+    // open_mode 缺省 singleton
+    let chart = memory_apps
+        .iter()
+        .find(|app| app.contribution_id == "chart")
+        .unwrap();
+    assert_eq!(
+        chart.open_mode,
+        tiangong_plugin_runtime::OpenMode::Singleton
+    );
+
+    // settings 贡献仍在 Slot 通道可见（不进入 App 列表）
+    let memory_settings = list_slot_contributions("settings.plugin-page")
+        .into_iter()
+        .find(|item| item.plugin_id == "memory")
+        .expect("memory 的 settings 贡献应经 Slot 通道可见");
+    assert_eq!(memory_settings.source, ContributionSource::Manifest);
 }

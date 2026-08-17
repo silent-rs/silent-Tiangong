@@ -235,6 +235,9 @@ pub struct UiContribution {
     pub id: String,
     /// 展示标题。
     pub title: String,
+    /// 用途说明（矩阵卡片等展示位）。
+    #[serde(default)]
+    pub description: String,
     /// 图标名或内联 SVG。
     #[serde(default)]
     pub icon: String,
@@ -380,6 +383,7 @@ mod tests {
             slot: "extension.tab".to_string(),
             id: "board-tab".to_string(),
             title: "看板".to_string(),
+            description: "任务看板面板".to_string(),
             icon: "board".to_string(),
             entry: "index.html".to_string(),
             open_mode: OpenMode::Multi,
@@ -389,6 +393,7 @@ mod tests {
         let json = serde_json::to_string(&contribution).unwrap();
         assert!(json.contains("\"open_mode\":\"multi\""));
         assert!(json.contains("\"sandbox\":\"shadow\""));
+        assert!(json.contains("\"description\":\"任务看板面板\""));
 
         let parsed: UiContribution = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, contribution);
