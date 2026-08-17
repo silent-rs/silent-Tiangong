@@ -6,7 +6,7 @@
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::Command;
-use crate::session::MessageRole;
+use crate::session::{Message, MessageRole};
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
@@ -92,6 +92,20 @@ pub(crate) async fn run_turn(
         ctx.session.messages[idx].set_turn_result(elapsed_ms, status);
     }
 
+    // ── 失败轮次追加用户可见的错误消息 ──
+    // System 消息被 build_provider_messages 排除，不进模型上下文；前端按
+    // "[错误]" 前缀渲染红色错误框。消息先入 session 随下方最终落盘持久化，
+    // 终态发布前再补发 upsert 事件，实时会话与重载会话都能看到失败原因。
+    // 给模型的失败痕迹由 persist_error 注入的 react_loop_error 消息对负责。
+    let user_error_snapshot = match &outcome {
+        TurnExecutionOutcome::Failed(message) => {
+            let error_message = Message::new(MessageRole::System, format!("[错误] {message}"));
+            ctx.session.messages.push(error_message.clone());
+            Some(error_message)
+        }
+        _ => None,
+    };
+
     // ── 清理运行态并最终持久化（不等待插件收尾）──
     // base64 等瞬态内容只用于本轮模型请求，不能进入磁盘会话合同。
     // 关键路径顺序：落盘 → 快照 → 终态。插件收尾（含 on_cancel）移到终态之后，
@@ -139,6 +153,14 @@ pub(crate) async fn run_turn(
 
     // ── 生成终态 ──
     // 每轮独立终态：turn 收尾完成即发布（连续轮次各自拥有自己的终态事件）。
+    // 失败错误消息先于终态发布：前端先插入红框消息，再收到 error 终态更新
+    // 轮次状态，避免终态把运行状态归位后错误才姗姗来迟。
+    if let Some(message) = user_error_snapshot {
+        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message,
+            deferred_tool_injections: None,
+        });
+    }
     let terminal = outcome.terminal_event(usage);
     let _ = stream_tx.send(terminal.clone());
 

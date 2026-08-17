@@ -138,9 +138,9 @@ pub(crate) fn select_client_for_request<'a>(
 /// - 走标准注入通道保证 append-only、provider 序列化为合法 tool pair，cache 友好。
 ///
 /// 去重边界：`inject_tool_to_messages` 仅对连续相同的 plugin_injection 结果去重，
-/// 不会与前端 `StreamEvent::Error` 落盘的 `[错误]` System 消息跨格式去重——因此
-/// 前端若也落盘，UI 上仍可能出现重复错误消息。engine 侧落盘作为前端时序丢失的
-/// 兜底，确保会话重载后至少能看到失败原因。
+/// 不与 `run_turn` 失败收尾追加的 `[错误]` System 消息跨格式去重——二者各司其职：
+/// 本消息对模型可见（携带继续指令），`[错误]` 消息仅前端可见（System 角色被
+/// `build_provider_messages` 排除）。
 pub(crate) fn persist_error(ctx: &mut TurnContext, message: impl Into<String>) {
     let message = message.into();
     let payload = serde_json::json!({
