@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { MessageItem } from "./types";
-import { formatMessageTime, summarizeToolGroup } from "./utils";
+import { formatMessageTime, formatDuration, summarizeToolGroup } from "./utils";
 import type { ExpansionState } from "./useExpansionState";
 import {
   buildRunningToolModel,
@@ -136,6 +136,11 @@ function ToolRunRow({
             }`}
           >
             {summaryText}
+          </span>
+        )}
+        {model.durationMs != null && model.durationMs > 0 && (
+          <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums" title="本次调用耗时">
+            {formatDuration(model.durationMs)}
           </span>
         )}
       </button>

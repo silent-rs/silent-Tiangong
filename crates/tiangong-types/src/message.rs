@@ -275,6 +275,14 @@ pub struct Message {
     /// 该轮次的最终状态。仅持久化到用户消息，便于前端直观区分成功/失败/取消。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_status: Option<TurnStatus>,
+    /// 本次模型输出中思考（reasoning）阶段的耗时（毫秒）：首个 reasoning 增量
+    /// 到最后一个增量的时长。仅持久化到 assistant 消息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_elapsed_ms: Option<u64>,
+    /// 本次模型输出中正文生成阶段的耗时（毫秒）：首个文本增量到最后一个增量
+    /// 的时长。仅持久化到 assistant 消息。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_elapsed_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -569,6 +577,10 @@ impl<'de> Deserialize<'de> for Message {
             created_at: String,
             elapsed_ms: Option<u64>,
             turn_status: Option<TurnStatus>,
+            #[serde(default)]
+            reasoning_elapsed_ms: Option<u64>,
+            #[serde(default)]
+            text_elapsed_ms: Option<u64>,
         }
 
         let raw = MessageRaw::deserialize(deserializer)?;
@@ -591,6 +603,8 @@ impl<'de> Deserialize<'de> for Message {
             created_at: raw.created_at,
             elapsed_ms: raw.elapsed_ms,
             turn_status: raw.turn_status,
+            reasoning_elapsed_ms: raw.reasoning_elapsed_ms,
+            text_elapsed_ms: raw.text_elapsed_ms,
         })
     }
 }
@@ -613,6 +627,8 @@ impl Message {
             created_at: now_text(),
             elapsed_ms: None,
             turn_status: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
         }
     }
 
@@ -638,6 +654,8 @@ impl Message {
             created_at: now_text(),
             elapsed_ms: None,
             turn_status: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
         }
     }
 

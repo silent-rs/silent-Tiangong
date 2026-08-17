@@ -104,6 +104,8 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         worker_id: None,
         elapsed_ms: None,
         turn_status: None,
+        reasoning_elapsed_ms: None,
+        text_elapsed_ms: None,
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,

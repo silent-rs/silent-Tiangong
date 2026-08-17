@@ -345,6 +345,7 @@ function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
     tool_name: event.name,
     tool_result_is_error: event.ok === false,
     phase: 'react',
+    duration_ms: event.duration_ms ?? undefined,
     created_at: existingIndex >= 0
       ? messages[existingIndex].created_at
       : new Date().toISOString(),

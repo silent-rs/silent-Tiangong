@@ -11,6 +11,7 @@ import { useResolvedTheme } from "@/hooks/useTheme";
 import { hasMediaBlocks, textContent } from "@/api/tauri";
 import {
   formatMessageTime,
+  formatDuration,
   msgReasoning,
   resolveMarkdownImages,
   extractLlmExplanation,
@@ -39,12 +40,6 @@ interface AgentTurnProps {
   hasTts: boolean;
   selectedAgentTab: string | null;
   isActive?: boolean;
-}
-
-/** 将毫秒格式化为人类可读时长：< 1s 显示 ms，否则显示 s（保留 1 位小数）。 */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
@@ -103,7 +98,7 @@ function AgentTurnView({
 
   type Fragment =
     | { type: "explanation"; text: string; time?: string }
-    | { type: "thinking"; content: string; time?: string }
+    | { type: "thinking"; content: string; time?: string; elapsedMs?: number | null }
     | { type: "tool_group"; key: string; tools: MessageItem[] }
     | { type: "user"; msg: MessageItem }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
@@ -156,14 +151,14 @@ function AgentTurnView({
       if (prevFrag?.type === "explanation" && prevFrag.text === textContent(msg).trim() && !isStreaming) fragments.pop();
       if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
-        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
+        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: msg.reasoning_elapsed_ms });
       }
       // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
       // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
       if (isNeedMoreWorkMessage(msg)) {
         const needMoreWorkBody = stripSummaryStatusMarker(textContent(msg)).trim();
         if (needMoreWorkBody || isStreaming) {
-          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at });
+          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: msg.text_elapsed_ms });
         }
         continue;
       }
@@ -233,7 +228,7 @@ function AgentTurnView({
     if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
     if (frag.type === "thinking") {
       // 历史/已完成思考块一律视为非活跃且默认折叠。
-      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} /></div>;
+      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} elapsedMs={frag.elapsedMs} /></div>;
     }
         if (frag.type === "explanation") {
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
@@ -325,7 +320,12 @@ function AgentTurnView({
               ) : null}
               {!isStreaming && msg.content && visibleText && (
                 <div className="mt-1 border-t border-border/50 pt-1">
-                  <MessageActions text={visibleText} showTts={hasTts} durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined} />
+                  <MessageActions
+                    text={visibleText}
+                    showTts={hasTts}
+                    durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined}
+                    generationMs={!isStreaming ? msg.text_elapsed_ms : undefined}
+                  />
                 </div>
               )}
             </div>

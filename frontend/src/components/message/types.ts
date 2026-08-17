@@ -24,6 +24,12 @@ export interface MessageItem {
   elapsed_ms?: number;
   /** 该轮次的最终状态。仅用户消息携带。 */
   turn_status?: "success" | "failed" | "cancelled";
+  /** 本次模型输出思考阶段的耗时（毫秒）。仅 assistant 消息携带。 */
+  reasoning_elapsed_ms?: number | null;
+  /** 本次模型输出正文生成阶段的耗时（毫秒）。仅 assistant 消息携带。 */
+  text_elapsed_ms?: number | null;
+  /** 单次工具调用耗时（毫秒）。由 ToolResult 流式事件写入工具消息。 */
+  duration_ms?: number | null;
 }
 
 export interface MessageGroup {

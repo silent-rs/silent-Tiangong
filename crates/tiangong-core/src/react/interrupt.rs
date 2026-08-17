@@ -14,10 +14,19 @@ pub(super) fn persist_interrupted_llm_output(
     pending_msg_id: &str,
     streamed_text: &str,
     streamed_reasoning: &str,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) {
     match purpose {
         LlmPurpose::React { .. } => {
-            persist_streamed_react_message(ctx, pending_msg_id, streamed_text, streamed_reasoning);
+            persist_streamed_react_message(
+                ctx,
+                pending_msg_id,
+                streamed_text,
+                streamed_reasoning,
+                reasoning_elapsed_ms,
+                text_elapsed_ms,
+            );
         }
     }
 }
@@ -56,6 +65,7 @@ pub(super) async fn interrupt_active_work(
                 streamed_text,
                 streamed_reasoning,
                 streaming_usage,
+                timing,
                 ..
             } = active;
             sink.finish();
@@ -67,6 +77,8 @@ pub(super) async fn interrupt_active_work(
                 &pending_msg_id,
                 &streamed_text,
                 &streamed_reasoning,
+                timing.reasoning.elapsed_ms(),
+                timing.text.elapsed_ms(),
             );
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);

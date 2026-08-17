@@ -1,14 +1,9 @@
 import { useState } from "react";
 import { Copy, Check, Volume2, Square, Loader2, Clock } from "lucide-react";
 import { api } from "@/api/tauri";
+import { formatDuration } from "./utils";
 
-/** 将毫秒格式化为人类可读时长：< 1s 显示 ms，否则显示 s（保留 1 位小数）。 */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-export function MessageActions({ text, showTts, durationMs }: { text: string; showTts: boolean; durationMs?: number | null }) {
+export function MessageActions({ text, showTts, durationMs, generationMs }: { text: string; showTts: boolean; durationMs?: number | null; generationMs?: number | null }) {
   const [copied, setCopied] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [ttsLoading, setTtsLoading] = useState(false);
@@ -49,6 +44,12 @@ export function MessageActions({ text, showTts, durationMs }: { text: string; sh
         <button onClick={handleTts} className={btnClass} title={playing ? "停止播放" : "朗读"}>
           {ttsLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : playing ? <Square className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
         </button>
+      )}
+      {generationMs != null && generationMs > 0 && (
+        <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="回复生成耗时">
+          <Clock className="w-3 h-3" />
+          {formatDuration(generationMs)}
+        </span>
       )}
       {durationMs != null && durationMs > 0 && (
         <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">

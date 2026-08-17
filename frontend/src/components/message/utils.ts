@@ -22,6 +22,12 @@ export function formatMessageTime(createdAt?: string): string {
   }
 }
 
+/** 将毫秒格式化为人类可读时长：< 1s 显示 ms，否则显示 s（保留 1 位小数）。 */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export function msgReasoning(message: MessageItem): string {
   return (message.reasoning_content ?? "").trim();
 }

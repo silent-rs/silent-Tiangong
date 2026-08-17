@@ -106,6 +106,8 @@ pub(crate) fn upsert_assistant_text_message(
     text: &str,
     reasoning_content: &str,
     phase: crate::session::MessagePhase,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) {
     let mut message = Message::with_reasoning(
         MessageRole::Assistant,
@@ -114,6 +116,8 @@ pub(crate) fn upsert_assistant_text_message(
     )
     .with_phase(phase);
     message.id = message_id.to_string();
+    message.reasoning_elapsed_ms = reasoning_elapsed_ms;
+    message.text_elapsed_ms = text_elapsed_ms;
     if let Some(existing) = session
         .messages
         .iter_mut()
