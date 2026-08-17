@@ -136,6 +136,8 @@ fn record_tool_calls(
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
     stage: String,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) -> Vec<ToolCall> {
     let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
@@ -177,6 +179,8 @@ fn record_tool_calls(
         &response.reasoning_content,
         response.reasoning_signature.clone(),
         &calls.iter().collect::<Vec<_>>(),
+        reasoning_elapsed_ms,
+        text_elapsed_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     calls
@@ -395,7 +399,7 @@ pub(super) fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
-    append_tool_result_message(
+    append_tool_result_message_with_duration(
         &mut ctx.session,
         &call.id,
         &call.name,
@@ -412,6 +416,7 @@ pub(super) fn record_completed_tool_call(
             .render_for_model()
         },
         !result.ok,
+        duration_ms,
     );
     append_runtime_tool_message(
         &mut ctx.session,
@@ -1074,6 +1079,8 @@ fn complete_llm_request(
                     &pending_msg_id,
                     &response,
                     format!("react-round-{}", state.budget.request_round),
+                    reasoning_elapsed_ms,
+                    text_elapsed_ms,
                 );
                 NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),

@@ -15,6 +15,7 @@ export function ThinkingBlock({ content, isActive = false, defaultExpanded, elap
   // 推理完成后默认收起为一行摘要；活跃态保持展开（便于用户跟随推理过程）。
   const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? isActive);
   // 流式思考中本地计时（从思考开始展示起算，与后端首增量计时基本一致）。
+  // 结束后保留最后一次计时作为冻结值展示，待后端持久化值到达后被替换。
   const [liveMs, setLiveMs] = useState(0);
 
   useEffect(() => {
@@ -32,7 +33,7 @@ export function ThinkingBlock({ content, isActive = false, defaultExpanded, elap
     }
   }, [isActive]);
 
-  const displayMs = elapsedMs ?? (isActive ? liveMs : null);
+  const displayMs = elapsedMs ?? liveMs;
 
   return (
     <div className="mb-2">

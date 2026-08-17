@@ -283,6 +283,10 @@ pub struct Message {
     /// 的时长。仅持久化到 assistant 消息。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_elapsed_ms: Option<u64>,
+    /// 单次工具调用的执行耗时（毫秒）。仅持久化到 tool 结果消息，
+    /// 历史 tool_calls 调用耗时展示；未测量（拒绝/重复跳过等）为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -581,6 +585,8 @@ impl<'de> Deserialize<'de> for Message {
             reasoning_elapsed_ms: Option<u64>,
             #[serde(default)]
             text_elapsed_ms: Option<u64>,
+            #[serde(default)]
+            duration_ms: Option<u64>,
         }
 
         let raw = MessageRaw::deserialize(deserializer)?;
@@ -605,6 +611,7 @@ impl<'de> Deserialize<'de> for Message {
             turn_status: raw.turn_status,
             reasoning_elapsed_ms: raw.reasoning_elapsed_ms,
             text_elapsed_ms: raw.text_elapsed_ms,
+            duration_ms: raw.duration_ms,
         })
     }
 }
@@ -629,6 +636,7 @@ impl Message {
             turn_status: None,
             reasoning_elapsed_ms: None,
             text_elapsed_ms: None,
+            duration_ms: None,
         }
     }
 
@@ -656,12 +664,19 @@ impl Message {
             turn_status: None,
             reasoning_elapsed_ms: None,
             text_elapsed_ms: None,
+            duration_ms: None,
         }
     }
 
     /// 设置消息的执行阶段标记（链式调用）。
     pub fn with_phase(mut self, phase: MessagePhase) -> Self {
         self.phase = phase;
+        self
+    }
+
+    /// 写入单次工具调用的执行耗时（链式调用）。仅对 tool 结果消息有意义。
+    pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.duration_ms = Some(duration_ms);
         self
     }
 
