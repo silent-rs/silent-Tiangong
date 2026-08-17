@@ -17,9 +17,9 @@ interface TabsContainerProps {
   onClose: () => void;
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
-  /** tabs 持久化落盘完成后通知（宿主据此刷新各 App 的"已打开实例"标记，
-   *  避免插件 tab_updated 事件先于落盘读到旧数据导致标记残留）。 */
-  onTabsPersisted?: (sessionId: string) => void;
+  /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
+   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
+  onTabKindsChanged?: (kinds: TabKind[]) => void;
   /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
   mode?: 'app' | 'matrix';
   /** 矩阵态渲染到内容区的视图（由宿主注入，保持容器与矩阵解耦）。 */
@@ -81,7 +81,7 @@ export function TabsContainer({
   terminalSyncVersion = 0,
   onClose,
   onShowMatrix,
-  onTabsPersisted,
+  onTabKindsChanged,
   mode = 'app',
   matrix,
   onActiveKindChange,
@@ -114,6 +114,18 @@ export function TabsContainer({
     [activeTabId, tabs],
   );
 
+  // tab 类型集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
+  const onTabKindsChangedRef = useRef(onTabKindsChanged);
+  onTabKindsChangedRef.current = onTabKindsChanged;
+  const lastTabKindsRef = useRef<string>('');
+  useEffect(() => {
+    const kinds = Array.from(new Set(tabs.map((tab) => tab.kind)));
+    const key = kinds.join(',');
+    if (key === lastTabKindsRef.current) return;
+    lastTabKindsRef.current = key;
+    onTabKindsChangedRef.current?.(kinds);
+  }, [tabs]);
+
   useEffect(() => {
     onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);
   }, [activeTab?.kind, isVisible, onActiveKindChange]);
@@ -121,16 +133,6 @@ export function TabsContainer({
   initialTabKindRef.current = initialTabKind;
   requestedTerminalTabIdRef.current = requestedTerminalTabId ?? null;
   isVisibleRef.current = isVisible;
-  const onTabsPersistedRef = useRef(onTabsPersisted);
-  onTabsPersistedRef.current = onTabsPersisted;
-
-  /** 持久化落盘完成后通知宿主刷新 App 标记（读取方拿到的一定是最新 tabs）。 */
-  const notifyTabsPersisted = useCallback((sessionId: string | null | undefined) => {
-    const key = sessionId || terminalSessionIdRef.current;
-    if (key) {
-      onTabsPersistedRef.current?.(key);
-    }
-  }, []);
 
   const syncBrowserRuntimeForTabs = useCallback(async (
     sessionId: string,
@@ -379,10 +381,8 @@ export function TabsContainer({
     if (hydratedSessionRef.current !== sessionId) return;
 
     const activeId = activeTabIdRef.current || currentTabs[0]?.id || null;
-    void api.setSessionTabs(sessionId, currentTabs, activeId)
-      .then(() => notifyTabsPersisted(sessionId))
-      .catch(console.error);
-  }, [notifyTabsPersisted]);
+    void api.setSessionTabs(sessionId, currentTabs, activeId).catch(console.error);
+  }, []);
 
   useEffect(() => {
     if (!activeSessionId) {
@@ -606,14 +606,7 @@ export function TabsContainer({
     if (nextTabs.length === 0) {
       const sessionId = activeSessionIdRef.current;
       if (sessionId) {
-        // 清空持久化完成后再通知宿主刷新标记：browserTabClose 触发的
-        // tab_updated 事件可能先于此落盘，读旧数据会让"已打开"绿点残留。
-        void api.setSessionTabs(sessionId, [], null)
-          .then(() => notifyTabsPersisted(sessionId))
-          .catch(console.error);
-      } else {
-        // 新对话无持久化，内存已清空，直接按会话 key 刷新
-        notifyTabsPersisted(sessionId);
+        void api.setSessionTabs(sessionId, [], null).catch(console.error);
       }
       // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
       void api.browserHide(terminalSessionId).catch(console.error);
@@ -634,7 +627,7 @@ export function TabsContainer({
         void api.browserHide(terminalSessionId).catch(console.error);
       }
     }
-  }, [notifyTabsPersisted, onClose, onShowMatrix, terminalSessionId]);
+  }, [onClose, onShowMatrix, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
     void api.browserHide(terminalSessionId).catch(console.error);
@@ -670,9 +663,7 @@ export function TabsContainer({
     const tabsToPersist = tabs;
     const activeTabIdToPersist = activeTabId || tabsToPersist[0]?.id || null;
     persistTimerRef.current = window.setTimeout(() => {
-      void api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist)
-        .then(() => notifyTabsPersisted(activeSessionId))
-        .catch(console.error);
+      void api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist).catch(console.error);
       persistTimerRef.current = null;
     }, TABS_PERSIST_DEBOUNCE_MS);
 
@@ -682,7 +673,7 @@ export function TabsContainer({
         persistTimerRef.current = null;
       }
     };
-  }, [activeSessionId, activeTabId, notifyTabsPersisted, tabs]);
+  }, [activeSessionId, activeTabId, tabs]);
 
   useEffect(() => {
     const handlePageHide = () => persistTabsNow();

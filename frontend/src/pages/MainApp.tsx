@@ -223,7 +223,13 @@ export function MainApp() {
   // 数据源用持久化的 getSessionTabs（而非各插件的 runtime tab_list）：
   // 历史会话切回来时 runtime state 尚未重建，runtime 查询会返回空，
   // 而持久化数据真实记录了该会话拥有的 browser/terminal tab。
+  // 拓展区面板挂载期间以 TabsContainer 的内存 tab 集合（onTabKindsChanged）
+  // 为唯一事实源：持久化读取可能撞上落盘竞态（新对话打开/首条消息落盘前
+  // 读到空），用它覆盖会把绿点误灭。本刷新只服务「面板从未挂载」的恢复。
+  const workspacePanelMountedRef = useRef(false);
+  workspacePanelMountedRef.current = workspacePanelMounted;
   const refreshAgentActiveMarkers = useCallback(async (sessionId: string) => {
+    if (workspacePanelMountedRef.current) return;
     try {
       const result = await api.getSessionTabs(sessionId);
       let hasBrowser = false;
@@ -737,8 +743,9 @@ export function MainApp() {
                     }
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
-                    onTabsPersisted={(sessionId) => {
-                      void refreshAgentActiveMarkers(sessionId);
+                    onTabKindsChanged={(kinds) => {
+                      setSessionBrowserTabs(kinds.includes('browser'));
+                      setSessionTerminalTabs(kinds.includes('terminal'));
                     }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
