@@ -878,16 +878,6 @@ export function TabsContainer({
               </ContextMenu>
             );
           })}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 w-7 shrink-0 p-0"
-            onClick={() => handleNewTab('terminal')}
-            title="新建终端"
-            aria-label="新建终端标签页"
-          >
-            <TerminalSquare className="h-3.5 w-3.5" />
-          </Button>
         </div>
 
         <Button
