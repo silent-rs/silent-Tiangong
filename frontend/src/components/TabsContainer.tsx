@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Globe, Grid3x3, Plus, TerminalSquare, X } from 'lucide-react';
+import { Globe, Grid3x3, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
 import type { TabKind, TabState } from '@/api/tauri';
@@ -7,6 +7,13 @@ import { useStore } from '@/store/useStore';
 import { BrowserTabContent } from './BrowserTabContent';
 import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from './ui/context-menu';
 
 interface TabsContainerProps {
   initialTabKind: TabKind;
@@ -30,6 +37,17 @@ interface TabsContainerProps {
 const DEFAULT_BROWSER_URL = 'about:blank';
 const TABS_PERSIST_DEBOUNCE_MS = 500;
 const BUSY_TERMINAL_PHASES = new Set(['UserActive', 'Running', 'Interactive']);
+
+/** 内置 App 的打开模式（设计文档 6.6）：浏览器单实例（重复打开聚焦），
+ *  终端多实例（每次新建）。右键菜单等操作按此约束：单实例不提供新建。 */
+const TAB_KIND_MULTI_INSTANCE: Record<TabKind, boolean> = {
+  browser: false,
+  terminal: true,
+};
+const TAB_KIND_NAME: Record<TabKind, string> = {
+  browser: '浏览器',
+  terminal: '终端',
+};
 
 function nowText(): string {
   return new Date().toISOString();
@@ -715,43 +733,69 @@ export function TabsContainer({
             const busy = tab.kind === 'terminal'
               && Boolean(tab.phase && BUSY_TERMINAL_PHASES.has(tab.phase));
             return (
-              <div
-                key={tab.id}
-                className={`group flex h-7 min-w-28 max-w-44 shrink-0 items-center gap-1.5 rounded px-2 text-xs transition-colors ${
-                  active
-                    ? 'bg-muted text-foreground'
-                    : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-                }`}
-                title={tab.title}
-              >
-                <button
-                  type="button"
-                  className="flex min-w-0 flex-1 items-center gap-1.5"
-                  onClick={() => handleSwitchTab(tab.id)}
-                >
-                  <Icon className="h-3.5 w-3.5 shrink-0" />
-                  {busy && (
-                    <span
-                      className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 ring-1 ring-yellow-600/40"
-                      title="终端繁忙"
-                      aria-label="终端繁忙"
-                    />
+              <ContextMenu key={tab.id}>
+                <ContextMenuTrigger asChild>
+                  <div
+                    className={`group flex h-7 min-w-28 max-w-44 shrink-0 cursor-default items-center gap-1.5 rounded px-2 text-xs transition-colors ${
+                      active
+                        ? 'bg-muted text-foreground'
+                        : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                    }`}
+                    title={tab.title}
+                  >
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-1.5"
+                      onClick={() => handleSwitchTab(tab.id)}
+                    >
+                      <Icon className="h-3.5 w-3.5 shrink-0" />
+                      {busy && (
+                        <span
+                          className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 ring-1 ring-yellow-600/40"
+                          title="终端繁忙"
+                          aria-label="终端繁忙"
+                        />
+                      )}
+                      <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleCloseTab(tab.id);
+                      }}
+                      title="关闭"
+                      aria-label="关闭标签页"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  {/* 多实例 App 才提供新建；单实例（浏览器）重复打开聚焦已有，不支持多开 */}
+                  {TAB_KIND_MULTI_INSTANCE[tab.kind] && (
+                    <ContextMenuItem onClick={() => void handleNewTab(tab.kind)}>
+                      新建{TAB_KIND_NAME[tab.kind]}标签页
+                    </ContextMenuItem>
                   )}
-                  <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
-                </button>
-                <button
-                  type="button"
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleCloseTab(tab.id);
-                  }}
-                  title="关闭"
-                  aria-label="关闭标签页"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
+                  {tabs.length > 1 && TAB_KIND_MULTI_INSTANCE[tab.kind] && (
+                    <ContextMenuItem
+                      onClick={() => {
+                        for (const other of tabsRef.current.filter((item) => item.id !== tab.id)) {
+                          handleCloseTab(other.id);
+                        }
+                      }}
+                    >
+                      关闭其他标签页
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuSeparator className="my-1" />
+                  <ContextMenuItem onClick={() => handleCloseTab(tab.id)}>
+                    关闭标签页
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             );
           })}
           <Button
@@ -763,16 +807,6 @@ export function TabsContainer({
             aria-label="新建终端标签页"
           >
             <TerminalSquare className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 w-7 shrink-0 p-0"
-            onClick={() => handleNewTab('browser')}
-            title="新建浏览器"
-            aria-label="新建浏览器标签页"
-          >
-            <Plus className="h-3.5 w-3.5" />
           </Button>
         </div>
 
