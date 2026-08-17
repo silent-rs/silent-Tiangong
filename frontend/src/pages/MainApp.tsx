@@ -737,6 +737,9 @@ export function MainApp() {
                     }
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
+                    onTabsPersisted={(sessionId) => {
+                      void refreshAgentActiveMarkers(sessionId);
+                    }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
                 </div>
