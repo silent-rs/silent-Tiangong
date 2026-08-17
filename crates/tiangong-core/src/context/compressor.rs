@@ -5,6 +5,7 @@ use crate::session::{Message, MessagePhase, MessageRole, Session};
 pub(crate) fn is_compressible(message: &Message) -> bool {
     !message.model_excluded
         && message.role != MessageRole::System
+        && message.role != MessageRole::Notice
         && message.phase != MessagePhase::CompressedResume
 }
 

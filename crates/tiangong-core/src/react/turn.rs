@@ -93,16 +93,15 @@ pub(crate) async fn run_turn(
     }
 
     // ── 失败轮次追加用户可见的错误消息 ──
-    // model_excluded 显式排除出模型上下文与压缩摘要（与 agent-team 的
-    // "[Agent]" 仅前端可见消息同一惯例），不依赖 System 角色被
-    // build_provider_messages 过滤的实现细节；前端按 "[错误]" 前缀渲染
-    // 红色错误框。消息先入 session 随下方最终落盘持久化，终态发布前再
-    // 补发 upsert 事件，实时会话与重载会话都能看到失败原因。
-    // 给模型的失败痕迹由 persist_error 注入的 react_loop_error 消息对负责。
+    // Notice 是"系统发给用户的通知"通道，角色本身保证排除出模型上下文与
+    // 压缩摘要（context 构建、压缩、provider 转换三处过滤），无需再加
+    // model_excluded。前端按 "[错误]" 前缀渲染红色错误框。消息先入 session
+    // 随下方最终落盘持久化，终态发布前再补发 upsert 事件，实时会话与重载
+    // 会话都能看到失败原因。给模型的失败痕迹由 persist_error 注入的
+    // react_loop_error 消息对负责。
     let user_error_snapshot = match &outcome {
         TurnExecutionOutcome::Failed(message) => {
-            let mut error_message = Message::new(MessageRole::System, format!("[错误] {message}"));
-            error_message.model_excluded = true;
+            let error_message = Message::new(MessageRole::Notice, format!("[错误] {message}"));
             ctx.session.messages.push(error_message.clone());
             Some(error_message)
         }

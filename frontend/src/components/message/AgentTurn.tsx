@@ -168,7 +168,7 @@ function AgentTurnView({
         continue;
       }
       fragments.push({ type: "assistant", msg, isStreaming });
-    } else if (msg.role === "system" && textContent(msg).startsWith("[错误]")) {
+    } else if ((msg.role === "notice" || msg.role === "system") && textContent(msg).startsWith("[错误]")) {
       flushTools();
       fragments.push({ type: "error_system", msg });
     } else if (msg.role === "system" && textContent(msg).startsWith("[重试]")) {
@@ -182,7 +182,7 @@ function AgentTurnView({
       flushTools();
       const category = textContent(msg).startsWith("[文件锁]") ? "lock" : "info";
       fragments.push({ type: "agent_event", category, content: textContent(msg), agentRoles: extractAgentRoles(textContent(msg), agents) });
-    } else if (msg.role === "system") {
+    } else if (msg.role === "system" || msg.role === "notice") {
       flushTools();
       fragments.push({ type: "other_system", msg });
     }
@@ -206,9 +206,13 @@ function AgentTurnView({
   let userFrag: Fragment | null = null;
   const summaryFrags: Fragment[] = [];
   const processFrags: Fragment[] = [];
+  // 错误通知不随过程折叠：失败轮次往往没有其他可见输出，错误原因必须始终可见。
+  const errorFrags: Fragment[] = [];
   for (const frag of mergedFragments) {
     if (frag.type === "user") {
       userFrag = frag;
+    } else if (frag.type === "error_system") {
+      errorFrags.push(frag);
     } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
       summaryFrags.push(frag);
     } else {
@@ -390,6 +394,7 @@ function AgentTurnView({
           {processFrags.map((frag, i) => renderFragment(frag, i))}
         </div>
       )}
+      {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
     </div>
   );

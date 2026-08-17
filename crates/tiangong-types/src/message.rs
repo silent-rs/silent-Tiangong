@@ -16,6 +16,10 @@ fn is_inline_data_reference(value: &str) -> bool {
 }
 
 /// 消息角色
+///
+/// [`Notice`](MessageRole::Notice) 是系统发给用户的通知（如轮次失败原因），
+/// 仅前端可见：消息须带 `model_excluded` 排除出模型上下文与压缩摘要，
+/// 不与 [`System`](MessageRole::System)（系统提示通道）混用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
@@ -23,6 +27,7 @@ pub enum MessageRole {
     User,
     Assistant,
     Tool,
+    Notice,
 }
 
 /// 单个对话轮次的最终执行状态，仅持久化到用户消息（turn 锚点）。

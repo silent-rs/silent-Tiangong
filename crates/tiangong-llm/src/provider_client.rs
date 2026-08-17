@@ -1234,6 +1234,8 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
         MessageRole::Assistant => LlmMessageRole::Assistant,
         MessageRole::Tool => LlmMessageRole::Tool,
         MessageRole::System => return Ok(None),
+        // Notice 是系统发给用户的通知，任何路径都不得进入模型请求。
+        MessageRole::Notice => return Ok(None),
     };
 
     if msg.role == MessageRole::Tool {

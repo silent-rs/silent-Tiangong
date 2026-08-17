@@ -237,7 +237,9 @@ fn compression_split_point(session: &Session) -> Option<usize> {
     let start = session.summary_up_to.min(session.messages.len());
     let last_visible = (start..session.messages.len()).rev().find(|&index| {
         let message = &session.messages[index];
-        !message.model_excluded && message.role != MessageRole::System
+        !message.model_excluded
+            && message.role != MessageRole::System
+            && message.role != MessageRole::Notice
     })?;
     let last_message = &session.messages[last_visible];
     let recent_start = if last_message.role == MessageRole::Tool {
