@@ -50,6 +50,19 @@ export interface LoadedSession {
 export type TabKind = 'browser' | 'terminal';
 export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
 
+/** 内置 App 的打开模式（设计文档 6.6）：浏览器单实例（重复打开聚焦），
+ *  终端多实例（每次新建）。tab 操作与矩阵菜单按此约束。 */
+export const BUILTIN_TAB_KIND_MULTI: Record<TabKind, boolean> = {
+  browser: false,
+  terminal: true,
+};
+
+/** 内置 App 展示名。 */
+export const TAB_KIND_NAME: Record<TabKind, string> = {
+  browser: '浏览器',
+  terminal: '终端',
+};
+
 export interface TabState {
   id: string;
   kind: TabKind;

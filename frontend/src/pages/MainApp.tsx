@@ -12,7 +12,7 @@ import { AppSidebar } from '@/components/AppSidebar';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
-import { TabsContainer } from '@/components/TabsContainer';
+import { TabsContainer, type AppTabCommand } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
@@ -117,6 +117,8 @@ export function MainApp() {
   // 拓展区三态（设计文档 6.7.2）：面板展开时区分矩阵态（App 矩阵）与 App 态
   // （聚焦某类 App 实例）；关闭态由 showWorkspacePanel=false 表达。
   const [workspaceMode, setWorkspaceMode] = useState<'app' | 'matrix'>('matrix');
+  // 矩阵右键菜单下发的 App 实例命令（新建实例/关闭全部），version 递增触发。
+  const [appTabCommand, setAppTabCommand] = useState<AppTabCommand | null>(null);
   // 当前会话各类 App 是否存在已打开实例（浏览器/终端分开维护）：
   // 拓展区按钮高亮（任一存在）与矩阵图标的「在用」绿点（按 App）共用数据源。
   const [sessionBrowserTabs, setSessionBrowserTabs] = useState(false);
@@ -739,8 +741,17 @@ export function MainApp() {
                           ...(sessionBrowserTabs ? (['browser'] as TabKind[]) : []),
                           ...(sessionTerminalTabs ? (['terminal'] as TabKind[]) : []),
                         ]}
+                        onNewAppTab={(kind) => {
+                          // 切换 App 态 + 下发新建命令（TabsContainer 执行 handleNewTab）
+                          setAppTabCommand({ kind, action: 'new', version: Date.now() });
+                          void openWorkspacePanel(kind);
+                        }}
+                        onCloseApp={(kind) => {
+                          setAppTabCommand({ kind, action: 'close-all', version: Date.now() });
+                        }}
                       />
                     }
+                    appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
                     onTabKindsChanged={(kinds) => {

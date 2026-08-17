@@ -1,19 +1,32 @@
 import { Globe, TerminalSquare } from 'lucide-react';
+import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
 import type { TabKind } from '@/api/tauri';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from './ui/context-menu';
 
 /**
  * 拓展区 App 矩阵（矩阵态视图骨架）。
  *
  * 启动台风格：图标块 + 下方名称，从顶部起排、等距紧凑网格。
- * 图标右上角预留给运行态状态点（T009 接入，与「App 使用中」标识共用位置），
- * 打开模式等说明放悬浮提示。T008 交付官方内置 App（浏览器/终端）入口；
- * T009 接入三方 App（listExtensionApps）与已打开标识，T010 接入实例打开。
+ * 图标右上角的绿点 = 该 App 存在已打开实例。左键打开；右键菜单提供
+ * 打开/聚焦、新建实例（仅多实例 App）与关闭已打开实例。
+ * T008 交付官方内置 App（浏览器/终端）入口；T009 接入三方 App
+ * （listExtensionApps），T010 接入三方 App 实例打开。
  */
 export interface ExtensionMatrixProps {
   /** 打开官方内置 App（进入 App 态）。 */
   onOpenApp: (kind: TabKind) => void;
   /** 当前会话存在已打开实例的官方 App（图标右上角显示「在用」绿点）。 */
   runningKinds?: TabKind[];
+  /** 多实例 App 新建实例（宿主切换 App 态并下发新建命令）。 */
+  onNewAppTab?: (kind: TabKind) => void;
+  /** 关闭该 App 的全部已打开实例（无实例时不显示菜单项）。 */
+  onCloseApp?: (kind: TabKind) => void;
 }
 
 const OFFICIAL_APPS: Array<{
@@ -39,36 +52,63 @@ const OFFICIAL_APPS: Array<{
   },
 ];
 
-export function ExtensionMatrix({ onOpenApp, runningKinds = [] }: ExtensionMatrixProps) {
+export function ExtensionMatrix({
+  onOpenApp,
+  runningKinds = [],
+  onNewAppTab,
+  onCloseApp,
+}: ExtensionMatrixProps) {
   return (
     <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-6 place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3 lg:grid-cols-8">
-        {OFFICIAL_APPS.map((app) => {
-          const Icon = app.icon;
-          const running = runningKinds.includes(app.kind);
-          return (
-            <button
-              key={app.kind}
-              type="button"
-              onClick={() => onOpenApp(app.kind)}
-              className="group flex w-full flex-col items-center gap-1"
-              title={`${app.name}${running ? '（已打开）' : ''}（${app.openMode}）—— ${app.description}`}
-            >
-              <span className="relative flex h-12 w-12 items-center justify-center rounded-lg border bg-muted/50 transition-colors group-hover:border-primary/50 group-hover:bg-accent">
-                <Icon className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
-                {running && (
-                  <span
-                    className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-background"
-                    title="已打开"
-                    aria-label={`${app.name}已打开`}
-                  />
-                )}
-              </span>
-              <span className="max-w-full truncate text-[11px] text-foreground/90">
-                {app.name}
-              </span>
-            </button>
-          );
-        })}
+      {OFFICIAL_APPS.map((app) => {
+        const Icon = app.icon;
+        const running = runningKinds.includes(app.kind);
+        const multi = BUILTIN_TAB_KIND_MULTI[app.kind];
+        return (
+          <ContextMenu key={app.kind}>
+            <ContextMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onOpenApp(app.kind)}
+                className="group flex w-full cursor-default flex-col items-center gap-1"
+                title={`${app.name}${running ? '（已打开）' : ''}（${app.openMode}）—— ${app.description}`}
+              >
+                <span className="relative flex h-12 w-12 items-center justify-center rounded-lg border bg-muted/50 transition-colors group-hover:border-primary/50 group-hover:bg-accent">
+                  <Icon className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
+                  {running && (
+                    <span
+                      className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-background"
+                      title="已打开"
+                      aria-label={`${app.name}已打开`}
+                    />
+                  )}
+                </span>
+                <span className="max-w-full truncate text-[11px] text-foreground/90">
+                  {app.name}
+                </span>
+              </button>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <ContextMenuItem onClick={() => onOpenApp(app.kind)}>
+                {running ? `聚焦${app.name}` : `打开${app.name}`}
+              </ContextMenuItem>
+              {multi && onNewAppTab && (
+                <ContextMenuItem onClick={() => onNewAppTab(app.kind)}>
+                  新建{app.name}标签页
+                </ContextMenuItem>
+              )}
+              {running && onCloseApp && (
+                <>
+                  <ContextMenuSeparator className="my-1" />
+                  <ContextMenuItem onClick={() => onCloseApp(app.kind)}>
+                    关闭{multi ? `全部${TAB_KIND_NAME[app.kind]}标签页` : `${app.name}`}
+                  </ContextMenuItem>
+                </>
+              )}
+            </ContextMenuContent>
+          </ContextMenu>
+        );
+      })}
     </div>
   );
 }

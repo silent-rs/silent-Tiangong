@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Globe, Grid3x3, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
+import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
 import type { TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { BrowserTabContent } from './BrowserTabContent';
@@ -27,6 +28,8 @@ interface TabsContainerProps {
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
    *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
   onTabKindsChanged?: (kinds: TabKind[]) => void;
+  /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
+  appCommand?: AppTabCommand | null;
   /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
   mode?: 'app' | 'matrix';
   /** 矩阵态渲染到内容区的视图（由宿主注入，保持容器与矩阵解耦）。 */
@@ -38,16 +41,12 @@ const DEFAULT_BROWSER_URL = 'about:blank';
 const TABS_PERSIST_DEBOUNCE_MS = 500;
 const BUSY_TERMINAL_PHASES = new Set(['UserActive', 'Running', 'Interactive']);
 
-/** 内置 App 的打开模式（设计文档 6.6）：浏览器单实例（重复打开聚焦），
- *  终端多实例（每次新建）。右键菜单等操作按此约束：单实例不提供新建。 */
-const TAB_KIND_MULTI_INSTANCE: Record<TabKind, boolean> = {
-  browser: false,
-  terminal: true,
-};
-const TAB_KIND_NAME: Record<TabKind, string> = {
-  browser: '浏览器',
-  terminal: '终端',
-};
+/** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
+export interface AppTabCommand {
+  kind: TabKind;
+  action: 'new' | 'close-all';
+  version: number;
+}
 
 function nowText(): string {
   return new Date().toISOString();
@@ -100,6 +99,7 @@ export function TabsContainer({
   onClose,
   onShowMatrix,
   onTabKindsChanged,
+  appCommand,
   mode = 'app',
   matrix,
   onActiveKindChange,
@@ -652,6 +652,25 @@ export function TabsContainer({
     onClose();
   }, [onClose]);
 
+  // 宿主（矩阵右键菜单）下发的实例命令：新建走既有 handleNewTab（宿主并行
+  // 切换 App 态）；关闭全部按 id 快照逐个走 handleCloseTab（末 tab 关闭会
+  // 触发回矩阵/收起的既有逻辑，处于矩阵态时 onShowMatrix 幂等）。
+  const lastAppCommandVersionRef = useRef(0);
+  useEffect(() => {
+    if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
+    lastAppCommandVersionRef.current = appCommand.version;
+    if (appCommand.action === 'new') {
+      void handleNewTab(appCommand.kind);
+      return;
+    }
+    const targetIds = tabsRef.current
+      .filter((tab) => tab.kind === appCommand.kind)
+      .map((tab) => tab.id);
+    for (const tabId of targetIds) {
+      handleCloseTab(tabId);
+    }
+  }, [appCommand, handleCloseTab, handleNewTab]);
+
   const handleBrowserMetadataChange = useCallback((
     tabId: string,
     metadata: { title?: string; url?: string },
@@ -774,12 +793,12 @@ export function TabsContainer({
                 </ContextMenuTrigger>
                 <ContextMenuContent>
                   {/* 多实例 App 才提供新建；单实例（浏览器）重复打开聚焦已有，不支持多开 */}
-                  {TAB_KIND_MULTI_INSTANCE[tab.kind] && (
+                  {BUILTIN_TAB_KIND_MULTI[tab.kind] && (
                     <ContextMenuItem onClick={() => void handleNewTab(tab.kind)}>
                       新建{TAB_KIND_NAME[tab.kind]}标签页
                     </ContextMenuItem>
                   )}
-                  {tabs.length > 1 && TAB_KIND_MULTI_INSTANCE[tab.kind] && (
+                  {tabs.length > 1 && BUILTIN_TAB_KIND_MULTI[tab.kind] && (
                     <ContextMenuItem
                       onClick={() => {
                         for (const other of tabsRef.current.filter((item) => item.id !== tab.id)) {
