@@ -1,4 +1,5 @@
 import { useStore } from "@/store/useStore";
+import { InteractionCard } from "./InteractionCard";
 import { useSearchStore } from "@/store/useSearchStore";
 import { findSearchMatches } from "@/utils/search";
 import { SearchBar } from "./SearchBar";
@@ -63,6 +64,7 @@ export function MessageList() {
   const agents = useStore(s => s.agents);
   const voiceMessages = useStore(s => s.voiceMessages);
   const approvalRequestId = useStore(s => s.approvalRequestId);
+  const pendingInteraction = useStore(s => s.pendingInteraction);
   const editAndResend = useStore(s => s.editAndResend);
   const activeSessionId = useStore(s => s.activeSessionId);
 
@@ -971,6 +973,11 @@ export function MessageList() {
                 </div>
               </div>
             </div>
+          )}
+
+          {/* 交互请求（ask_user 挂起） */}
+          {pendingInteraction && (
+            <InteractionCard interaction={pendingInteraction} />
           )}
 
           {/* 滚动锚点 */}

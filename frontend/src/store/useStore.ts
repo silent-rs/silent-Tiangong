@@ -43,6 +43,13 @@ interface SessionViewCache {
   runSummary: string;
   contextManagementPending: boolean;
   approvalRequestId: string | null;
+  /** 挂起中的交互请求（ask_user）：非空时消息区渲染交互卡片。 */
+  pendingInteraction: {
+    interaction_id: string;
+    kind: string;
+    title: string;
+    schema: string;
+  } | null;
   tokenStats: TokenStats | null;
   lastUsage: AppState['lastUsage'];
   lastDurationMs: number | null;
@@ -487,6 +494,7 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     runSummary: runStatus === 'idle' ? '' : '正在处理',
     contextManagementPending: false,
     approvalRequestId: null,
+    pendingInteraction: null,
     tokenStats: null,
     lastUsage: null,
     lastDurationMs: null,
@@ -508,6 +516,7 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     runSummary: state.runSummary,
     contextManagementPending: false,
     approvalRequestId: state.approvalRequestId,
+    pendingInteraction: state.pendingInteraction,
     tokenStats: state.tokenStats,
     lastUsage: state.lastUsage,
     lastDurationMs: state.lastDurationMs,
@@ -554,6 +563,7 @@ function applyEventToSessionView(
   let runSummary = current.runSummary;
   let contextManagementPending = current.contextManagementPending;
   let approvalRequestId = current.approvalRequestId;
+  let pendingInteraction = current.pendingInteraction;
   let tokenStats = current.tokenStats;
   let lastUsage = current.lastUsage;
   let lastDurationMs = current.lastDurationMs;
@@ -581,6 +591,7 @@ function applyEventToSessionView(
       lastDurationMs = null;
       toolCallStartedAt = {};
       approvalRequestId = null;
+      pendingInteraction = null;
       currentPlan = undefined;
       break;
     case 'delta':
@@ -636,6 +647,7 @@ function applyEventToSessionView(
     case 'tool_start':
       runStatus = 'executing';
       approvalRequestId = null;
+      pendingInteraction = null;
       runSummary = event.args_summary
         ? `正在执行：${event.name || ''} ${event.args_summary}`
         : `正在执行：${event.name || ''}`;
@@ -664,6 +676,15 @@ function applyEventToSessionView(
       runSummary = event.args_summary
         ? `${event.tool_name || ''}: ${event.args_summary}`
         : `工具 ${event.tool_name || ''} 需要确认`;
+      break;
+    case 'interaction_needed':
+      runStatus = 'waiting_approval';
+      pendingInteraction = {
+        interaction_id: event.interaction_id || '',
+        kind: event.kind || 'confirm',
+        title: event.title || '需要您的输入',
+        schema: event.schema || '',
+      };
       break;
     case 'retry':
       runStatus = 'executing';
@@ -729,6 +750,7 @@ function applyEventToSessionView(
         if (event.action === 'cancelled') runSummary = '';
         contextManagementPending = false;
         approvalRequestId = null;
+        pendingInteraction = null;
         streamingMessageId = null;
         streamingContent = '';
         streamingReasoningContent = '';
@@ -753,6 +775,7 @@ function applyEventToSessionView(
       runSummary = '';
       contextManagementPending = false;
       approvalRequestId = null;
+      pendingInteraction = null;
       currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
@@ -770,6 +793,7 @@ function applyEventToSessionView(
       runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
       contextManagementPending = false;
       approvalRequestId = null;
+      pendingInteraction = null;
       currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
@@ -787,6 +811,7 @@ function applyEventToSessionView(
     runSummary,
     contextManagementPending,
     approvalRequestId,
+    pendingInteraction,
     tokenStats,
     lastUsage,
     lastDurationMs,
@@ -832,6 +857,13 @@ export interface AppState {
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
   approvalRequestId: string | null;
+  /** 挂起中的交互请求（ask_user）：非空时消息区渲染交互卡片。 */
+  pendingInteraction: {
+    interaction_id: string;
+    kind: string;
+    title: string;
+    schema: string;
+  } | null;
   currentPlan: TaskPlan | undefined;
   mcpServers: McpServer[] | null;
 
@@ -948,6 +980,7 @@ export function selectCurrentIsSending(state: AppState): boolean {
 
 export const useStore = create<AppState>((set, get) => ({
   // 初始状态
+  pendingInteraction: null,
   sessions: [],
   activeSessionId: null as string | null,
   newConversationId: null as string | null,

@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod config;
 mod execution;
 pub mod host_state;
+pub mod interaction;
 pub mod loader;
 pub mod manifest;
 pub mod protocol;
@@ -37,6 +38,7 @@ pub use bridge::{
     bridge_unsubscribe, set_event_emitter,
 };
 pub use config::PluginRuntimeConfig;
+pub use interaction::{InteractionKind, InteractionRequest, InteractionResponse};
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,

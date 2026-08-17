@@ -2572,3 +2572,125 @@ async fn always_allow_skips_subsequent_approval() {
         "会话应记录始终允许的工具"
     );
 }
+
+/// ask_user(choice)：用户点选后工具携带所选值完成，轮次继续。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_user_choice_is_answered_and_completes() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk(
+                "call_ask",
+                "ask_user",
+                r#"{"kind":"choice","title":"选择分支","options":["main","dev"]}"#,
+            ),
+            usage_chunk(8, 2),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("已按选择处理。"), usage_chunk(10, 3)],
+    )
+    .await;
+
+    let harness = TestHarness::new(&server, vec![tool_spec("ask_user")], HashMap::new());
+    let TestHarness {
+        mut ctx,
+        stream_rx,
+        cmd_tx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    let interaction_cmd_tx = cmd_tx.clone();
+    let interaction_task = tokio::task::spawn_blocking(move || {
+        loop {
+            let event = stream_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("等待交互事件超时");
+            if let StreamEvent::InteractionNeeded {
+                interaction_id,
+                kind,
+                title,
+                ..
+            } = event
+            {
+                assert_eq!(kind, "choice");
+                assert_eq!(title, "选择分支");
+                interaction_cmd_tx
+                    .send(Command::Interaction {
+                        interaction_id,
+                        result_json: Some(r#""main""#.to_string()),
+                    })
+                    .unwrap();
+                break;
+            }
+        }
+    });
+
+    let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+    interaction_task.await.unwrap();
+
+    assert!(
+        matches!(result.outcome, TurnExecutionOutcome::Success),
+        "交互完成后的结果: {:?}",
+        result.outcome
+    );
+    // 工具结果携带用户选择
+    assert!(
+        ctx.session
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("main")),
+        "工具结果应包含用户选择"
+    );
+}
+
+/// ask_user 交互等待超时按拒绝闭合（fail-closed）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ask_user_timeout_fails_closed() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk(
+                "call_ask_timeout",
+                "ask_user",
+                r#"{"kind":"confirm","title":"确认继续","question":"是否执行删除？"}"#,
+            ),
+            usage_chunk(8, 2),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![
+            text_delta_chunk("等待确认超时，已停止。"),
+            usage_chunk(10, 3),
+        ],
+    )
+    .await;
+
+    let harness = TestHarness::new(&server, vec![tool_spec("ask_user")], HashMap::new());
+    let TestHarness {
+        mut ctx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    ctx.approval_timeout = Duration::from_millis(150);
+
+    let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+    assert!(
+        matches!(result.outcome, TurnExecutionOutcome::Success),
+        "交互超时后的结果: {:?}",
+        result.outcome
+    );
+    assert!(
+        ctx.session
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("超时")),
+        "工具结果应标注超时闭合"
+    );
+}

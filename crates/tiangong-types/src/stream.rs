@@ -96,6 +96,16 @@ pub enum StreamEvent {
         tool_name: String,
         args_summary: String,
     },
+    /// 需要用户交互（选择/填写/确认）：ask_user 工具挂起等待响应
+    InteractionNeeded {
+        interaction_id: String,
+        /// choice | form | confirm
+        kind: String,
+        title: String,
+        /// 交互负载 JSON（choice 候选 / form 字段 schema / confirm 问题）
+        #[serde(default)]
+        schema: String,
+    },
     /// 本轮完成
     Done {
         /// 本轮累计 token 用量

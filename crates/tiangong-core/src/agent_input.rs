@@ -30,6 +30,8 @@ pub enum AgentInputKind {
     Tool(Box<dyn ToolInput>),
     /// 审批层：审批响应，解锁阻塞等待审批的 turn。
     Approval(ApprovalInput),
+    /// 交互层：ask_user 等交互请求的响应，解锁挂起的工具。
+    Interaction(InteractionInput),
     /// 控制层：控制指令。
     Command(CommandInput),
 }
@@ -94,6 +96,14 @@ impl AgentInputKind {
         })
     }
 
+    /// 便捷构造：交互响应。
+    pub fn interaction(interaction_id: impl Into<String>, result_json: Option<String>) -> Self {
+        AgentInputKind::Interaction(InteractionInput::Response {
+            interaction_id: interaction_id.into(),
+            result_json,
+        })
+    }
+
     /// 便捷构造：取消当前执行（cancel_flag 由 deliver 内部设置）。
     pub fn cancel() -> Self {
         AgentInputKind::Command(CommandInput::Cancel)
@@ -125,6 +135,15 @@ pub enum MessageInput {
 // ===== Approval 层 =====
 
 /// 审批层输入。
+/// 交互层输入。
+pub enum InteractionInput {
+    /// 交互响应：result_json=None 表示用户取消。
+    Response {
+        interaction_id: String,
+        result_json: Option<String>,
+    },
+}
+
 pub enum ApprovalInput {
     /// 审批响应（解锁当前阻塞等待审批的 turn）。
     /// approved=true 且 always_allow=true 时，同工具本会话后续放行。

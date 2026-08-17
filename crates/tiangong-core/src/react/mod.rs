@@ -11,5 +11,5 @@ mod phase;
 mod request;
 mod timer;
 mod tool_call;
-mod tools;
+pub(crate) mod tools;
 pub mod turn;

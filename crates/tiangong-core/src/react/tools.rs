@@ -46,6 +46,33 @@ pub(super) enum ToolBatchOutcome {
     Interrupted(Deferred),
 }
 
+/// 内置交互工具名：经交互接缝挂起等待用户选择/填写/确认。
+pub(crate) const ASK_USER_TOOL: &str = "ask_user";
+
+/// ask_user 的工具规格（模型可调用；参数即交互请求负载）。
+/// ask_user 的输入 schema 常量（JSON 文本，构建时解析为 Value）。
+const ASK_USER_INPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "kind": {"type": "string", "enum": ["choice", "form", "confirm"]},
+    "title": {"type": "string", "description": "交互标题"},
+    "options": {"type": "array", "items": {"type": "string"}, "description": "kind=choice 时的候选项"},
+    "fields": {"type": "array", "description": "kind=form 时的字段定义", "items": {"type": "object", "properties": {"key": {"type": "string"}, "label": {"type": "string"}, "type": {"type": "string", "enum": ["string", "number", "boolean", "select"]}, "options": {"type": "array", "items": {"type": "string"}}}, "required": ["key", "label", "type"]}},
+    "question": {"type": "string", "description": "kind=confirm 时的问题文案"}
+  },
+  "required": ["kind", "title"]
+}"#;
+
+/// ask_user 的工具规格（模型可调用；参数即交互请求负载）。
+pub(crate) fn ask_user_tool_spec() -> crate::model::ToolSpec {
+    crate::model::ToolSpec {
+        name: ASK_USER_TOOL.to_string(),
+        description: "向用户发起交互并等待响应：choice（用户在候选中选择一项）、form（用户填写表单）、confirm（用户确认）。需要用户决策、选择或补充信息时使用，结果直接来自用户。".to_string(),
+        input_schema: serde_json::from_str(ASK_USER_INPUT_SCHEMA)
+            .expect("ask_user 输入 schema 必须是合法 JSON"),
+    }
+}
+
 /// 待审批工具的审批结论。
 enum ApprovalDecision {
     Approved,
@@ -53,6 +80,18 @@ enum ApprovalDecision {
     /// 审批等待超时：按拒绝闭合（fail-closed，需求 #57）。
     TimedOut,
     /// 审批等待被中断类命令打断（待审批工具已按拒绝闭合）。
+    Interrupted(Deferred),
+}
+
+/// ask_user 交互等待结论。
+enum InteractionOutcome {
+    /// 用户已响应（负载 JSON 文本）。
+    Answered(String),
+    /// 用户取消（按拒绝闭合）。
+    Cancelled,
+    /// 等待超时（fail-closed）。
+    TimedOut,
+    /// 被中断类命令打断。
     Interrupted(Deferred),
 }
 
@@ -110,6 +149,74 @@ pub(super) async fn execute_tool_batch(
                         args_summary,
                         dedupe_key,
                     };
+                    // ask_user：内置交互工具，经交互接缝挂起等待用户响应
+                    //（本身就是用户交互，无需审批），结果直接来自用户。
+                    if tool.call.name == ASK_USER_TOOL {
+                        let started_at = std::time::Instant::now();
+                        match wait_interaction(
+                            ctx,
+                            state,
+                            injections,
+                            trust_mode,
+                            plugins,
+                            stream_tx,
+                            context_limit,
+                            cmd_rx,
+                            &tool,
+                        )
+                        .await
+                        {
+                            InteractionOutcome::Answered(result_json) => {
+                                let result = crate::tool::ToolResult {
+                                    ok: true,
+                                    summary: result_json,
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                    execution: None,
+                                };
+                                let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
+                                    name: tool.call.name.clone(),
+                                    args_summary: tool.args_summary.clone(),
+                                });
+                                record_completed_tool_call(
+                                    ctx,
+                                    CompletedToolCall {
+                                        call: &tool.call,
+                                        args_summary: &tool.args_summary,
+                                        dedupe_key: tool.dedupe_key.clone(),
+                                        result: &result,
+                                        duration_ms: started_at.elapsed().as_millis() as u64,
+                                    },
+                                    &mut state.tool_history,
+                                );
+                            }
+                            InteractionOutcome::Cancelled => {
+                                record_interaction_closed(ctx, &tool, "用户取消了交互。");
+                            }
+                            InteractionOutcome::TimedOut => {
+                                record_interaction_closed(
+                                    ctx,
+                                    &tool,
+                                    "等待用户响应超时（fail-closed）。",
+                                );
+                            }
+                            InteractionOutcome::Interrupted(deferred) => {
+                                record_interaction_closed(
+                                    ctx,
+                                    &tool,
+                                    "工具调用因用户发送新消息而中断。",
+                                );
+                                close_pending_calls(
+                                    ctx,
+                                    stream_tx,
+                                    "工具调用因用户发送新消息而中断。",
+                                );
+                                return ToolBatchOutcome::Interrupted(deferred);
+                            }
+                        }
+                        continue;
+                    }
                     let trust_mode_label = format!("{trust_mode:?}");
                     if *trust_mode == TrustMode::FullTrust
                         || ctx
@@ -299,6 +406,143 @@ pub(super) async fn execute_tool_batch(
     ToolBatchOutcome::Completed
 }
 
+/// 解析 ask_user 参数为交互事件负载（kind/title/schema）。
+fn parse_ask_user_args(
+    value: &serde_json::Value,
+) -> std::result::Result<(String, String, String), String> {
+    let kind = value
+        .get("kind")
+        .and_then(|item| item.as_str())
+        .ok_or("缺少 kind（choice/form/confirm）")?
+        .to_string();
+    if !matches!(kind.as_str(), "choice" | "form" | "confirm") {
+        return Err(format!("非法 kind：{kind}"));
+    }
+    let title = value
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or("需要您的输入")
+        .to_string();
+    let schema = match kind.as_str() {
+        "choice" => serde_json::to_string(
+            &value
+                .get("options")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
+        )
+        .unwrap_or_else(|_| "[]".to_string()),
+        "form" => serde_json::to_string(
+            &value
+                .get("fields")
+                .cloned()
+                .unwrap_or(serde_json::json!([])),
+        )
+        .unwrap_or_else(|_| "[]".to_string()),
+        _ => value
+            .get("question")
+            .and_then(|item| item.as_str())
+            .unwrap_or("是否继续？")
+            .to_string(),
+    };
+    Ok((kind, title, schema))
+}
+
+/// ask_user 交互失败闭合（取消/超时/参数无效）：按失败记录并通知前端。
+fn record_interaction_closed(ctx: &mut TurnContext, tool: &PreparedToolCall, reason: &str) {
+    ctx.observer.audit_tool_execution(
+        &ctx.session.id,
+        &tool.call.name,
+        false,
+        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
+        reason,
+    );
+    append_tool_result_message(
+        &mut ctx.session,
+        &tool.call.id,
+        &tool.call.name,
+        reason.to_string(),
+        true,
+    );
+    ctx.session.persist_to_disk();
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
+        name: tool.call.name.clone(),
+        tool_call_id: Some(tool.call.id.clone()),
+        ok: false,
+        output: reason.to_string(),
+        full_output: None,
+        duration_ms: None,
+    });
+}
+
+/// 等待用户交互响应：响应/取消/超时/中断四类出口；其余命令就地消化。
+/// 时限与审批等待共用 `approval_timeout`（fail-closed 语义一致）。
+#[allow(clippy::too_many_arguments)]
+async fn wait_interaction(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    trust_mode: &mut TrustMode,
+    plugins: &[Arc<dyn Plugin>],
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    tool: &PreparedToolCall,
+) -> InteractionOutcome {
+    let (kind, title, schema) = match parse_ask_user_args(&tool.call.arguments) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            record_interaction_closed(ctx, tool, &format!("ask_user 参数无效：{message}"));
+            return InteractionOutcome::Cancelled;
+        }
+    };
+    let interaction_id = scru128::new().to_string();
+    let _ = stream_tx.send(StreamEvent::InteractionNeeded {
+        interaction_id: interaction_id.clone(),
+        kind,
+        title,
+        schema,
+    });
+    let deadline = tokio::time::Instant::now() + ctx.approval_timeout;
+    loop {
+        let command = tokio::select! {
+            command = cmd_rx.recv() => match command {
+                Some(command) => command,
+                None => return InteractionOutcome::Interrupted(Deferred::Closed),
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::warn!(%interaction_id, "等待用户交互超时，按拒绝闭合");
+                return InteractionOutcome::TimedOut;
+            }
+        };
+        match command {
+            Command::Interaction {
+                interaction_id: responded,
+                result_json,
+            } if responded == interaction_id => {
+                return match result_json {
+                    Some(json) => InteractionOutcome::Answered(json),
+                    None => InteractionOutcome::Cancelled,
+                };
+            }
+            command if is_interrupting(&command) => {
+                return InteractionOutcome::Interrupted(Deferred::Command(command));
+            }
+            command => {
+                handle_ambient_command(
+                    ctx,
+                    state,
+                    injections,
+                    trust_mode,
+                    plugins,
+                    stream_tx,
+                    context_limit,
+                    command,
+                );
+            }
+        }
+    }
+}
+
 /// 等待审批结论：审批/FullTrust 解锁/中断/超时四类出口；其余命令就地消化。
 /// 超时按拒绝闭合（fail-closed），时限自请求发出起算（ambient 命令不重置）。
 #[allow(clippy::too_many_arguments)]
@@ -392,6 +636,8 @@ fn handle_ambient_command(
     command: Command,
 ) {
     match command {
+        // 无等待的交互响应（如等待已被中断闭合）直接丢弃
+        Command::Interaction { .. } => {}
         Command::SetTrustMode(mode) => {
             set_runtime_trust_mode(trust_mode, plugins, mode);
         }

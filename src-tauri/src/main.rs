@@ -433,6 +433,7 @@ fn run_gui() {
             tiangong_app::commands::append_message,
             tiangong_app::commands::edit_and_resend,
             tiangong_app::commands::respond_approval,
+            tiangong_app::commands::respond_interaction,
             tiangong_app::commands::list_plugin_contributions,
             tiangong_app::commands::list_plugins,
             tiangong_app::commands::list_available_plugins,

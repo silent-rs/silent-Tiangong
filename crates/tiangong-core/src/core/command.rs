@@ -11,6 +11,12 @@ pub enum Command {
         approved: bool,
         always_allow: bool,
     },
+    /// 交互响应（解锁挂起的 ask_user 工具）；result_json=None 表示取消
+    #[allow(dead_code)]
+    Interaction {
+        interaction_id: String,
+        result_json: Option<String>,
+    },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
@@ -51,6 +57,7 @@ impl Command {
         match self {
             Self::Cancel => "Cancel",
             Self::Approval { .. } => "ApprovalResponse",
+            Self::Interaction { .. } => "InteractionResponse",
             Self::SetTrustMode(_) => "SetTrustMode",
             Self::SetReasoningEffort(_) => "SetReasoningEffort",
             Self::SetTitle { .. } => "SetTitle",

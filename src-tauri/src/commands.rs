@@ -1465,6 +1465,24 @@ pub async fn respond_approval(
     Ok(true)
 }
 
+/// 响应交互请求（ask_user 选择/填写/确认）；resultJson 为空表示取消
+#[tauri::command]
+pub async fn respond_interaction(
+    interaction_id: String,
+    result_json: Option<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
+        .await?;
+    state.inner().core_manager.respond_interaction_to_core(
+        &session_id,
+        interaction_id,
+        result_json,
+    );
+    Ok(true)
+}
+
 /// 获取当前信任模式
 #[tauri::command]
 pub async fn get_trust_mode(

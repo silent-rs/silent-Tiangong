@@ -356,6 +356,122 @@ impl ResponseState {
                 }
             }
 
+            StreamEvent::InteractionNeeded {
+                interaction_id,
+                kind,
+                title,
+                schema,
+            } => {
+                self.end_active_stream();
+                // CLI 文本交互：choice 输入序号、confirm y/n、form 逐字段输入
+                let result_json = match kind.as_str() {
+                    "choice" => {
+                        let options: Vec<String> =
+                            serde_json::from_str(schema.as_str()).unwrap_or_default();
+                        eprintln!("\x1b[1m  {title}\x1b[0m");
+                        for (index, option) in options.iter().enumerate() {
+                            eprintln!("    {}. {option}", index + 1);
+                        }
+                        let mut picked: Option<String> = None;
+                        while picked.is_none() {
+                            eprint!("\x1b[1;33m  输入序号选择: \x1b[0m");
+                            let mut buf = String::new();
+                            if std::io::stdin().read_line(&mut buf).is_err() {
+                                break;
+                            }
+                            match buf.trim().parse::<usize>() {
+                                Ok(number) if number >= 1 && number <= options.len() => {
+                                    picked =
+                                        Some(serde_json::to_string(&options[number - 1]).unwrap());
+                                }
+                                _ => eprintln!("  请输入 1-{} 的序号", options.len()),
+                            }
+                        }
+                        picked
+                    }
+                    "confirm" => {
+                        eprintln!("\x1b[1m  {title}\x1b[0m");
+                        eprintln!("    {schema}");
+                        let mut buf = String::new();
+                        eprint!("\x1b[1;33m  (y/n): \x1b[0m");
+                        if std::io::stdin().read_line(&mut buf).is_err() {
+                            None
+                        } else {
+                            Some(buf.trim().eq_ignore_ascii_case("y").to_string())
+                        }
+                    }
+                    _ => {
+                        // form：逐字段按提示输入（字段 schema 为 JSON 数组）
+                        eprintln!("\x1b[1m  {title}\x1b[0m");
+                        let fields: Vec<serde_json::Value> =
+                            serde_json::from_str(schema.as_str()).unwrap_or_default();
+                        let mut answers = serde_json::Map::new();
+                        for field in fields {
+                            let key = field.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                            let label = field.get("label").and_then(|v| v.as_str()).unwrap_or(key);
+                            let field_type = field
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("string");
+                            let options: Vec<String> = field
+                                .get("options")
+                                .and_then(|v| v.as_array())
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(|item| item.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if field_type == "select" && !options.is_empty() {
+                                for (index, option) in options.iter().enumerate() {
+                                    eprintln!("    {}. {option}", index + 1);
+                                }
+                                eprint!("\x1b[1;33m  {label}（序号）: \x1b[0m");
+                            } else {
+                                eprint!("\x1b[1;33m  {label}: \x1b[0m");
+                            }
+                            let mut buf = String::new();
+                            if std::io::stdin().read_line(&mut buf).is_err() {
+                                continue;
+                            }
+                            let trimmed = buf.trim();
+                            if field_type == "number" {
+                                if let Ok(number) = trimmed.parse::<f64>() {
+                                    answers.insert(key.to_string(), serde_json::json!(number));
+                                }
+                            } else if field_type == "boolean" {
+                                answers.insert(
+                                    key.to_string(),
+                                    serde_json::json!(
+                                        trimmed.eq_ignore_ascii_case("y")
+                                            || trimmed.eq_ignore_ascii_case("true")
+                                    ),
+                                );
+                            } else if field_type == "select"
+                                && !options.is_empty()
+                                && let Ok(number) = trimmed.parse::<usize>()
+                                && (1..=options.len()).contains(&number)
+                            {
+                                answers.insert(
+                                    key.to_string(),
+                                    serde_json::json!(options[number - 1]),
+                                );
+                            } else {
+                                answers.insert(key.to_string(), serde_json::json!(trimmed));
+                            }
+                        }
+                        Some(serde_json::to_string(&serde_json::Value::Object(answers)).unwrap())
+                    }
+                };
+                if !core_manager.deliver_to_core_if_live(
+                    session_id,
+                    AgentInputKind::interaction(interaction_id.clone(), result_json),
+                ) {
+                    tracing::warn!(%session_id, "交互响应投递失败（Core 可能已停止）");
+                }
+            }
+
             StreamEvent::Done { .. } => {
                 self.finish();
                 return true;

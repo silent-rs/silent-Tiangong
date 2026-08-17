@@ -97,6 +97,10 @@ pub(super) async fn handle_command(
         ));
     }
     match deferred_command {
+        Deferred::Command(Command::Interaction { .. }) => {
+            // 交互等待已闭合后的迟到响应：丢弃
+            CommandEffect::KeepCurrent
+        }
         Deferred::Command(Command::InjectUserMessage {
             message_id,
             content,

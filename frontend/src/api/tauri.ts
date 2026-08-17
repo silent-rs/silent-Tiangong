@@ -290,6 +290,10 @@ export interface StreamEvent {
   path?: string;
   /** title_changed 事件携带的新标题。 */
   title?: string;
+  /** interaction_needed 事件字段（ask_user 挂起）。 */
+  interaction_id?: string;
+  kind?: string;
+  schema?: string;
 }
 
 export interface SessionStreamEvent {
@@ -795,6 +799,10 @@ export const api = {
 
   respondApproval: (requestId: string, approved: boolean, alwaysAllow?: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved, alwaysAllow: alwaysAllow ?? false }),
+
+  /// 响应交互请求（ask_user 选择/填写/确认）；resultJson 为空表示取消。
+  respondInteraction: (interactionId: string, resultJson: string | null): Promise<boolean> =>
+    invoke('respond_interaction', { interactionId, resultJson }),
 
   getTrustMode: (sessionId?: string): Promise<string> =>
     invoke('get_trust_mode', { sessionId }),

@@ -261,6 +261,14 @@ impl TiangongCore {
         let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
+        // 内置交互工具（ask_user）：模型可调用，经交互接缝挂起等待用户响应。
+        let mut turn_tools = prepared_plugins.tools;
+        if !turn_tools
+            .iter()
+            .any(|spec| spec.name == crate::react::tools::ASK_USER_TOOL)
+        {
+            turn_tools.push(crate::react::tools::ask_user_tool_spec());
+        }
 
         Ok(TurnContext::builder()
             .client(client)
@@ -278,7 +286,7 @@ impl TiangongCore {
             .trust_mode(trust_mode)
             .observer(crate::observe::Observer::new(self.storage_root.clone()))
             .tool_overrides(prepared_plugins.tool_overrides)
-            .tools(prepared_plugins.tools)
+            .tools(turn_tools)
             .build())
     }
 
@@ -521,7 +529,9 @@ impl TiangongCore {
 
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
-        use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
+        use crate::agent_input::{
+            AgentInputKind, ApprovalInput, CommandInput, InteractionInput, MessageInput,
+        };
 
         match input {
             // 空闲起轮、运行中投通道：运行中的用户消息由活跃 turn 作为引导处理
@@ -564,6 +574,16 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     always_allow,
                 },
                 "ApprovalResponse",
+            ),
+            AgentInputKind::Interaction(InteractionInput::Response {
+                interaction_id,
+                result_json,
+            }) => self.deliver_to_turn(
+                Command::Interaction {
+                    interaction_id,
+                    result_json,
+                },
+                "InteractionResponse",
             ),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {
