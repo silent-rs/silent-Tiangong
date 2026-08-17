@@ -163,6 +163,18 @@ pub(crate) async fn run_turn(
             deferred_tool_injections: None,
         });
     }
+    // ── 终态前发布用户消息快照 ──
+    // set_turn_result 只更新后端 Session；前端轮次总时长依赖秒级 TurnElapsed
+    // 事件累计，事件链路波动时会缺失。终态前补发含最终 elapsed_ms/turn_status
+    // 的用户消息快照，回复底部与用户消息旁的「执行总时长」始终有精确值。
+    if let Some(idx) = ctx.session.latest_user_message_index() {
+        let mut snapshot = ctx.session.messages[idx].clone();
+        snapshot.clear_transient_data();
+        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message: snapshot,
+            deferred_tool_injections: None,
+        });
+    }
     let terminal = outcome.terminal_event(usage);
     let _ = stream_tx.send(terminal.clone());
 

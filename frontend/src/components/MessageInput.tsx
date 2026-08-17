@@ -22,6 +22,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
+import { formatDuration } from './message/utils';
 
 interface MentionCandidate {
   value: string;
@@ -176,10 +177,24 @@ export function MessageInput() {
     && (inputContent.trim().length > 0 || attachments.length > 0);
   const isTextDropTargetActive = !voiceMode && !!cacheKey;
 
-  const liveDurationLabel = !isIdle && lastDurationMs != null && lastDurationMs >= 1000
-    ? `${Math.floor(lastDurationMs / 1000)}s`
-    : '';
-
+  // 运行中实时计时：以 TurnElapsed 事件累计值为基准本地外推，事件链路波动
+  // （如工具执行阶段事件稀疏）时秒数依然持续跳动，格式随时长进位到分/时。
+  const lastDurationSeenAtRef = useRef<number>(Date.now());
+  useEffect(() => {
+    lastDurationSeenAtRef.current = Date.now();
+  }, [lastDurationMs]);
+  const [durationTick, setDurationTick] = useState(0);
+  useEffect(() => {
+    if (isIdle) return;
+    const timer = setInterval(() => setDurationTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isIdle]);
+  const liveDurationLabel = (() => {
+    void durationTick;
+    if (isIdle || lastDurationMs == null || lastDurationMs < 1000) return '';
+    const extrapolated = lastDurationMs + (Date.now() - lastDurationSeenAtRef.current);
+    return formatDuration(Math.max(lastDurationMs, extrapolated));
+  })();
   // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====
