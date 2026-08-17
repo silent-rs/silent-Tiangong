@@ -41,8 +41,10 @@ interface AgentTurnProps {
   hasTts: boolean;
   selectedAgentTab: string | null;
   isActive?: boolean;
-  /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms，回复底部展示。 */
+  /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms。 */
   turnElapsedMs?: number;
+  /** 本轮最终状态（success/failed/cancelled）：失败/取消时轮次末尾展示状态行。 */
+  turnStatus?: string;
 }
 
 function AgentTurnView({
@@ -54,6 +56,7 @@ function AgentTurnView({
   selectedAgentTab,
   isActive = false,
   turnElapsedMs,
+  turnStatus,
 }: AgentTurnProps) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
@@ -325,7 +328,7 @@ function AgentTurnView({
                   <MessageActions
                     text={visibleText}
                     showTts={hasTts}
-                    durationMs={!isActive ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
+                    durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
                     generationMs={!isStreaming ? msg.text_elapsed_ms : undefined}
                   />
                 </div>
@@ -364,6 +367,9 @@ function AgentTurnView({
     tools: processFrags.filter((f) => f.type === "tool_group").reduce((acc, f) => acc + (f.type === "tool_group" ? f.tools.length : 0), 0),
   };
   const collapseProcess = !isActive && processFrags.length > 0;
+  // 失败/取消的轮次：状态与总时长在轮次末尾（工具或回复下方）展示；
+  // 成功轮次的总时长在回复底部操作栏展示。
+  const turnStatusMeta = TURN_STATUS_META[turnStatus ?? ""] ?? null;
 
   return (
     <div className="space-y-1.5">
@@ -398,12 +404,23 @@ function AgentTurnView({
       )}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
+      {turnStatusMeta && !isActive && (
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
+          <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>
+            <span className={`inline-block w-1.5 h-1.5 rounded-full ${turnStatusMeta.dot}`} />
+            {turnStatusMeta.label}
+          </span>
+          {turnElapsedMs != null && (
+            <span title="本轮执行总时长">⏱ {formatDuration(turnElapsedMs)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs) return false;
+  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;
