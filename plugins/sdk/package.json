@@ -1,0 +1,13 @@
+{
+  "name": "@tiangong/plugin-sdk",
+  "version": "0.1.0",
+  "description": "天工插件 SDK：UI 沙箱内的宿主桥接客户端与类型定义",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": ["src", "README.md"],
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}

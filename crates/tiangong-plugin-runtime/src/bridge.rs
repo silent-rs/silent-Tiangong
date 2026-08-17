@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::manifest::PluginManifest;
 
@@ -149,7 +149,9 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
             crate::registry::handle_view_message(plugin_id, wasm_method, payload)
                 .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 处理消息失败"))
         }
-        // 其余命名空间已定形白名单，宿主服务路由在对应接缝任务接入。
+        // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
+        "storage." => storage_call(plugin_id, method, payload),
+        // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
             bail!(
@@ -353,5 +355,120 @@ mod tests {
         .unwrap();
         assert!(has_bridge_permission(&v2_declared, plugin_ns));
         assert!(!has_bridge_permission(&v2_declared, session_ns));
+    }
+}
+
+// ── storage.* 宿主路由 ──
+
+/// 插件私有桥接存储文件（插件 data 目录下）。
+fn bridge_storage_path(directory: &std::path::Path) -> std::path::PathBuf {
+    directory.join("data").join("bridge-storage.json")
+}
+
+/// 读取插件桥接存储（无文件视为空对象）。
+fn load_bridge_storage(
+    directory: &std::path::Path,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let path = bridge_storage_path(directory);
+    if !path.exists() {
+        return Ok(serde_json::Map::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("读取插件存储失败: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("解析插件存储失败: {}", path.display()))?;
+    match value {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Ok(serde_json::Map::new()),
+    }
+}
+
+/// 写回插件桥接存储。
+fn save_bridge_storage(
+    directory: &std::path::Path,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let path = bridge_storage_path(directory);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建插件存储目录失败: {}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(map.clone()))?;
+    std::fs::write(&path, content).with_context(|| format!("写入插件存储失败: {}", path.display()))
+}
+
+/// `storage.*` 宿主路由（设计 7.8）：插件 UI 沙箱经桥接读写私有数据，
+/// 落盘在插件 data 目录（不经逻辑层，纯 UI 插件也可用）。
+/// 方法：`storage.get(key)` / `storage.set(key,value)` / `storage.delete(key)` /
+/// `storage.list()`；key/value 均为字符串，value 缺省按 JSON null 存取。
+fn storage_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    let directory = crate::registry::plugin_install_directory(plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
+    let request: serde_json::Value =
+        serde_json::from_str(payload).with_context(|| "storage 请求负载必须是 JSON 对象")?;
+
+    let result = match method {
+        "storage.get" => {
+            let key = request_key(&request)?;
+            load_bridge_storage(&directory)?
+                .get(&key)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        }
+        "storage.set" => {
+            let key = request_key(&request)?;
+            let value = request
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let mut map = load_bridge_storage(&directory)?;
+            map.insert(key, value);
+            save_bridge_storage(&directory, &map)?;
+            serde_json::Value::Bool(true)
+        }
+        "storage.delete" => {
+            let key = request_key(&request)?;
+            let mut map = load_bridge_storage(&directory)?;
+            map.remove(&key);
+            save_bridge_storage(&directory, &map)?;
+            serde_json::Value::Bool(true)
+        }
+        "storage.list" => {
+            let map = load_bridge_storage(&directory)?;
+            serde_json::Value::Array(map.keys().cloned().map(serde_json::Value::String).collect())
+        }
+        other => bail!("未知 storage 方法 {other}（可用：get/set/delete/list）"),
+    };
+    serde_json::to_string(&result).with_context(|| "序列化 storage 结果失败")
+}
+
+fn request_key(request: &serde_json::Value) -> Result<String> {
+    request
+        .get("key")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .filter(|key| !key.trim().is_empty() && key.len() <= 256)
+        .ok_or_else(|| anyhow::anyhow!("storage 请求缺少合法 key（非空、≤256 字符）"))
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    #[test]
+    fn 未知_storage_方法拒绝() {
+        let error = storage_call("missing", "storage.clear", "{}").unwrap_err();
+        // 未加载插件先失败
+        assert!(format!("{error:#}").contains("未加载"));
+    }
+
+    #[test]
+    fn 请求_key_校验() {
+        for payload in [r#"{}"#, r#"{"key":""}"#, r#"{"key":"  "}"#] {
+            let request: serde_json::Value = serde_json::from_str(payload).unwrap();
+            assert!(request_key(&request).is_err());
+        }
+        let request: serde_json::Value = serde_json::from_str(r#"{"key":"theme"}"#).unwrap();
+        assert_eq!(request_key(&request).unwrap(), "theme");
     }
 }

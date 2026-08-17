@@ -358,6 +358,10 @@ fn main() {
         [command, catalog] if command == "validate-plugin-catalog" => {
             validate_plugin_catalog_file(Path::new(catalog))
         }
+        [command, plugin_id] if command == "new-plugin" => new_plugin(plugin_id, None),
+        [command, plugin_id, output_dir] if command == "new-plugin" => {
+            new_plugin(plugin_id, Some(output_dir))
+        }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -1094,6 +1098,58 @@ fn user_home_dir() -> Option<PathBuf> {
 
 fn env_var_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// 从模板生成纯 UI 插件骨架：复制 templates/ui-app 并替换插件 ID。
+fn new_plugin(plugin_id: &str, output_dir: Option<&str>) -> io::Result<()> {
+    if plugin_id.is_empty()
+        || !plugin_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(invalid_input(
+            "插件 ID 只能包含字母数字与 - _ .（建议反向域名如 com.example.board）",
+        ));
+    }
+    let manifest_dir = Path::new("plugins").join("templates").join("ui-app");
+    if !manifest_dir.join("plugin.json").is_file() {
+        return Err(invalid_input(format!(
+            "模板目录不存在: {}（请在仓库根目录执行）",
+            manifest_dir.display()
+        )));
+    }
+    let target = match output_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from("dist").join("plugins").join(plugin_id),
+    };
+    if target.exists() {
+        return Err(invalid_input(format!(
+            "目标目录已存在: {}",
+            target.display()
+        )));
+    }
+    copy_dir_recursive(&manifest_dir, &target)?;
+    let manifest_path = target.join("plugin.json");
+    let manifest = std::fs::read_to_string(&manifest_path)?.replace("com.example.board", plugin_id);
+    std::fs::write(&manifest_path, manifest)?;
+    println!("[xtask] 插件骨架已生成: {}", target.display());
+    println!("[xtask] 本地导入: 在天工「设置 → 插件管理 → 导入本地插件」选择该目录");
+    println!("[xtask] 工程化开发: 参阅 plugins/sdk/README.md 与 docs/plugin-development.md");
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let destination = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &destination)?;
+        } else {
+            std::fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {

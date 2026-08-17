@@ -316,3 +316,71 @@ cargo run -p xtask -- merge-plugin-catalog \
 ```bash
 cargo run -p xtask -- validate-plugin-catalog catalog.json
 ```
+
+## v2 插件形态（Plugin Harness）：纯 UI 插件与界面挂载
+
+> 关联设计：`docs/plugin-harness-design.md`；SDK：`plugins/sdk/README.md`。
+
+`schema_version: 2` 在 v1（WASM 逻辑层）之上新增两类能力：
+
+1. **纯 UI 插件**：`wasm` 字段可省略——只要 HTML/CSS/JS 就能做出现在拓展区矩阵的
+   App（无工具/生命周期等逻辑能力，经宿主桥接 `storage.*` 持久化数据）。
+2. **界面挂载声明**：`ui.contributions` 把界面挂到宿主 Slot（拓展区标签页、设置页
+   等），不再局限于设置页。
+
+### 最小示例：一个看板 App
+
+```sh
+# 1. 生成骨架（仓库根目录执行）
+cargo run -p xtask -- new-plugin com.example.myboard
+
+# 2. 编辑 dist/plugins/com.example.myboard/app/index.html 实现界面
+
+# 3. 天工「设置 → 插件管理 → 导入本地插件」选择该目录
+#    拓展区矩阵中出现「看板」，打开即用
+```
+
+生成的清单（v2 纯 UI 形态）：
+
+```jsonc
+{
+  "schema_version": 2,
+  "id": "com.example.myboard",
+  "version": "0.1.0",
+  "permissions": ["bridge.call", "storage.private"],
+  "ui": {
+    "contributions": [
+      { "slot": "extension.tab", "id": "board", "title": "看板",
+        "entry": "app/index.html", "open_mode": "multi" },
+      { "slot": "settings.plugin-page", "id": "board-settings",
+        "entry": "app/index.html" }
+    ]
+  }
+}
+```
+
+字段约束：`slot` 必须是宿主登记的合法挂载点（非法值导入即拒）；
+`open_mode` 仅对 `extension.tab` 生效（`singleton` 聚焦已有 / `multi` 每次新建，
+缺省 `singleton`）；`sandbox` 缺省 `shadow`（挂载主 DOM 树），`iframe` 强隔离，
+`native` 仅官方签名。
+
+### 宿主桥接
+
+插件 UI 内经统一桥接访问宿主（两种容器自动适配，见 `plugins/sdk`）：
+
+```ts
+import { createTiangongBridge, pluginStorage } from '@tiangong/plugin-sdk';
+const bridge = await createTiangongBridge();
+await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
+```
+
+- `storage.get/set/delete/list`：私有数据，落盘在插件 `data/` 目录，需声明
+  `storage.private` 权限。
+- `plugin.*`：转发到本插件 WASM 逻辑层（带逻辑层的 v2 插件与 v1 插件通用）。
+- 主题 token：iframe 经 `tiangong_host_context` 消息、Shadow 容器经 `:host` CSS
+  变量注入，用 `var(--background)` 等即可跟随主题。
+
+### 带逻辑层的 v2 插件
+
+在 v1 清单基础上补 `schema_version: 2` 与 `ui`/`capabilities` 即可：WASM 侧
+（工具/提示词/生命周期）零改动，界面从「仅设置页」升级为可挂拓展区矩阵。

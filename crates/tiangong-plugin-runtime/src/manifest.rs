@@ -20,7 +20,10 @@ pub struct PluginManifest {
     pub schema_version: u32,
     pub id: String,
     pub version: String,
-    pub wasm: WasmManifest,
+    /// 逻辑层 WASM 制品。schema v2 可省略——纯 UI 插件（无工具/生命周期等
+    /// 逻辑能力）经宿主桥接（storage.* 等）即可工作，见设计文档 9.1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<WasmManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SidecarManifest>,
     #[serde(default)]
@@ -182,7 +185,24 @@ impl PluginManifest {
         if self.version.trim().is_empty() {
             bail!("插件 {} 清单版本为空", self.id);
         }
-        validate_relative_path(self.wasm_binary(), "wasm.binary")?;
+        match self.wasm_binary() {
+            Some(binary) => validate_relative_path(binary, "wasm.binary")?,
+            None => {
+                // 纯 UI 插件：无逻辑层时必须有界面贡献，且仅 v2 支持
+                if self.schema_version != MANIFEST_SCHEMA_VERSION_V2 {
+                    bail!(
+                        "插件 {} 未声明 wasm（仅 schema_version 2 支持纯 UI 插件）",
+                        self.id
+                    );
+                }
+                if self.ui_contributions().is_empty() {
+                    bail!(
+                        "插件 {} 未声明 wasm 时必须至少声明一条 ui.contributions",
+                        self.id
+                    );
+                }
+            }
+        }
         if let Some(sidecar) = &self.sidecar {
             validate_relative_path(&sidecar.binary, "sidecar.binary")?;
             if sidecar.transport_protocol.trim().is_empty() {
@@ -369,9 +389,12 @@ impl PluginManifest {
         Ok(())
     }
 
-    pub fn wasm_binary(&self) -> &Path {
+    pub fn wasm_binary(&self) -> Option<&Path> {
         match &self.wasm {
-            WasmManifest::Detailed { binary } | WasmManifest::Legacy(binary) => binary,
+            Some(WasmManifest::Detailed { binary }) | Some(WasmManifest::Legacy(binary)) => {
+                Some(binary)
+            }
+            None => None,
         }
     }
 
@@ -662,6 +685,35 @@ mod tests {
         let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 3");
         let error = parse(&json).unwrap_err();
         assert!(error.to_string().contains("清单版本不支持"));
+    }
+
+    #[test]
+    fn 纯_ui_插件_wasm_可省略但须有贡献() {
+        // v2 + ui 贡献：wasm 可省略
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.board","version":"1.0.0","permissions":["bridge.call"],"ui":{"contributions":[{"slot":"extension.tab","id":"board","entry":"index.html"}]}}"#,
+        )
+        .unwrap();
+        manifest.validate().expect("纯 UI 插件应通过校验");
+        assert!(manifest.wasm_binary().is_none());
+        assert_eq!(manifest.ui_contributions().len(), 1);
+
+        // v2 + 无 wasm + 无 ui 贡献：拒绝
+        let bare: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.bare","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let error = bare.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("ui.contributions"));
+
+        // v1 + 无 wasm：拒绝（纯 UI 仅 v2 支持）
+        let v1_bare: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":1,"id":"a","version":"1.0.0","ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","entry":"i.html"}]}}"#,
+        )
+        .unwrap();
+        let error = v1_bare.validate().unwrap_err();
+        // v1 携带 ui 字段先被 v2 字段校验拒绝（提示升级 schema_version）
+        assert!(format!("{error:#}").contains("schema_version"));
     }
 
     #[test]

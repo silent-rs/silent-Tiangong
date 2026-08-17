@@ -324,7 +324,7 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 .is_some_and(|connection| connection.has_runtime_endpoint());
             let state = if !loaded.enabled {
                 "disabled"
-            } else if loaded.ui_plugin.is_none() {
+            } else if loaded.ui_plugin.is_none() && loaded.manifest.wasm_binary().is_some() {
                 "error"
             } else if loaded.last_error.is_some() {
                 "degraded"
@@ -421,8 +421,9 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 
     let mut replacements = Vec::with_capacity(instances.len());
     for adapter in &instances {
+        let component = component.clone().expect("热加载替换仅适用于带逻辑层的插件");
         let plugin = instantiate_from_compiled(
-            component.clone(),
+            component,
             sidecar.clone(),
             adapter.runtime_config(),
             installed.manifest.id.clone(),
@@ -450,9 +451,9 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.directory = installed.directory.clone();
     loaded.manifest = installed.manifest.clone();
     loaded.wasm_bytes = Some(wasm_bytes);
-    loaded.component = Some(component);
-    loaded.ui_plugin = Some(Arc::new(Mutex::new(ui_plugin)));
-    loaded.descriptor = Some(descriptor);
+    loaded.component = component;
+    loaded.ui_plugin = ui_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
+    loaded.descriptor = descriptor;
     loaded.generation = next_generation;
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
@@ -482,6 +483,13 @@ pub fn invoke_sidecar(
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
     let response = connection.invoke(operation, &payload)?;
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
+}
+
+/// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
+pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(plugin_id)?;
+    loaded.enabled.then(|| loaded.directory.clone())
 }
 
 /// 取已启用插件的 manifest 快照（供桥接层做权限校验）。
@@ -889,16 +897,23 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
         last_error = Some(error.to_string());
     }
-    let load_result = read_wasm_bytes(&installed).and_then(|bytes| {
-        let bytes = Arc::new(bytes);
-        compile_plugin(
-            bytes.clone(),
-            &installed.manifest,
-            sidecar.clone(),
-            PluginRuntimeConfig::default(),
-        )
-        .map(|(component, plugin, descriptor)| (bytes, component, plugin, descriptor))
-    });
+    // 纯 UI 插件（wasm 省略）：无逻辑层，直接构造已加载记录
+    let load_result = if installed.manifest.wasm_binary().is_some() {
+        read_wasm_bytes(&installed)
+            .map(|bytes| {
+                let bytes = Arc::new(bytes);
+                compile_plugin(
+                    bytes.clone(),
+                    &installed.manifest,
+                    sidecar.clone(),
+                    PluginRuntimeConfig::default(),
+                )
+                .map(|(component, plugin, descriptor)| (Some(bytes), component, plugin, descriptor))
+            })
+            .and_then(|result| result)
+    } else {
+        Ok((None, None, None, None))
+    };
 
     match load_result {
         Ok((bytes, component, plugin, descriptor)) => {
@@ -906,10 +921,10 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
             LoadedPlugin {
                 directory: installed.directory,
                 manifest: installed.manifest,
-                wasm_bytes: Some(bytes),
-                component: Some(component),
-                ui_plugin: Some(Arc::new(Mutex::new(plugin))),
-                descriptor: Some(descriptor),
+                wasm_bytes: bytes,
+                component,
+                ui_plugin: plugin.map(|plugin| Arc::new(Mutex::new(plugin))),
+                descriptor,
                 generation: 1,
                 instances: Vec::new(),
                 sidecar,
@@ -984,12 +999,23 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
     Some(adapter)
 }
 
+/// 编译产物：纯 UI 插件（无 wasm）三项均为 None。
+type CompiledPlugin = (
+    Option<Arc<wasmtime::component::Component>>,
+    Option<WasmPlugin>,
+    Option<Descriptor>,
+);
+
 fn compile_plugin(
     bytes: Arc<Vec<u8>>,
     manifest: &PluginManifest,
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     config: PluginRuntimeConfig,
-) -> Result<(Arc<wasmtime::component::Component>, WasmPlugin, Descriptor)> {
+) -> Result<CompiledPlugin> {
+    // 纯 UI 插件（wasm 省略）：无逻辑层，返回空三元组
+    if manifest.wasm_binary().is_none() {
+        return Ok((None, None, None));
+    }
     let plugin_id = manifest.id.clone();
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
@@ -1015,7 +1041,7 @@ fn compile_plugin(
                 descriptor.version
             );
         }
-        Ok((component, plugin, descriptor))
+        Ok((Some(component), Some(plugin), Some(descriptor)))
     })
 }
 
@@ -1033,7 +1059,12 @@ fn instantiate_from_compiled(
 }
 
 fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
-    let path = installed.directory.join(installed.manifest.wasm_binary());
+    let path = installed.directory.join(
+        installed
+            .manifest
+            .wasm_binary()
+            .expect("调用方保证 wasm 存在"),
+    );
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
@@ -1317,7 +1348,10 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
         signed_release,
     };
     let result = (|| {
-        let wasm_bytes = Arc::new(read_wasm_bytes(&installed)?);
+        let wasm_bytes = match installed.manifest.wasm_binary() {
+            Some(_) => Some(Arc::new(read_wasm_bytes(&installed)?)),
+            None => None,
+        };
         let sidecar = resolve_sidecar(storage_root, &installed, true)?;
         if let Some(sidecar_manifest) = &installed.manifest.sidecar {
             let binary = sidecar_binary_path(staged_path, &sidecar_manifest.binary)?;
@@ -1326,11 +1360,12 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
             }
         }
         compile_plugin(
-            wasm_bytes,
+            wasm_bytes.clone().unwrap_or_else(|| Arc::new(Vec::new())),
             &installed.manifest,
             sidecar,
             PluginRuntimeConfig::default(),
         )?;
+        let _ = wasm_bytes;
         Ok(())
     })();
     remove_sidecar_connection(staged_path);
@@ -1372,7 +1407,9 @@ fn install_new_plugin(
         signed_release: verify_signed_release(&destination, &manifest)?,
     };
     let loaded = load_plugin_record(storage_root, installed);
-    if loaded.ui_plugin.is_none() || loaded.last_error.is_some() {
+    if (loaded.ui_plugin.is_none() && manifest.wasm_binary().is_some())
+        || loaded.last_error.is_some()
+    {
         let error = loaded
             .last_error
             .unwrap_or_else(|| "WASM 插件加载失败".to_string());
@@ -1965,18 +2002,25 @@ fn sidecar_connection(
 }
 
 fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
-    let bytes = read_wasm_bytes(installed)?;
+    // 纯 UI 插件无 wasm 字节可比较，按目录/版本/权限判定
+    let bytes = installed
+        .manifest
+        .wasm_binary()
+        .map(|_| read_wasm_bytes(installed))
+        .transpose()?;
     let plugins = loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
     let Some(loaded) = plugins.get(&installed.manifest.id) else {
         return Ok(false);
     };
+    let bytes_match = match (&loaded.wasm_bytes, &bytes) {
+        (Some(loaded_bytes), Some(bytes)) => loaded_bytes.as_slice() == bytes.as_slice(),
+        (None, None) => true,
+        _ => false,
+    };
     Ok(loaded.directory == installed.directory
         && loaded.manifest.version == installed.manifest.version
         && loaded.manifest.permissions == installed.manifest.permissions
-        && loaded
-            .wasm_bytes
-            .as_ref()
-            .is_some_and(|loaded_bytes| loaded_bytes.as_slice() == bytes.as_slice()))
+        && bytes_match)
 }
