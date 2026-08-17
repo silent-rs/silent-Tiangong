@@ -63,6 +63,7 @@ function AgentTurnView({
   const caseSensitive = useSearchStore((s) => s.caseSensitive);
   const toolGroupExpansion = useExpansionState();
   const agents = useStore((state) => state.agents);
+  const toolCallStartedAt = useStore((state) => state.toolCallStartedAt);
   const resolvedTheme = useResolvedTheme();
 
   // 已完成轮次默认折叠「过程」（思考/解释/工具/ReAct 文本等），仅保留总结回复可见，
@@ -84,8 +85,11 @@ function AgentTurnView({
   const argsOfToolMessage = (msg: MessageItem): unknown =>
     msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
   // 执行中的调用：tool_calls 已发出但结果未到达，仅活跃轮次渲染为运行行。
+  // 携带发起时刻（store 记录），运行行据此实时跳秒。
   const runningToolCalls = isActive
-    ? [...toolCallArgs.values()].filter((call) => !settledToolCallIds.has(call.id))
+    ? [...toolCallArgs.values()]
+        .filter((call) => !settledToolCallIds.has(call.id))
+        .map((call) => ({ ...call, startedAt: toolCallStartedAt[call.id] }))
     : [];
 
   const renderWithHighlight = (msgId: string, text: string) => {

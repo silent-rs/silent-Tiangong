@@ -22,20 +22,21 @@ export function formatMessageTime(createdAt?: string): string {
   }
 }
 
-/** 将毫秒格式化为人类可读时长：< 1s 显示 ms；< 60s 显示 s（保留 1 位小数）；
- *  < 1h 显示「N分SS秒」；更长显示「N时MM分SS秒」。 */
+/** 将毫秒格式化为人类可读时长：< 1s 显示 ms；秒以上取整秒、单位用中文「秒」，
+ *  满一分钟进位为「N分SS秒」，满一小时进位为「N时MM分SS秒」。 */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`;
-  const totalSeconds = ms / 1000;
-  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
-  const total = Math.floor(totalSeconds);
-  const seconds = total % 60;
-  const minutes = Math.floor(total / 60) % 60;
-  const hours = Math.floor(total / 3600);
+  const totalSeconds = Math.floor(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
   if (hours > 0) {
     return `${hours}时${String(minutes).padStart(2, "0")}分${String(seconds).padStart(2, "0")}秒`;
   }
-  return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+  if (minutes > 0) {
+    return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+  }
+  return `${seconds}秒`;
 }
 
 export function msgReasoning(message: MessageItem): string {

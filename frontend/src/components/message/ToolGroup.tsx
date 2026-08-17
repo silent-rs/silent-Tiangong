@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Brain,
   ChevronDown,
@@ -31,6 +32,8 @@ export interface RunningToolCall {
   id: string;
   name: string;
   arguments?: unknown;
+  /** 调用发起时刻（Date.now()），运行行据此实时跳秒。 */
+  startedAt?: number;
 }
 
 interface ToolGroupProps {
@@ -97,12 +100,15 @@ function ToolRunRow({
   expanded = false,
   onToggle,
   time,
+  startedAtMs,
 }: {
   model: ToolDisplayModel;
   args?: unknown;
   expanded?: boolean;
   onToggle?: () => void;
   time?: string;
+  /** 运行中调用的发起时刻（毫秒时间戳）：行尾实时跳秒。 */
+  startedAtMs?: number;
 }) {
   const Icon = VARIANT_ICONS[model.variant];
   const isError = model.state === "error";
@@ -110,6 +116,15 @@ function ToolRunRow({
   const summaryText = model.errorSummary ?? model.summary;
   const expandable = isExpandable(model);
   const open = expandable && expanded;
+
+  // 运行行本地跳秒：秒数逐秒前进，结果到达后该行整体被完成行替换。
+  const [, setRunTick] = useState(0);
+  useEffect(() => {
+    if (!isRunning || startedAtMs == null) return;
+    const timer = setInterval(() => setRunTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isRunning, startedAtMs]);
+  const runningMs = startedAtMs != null ? Date.now() - startedAtMs : null;
 
   return (
     <div title={time}>
@@ -136,6 +151,11 @@ function ToolRunRow({
             }`}
           >
             {summaryText}
+          </span>
+        )}
+        {isRunning && runningMs != null && runningMs >= 1000 && (
+          <span className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground/70 tabular-nums" title="已运行时长">
+            {formatDuration(runningMs)}
           </span>
         )}
         {model.durationMs != null && model.durationMs > 0 && (
@@ -182,7 +202,7 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
       <div className="ml-4 space-y-0">{tools.map(renderToolItem)}</div>
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
-          <ToolRunRow model={buildRunningToolModel(call.name, call.arguments)} />
+          <ToolRunRow model={buildRunningToolModel(call.name, call.arguments)} startedAtMs={call.startedAt} />
         </div>
       ))}
     </div>
