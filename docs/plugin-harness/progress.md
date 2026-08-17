@@ -5,8 +5,8 @@
 
 ## 当前状态
 
-- **阶段**：M0 已完成；M1 进行中（T006、T007 已完成，T008 进行中）。
-- **当前建议任务**：T008（顶部入口收敛 + 拓展区三态状态机）。
+- **阶段**：M1 基本完成（T006-T010 已交付，M1 验收冒烟待真实三方插件制品）。
+- **当前建议任务**：M2 内置插件化准备（T011 浏览器迁移）或 T014 审批接缝（可与 M2 并行）。
 - **当前阻塞**：无。
 - **下一步**：T007 → T008 → T009/T010 串行推进。
 
@@ -21,9 +21,9 @@
 | T005 | 端到端验证：旧插件经新桥接渲染设置页 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | Memory 双向通信需 sidecar，GUI 冒烟待用户确认 |
 | T006 | Shadow/iframe 沙箱容器组件 | M1 | 已完成 | feature/plugin-harness | `414f9c05` | 见下方验证记录 | 媒体资源代理、深度 JS 沙箱后续迭代 |
 | T007 | extension.tab Slot 注册 + App 元数据 | M1 | 已完成 | feature/plugin-harness | `3cb5dbd9` | 见下方验证记录 | — |
-| T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 进行中 | — | — | — | — |
-| T009 | App 矩阵视图 + 启动台按钮 | M1 | 未开始 | — | — | — | — |
-| T010 | singleton/multi 打开与实例管理 | M1 | 未开始 | — | — | — | — |
+| T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 已完成 | feature/plugin-harness | `41a3a2d2` 等 | 见下方验证记录 | 矩阵图标映射留待 T016 | — | — | — | — |
+| T009 | App 矩阵视图 + 启动台按钮 | M1 | 已完成 | feature/plugin-harness | `97eb63ca` | 见下方验证记录 | 三方绿点/数量徽标待实例感知 |
+| T010 | singleton/multi 打开与实例管理 | M1 | 已完成 | feature/plugin-harness | `97eb63ca` | 见下方验证记录 | 真实三方插件 GUI 冒烟待 T016 |
 | T011 | 浏览器插件化迁移 | M2 | 未开始 | — | — | — | — |
 | T012 | 终端插件化迁移 | M2 | 未开始 | — | — | — | — |
 | T013 | Agent Team 插件化迁移 | M2 | 未开始 | — | — | — | — |
@@ -55,7 +55,7 @@
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
 | M0 | 接缝地基（T001-T005） | 已完成（2026-08-17，提交 `585d1d74`） |
-| M1 | UI 接缝与能力矩阵（T006-T010） | 进行中（T006 `414f9c05`、T007 `3cb5dbd9`） |
+| M1 | UI 接缝与能力矩阵（T006-T010） | 基本完成（T008 `41a3a2d2` 系列、T009/T010 `97eb63ca`；GUI 冒烟待三方制品） |
 | M2 | 内置插件化（T011-T013） | 未开始 |
 | M3 | 交互接缝（T014-T015） | 未开始 |
 | M4 | 三方体验（T016） | 未开始 |
@@ -70,6 +70,8 @@
 | `ea18699f` | fix(plugin): bridge 权限校验对 v1 插件一律放行 plugin.*（M0 回归修复） |
 | `414f9c05` | feat(plugin): T006 Shadow/iframe 沙箱容器组件 |
 | `3cb5dbd9` | feat(plugin): T007 extension.tab Slot 注册与 App 元数据 |
+| `41a3a2d2` 等 | feat(plugin): T008 顶部入口收敛 + 拓展区三态状态机（含矩阵内嵌、启动台图标、在用绿点、tab/矩阵右键菜单、绿点数据源修复等多轮迭代：`0c1ac6a3`、`a68cbc5f`、`1a367486`、`f22c8046`、`e74bec2b`） |
+| `97eb63ca` | feat(plugin): T009/T010 三方 App 进矩阵与 plugin tab 实例管理 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -121,7 +123,23 @@
 
 - `cargo check -p tiangong-app`、`cargo clippy -p tiangong-plugin-runtime --all-targets --tests` 零警告；`cargo test -p tiangong-plugin-runtime` 57 项全绿（新增 v2 manifest 贡献链路集成测试：Slot 列出/entry 读取/资源读取/`../` 逃逸拒绝）。
 - 前端 `tsc --noEmit`、`yarn build`、`yarn test` 200 项全绿（新增沙箱容器组件测试 8 项：shadow 挂载、内联/外链脚本受控执行、外链样式注入、桥接 call 转发、bridge.on 按 plugin_id 分发、卸载退订清理、:host token 注入、iframe/native 分发）。
-- 任务 spec：`./tasks/006-沙箱容器组件.md`、`./tasks/007-extension-tab注册与App元数据.md`。
+- 任务 spec：`./tasks/006-沙箱容器组件.md`、`./tasks/007-extension-tab注册与App元数据.md`、`./tasks/008-顶部入口收敛与三态状态机.md`、`./tasks/009-010-三方App矩阵与实例管理.md`。
+
+### T008-T010（2026-08-17，`41a3a2d2`…`97eb63ca`）
+
+- T008：顶部「终端/浏览器」收敛为单个「拓展区」按钮；三态状态机（关闭/矩阵/App）；
+  矩阵态 tab 栏保留（启动台按钮高亮）、App 实例隐藏保活；启动台图标网格与「在用」
+  绿点（会话存在实例即亮，与按钮绿点同源）；tab 右键菜单（多实例新建/关闭其他/关闭，
+  单实例仅关闭，移除「新建浏览器」按钮）；矩阵 App 右键菜单（打开/聚焦、新建实例、
+  关闭全部实例）。状态机组件测试 2 项；绿点数据源经多轮迭代收敛为
+  onTabKindsChanged 即时通知（修复新对话不亮、关闭残留、落盘竞态误灭三个缺陷）。
+- T009/T010：后端布局层支持 plugin tab（kind/元数据/持久化往返测试）；前端 plugin
+  tab 打开按 open_mode 分派、内容经 PluginAppTabContent + PluginSandbox 渲染；
+  矩阵接入 listExtensionApps 三方卡片。
+- 验证：后端布局层测试 4 项、前端 202 项测试全绿；`cargo check -p tiangong-app`、
+  `yarn build` 通过。
+- 遗留：三方 App 绿点/数量徽标与右键关闭（需 plugin 实例集合感知）、三方图标映射、
+  真实三方插件的 GUI 冒烟（待 T016 示例制品）。
 
 ### T007（2026-08-17，`3cb5dbd9`）
 
