@@ -11,6 +11,7 @@ import { useResolvedTheme } from "@/hooks/useTheme";
 import { hasMediaBlocks, textContent } from "@/api/tauri";
 import {
   formatMessageTime,
+  formatDuration,
   msgReasoning,
   resolveMarkdownImages,
   extractLlmExplanation,
@@ -22,6 +23,7 @@ import {
   displayTextContent,
   stripSummaryStatusMarker,
   isNeedMoreWorkMessage,
+  TURN_STATUS_META,
 } from "./utils";
 import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
@@ -39,19 +41,11 @@ interface AgentTurnProps {
   hasTts: boolean;
   selectedAgentTab: string | null;
   isActive?: boolean;
+  /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms。 */
+  turnElapsedMs?: number;
+  /** 本轮最终状态（success/failed/cancelled）：失败/取消时轮次末尾展示状态行。 */
+  turnStatus?: string;
 }
-
-/** 将毫秒格式化为人类可读时长：< 1s 显示 ms，否则显示 s（保留 1 位小数）。 */
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-/** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
-const TURN_STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
-  failed: { label: "失败", className: "text-destructive", dot: "bg-destructive" },
-  cancelled: { label: "已取消", className: "text-muted-foreground", dot: "bg-muted-foreground" },
-};
 
 function AgentTurnView({
   messages,
@@ -61,6 +55,8 @@ function AgentTurnView({
   hasTts,
   selectedAgentTab,
   isActive = false,
+  turnElapsedMs,
+  turnStatus,
 }: AgentTurnProps) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
@@ -68,6 +64,7 @@ function AgentTurnView({
   const caseSensitive = useSearchStore((s) => s.caseSensitive);
   const toolGroupExpansion = useExpansionState();
   const agents = useStore((state) => state.agents);
+  const toolCallStartedAt = useStore((state) => state.toolCallStartedAt);
   const resolvedTheme = useResolvedTheme();
 
   // 已完成轮次默认折叠「过程」（思考/解释/工具/ReAct 文本等），仅保留总结回复可见，
@@ -89,8 +86,11 @@ function AgentTurnView({
   const argsOfToolMessage = (msg: MessageItem): unknown =>
     msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
   // 执行中的调用：tool_calls 已发出但结果未到达，仅活跃轮次渲染为运行行。
+  // 携带发起时刻（store 记录），运行行据此实时跳秒。
   const runningToolCalls = isActive
-    ? [...toolCallArgs.values()].filter((call) => !settledToolCallIds.has(call.id))
+    ? [...toolCallArgs.values()]
+        .filter((call) => !settledToolCallIds.has(call.id))
+        .map((call) => ({ ...call, startedAt: toolCallStartedAt[call.id] }))
     : [];
 
   const renderWithHighlight = (msgId: string, text: string) => {
@@ -103,7 +103,7 @@ function AgentTurnView({
 
   type Fragment =
     | { type: "explanation"; text: string; time?: string }
-    | { type: "thinking"; content: string; time?: string }
+    | { type: "thinking"; content: string; time?: string; elapsedMs?: number | null }
     | { type: "tool_group"; key: string; tools: MessageItem[] }
     | { type: "user"; msg: MessageItem }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
@@ -156,14 +156,14 @@ function AgentTurnView({
       if (prevFrag?.type === "explanation" && prevFrag.text === textContent(msg).trim() && !isStreaming) fragments.pop();
       if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
         shownReasonings.add(assistantReasoning);
-        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at });
+        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: msg.reasoning_elapsed_ms });
       }
       // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
       // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
       if (isNeedMoreWorkMessage(msg)) {
         const needMoreWorkBody = stripSummaryStatusMarker(textContent(msg)).trim();
         if (needMoreWorkBody || isStreaming) {
-          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at });
+          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: msg.text_elapsed_ms });
         }
         continue;
       }
@@ -233,7 +233,7 @@ function AgentTurnView({
     if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
     if (frag.type === "thinking") {
       // 历史/已完成思考块一律视为非活跃且默认折叠。
-      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} /></div>;
+      return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} elapsedMs={frag.elapsedMs} /></div>;
     }
         if (frag.type === "explanation") {
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
@@ -325,7 +325,12 @@ function AgentTurnView({
               ) : null}
               {!isStreaming && msg.content && visibleText && (
                 <div className="mt-1 border-t border-border/50 pt-1">
-                  <MessageActions text={visibleText} showTts={hasTts} durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined} />
+                  <MessageActions
+                    text={visibleText}
+                    showTts={hasTts}
+                    durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
+                    generationMs={!isStreaming ? msg.text_elapsed_ms : undefined}
+                  />
                 </div>
               )}
             </div>
@@ -362,6 +367,9 @@ function AgentTurnView({
     tools: processFrags.filter((f) => f.type === "tool_group").reduce((acc, f) => acc + (f.type === "tool_group" ? f.tools.length : 0), 0),
   };
   const collapseProcess = !isActive && processFrags.length > 0;
+  // 失败/取消的轮次：状态与总时长在轮次末尾（工具或回复下方）展示；
+  // 成功轮次的总时长在回复底部操作栏展示。
+  const turnStatusMeta = TURN_STATUS_META[turnStatus ?? ""] ?? null;
 
   return (
     <div className="space-y-1.5">
@@ -396,12 +404,23 @@ function AgentTurnView({
       )}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
+      {turnStatusMeta && !isActive && (
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
+          <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>
+            <span className={`inline-block w-1.5 h-1.5 rounded-full ${turnStatusMeta.dot}`} />
+            {turnStatusMeta.label}
+          </span>
+          {turnElapsedMs != null && (
+            <span title="本轮执行总时长">⏱ {formatDuration(turnElapsedMs)}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive) return false;
+  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;

@@ -45,6 +45,8 @@ export interface ToolDisplayModel {
   terminal: TerminalMaterial | null;
   /** 文件类工具的目标路径（来自参数）。 */
   filePath: string | null;
+  /** 单次调用耗时（毫秒）：优先事件携带值，历史消息从 trace 文本解析。 */
+  durationMs: number | null;
 }
 
 const VARIANT_TITLES: Record<ToolVariant, string> = {
@@ -282,6 +284,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
       outputText: content,
       terminal: null,
       filePath: null,
+      durationMs: null,
     };
   }
 
@@ -299,6 +302,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
       outputText: content,
       terminal: null,
       filePath: null,
+      durationMs: null,
     };
   }
 
@@ -325,6 +329,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
         variant === "file-read" || variant === "file-write"
           ? (trace.command?.match(/^(?:path=)?(\S+)/)?.[1] ?? null)
           : null,
+      durationMs: trace.durationMs,
     };
   }
 
@@ -385,6 +390,7 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
     outputText,
     terminal,
     filePath,
+    durationMs: msg.duration_ms ?? null,
   };
 }
 
@@ -401,6 +407,7 @@ export function buildRunningToolModel(name: string, args?: unknown): ToolDisplay
     outputText: null,
     terminal: null,
     filePath: null,
+    durationMs: null,
   };
 }
 

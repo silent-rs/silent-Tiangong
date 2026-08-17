@@ -217,6 +217,12 @@ export interface Message {
   elapsed_ms?: number;
   /** 该轮次的最终状态。仅用户消息携带，便于区分成功/失败/取消。 */
   turn_status?: TurnStatus;
+  /** 本次模型输出思考阶段的耗时（毫秒）。仅 assistant 消息携带。 */
+  reasoning_elapsed_ms?: number | null;
+  /** 本次模型输出正文生成阶段的耗时（毫秒）。仅 assistant 消息携带。 */
+  text_elapsed_ms?: number | null;
+  /** 单次工具调用耗时（毫秒）。由 ToolResult 流式事件写入工具消息，历史消息无此字段。 */
+  duration_ms?: number | null;
 }
 
 /** Core 经 Desktop 按会话转发的单个流事件。 */

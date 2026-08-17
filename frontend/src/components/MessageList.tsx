@@ -243,6 +243,36 @@ export function MessageList() {
     return indices;
   }, [completedGroups]);
 
+  // 每轮 agent_turn 的终态（总时长 + 最终状态）：取该轮用户消息（前置最近
+  // user 组）的 elapsed_ms/turn_status；回复底部与轮次末尾状态行据此展示。
+  const turnResultByGroupKey = useMemo(() => {
+    const map = new Map<string, { elapsedMs?: number; status?: string }>();
+    let current: { elapsedMs?: number; status?: string } | undefined;
+    for (const group of filteredGroups) {
+      if (group.type === 'user') {
+        const msg = group.messages[0];
+        current = { elapsedMs: msg?.elapsed_ms ?? undefined, status: msg?.turn_status ?? undefined };
+      } else if (group.type === 'agent_turn') {
+        map.set(group.key, current ?? {});
+      }
+    }
+    return map;
+  }, [filteredGroups]);
+
+  // 流式轮的终态：本轮最后一条用户消息的 elapsed_ms/turn_status。
+  const streamingTurnResult = useMemo(() => {
+    if (!streamingGroup) return undefined;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') {
+        return {
+          elapsedMs: messages[i].elapsed_ms ?? undefined,
+          status: messages[i].turn_status ?? undefined,
+        };
+      }
+    }
+    return undefined;
+  }, [streamingGroup, messages]);
+
   // 计算 compact 边界
   const nonEditableIds = useMemo(() => {
     const ids = new Set<string>();
@@ -843,6 +873,8 @@ export function MessageList() {
                         hasTts={hasTts}
                         selectedAgentTab={selectedAgentTab}
                         isActive={isLiveTurn}
+                        turnElapsedMs={turnResultByGroupKey.get(group.key)?.elapsedMs}
+                        turnStatus={turnResultByGroupKey.get(group.key)?.status}
                       />
                     </div>
                   );
@@ -861,6 +893,8 @@ export function MessageList() {
                     hasTts={hasTts}
                     selectedAgentTab={selectedAgentTab}
                     isActive={isThinking}
+                    turnElapsedMs={streamingTurnResult?.elapsedMs}
+                    turnStatus={streamingTurnResult?.status}
                   />
                 </div>
               )}

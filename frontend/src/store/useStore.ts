@@ -46,6 +46,8 @@ interface SessionViewCache {
   tokenStats: TokenStats | null;
   lastUsage: AppState['lastUsage'];
   lastDurationMs: number | null;
+  /** 运行中工具调用的开始时刻（tool_call_id → Date.now()），用于运行行实时跳秒。 */
+  toolCallStartedAt: Record<string, number>;
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
@@ -345,6 +347,7 @@ function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
     tool_name: event.name,
     tool_result_is_error: event.ok === false,
     phase: 'react',
+    duration_ms: event.duration_ms ?? undefined,
     created_at: existingIndex >= 0
       ? messages[existingIndex].created_at
       : new Date().toISOString(),
@@ -487,6 +490,7 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     tokenStats: null,
     lastUsage: null,
     lastDurationMs: null,
+    toolCallStartedAt: {},
     streamingMessageId: null,
     streamingContent: '',
     streamingReasoningContent: '',
@@ -507,6 +511,7 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     tokenStats: state.tokenStats,
     lastUsage: state.lastUsage,
     lastDurationMs: state.lastDurationMs,
+    toolCallStartedAt: state.toolCallStartedAt,
     streamingMessageId: state.streamingMessageId,
     streamingContent: state.streamingContent,
     streamingReasoningContent: state.streamingReasoningContent,
@@ -552,6 +557,7 @@ function applyEventToSessionView(
   let tokenStats = current.tokenStats;
   let lastUsage = current.lastUsage;
   let lastDurationMs = current.lastDurationMs;
+  let toolCallStartedAt = current.toolCallStartedAt;
   let streamingMessageId = current.streamingMessageId;
   let streamingContent = current.streamingContent;
   let streamingReasoningContent = current.streamingReasoningContent;
@@ -573,6 +579,7 @@ function applyEventToSessionView(
       runStatus = 'executing';
       runSummary = '正在处理';
       lastDurationMs = null;
+      toolCallStartedAt = {};
       approvalRequestId = null;
       currentPlan = undefined;
       break;
@@ -611,6 +618,15 @@ function applyEventToSessionView(
       break;
     case 'tool_calls':
       messages = applyToolCalls(messages, event);
+      // 记录本批调用的开始时刻，运行行据此实时跳秒；结果到达时移除。
+      {
+        const now = Date.now();
+        const startedAt = { ...toolCallStartedAt };
+        for (const call of event.calls || []) {
+          if (call?.id) startedAt[call.id] = now;
+        }
+        toolCallStartedAt = startedAt;
+      }
       streamingMessageId = null;
       streamingContent = '';
       streamingReasoningContent = '';
@@ -626,6 +642,10 @@ function applyEventToSessionView(
       break;
     case 'tool_result':
       messages = applyToolResult(messages, event);
+      if (event.tool_call_id && toolCallStartedAt[event.tool_call_id] != null) {
+        const { [event.tool_call_id]: _removed, ...rest } = toolCallStartedAt;
+        toolCallStartedAt = rest;
+      }
       runSummary = `${event.ok === false ? '失败' : '完成'} ${event.name || ''}`.trim();
       break;
     case 'token_usage':
@@ -734,6 +754,7 @@ function applyEventToSessionView(
       contextManagementPending = false;
       approvalRequestId = null;
       currentPlan = undefined;
+      toolCallStartedAt = {};
       streamingMessageId = null;
       streamingContent = '';
       streamingReasoningContent = '';
@@ -750,6 +771,7 @@ function applyEventToSessionView(
       contextManagementPending = false;
       approvalRequestId = null;
       currentPlan = undefined;
+      toolCallStartedAt = {};
       streamingMessageId = null;
       streamingContent = '';
       streamingReasoningContent = '';
@@ -768,6 +790,7 @@ function applyEventToSessionView(
     tokenStats,
     lastUsage,
     lastDurationMs,
+    toolCallStartedAt,
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
@@ -804,6 +827,8 @@ export interface AppState {
   runStatus: string;
   runSummary: string;
   lastDurationMs: number | null;
+  /** 运行中工具调用的开始时刻（tool_call_id → Date.now()），用于运行行实时跳秒。 */
+  toolCallStartedAt: Record<string, number>;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
   approvalRequestId: string | null;
@@ -931,6 +956,7 @@ export const useStore = create<AppState>((set, get) => ({
   runStatus: 'idle',
   runSummary: '',
   lastDurationMs: null,
+  toolCallStartedAt: {},
   lastUsage: null,
   tokenStats: null,
   approvalRequestId: null,
@@ -1202,6 +1228,7 @@ export const useStore = create<AppState>((set, get) => ({
           runStatus: cache.runStatus,
           runSummary: cache.runSummary,
           lastDurationMs: cache.lastDurationMs,
+          toolCallStartedAt: cache.toolCallStartedAt,
           lastUsage: cache.lastUsage,
           tokenStats: cache.tokenStats,
           approvalRequestId: cache.approvalRequestId,
@@ -1783,6 +1810,7 @@ export const useStore = create<AppState>((set, get) => ({
         runSummary: summary,
         contextManagementPending: true,
         lastDurationMs: null,
+        toolCallStartedAt: {},
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
@@ -1792,6 +1820,7 @@ export const useStore = create<AppState>((set, get) => ({
       runStatus: 'executing',
       runSummary: summary,
       lastDurationMs: null,
+      toolCallStartedAt: {},
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
@@ -1884,6 +1913,7 @@ export const useStore = create<AppState>((set, get) => ({
         runStatus: currentCache.runStatus,
         runSummary: currentCache.runSummary,
         lastDurationMs: currentCache.lastDurationMs,
+        toolCallStartedAt: currentCache.toolCallStartedAt,
         lastUsage: currentCache.lastUsage,
         tokenStats: currentCache.tokenStats,
         approvalRequestId: currentCache.approvalRequestId,

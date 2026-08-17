@@ -60,6 +60,7 @@ pub(crate) fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
     trimmed.starts_with("[调用工具:") && trimmed.ends_with(']')
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn append_assistant_tool_call_message(
     session: &mut Session,
     message_id: String,
@@ -67,6 +68,8 @@ pub(crate) fn append_assistant_tool_call_message(
     reasoning_content: &str,
     reasoning_signature: Option<String>,
     calls: &[&crate::model::ToolCall],
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) {
     let tool_calls = calls
         .iter()
@@ -89,6 +92,8 @@ pub(crate) fn append_assistant_tool_call_message(
     message.id = message_id;
     message.reasoning_signature = reasoning_signature;
     message.tool_calls = tool_calls;
+    message.reasoning_elapsed_ms = reasoning_elapsed_ms;
+    message.text_elapsed_ms = text_elapsed_ms;
     if let Some(existing) = session
         .messages
         .iter_mut()
@@ -106,6 +111,8 @@ pub(crate) fn upsert_assistant_text_message(
     text: &str,
     reasoning_content: &str,
     phase: crate::session::MessagePhase,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) {
     let mut message = Message::with_reasoning(
         MessageRole::Assistant,
@@ -114,6 +121,8 @@ pub(crate) fn upsert_assistant_text_message(
     )
     .with_phase(phase);
     message.id = message_id.to_string();
+    message.reasoning_elapsed_ms = reasoning_elapsed_ms;
+    message.text_elapsed_ms = text_elapsed_ms;
     if let Some(existing) = session
         .messages
         .iter_mut()
@@ -134,6 +143,22 @@ pub(crate) fn append_tool_result_message(
 ) {
     let message = Message::tool_result(tool_call_id, tool_name, text, is_error)
         .with_phase(crate::session::MessagePhase::React);
+    session.messages.push(message);
+}
+
+/// 追加带执行耗时的工具结果消息：耗时随消息持久化，
+/// 历史 tool_calls 调用重新打开会话后仍可展示。
+pub(crate) fn append_tool_result_message_with_duration(
+    session: &mut Session,
+    tool_call_id: &str,
+    tool_name: &str,
+    text: String,
+    is_error: bool,
+    duration_ms: u64,
+) {
+    let message = Message::tool_result(tool_call_id, tool_name, text, is_error)
+        .with_phase(crate::session::MessagePhase::React)
+        .with_duration_ms(duration_ms);
     session.messages.push(message);
 }
 

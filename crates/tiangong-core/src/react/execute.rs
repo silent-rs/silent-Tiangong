@@ -31,7 +31,9 @@ use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 use super::command::{CommandEffect, Deferred, handle_command};
 use super::compression::observed_total_tokens;
 use super::outcome::TurnExecutionResult;
-use super::phase::{ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, ToolBatchState};
+use super::phase::{
+    ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, StreamTiming, ToolBatchState,
+};
 use super::request;
 use super::tools;
 
@@ -134,6 +136,8 @@ fn record_tool_calls(
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
     stage: String,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) -> Vec<ToolCall> {
     let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
@@ -175,6 +179,8 @@ fn record_tool_calls(
         &response.reasoning_content,
         response.reasoning_signature.clone(),
         &calls.iter().collect::<Vec<_>>(),
+        reasoning_elapsed_ms,
+        text_elapsed_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     calls
@@ -393,7 +399,7 @@ pub(super) fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
-    append_tool_result_message(
+    append_tool_result_message_with_duration(
         &mut ctx.session,
         &call.id,
         &call.name,
@@ -410,6 +416,7 @@ pub(super) fn record_completed_tool_call(
             .render_for_model()
         },
         !result.ok,
+        duration_ms,
     );
     append_runtime_tool_message(
         &mut ctx.session,
@@ -575,6 +582,7 @@ fn start_llm_request(
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage::default(),
+        timing: StreamTiming::default(),
     }
 }
 
@@ -583,6 +591,8 @@ pub(super) fn persist_streamed_react_message(
     pending_msg_id: &str,
     streamed_text: &str,
     streamed_reasoning: &str,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) {
     if streamed_text.trim().is_empty() && streamed_reasoning.trim().is_empty() {
         return;
@@ -593,6 +603,8 @@ pub(super) fn persist_streamed_react_message(
         streamed_text,
         streamed_reasoning,
         MessagePhase::React,
+        reasoning_elapsed_ms,
+        text_elapsed_ms,
     );
     emit_session_message_upsert(ctx, pending_msg_id);
 }
@@ -609,6 +621,8 @@ fn handle_react_text_response(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
 ) -> ReactTextDisposition {
     // 合成占位符不是有效输出，不保存为消息。
     if is_synthetic_tool_call_placeholder(&response.text) {
@@ -621,6 +635,8 @@ fn handle_react_text_response(
         &response.text,
         &response.reasoning_content,
         MessagePhase::React,
+        reasoning_elapsed_ms,
+        text_elapsed_ms,
     );
     if let Some(message) = ctx
         .session
@@ -869,6 +885,12 @@ pub(super) async fn execute_turn(
                                 let usage: TokenUsage = chunk_usage.clone().into();
                                 active.streaming_usage.accumulate(&usage);
                             }
+                            if !chunk.reasoning_content.is_empty() {
+                                active.timing.reasoning.record();
+                            }
+                            if !chunk.content.is_empty() {
+                                active.timing.text.record();
+                            }
                             active.streamed_text.push_str(&chunk.content);
                             active.streamed_reasoning.push_str(&chunk.reasoning_content);
                             active.sink.push_chunk(&chunk);
@@ -883,8 +905,11 @@ pub(super) async fn execute_turn(
                             task,
                             streamed_text,
                             streamed_reasoning,
+                            timing,
                             ..
                         } = active;
+                        let reasoning_elapsed_ms = timing.reasoning.elapsed_ms();
+                        let text_elapsed_ms = timing.text.elapsed_ms();
                         sink.finish();
                         let response_result = match task.await {
                             Ok(result) => result,
@@ -899,6 +924,8 @@ pub(super) async fn execute_turn(
                             pending_msg_id,
                             streamed_text,
                             streamed_reasoning,
+                            reasoning_elapsed_ms,
+                            text_elapsed_ms,
                             response_result,
                         );
                         let next_phase = match next {
@@ -973,6 +1000,8 @@ fn complete_llm_request(
     pending_msg_id: String,
     streamed_text: String,
     streamed_reasoning: String,
+    reasoning_elapsed_ms: Option<u64>,
+    text_elapsed_ms: Option<u64>,
     response_result: anyhow::Result<ModelFunctionResponse>,
 ) -> NextStep {
     let context_limit = ctx.context_limit;
@@ -985,6 +1014,8 @@ fn complete_llm_request(
                 &pending_msg_id,
                 &streamed_text,
                 &streamed_reasoning,
+                reasoning_elapsed_ms,
+                text_elapsed_ms,
             );
             let response = match response_result {
                 Ok(response) => response,
@@ -1027,7 +1058,13 @@ fn complete_llm_request(
                 append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
                 NextStep::Phase(ExecutionPhase::NeedModel)
             } else if response.tool_calls.is_empty() {
-                let disposition = handle_react_text_response(ctx, &pending_msg_id, &response);
+                let disposition = handle_react_text_response(
+                    ctx,
+                    &pending_msg_id,
+                    &response,
+                    reasoning_elapsed_ms,
+                    text_elapsed_ms,
+                );
                 NextStep::Phase(finish_react_text(
                     ctx,
                     state,
@@ -1042,6 +1079,8 @@ fn complete_llm_request(
                     &pending_msg_id,
                     &response,
                     format!("react-round-{}", state.budget.request_round),
+                    reasoning_elapsed_ms,
+                    text_elapsed_ms,
                 );
                 NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),

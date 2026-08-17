@@ -22,6 +22,46 @@ export function formatMessageTime(createdAt?: string): string {
   }
 }
 
+/** 将毫秒格式化为人类可读时长：< 1s 显示 ms；秒以上取整秒、单位用中文「秒」，
+ *  满一分钟进位为「N分SS秒」，满一小时进位为「N时MM分SS秒」。 */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSeconds = Math.floor(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  if (hours > 0) {
+    return `${hours}时${String(minutes).padStart(2, "0")}分${String(seconds).padStart(2, "0")}秒`;
+  }
+  if (minutes > 0) {
+    return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+  }
+  return `${seconds}秒`;
+}
+
+/** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
+export const TURN_STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
+  failed: { label: "失败", className: "text-destructive", dot: "bg-destructive" },
+  cancelled: { label: "已取消", className: "text-muted-foreground", dot: "bg-muted-foreground" },
+};
+
+/** 工具行耗时格式：与总时间的中文格式区分，单位用英文 h/m/s/ms，
+ *  进位规则相同（< 1s 显示 ms，满 60 秒进分，满 60 分进时）。 */
+export function formatToolDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSeconds = Math.floor(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  if (hours > 0) {
+    return `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
 export function msgReasoning(message: MessageItem): string {
   return (message.reasoning_content ?? "").trim();
 }

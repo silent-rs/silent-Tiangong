@@ -22,6 +22,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
+import { formatDuration } from './message/utils';
 
 interface MentionCandidate {
   value: string;
@@ -176,10 +177,30 @@ export function MessageInput() {
     && (inputContent.trim().length > 0 || attachments.length > 0);
   const isTextDropTargetActive = !voiceMode && !!cacheKey;
 
-  const liveDurationLabel = !isIdle && lastDurationMs != null && lastDurationMs >= 1000
-    ? `${Math.floor(lastDurationMs / 1000)}s`
-    : '';
-
+  // 运行中实时计时：维护单调递增的显示基准（baseMs@baseAt），事件到达与本地
+  // tick 都只向前推进——事件值与外推值取大，杜绝显示回跳；TurnElapsed 事件
+  // 稀疏（如工具执行阶段）时秒数依然持续跳动。
+  const liveTimerRef = useRef<{ baseMs: number; baseAt: number }>({ baseMs: 0, baseAt: 0 });
+  const [durationTick, setDurationTick] = useState(0);
+  useEffect(() => {
+    if (isIdle) return;
+    const timer = setInterval(() => setDurationTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isIdle]);
+  const liveDurationLabel = (() => {
+    void durationTick;
+    const { baseMs, baseAt } = liveTimerRef.current;
+    if (isIdle || lastDurationMs == null) {
+      // 空闲或新一轮尚未收到首个计时事件：复位基准。
+      liveTimerRef.current = { baseMs: 0, baseAt: 0 };
+      return '';
+    }
+    const now = Date.now();
+    const extrapolated = baseMs > 0 ? baseMs + (now - baseAt) : 0;
+    const candidate = Math.max(lastDurationMs, extrapolated);
+    liveTimerRef.current = { baseMs: candidate, baseAt: now };
+    return candidate < 1000 ? '' : formatDuration(candidate);
+  })();
   // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====

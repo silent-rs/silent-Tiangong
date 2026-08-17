@@ -80,6 +80,36 @@ pub(super) enum LlmPurpose {
     React { request_injection_generation: u64 },
 }
 
+/// 单个流式阶段的耗时测量：记录首个与最后一个增量的到达时刻。
+#[derive(Default)]
+pub(super) struct StreamElapsed {
+    first: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl StreamElapsed {
+    /// 收到一个非空增量时调用。
+    pub(super) fn record(&mut self) {
+        let now = std::time::Instant::now();
+        if self.first.is_none() {
+            self.first = Some(now);
+        }
+        self.last = Some(now);
+    }
+
+    /// 首末增量间的时长（毫秒）；从未收到增量时为 `None`。
+    pub(super) fn elapsed_ms(&self) -> Option<u64> {
+        Some(self.last?.duration_since(self.first?).as_millis() as u64)
+    }
+}
+
+/// 一次模型流式输出中思考与正文两个阶段的耗时测量。
+#[derive(Default)]
+pub(super) struct StreamTiming {
+    pub(super) reasoning: StreamElapsed,
+    pub(super) text: StreamElapsed,
+}
+
 /// 活跃模型请求（阶段持有）。
 pub(super) struct ActiveLlm {
     pub(super) purpose: LlmPurpose,
@@ -90,6 +120,7 @@ pub(super) struct ActiveLlm {
     pub(super) streamed_text: String,
     pub(super) streamed_reasoning: String,
     pub(super) streaming_usage: TokenUsage,
+    pub(super) timing: StreamTiming,
 }
 
 impl ActiveLlm {
