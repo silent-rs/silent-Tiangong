@@ -9,7 +9,7 @@ import { parseScheduledTaskMessage } from "@/utils/scheduledTaskMessage";
 import { parseWebhookMessage } from "@/utils/webhookMessage";
 import { textContent } from "@/api/tauri";
 import { hasMention, parseBlocks } from "@/utils/mentionBlocks";
-import { formatMessageTime } from "./utils";
+import { formatMessageTime, formatDuration, TURN_STATUS_META } from "./utils";
 import type { MessageGroup } from "./types";
 import { VoiceBubble } from "./VoiceBubble";
 import { UserMessageActions } from "./UserMessageActions";
@@ -204,6 +204,20 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                 </div>
               )}
             </div>
+          )}
+        </div>
+      )}
+      {/* 轮次执行总时长与最终状态：完成（含失败/取消）后随用户消息持久化展示。 */}
+      {!isEditing && (message.elapsed_ms != null || message.turn_status) && (
+        <div className="flex items-center justify-end gap-1.5 pr-1 text-[11px] text-muted-foreground/80 tabular-nums">
+          {message.turn_status && TURN_STATUS_META[message.turn_status] && (
+            <span className={`inline-flex items-center gap-1 ${TURN_STATUS_META[message.turn_status].className}`}>
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${TURN_STATUS_META[message.turn_status].dot}`} />
+              {TURN_STATUS_META[message.turn_status].label}
+            </span>
+          )}
+          {message.elapsed_ms != null && (
+            <span title="本轮执行总时长">⏱ {formatDuration(message.elapsed_ms)}</span>
           )}
         </div>
       )}

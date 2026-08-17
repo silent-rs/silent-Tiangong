@@ -23,6 +23,7 @@ import {
   displayTextContent,
   stripSummaryStatusMarker,
   isNeedMoreWorkMessage,
+  TURN_STATUS_META,
 } from "./utils";
 import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
@@ -40,13 +41,9 @@ interface AgentTurnProps {
   hasTts: boolean;
   selectedAgentTab: string | null;
   isActive?: boolean;
+  /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms，回复底部展示。 */
+  turnElapsedMs?: number;
 }
-
-/** 轮次状态对应的中文标签与颜色（失败/取消直观醒目，成功保持低调）。 */
-const TURN_STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
-  failed: { label: "失败", className: "text-destructive", dot: "bg-destructive" },
-  cancelled: { label: "已取消", className: "text-muted-foreground", dot: "bg-muted-foreground" },
-};
 
 function AgentTurnView({
   messages,
@@ -56,6 +53,7 @@ function AgentTurnView({
   hasTts,
   selectedAgentTab,
   isActive = false,
+  turnElapsedMs,
 }: AgentTurnProps) {
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
@@ -327,7 +325,7 @@ function AgentTurnView({
                   <MessageActions
                     text={visibleText}
                     showTts={hasTts}
-                    durationMs={!isActive ? userFrag?.msg.elapsed_ms : undefined}
+                    durationMs={!isActive ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
                     generationMs={!isStreaming ? msg.text_elapsed_ms : undefined}
                   />
                 </div>
@@ -405,7 +403,7 @@ function AgentTurnView({
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive) return false;
+  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;

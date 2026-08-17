@@ -243,6 +243,30 @@ export function MessageList() {
     return indices;
   }, [completedGroups]);
 
+  // 每轮 agent_turn 的执行总时长：取该轮用户消息（前置最近 user 组）的
+  // elapsed_ms，回复底部据此显示「执行总时长」。
+  const turnElapsedByGroupKey = useMemo(() => {
+    const map = new Map<string, number | undefined>();
+    let current: number | undefined;
+    for (const group of filteredGroups) {
+      if (group.type === 'user') {
+        current = group.messages[0]?.elapsed_ms ?? undefined;
+      } else if (group.type === 'agent_turn') {
+        map.set(group.key, current);
+      }
+    }
+    return map;
+  }, [filteredGroups]);
+
+  // 流式轮的总时长：本轮最后一条用户消息的 elapsed_ms。
+  const streamingTurnElapsedMs = useMemo(() => {
+    if (!streamingGroup) return undefined;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].elapsed_ms ?? undefined;
+    }
+    return undefined;
+  }, [streamingGroup, messages]);
+
   // 计算 compact 边界
   const nonEditableIds = useMemo(() => {
     const ids = new Set<string>();
@@ -843,6 +867,7 @@ export function MessageList() {
                         hasTts={hasTts}
                         selectedAgentTab={selectedAgentTab}
                         isActive={isLiveTurn}
+                        turnElapsedMs={turnElapsedByGroupKey.get(group.key)}
                       />
                     </div>
                   );
@@ -861,6 +886,7 @@ export function MessageList() {
                     hasTts={hasTts}
                     selectedAgentTab={selectedAgentTab}
                     isActive={isThinking}
+                    turnElapsedMs={streamingTurnElapsedMs}
                   />
                 </div>
               )}
