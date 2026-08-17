@@ -717,6 +717,9 @@ pub enum ContributionSource {
 pub struct ExtensionApp {
     pub plugin_id: String,
     pub contribution_id: String,
+    /// 官方内置 App（浏览器/终端/Agent Team）：native 容器，非插件清单声明。
+    #[serde(default)]
+    pub official: bool,
     /// 插件 descriptor 名称（矩阵主标题）。
     pub name: String,
     /// 贡献标题（缺省回落 plugin_id）。
@@ -726,6 +729,47 @@ pub struct ExtensionApp {
     /// singleton：全局至多一个 tab，重复打开聚焦；multi：每次打开新建。
     pub open_mode: crate::slots::OpenMode,
     pub sandbox: crate::slots::SandboxKind,
+}
+
+/// 官方内置 App 目录（设计文档 8.1-8.3）：以官方插件身份进入统一 App 注册表，
+/// native 容器（仅官方签名语义），与三方 App 同构展示。
+/// plugin_id 统一为 `__builtin__`，contribution_id 即官方 App 标识。
+pub fn official_apps() -> Vec<ExtensionApp> {
+    vec![
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "browser".to_string(),
+            official: true,
+            name: "浏览器".to_string(),
+            title: "浏览器".to_string(),
+            description: "嵌入式浏览器，Agent 与你共用同一页面".to_string(),
+            icon: "globe".to_string(),
+            open_mode: crate::slots::OpenMode::Singleton,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "terminal".to_string(),
+            official: true,
+            name: "终端".to_string(),
+            title: "终端".to_string(),
+            description: "嵌入式终端，支持多标签与会话隔离".to_string(),
+            icon: "terminal".to_string(),
+            open_mode: crate::slots::OpenMode::Multi,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "agent-team".to_string(),
+            official: true,
+            name: "Agent Team".to_string(),
+            title: "Agent Team".to_string(),
+            description: "子 Agent 协作状态面板".to_string(),
+            icon: "bot".to_string(),
+            open_mode: crate::slots::OpenMode::Singleton,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+    ]
 }
 
 /// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
@@ -751,6 +795,7 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
                 continue;
             }
             apps.push(ExtensionApp {
+                official: false,
                 plugin_id: plugin_id.clone(),
                 contribution_id: contribution.id.clone(),
                 name: plugin_name.clone(),
@@ -762,12 +807,17 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
             });
         }
     }
-    apps.sort_by(|left, right| {
-        left.plugin_id
-            .cmp(&right.plugin_id)
-            .then(left.contribution_id.cmp(&right.contribution_id))
+    let mut all = official_apps();
+    all.extend(apps);
+    // 官方 App 置顶，其余按 (plugin_id, contribution_id) 排序
+    all.sort_by(|left, right| {
+        right.official.cmp(&left.official).then_with(|| {
+            left.plugin_id
+                .cmp(&right.plugin_id)
+                .then(left.contribution_id.cmp(&right.contribution_id))
+        })
     });
-    apps
+    all
 }
 
 /// 打开插件页面，返回入口 HTML。

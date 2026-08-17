@@ -5,6 +5,7 @@ import { api } from '@/api/tauri';
 import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
 import type { SandboxKind, TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
+import { AgentTeamPanel } from './AgentTeamPanel';
 import { BrowserTabContent } from './BrowserTabContent';
 import { PluginAppTabContent } from './PluginAppTabContent';
 import { TerminalTabContent } from './TerminalTabContent';
@@ -27,8 +28,9 @@ interface TabsContainerProps {
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
-   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
-  onTabKindsChanged?: (kinds: TabKind[]) => void;
+   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。
+   *  第二参量为已打开的三方/官方 plugin App 键（`plugin_id:contribution_id`）。 */
+  onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
   /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
   appCommand?: AppTabCommand | null;
   /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
@@ -141,16 +143,23 @@ export function TabsContainer({
     [activeTabId, tabs],
   );
 
-  // tab 类型集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
+  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
   const onTabKindsChangedRef = useRef(onTabKindsChanged);
   onTabKindsChangedRef.current = onTabKindsChanged;
   const lastTabKindsRef = useRef<string>('');
   useEffect(() => {
     const kinds = Array.from(new Set(tabs.map((tab) => tab.kind)));
-    const key = kinds.join(',');
+    const pluginApps = Array.from(
+      new Set(
+        tabs
+          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
+          .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
+      ),
+    );
+    const key = `${kinds.join(',')}|${pluginApps.join(',')}`;
     if (key === lastTabKindsRef.current) return;
     lastTabKindsRef.current = key;
-    onTabKindsChangedRef.current?.(kinds);
+    onTabKindsChangedRef.current?.(kinds, pluginApps);
   }, [tabs]);
 
   useEffect(() => {
@@ -904,11 +913,31 @@ export function TabsContainer({
               isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
             />
           ) : tab.kind === 'plugin' ? (
-            <PluginAppTabContent
-              key={`${terminalSessionId}:${tab.id}`}
-              tab={tab}
-              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
-            />
+            tab.sandbox === 'native' && tab.plugin_id === '__builtin__' ? (
+              // 官方内置 App 的 native 容器（设计 6.2 ③，仅官方）：按贡献分派组件
+              <div
+                key={`${terminalSessionId}:${tab.id}`}
+                className={
+                  isVisible && mode === 'app' && tab.id === activeTab?.id
+                    ? 'flex h-full min-h-0 w-full flex-1 flex-col'
+                    : 'hidden'
+                }
+              >
+                {tab.contribution_id === 'agent-team' ? (
+                  <AgentTeamPanel />
+                ) : (
+                  <div className="p-4 text-sm text-muted-foreground">
+                    该官方 App 内容组件未注册。
+                  </div>
+                )}
+              </div>
+            ) : (
+              <PluginAppTabContent
+                key={`${terminalSessionId}:${tab.id}`}
+                tab={tab}
+                isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
+              />
+            )
           ) : (
             <BrowserTabContent
               key={`${terminalSessionId}:${tab.id}`}

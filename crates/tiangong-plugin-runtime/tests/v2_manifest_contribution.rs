@@ -248,3 +248,39 @@ fn extension_tab_贡献聚合为_app_元数据() {
         .expect("memory 的 settings 贡献应经 Slot 通道可见");
     assert_eq!(memory_settings.source, ContributionSource::Manifest);
 }
+
+#[test]
+fn 官方内置_app_置顶出现在统一目录() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let apps = list_extension_apps();
+    let official: Vec<&_> = apps.iter().filter(|app| app.official).collect();
+    assert_eq!(official.len(), 3, "浏览器/终端/Agent Team 三条官方 App");
+    assert!(official.iter().all(|app| app.plugin_id == "__builtin__"));
+    // 官方 App 置顶
+    assert!(apps.first().map(|app| app.official).unwrap_or(false));
+    // 打开模式语义：浏览器单例、终端多例、Agent Team 单例
+    let browser = official
+        .iter()
+        .find(|app| app.contribution_id == "browser")
+        .unwrap();
+    assert_eq!(
+        browser.open_mode,
+        tiangong_plugin_runtime::OpenMode::Singleton
+    );
+    let terminal = official
+        .iter()
+        .find(|app| app.contribution_id == "terminal")
+        .unwrap();
+    assert_eq!(terminal.open_mode, tiangong_plugin_runtime::OpenMode::Multi);
+    let team = official
+        .iter()
+        .find(|app| app.contribution_id == "agent-team")
+        .unwrap();
+    assert_eq!(team.open_mode, tiangong_plugin_runtime::OpenMode::Singleton);
+    // 官方 App 为 native 容器
+    assert!(
+        official
+            .iter()
+            .all(|app| app.sandbox == tiangong_plugin_runtime::SandboxKind::Native)
+    );
+}

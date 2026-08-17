@@ -555,10 +555,12 @@ export interface PluginCapabilities {
   events: string[];
 }
 
-/** 拓展区 App 元数据（声明 extension.tab 贡献的插件）。 */
+/** 拓展区 App 元数据（三方 extension.tab 贡献 + 官方内置 App）。 */
 export interface AppEntry {
   plugin_id: string;
   contribution_id: string;
+  /** 官方内置 App（浏览器/终端/Agent Team）：native 容器。 */
+  official: boolean;
   /** 插件名（矩阵主标题）。 */
   name: string;
   title: string;

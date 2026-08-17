@@ -123,6 +123,8 @@ export function MainApp() {
   // 拓展区按钮高亮（任一存在）与矩阵图标的「在用」绿点（按 App）共用数据源。
   const [sessionBrowserTabs, setSessionBrowserTabs] = useState(false);
   const [sessionTerminalTabs, setSessionTerminalTabs] = useState(false);
+  // 已打开的 plugin App 键集合（`plugin_id:contribution_id`）：矩阵绿点数据源。
+  const [runningPluginApps, setRunningPluginApps] = useState<string[]>([]);
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
   const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
@@ -741,6 +743,7 @@ export function MainApp() {
                           ...(sessionBrowserTabs ? (['browser'] as TabKind[]) : []),
                           ...(sessionTerminalTabs ? (['terminal'] as TabKind[]) : []),
                         ]}
+                        runningPluginApps={runningPluginApps}
                         onNewAppTab={(kind) => {
                           // 切换 App 态 + 下发新建命令（TabsContainer 执行 handleNewTab）
                           setAppTabCommand({ kind, action: 'new', version: Date.now() });
@@ -750,8 +753,8 @@ export function MainApp() {
                           setAppTabCommand({ kind, action: 'close-all', version: Date.now() });
                         }}
                         onOpenPluginApp={(app) => {
-                          // 三方 App：按 open_mode 分派（命令通道内单例聚焦/多例新建），
-                          // 同时切换拓展区到 App 态。
+                          // 官方 plugin 形态 App（agent-team）与三方 App 同一命令通道：
+                          // 按 open_mode 分派（单例聚焦/多例新建），native 由官方容器渲染。
                           setAppTabCommand({
                             kind: 'plugin',
                             action: 'open-plugin',
@@ -771,9 +774,10 @@ export function MainApp() {
                     appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
-                    onTabKindsChanged={(kinds) => {
+                    onTabKindsChanged={(kinds, pluginApps) => {
                       setSessionBrowserTabs(kinds.includes('browser'));
                       setSessionTerminalTabs(kinds.includes('terminal'));
+                      setRunningPluginApps(pluginApps);
                     }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />
