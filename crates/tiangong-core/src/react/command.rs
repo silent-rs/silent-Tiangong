@@ -38,7 +38,6 @@ pub(super) fn save_user_message_and_restart(
         content: content_text,
         content_blocks,
         media: Vec::new(),
-        model_excluded: false,
     });
     tracing::info!(
         session_id = %ctx.session.id,

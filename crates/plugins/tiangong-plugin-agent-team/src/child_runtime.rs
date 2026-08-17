@@ -1494,7 +1494,6 @@ mod tests {
                 content: "test".to_string(),
                 content_blocks: Vec::new(),
                 media: Vec::new(),
-                model_excluded: false,
             },
         );
         handle_child_event(

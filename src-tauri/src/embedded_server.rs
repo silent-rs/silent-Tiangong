@@ -490,9 +490,9 @@ async fn completed_message_result(
         return Err(format!("目标会话不存在：{session_id}"));
     }
     let session = state.core_manager.load_session(session_id)?;
-    let (outgoing, direct_agent_reply) =
+    let outgoing =
         tiangong_server::remote::core::assistant_outgoing_after_user(&session, message_id);
-    if status == TurnStatus::Success || direct_agent_reply {
+    if status == TurnStatus::Success {
         Ok(outgoing)
     } else {
         Err(match status {

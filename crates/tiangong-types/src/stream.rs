@@ -141,9 +141,6 @@ pub enum StreamEvent {
         /// 旧版消费者兼容字段；仅包含稳定媒体引用，不携带运行时 base64。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         media: Vec<crate::MediaAsset>,
-        /// 消息保留在会话历史中，但不进入当前 Agent 的模型上下文。
-        #[serde(default, skip_serializing_if = "is_false")]
-        model_excluded: bool,
     },
     /// Core 会话中的稳定消息快照，供宿主按 ID 更新本地镜像。
     SessionMessageUpsert {
@@ -237,10 +234,6 @@ pub enum StreamEvent {
     },
     /// 会话标题变更（标题生成完成 / 用户编辑）。消费线程据此 emit sessions_updated。
     TitleChanged { title: String },
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// 上下文压缩/清理操作类型

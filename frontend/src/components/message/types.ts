@@ -18,7 +18,6 @@ export interface MessageItem {
   tool_name?: string;
   tool_result_is_error?: boolean;
   compact?: boolean;
-  model_excluded?: boolean;
   phase?: MessagePhase;
   created_at: string;
   /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带。 */

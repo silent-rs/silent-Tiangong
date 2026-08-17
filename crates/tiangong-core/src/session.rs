@@ -425,7 +425,6 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -451,7 +450,6 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -495,7 +493,6 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -517,7 +514,6 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -694,20 +690,6 @@ impl Session {
         }
     }
 
-    /// 保留消息历史与展示，但控制它是否进入当前 Agent 的模型上下文。
-    pub fn set_message_model_excluded(&mut self, message_id: &str, excluded: bool) -> bool {
-        if let Some(message) = self
-            .messages
-            .iter_mut()
-            .find(|message| message.id == message_id)
-        {
-            message.model_excluded = excluded;
-            true
-        } else {
-            false
-        }
-    }
-
     pub(crate) fn defer_tool_injection(&mut self, tool_name: String, payload: serde_json::Value) {
         self.deferred_tool_injections
             .push(DeferredToolInjection { tool_name, payload });
@@ -743,7 +725,6 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -1085,9 +1066,7 @@ impl Session {
                 // system_prompt_message 提供，避免日志覆盖完整规则。
                 // Notice 是系统发给用户的通知，按角色整体排除出模型上下文。
                 .filter(|message| {
-                    !message.model_excluded
-                        && message.role != MessageRole::System
-                        && message.role != MessageRole::Notice
+                    message.role != MessageRole::System && message.role != MessageRole::Notice
                 })
                 .cloned(),
         );
@@ -1368,31 +1347,6 @@ mod ready_content_tests {
             &session.context()[0].content[1],
             ContentBlock::Image { data: None, .. }
         ));
-    }
-
-    #[test]
-    fn model_excluded_round_trips_and_stays_out_of_context() {
-        let mut session = Session::new("excluded-message");
-        session.append_prepared_user_message_with_id(
-            "routed-user".to_string(),
-            vec![ContentBlock::text("@dev handle this")],
-        );
-        assert!(session.set_message_model_excluded("routed-user", true));
-        assert!(session.context().is_empty());
-
-        let json = serde_json::to_string(&session).unwrap();
-        let restored: Session = serde_json::from_str(&json).unwrap();
-        assert!(restored.messages[0].model_excluded);
-        assert!(restored.context().is_empty());
-
-        let mut legacy_value = serde_json::to_value(&session).unwrap();
-        legacy_value["messages"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("model_excluded");
-        let legacy: Session = serde_json::from_value(legacy_value).unwrap();
-        assert!(!legacy.messages[0].model_excluded);
-        assert_eq!(legacy.context().len(), 1);
     }
 }
 

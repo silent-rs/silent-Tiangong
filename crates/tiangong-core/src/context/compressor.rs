@@ -3,8 +3,7 @@ use crate::session::{Message, MessagePhase, MessageRole, Session};
 
 /// 判断消息是否为可压缩的有效消息。
 pub(crate) fn is_compressible(message: &Message) -> bool {
-    !message.model_excluded
-        && message.role != MessageRole::System
+    message.role != MessageRole::System
         && message.role != MessageRole::Notice
         && message.phase != MessagePhase::CompressedResume
 }
@@ -128,9 +127,7 @@ impl ContextCompressor {
             session.messages[start..split_point]
                 .iter()
                 .filter(|message| {
-                    is_compressible(message)
-                        || (!message.model_excluded
-                            && message.phase == MessagePhase::CompressedResume)
+                    is_compressible(message) || message.phase == MessagePhase::CompressedResume
                 })
                 .cloned(),
         );

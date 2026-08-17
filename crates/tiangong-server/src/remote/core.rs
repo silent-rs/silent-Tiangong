@@ -196,18 +196,8 @@ impl ServerCoreManager {
             }
         };
         let response = match outcome {
-            TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await.0,
-            TurnOutcome::Failed(message) => {
-                let (response, is_direct_agent_reply) =
-                    self.last_assistant_outgoing(&session_id).await;
-                if is_direct_agent_reply {
-                    // @Agent 的业务失败/定向取消已经生成可交付说明；会话轮次仍记录为
-                    // failed/cancelled，但远程用户不能因为终态是 Error 而看不到说明。
-                    response
-                } else {
-                    return Err(anyhow!(message));
-                }
-            }
+            TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await,
+            TurnOutcome::Failed(message) => return Err(anyhow!(message)),
         };
 
         Ok((session_id, response))
@@ -473,23 +463,23 @@ impl ServerCoreManager {
             .clone()
     }
 
-    async fn last_assistant_outgoing(&self, session_id: &str) -> (OutgoingMessage, bool) {
+    async fn last_assistant_outgoing(&self, session_id: &str) -> OutgoingMessage {
         // 消息遍历需完整 Session;从磁盘 load(issue #245:真相源归磁盘)。
         let core_manager = self.state.lock().await.core_manager.clone();
         let Ok(session) = core_manager.load_session(session_id) else {
-            return (text_outgoing("处理完成"), false);
+            return text_outgoing("处理完成");
         };
         assistant_outgoing_after_last_user(&session)
     }
 }
 
-fn assistant_outgoing_after_last_user(session: &Session) -> (OutgoingMessage, bool) {
+fn assistant_outgoing_after_last_user(session: &Session) -> OutgoingMessage {
     let Some(last_user) = session
         .messages
         .iter()
         .rfind(|message| message.role == MessageRole::User)
     else {
-        return (text_outgoing("处理完成"), false);
+        return text_outgoing("处理完成");
     };
     assistant_outgoing_after_user(session, &last_user.id)
 }
@@ -498,56 +488,32 @@ fn assistant_outgoing_after_last_user(session: &Session) -> (OutgoingMessage, bo
 ///
 /// 以用户消息 ID 划定区间，而不是读取“最后一轮”，供 Desktop 内嵌 Server 在同一
 /// 会话存在排队轮次时准确返回各自的结果。
-pub fn assistant_outgoing_after_user(
-    session: &Session,
-    user_message_id: &str,
-) -> (OutgoingMessage, bool) {
+pub fn assistant_outgoing_after_user(session: &Session, user_message_id: &str) -> OutgoingMessage {
     let Some(user_index) = session
         .messages
         .iter()
         .position(|message| message.id == user_message_id && message.role == MessageRole::User)
     else {
-        return (text_outgoing("处理完成"), false);
+        return text_outgoing("处理完成");
     };
-    let assistant_messages = session
+    // 仅聚合主 Agent 回复（worker_id 为空）；子 Agent 过程消息不落盘（桌面端
+    // 走内存视图），磁盘会话中不存在需要聚合的 worker 回复。
+    let selected = session
         .messages
         .iter()
         .skip(user_index + 1)
         .take_while(|message| {
             message.role != MessageRole::User || message.worker_id.as_deref().is_some()
         })
-        .filter(|message| message.role == MessageRole::Assistant)
-        .collect::<Vec<_>>();
-    let has_direct_agent_reply = assistant_messages.iter().any(|message| {
-        message.model_excluded
-            && message
-                .worker_id
-                .as_deref()
-                .is_some_and(|worker_id| worker_id.starts_with("agent:"))
-    });
-    let selected = assistant_messages.into_iter().filter(|message| {
-        if has_direct_agent_reply {
-            message.model_excluded
-                && message
-                    .worker_id
-                    .as_deref()
-                    .is_some_and(|worker_id| worker_id.starts_with("agent:"))
-        } else {
-            message.worker_id.is_none()
-        }
-    });
+        .filter(|message| message.role == MessageRole::Assistant && message.worker_id.is_none());
     let mut texts = Vec::new();
     let mut media_items = Vec::new();
     for message in selected {
         let (text, referenced_files) =
             extract_local_files_from_text(session, &message.text_content());
         if !text.trim().is_empty() {
-            if has_direct_agent_reply {
-                texts.push(text);
-            } else {
-                texts.clear();
-                texts.push(text);
-            }
+            texts.clear();
+            texts.push(text);
         }
         media_items.extend(referenced_files);
         for block in &message.content {
@@ -586,16 +552,13 @@ pub fn assistant_outgoing_after_user(
     media_items.retain(|media| seen_urls.insert(media.url.clone()));
 
     if !media_items.is_empty() {
-        return (
-            media_outgoing(media_items, latest_text),
-            has_direct_agent_reply,
-        );
+        return media_outgoing(media_items, latest_text);
     }
 
     if latest_text.trim().is_empty() {
-        (text_outgoing("处理完成"), has_direct_agent_reply)
+        text_outgoing("处理完成")
     } else {
-        (text_outgoing(latest_text), has_direct_agent_reply)
+        text_outgoing(latest_text)
     }
 }
 
@@ -1183,7 +1146,7 @@ mod tests {
 
     use tiangong_core::core::Plugin;
     use tiangong_core::core_config::CoreConfig;
-    use tiangong_types::{ContentBlock, StoredAsset};
+    use tiangong_types::ContentBlock;
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
 
@@ -1208,17 +1171,6 @@ mod tests {
             Arc::new(EventBus::default()),
         ));
         (manager, session, session_path, state)
-    }
-
-    fn image_asset() -> StoredAsset {
-        StoredAsset {
-            asset_id: "asset-server".to_string(),
-            local_path: "/tmp/server-image.png".to_string(),
-            original_name: "server-image.png".to_string(),
-            mime_type: "image/png".to_string(),
-            size: 4,
-            kind: MediaKind::Image,
-        }
     }
 
     #[test]
@@ -1406,7 +1358,6 @@ mod tests {
             content: "second".to_string(),
             content_blocks: Vec::new(),
             media: Vec::new(),
-            model_excluded: false,
         });
         tracker.observe_event(&StreamEvent::Done { usage: None });
         assert!(matches!(
@@ -1428,7 +1379,6 @@ mod tests {
             content: "active".to_string(),
             content_blocks: Vec::new(),
             media: Vec::new(),
-            model_excluded: false,
         });
 
         tracker.fail_all("Core 事件流已关闭");
@@ -1440,43 +1390,6 @@ mod tests {
         assert!(matches!(
             tracker.wait_for_turn(active),
             TurnOutcome::Failed(message) if message.contains("事件流已关闭")
-        ));
-    }
-
-    #[test]
-    fn direct_agent_outgoing_aggregates_all_replies_and_maps_ready_assets() {
-        let mut session = Session::new("direct-agent-outgoing");
-        session.append_message(MessageRole::User, "@dev @test 请分别处理".to_string());
-        session.append_worker_message(MessageRole::Assistant, "开发结果", "agent:dev:agent-dev");
-        if let Some(message) = session.messages.last_mut() {
-            message.model_excluded = true;
-            let mut asset = image_asset();
-            asset.local_path = "/tmp/dev-image.png".to_string();
-            message.content.push(ContentBlock::AssetReference { asset });
-        }
-        session.append_worker_message(MessageRole::Assistant, "测试结果", "agent:test:agent-test");
-        if let Some(message) = session.messages.last_mut() {
-            message.model_excluded = true;
-            message.content.push(ContentBlock::AssetReference {
-                asset: image_asset(),
-            });
-        }
-
-        let (outgoing, is_direct) = assistant_outgoing_after_last_user(&session);
-        assert!(is_direct);
-        match outgoing.content {
-            MessageContent::Image { url, caption } => {
-                assert_eq!(url, "/tmp/dev-image.png");
-                let caption = caption.unwrap();
-                assert!(caption.contains("开发结果"));
-                assert!(caption.contains("测试结果"));
-            }
-            other => panic!("expected image outgoing, got {other:?}"),
-        }
-        assert_eq!(outgoing.attachments.len(), 1);
-        assert!(matches!(
-            &outgoing.attachments[0],
-            MessageContent::Image { url, .. } if url == "/tmp/server-image.png"
         ));
     }
 
@@ -1496,11 +1409,8 @@ mod tests {
         );
         session.append_message(MessageRole::Assistant, "second reply");
 
-        let (first, first_is_direct) = assistant_outgoing_after_user(&session, "user-1");
-        let (second, second_is_direct) = assistant_outgoing_after_user(&session, "user-2");
-
-        assert!(!first_is_direct);
-        assert!(!second_is_direct);
+        let first = assistant_outgoing_after_user(&session, "user-1");
+        let second = assistant_outgoing_after_user(&session, "user-2");
         assert!(matches!(first.content, MessageContent::Text(ref text) if text == "first reply"));
         assert!(matches!(second.content, MessageContent::Text(ref text) if text == "second reply"));
     }
@@ -1535,8 +1445,7 @@ mod tests {
             ),
         );
 
-        let (outgoing, is_direct) = assistant_outgoing_after_user(&session, "user-local-files");
-        assert!(!is_direct);
+        let outgoing = assistant_outgoing_after_user(&session, "user-local-files");
         let image_path = std::fs::canonicalize(image).unwrap();
         match outgoing.content {
             MessageContent::Image { url, caption } => {
@@ -1577,7 +1486,7 @@ mod tests {
             format!("报告已经生成：\n\n[下载报告]({})", report.display()),
         );
 
-        let (outgoing, _) = assistant_outgoing_after_user(&session, "user-workspace-file");
+        let outgoing = assistant_outgoing_after_user(&session, "user-workspace-file");
         assert!(matches!(
             outgoing.content,
             MessageContent::Text(ref text)

@@ -18,8 +18,8 @@ fn is_inline_data_reference(value: &str) -> bool {
 /// 消息角色
 ///
 /// [`Notice`](MessageRole::Notice) 是系统发给用户的通知（如轮次失败原因），
-/// 仅前端可见：消息须带 `model_excluded` 排除出模型上下文与压缩摘要，
-/// 不与 [`System`](MessageRole::System)（系统提示通道）混用。
+/// 仅前端可见：按角色在上下文构建、压缩与 provider 转换处整体排除，
+/// 不进模型上下文，也不与 [`System`](MessageRole::System)（系统提示通道）混用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
@@ -264,9 +264,6 @@ pub struct Message {
     /// 表示从当前消息及以前的历史已被压缩摘要覆盖。
     #[serde(default, skip_serializing_if = "is_false")]
     pub compact: bool,
-    /// 该消息保留在会话历史中，但不进入当前 Agent 的模型上下文或压缩摘要。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub model_excluded: bool,
     /// 消息所属的执行阶段，用于前端消息分层展示。
     #[serde(default)]
     pub phase: MessagePhase,
@@ -568,8 +565,6 @@ impl<'de> Deserialize<'de> for Message {
             #[serde(default)]
             compact: bool,
             #[serde(default)]
-            model_excluded: bool,
-            #[serde(default)]
             phase: MessagePhase,
             created_at: String,
             elapsed_ms: Option<u64>,
@@ -592,7 +587,6 @@ impl<'de> Deserialize<'de> for Message {
             tool_name: raw.tool_name,
             tool_result_is_error: raw.tool_result_is_error,
             compact: raw.compact,
-            model_excluded: raw.model_excluded,
             phase: raw.phase,
             created_at: raw.created_at,
             elapsed_ms: raw.elapsed_ms,
@@ -615,7 +609,6 @@ impl Message {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: now_text(),
             elapsed_ms: None,
@@ -641,7 +634,6 @@ impl Message {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: now_text(),
             elapsed_ms: None,

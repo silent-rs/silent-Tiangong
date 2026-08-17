@@ -109,7 +109,6 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         tool_name: None,
         tool_result_is_error: false,
         compact: false,
-        model_excluded: false,
         phase: MessagePhase::Normal,
         created_at: now_text(),
     }
