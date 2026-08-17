@@ -117,6 +117,14 @@ pub enum MemoryCommand {
         workspace_id: String,
     },
     RunMetaRumination,
+    /// 提交后台 worker 已完成 LLM 提炼的 Meso 结果（Actor 串行落库）。
+    ApplyMesoRumination {
+        outcome: Box<crate::rumination::MesoOutcome>,
+    },
+    /// 提交后台 worker 已完成评估的 Meta 结果（Actor 串行归档）。
+    ApplyMetaRumination {
+        outcome: Box<crate::rumination::MetaOutcome>,
+    },
 
     // ── 生命周期 ──
     Reconfigure {
