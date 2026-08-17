@@ -23,6 +23,9 @@ const TEAM_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// 测试使用短超时，便于验证 detach 合同（留足正常关闭收敛余量）。
 #[cfg(test)]
 const TEAM_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// 关闭超时后销毁临时 runtime 的宽限：到期放弃等待仍在跑的 blocking 关闭任务
+/// （`Runtime` 默认析构会无限等待它们，将重新卡住通知线程）。
+const TEAM_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct AgentTeamPlugin {
     coordinator: Arc<Coordinator>,
@@ -169,6 +172,10 @@ impl Plugin for AgentTeamPlugin {
                 "Agent Team 关闭超时：剩余子 Agent 已 detach，由共享 runtime 自然收敛落盘"
             ),
         }
+        // runtime 默认析构会无限等待其 blocking 任务（子 Core 关闭在
+        // spawn_blocking 中执行），超时场景下通知线程会被重新卡住。改为带
+        // 期限销毁：到期放弃等待，未完成的子任务在其系统线程上自然收敛。
+        runtime.shutdown_timeout(TEAM_SHUTDOWN_GRACE);
     }
 }
 
