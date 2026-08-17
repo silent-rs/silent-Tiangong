@@ -67,6 +67,7 @@
 | `a5cbfc41` | docs(plugin): 新增统一插件形态（Plugin Harness）设计方案 |
 | `cbe28c7b` | docs(plugin): 新增插件 Harness 需求、任务 spec 与进度记录 |
 | `585d1d74` | feat(plugin): 落地插件 Harness M0 接缝地基（T001-T005） |
+| `ea18699f` | fix(plugin): bridge 权限校验对 v1 插件一律放行 plugin.*（M0 回归修复） |
 
 （后续文档提交与代码提交分开记录）
 
@@ -95,6 +96,19 @@
 1. Memory 的 view message（bootstrap/save_config）依赖 sidecar 进程，测试环境无法拉起真实 sidecar；其双向通信经 prompt 插件（同一 v1 兼容路径 + 同一 `plugin.*` 桥接通道）验证等价，Memory 侧待 GUI 手动冒烟确认。
 2. GUI 手动冒烟（设置 → 插件：Memory/prompt 设置页加载、交互、主题切换、无 console 报错）需在桌面 App 中人工确认，前端桥接代码路径已被集成测试覆盖。
 3. 事件订阅（bridge.on）当前为登记骨架，事件源接入在 T007 之后按需补充。
+
+### M0 回归修复：v1 非空权限插件设置页误拒（2026-08-17，`ea18699f`）
+
+用户 GUI 冒烟发现 generate-image-openai 设置页报错「未声明权限 bridge.call」。
+根因：bridge 权限校验原实现按「v1 + permissions 非空即按声明校验」处理，
+而 v1 清单早于 bridge 权限体系，不可能声明 bridge.call。
+
+修复：
+
+- `plugin.*` 命名空间对 v1 一律放行（等价旧 plugin_call 透传通道，零改动兼容）；v2 仍按声明校验。
+- 其余宿主能力命名空间仅 v2 可达，v1 调用时明确提示需升级清单。
+- 单元测试与 m0 端到端测试补充该回归场景；用本机真实安装的 generate-image-openai 验证 `plugin.bootstrap` 经新桥接正常返回配置。
+- 修复后 `cargo test -p tiangong-plugin-runtime` 56 项全绿，clippy 零警告。
 
 ## 更新规则
 
