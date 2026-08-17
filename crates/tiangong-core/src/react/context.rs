@@ -138,9 +138,9 @@ pub(crate) fn select_client_for_request<'a>(
 /// - 走标准注入通道保证 append-only、provider 序列化为合法 tool pair，cache 友好。
 ///
 /// 去重边界：`inject_tool_to_messages` 仅对连续相同的 plugin_injection 结果去重，
-/// 不与 `run_turn` 失败收尾追加的 `[错误]` System 消息跨格式去重——二者各司其职：
-/// 本消息对模型可见（携带继续指令），`[错误]` 消息仅前端可见（System 角色被
-/// `build_provider_messages` 排除）。
+/// 不与 `run_turn` 失败收尾追加的 `[错误]` Notice 消息跨格式去重——二者各司其职：
+/// 本消息对模型可见（携带继续指令），`[错误]` 消息仅前端可见（Notice 角色在
+/// 上下文构建、压缩与 provider 转换处整体排除）。
 pub(crate) fn persist_error(ctx: &mut TurnContext, message: impl Into<String>) {
     let message = message.into();
     let payload = serde_json::json!({

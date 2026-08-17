@@ -339,6 +339,7 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
                 MessageRole::Assistant => "assistant",
                 MessageRole::Tool => "tool",
                 MessageRole::System => return None,
+                MessageRole::Notice => return None,
             };
             Some(TurnData {
                 turn_id: msg.id.clone(),

@@ -1,8 +1,8 @@
-import type { ContentBlock, MessagePhase } from "@/api/tauri";
+import type { ContentBlock, MessagePhase, MessageRole } from "@/api/tauri";
 
 export interface MessageItem {
   id: string;
-  role: "system" | "user" | "assistant" | "tool";
+  role: MessageRole;
   content: ContentBlock[];
   reasoning_content: string;
   worker_id?: string;

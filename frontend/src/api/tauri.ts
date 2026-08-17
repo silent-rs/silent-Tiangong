@@ -79,7 +79,8 @@ export interface TerminalTabListResponse {
   active_tab_id: string | null;
 }
 
-export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
+/** notice：系统发给用户的通知（如轮次失败原因），仅前端可见，不进模型上下文。 */
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'notice';
 export type MessagePhase = 'normal' | 'react' | 'summary' | 'compressedresume';
 
 /** 单个对话轮次的最终执行状态（持久化在用户消息上，历史会话同样可见）。 */

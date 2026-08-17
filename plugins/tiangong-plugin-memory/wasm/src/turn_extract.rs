@@ -58,6 +58,7 @@ pub(crate) fn build_turn_memory_result(
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
                 MessageRole::System => return None,
+                MessageRole::Notice => return None,
                 MessageRole::Tool => "tool",
             };
             let content = compact_single_memory_text(&message.text_content(), 400);

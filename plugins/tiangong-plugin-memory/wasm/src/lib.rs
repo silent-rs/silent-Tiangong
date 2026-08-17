@@ -610,6 +610,7 @@ fn build_recall_context(session: &tiangong_types::PluginSession) -> Vec<String> 
                 tiangong_types::MessageRole::User => "user",
                 tiangong_types::MessageRole::Assistant => "assistant",
                 tiangong_types::MessageRole::System => return None,
+                tiangong_types::MessageRole::Notice => return None,
                 tiangong_types::MessageRole::Tool => message.tool_name.as_deref().unwrap_or("tool"),
             };
             let content = compact_memory_text(&message.text_content(), 900);

@@ -1083,7 +1083,12 @@ impl Session {
                 .iter()
                 // 持久化 System 消息是 UI/恢复日志；唯一模型系统提示由
                 // system_prompt_message 提供，避免日志覆盖完整规则。
-                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+                // Notice 是系统发给用户的通知，按角色整体排除出模型上下文。
+                .filter(|message| {
+                    !message.model_excluded
+                        && message.role != MessageRole::System
+                        && message.role != MessageRole::Notice
+                })
                 .cloned(),
         );
         context

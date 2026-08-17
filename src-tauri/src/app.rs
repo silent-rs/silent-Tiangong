@@ -120,7 +120,8 @@ fn merge_agent_output_messages(
                 tiangong_core::session::MessageRole::Assistant
             }
             tiangong_core::session::MessageRole::System
-            | tiangong_core::session::MessageRole::Tool => {
+            | tiangong_core::session::MessageRole::Tool
+            | tiangong_core::session::MessageRole::Notice => {
                 tiangong_core::session::MessageRole::System
             }
             tiangong_core::session::MessageRole::User => tiangong_core::session::MessageRole::User,
