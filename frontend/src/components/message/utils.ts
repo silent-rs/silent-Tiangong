@@ -39,6 +39,23 @@ export function formatDuration(ms: number): string {
   return `${seconds}秒`;
 }
 
+/** 工具行耗时格式：与总时间的中文格式区分，单位用英文 h/m/s/ms，
+ *  进位规则相同（< 1s 显示 ms，满 60 秒进分，满 60 分进时）。 */
+export function formatToolDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSeconds = Math.floor(ms / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  if (hours > 0) {
+    return `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
+}
+
 export function msgReasoning(message: MessageItem): string {
   return (message.reasoning_content ?? "").trim();
 }
