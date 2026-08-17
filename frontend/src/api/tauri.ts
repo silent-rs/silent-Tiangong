@@ -50,10 +50,10 @@ export interface LoadedSession {
 export type TabKind = 'browser' | 'terminal' | 'plugin';
 export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
 
-/** 内置 App 的打开模式（设计文档 6.6）：浏览器单实例（重复打开聚焦），
- *  终端多实例（每次新建）；plugin（三方 App）按贡献声明的 open_mode。 */
+/** 内置 App 的打开模式：浏览器与终端均为多实例（每次新建标签页）；
+ *  plugin（三方 App）按贡献声明的 open_mode。 */
 export const BUILTIN_TAB_KIND_MULTI: Record<TabKind, boolean> = {
-  browser: false,
+  browser: true,
   terminal: true,
   plugin: false,
 };

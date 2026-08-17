@@ -258,15 +258,12 @@ fn 官方内置_app_置顶出现在统一目录() {
     assert!(official.iter().all(|app| app.plugin_id == "__builtin__"));
     // 官方 App 置顶
     assert!(apps.first().map(|app| app.official).unwrap_or(false));
-    // 打开模式语义：浏览器单例、终端多例、Agent Team 单例
+    // 打开模式语义：浏览器多例、终端多例、Agent Team 单例
     let browser = official
         .iter()
         .find(|app| app.contribution_id == "browser")
         .unwrap();
-    assert_eq!(
-        browser.open_mode,
-        tiangong_plugin_runtime::OpenMode::Singleton
-    );
+    assert_eq!(browser.open_mode, tiangong_plugin_runtime::OpenMode::Multi);
     let terminal = official
         .iter()
         .find(|app| app.contribution_id == "terminal")

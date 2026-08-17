@@ -401,7 +401,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 - **App = 声明了 `extension.tab` 的插件**。一个 App 在矩阵中是一个可打开的入口（图标 + 名称 + 描述 + 打开模式）。
 - 顶部不再保留独立的「终端」「浏览器」按钮，**合并为一个「拓展区」按钮**；点击打开拓展区，未打开任何 App 时直接显示 App 矩阵（启动台网格）。
 - App 按 manifest 的 `open_mode` 区分两种打开方式：
-  - **`singleton`（单例 tab）**：全局至多一个 tab，重复打开聚焦已有实例（浏览器即此模式）。
+  - **`singleton`（单例 tab）**：全局至多一个 tab，重复打开聚焦已有实例（Agent Team 即此模式；浏览器/终端为 `multi`）。
   - **`multi`（多 tab）**：每次打开新建一个独立 tab 实例，可并存切换（终端即此模式）。
 - 已打开的 App 在矩阵中**标识**：图标带「已打开」角标、多实例显示实例数量、运行中显示状态点。
 - 打开 App 后，拓展区顶部显示 tab 栏（可切换实例）+ 一个**启动台按钮**（九宫格图标），点击切回 App 矩阵以便快速打开其他 App。
@@ -568,7 +568,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 
 迁移：
 
-- 拆为**官方「浏览器」插件**：声明 `extension.tab`（`sandbox: "native"`，保留高保真面板；`open_mode: "singleton"`）+ 工具接缝（`browser_open`、`browser_navigate`、`browser_eval` 等现有工具）+ 事件接缝（页面/标签状态）。
+- 拆为**官方「浏览器」插件**：声明 `extension.tab`（`sandbox: "native"`，保留高保真面板；`open_mode: "multi"`）+ 工具接缝（`browser_open`、`browser_navigate`、`browser_eval` 等现有工具）+ 事件接缝（页面/标签状态）。
 - 前端 `BrowserTabContent` 变为该插件的原生容器实现；`plugin:browser|*` 命令迁移为该插件经桥接 `tool.invoke` 调用的内部通道。
 - 迁移后，三方可仿照浏览器插件开发自己的「面板类」能力（如代码地图、数据库浏览器、看板）。
 

@@ -750,9 +750,9 @@ pub fn official_apps() -> Vec<ExtensionApp> {
             official: true,
             name: "浏览器".to_string(),
             title: "浏览器".to_string(),
-            description: "嵌入式浏览器，Agent 与你共用同一页面".to_string(),
+            description: "嵌入式浏览器，支持多标签与会话隔离".to_string(),
             icon: "globe".to_string(),
-            open_mode: crate::slots::OpenMode::Singleton,
+            open_mode: crate::slots::OpenMode::Multi,
             sandbox: crate::slots::SandboxKind::Native,
         },
         ExtensionApp {
