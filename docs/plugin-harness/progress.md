@@ -5,8 +5,8 @@
 
 ## 当前状态
 
-- **阶段**：M0 已完成；M1 进行中（T006 已完成，T007 进行中）。
-- **当前建议任务**：T007（extension.tab Slot 注册 + App 元数据）。
+- **阶段**：M0 已完成；M1 进行中（T006、T007 已完成，T008 进行中）。
+- **当前建议任务**：T008（顶部入口收敛 + 拓展区三态状态机）。
 - **当前阻塞**：无。
 - **下一步**：T007 → T008 → T009/T010 串行推进。
 
@@ -20,8 +20,8 @@
 | T004 | settings.plugin-page Slot 前端容器 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | GUI 手动冒烟待用户确认 |
 | T005 | 端到端验证：旧插件经新桥接渲染设置页 | M0 | 已完成 | feature/plugin-harness | `585d1d74` | 见下方验证记录 | Memory 双向通信需 sidecar，GUI 冒烟待用户确认 |
 | T006 | Shadow/iframe 沙箱容器组件 | M1 | 已完成 | feature/plugin-harness | `414f9c05` | 见下方验证记录 | 媒体资源代理、深度 JS 沙箱后续迭代 |
-| T007 | extension.tab Slot 注册 + App 元数据 | M1 | 未开始 | — | — | — | — |
-| T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 未开始 | — | — | — | — |
+| T007 | extension.tab Slot 注册 + App 元数据 | M1 | 已完成 | feature/plugin-harness | `3cb5dbd9` | 见下方验证记录 | — |
+| T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 进行中 | — | — | — | — |
 | T009 | App 矩阵视图 + 启动台按钮 | M1 | 未开始 | — | — | — | — |
 | T010 | singleton/multi 打开与实例管理 | M1 | 未开始 | — | — | — | — |
 | T011 | 浏览器插件化迁移 | M2 | 未开始 | — | — | — | — |
@@ -55,7 +55,7 @@
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
 | M0 | 接缝地基（T001-T005） | 已完成（2026-08-17，提交 `585d1d74`） |
-| M1 | UI 接缝与能力矩阵（T006-T010） | 进行中（T006 完成，`414f9c05`） |
+| M1 | UI 接缝与能力矩阵（T006-T010） | 进行中（T006 `414f9c05`、T007 `3cb5dbd9`） |
 | M2 | 内置插件化（T011-T013） | 未开始 |
 | M3 | 交互接缝（T014-T015） | 未开始 |
 | M4 | 三方体验（T016） | 未开始 |
@@ -69,6 +69,7 @@
 | `585d1d74` | feat(plugin): 落地插件 Harness M0 接缝地基（T001-T005） |
 | `ea18699f` | fix(plugin): bridge 权限校验对 v1 插件一律放行 plugin.*（M0 回归修复） |
 | `414f9c05` | feat(plugin): T006 Shadow/iframe 沙箱容器组件 |
+| `3cb5dbd9` | feat(plugin): T007 extension.tab Slot 注册与 App 元数据 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -120,7 +121,12 @@
 
 - `cargo check -p tiangong-app`、`cargo clippy -p tiangong-plugin-runtime --all-targets --tests` 零警告；`cargo test -p tiangong-plugin-runtime` 57 项全绿（新增 v2 manifest 贡献链路集成测试：Slot 列出/entry 读取/资源读取/`../` 逃逸拒绝）。
 - 前端 `tsc --noEmit`、`yarn build`、`yarn test` 200 项全绿（新增沙箱容器组件测试 8 项：shadow 挂载、内联/外链脚本受控执行、外链样式注入、桥接 call 转发、bridge.on 按 plugin_id 分发、卸载退订清理、:host token 注入、iframe/native 分发）。
-- 任务 spec：`./tasks/006-沙箱容器组件.md`。
+- 任务 spec：`./tasks/006-沙箱容器组件.md`、`./tasks/007-extension-tab注册与App元数据.md`。
+
+### T007（2026-08-17，`3cb5dbd9`）
+
+- `cargo test -p tiangong-plugin-runtime` 58 项全绿（新增 extension.tab 聚合用例：multi 显式/singleton 缺省、descriptor 名作为 App 名、settings 贡献不进入 App 列表）。
+- clippy 零警告；前端 `tsc --noEmit`、`yarn build` 通过。
 
 ## 更新规则
 
