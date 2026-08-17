@@ -484,6 +484,13 @@ pub fn invoke_sidecar(
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
+/// 取已启用插件的 manifest 快照（供桥接层做权限校验）。
+pub fn plugin_manifest(plugin_id: &str) -> Option<PluginManifest> {
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(plugin_id)?;
+    loaded.enabled.then(|| loaded.manifest.clone())
+}
+
 /// 收集所有已加载 WASM 插件的设置页贡献及其加载代次。
 pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
     let entries = {
@@ -511,6 +518,124 @@ pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
                 .map(|contributions| (id, generation, contributions))
         })
         .collect()
+}
+
+/// 按 Slot 列出 UI 贡献（宿主 UI 接缝的统一查询入口）。
+///
+/// - v1 插件：WASM 运行时声明的设置页贡献整体映射到 `settings.plugin-page`，
+///   零改动兼容（设计文档 11）。
+/// - v2 插件：manifest `ui.contributions` 中 slot 匹配的项。
+pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
+    let mut result = Vec::new();
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return result;
+    };
+    for (plugin_id, loaded) in plugins.iter() {
+        if !loaded.enabled {
+            continue;
+        }
+        // v2：manifest 声明的贡献
+        for contribution in loaded.manifest.ui_contributions() {
+            if contribution.slot == slot {
+                result.push(SlotContribution {
+                    plugin_id: plugin_id.clone(),
+                    contribution_id: contribution.id.clone(),
+                    slot: contribution.slot.clone(),
+                    title: contribution.title.clone(),
+                    description: String::new(),
+                    icon: contribution.icon.clone(),
+                    group: String::new(),
+                    has_view: true,
+                    open_mode: contribution.open_mode,
+                    sandbox: contribution.sandbox,
+                    source: ContributionSource::Manifest,
+                });
+            }
+        }
+        // v1：WASM 设置页贡献映射到 settings.plugin-page
+        if loaded.manifest.schema_version == 1
+            && slot == "settings.plugin-page"
+            && let Some(ui_plugin) = &loaded.ui_plugin
+            && let Ok(contributions) =
+                call_wasm_off_runtime(ui_plugin.clone(), WasmPlugin::contributions)
+        {
+            for contribution in contributions {
+                result.push(SlotContribution {
+                    plugin_id: plugin_id.clone(),
+                    contribution_id: contribution.id.clone(),
+                    slot: slot.to_string(),
+                    title: contribution.title.clone(),
+                    description: contribution.description.clone(),
+                    icon: contribution.icon.clone(),
+                    group: contribution.group.clone(),
+                    has_view: contribution.has_view,
+                    open_mode: crate::slots::OpenMode::Singleton,
+                    sandbox: crate::slots::SandboxKind::Iframe,
+                    source: ContributionSource::Wasm,
+                });
+            }
+        }
+    }
+    result.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then(left.contribution_id.cmp(&right.contribution_id))
+    });
+    result
+}
+
+/// 读取 v2 manifest UI 贡献声明的入口 HTML 文件。
+///
+/// v1 贡献的页面由 WASM `open-view` 提供（见 [`open_view`]），本函数只服务
+/// manifest 声明的 `entry`。
+pub fn open_manifest_view(plugin_id: &str, contribution_id: &str) -> Result<String> {
+    let (directory, entry) = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let contribution = loaded
+            .manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|item| item.id == contribution_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("插件 {plugin_id} 无 manifest 贡献 {contribution_id}")
+            })?;
+        (loaded.directory.clone(), contribution.entry)
+    };
+    let path = directory.join(&entry);
+    std::fs::read_to_string(&path).with_context(|| format!("读取插件页面失败: {}", path.display()))
+}
+
+/// 按 Slot 查询得到的统一 UI 贡献项。
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotContribution {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub slot: String,
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    pub group: String,
+    /// 是否有可渲染页面（v1 由 WASM 声明；v2 manifest 贡献恒有）。
+    pub has_view: bool,
+    pub open_mode: crate::slots::OpenMode,
+    pub sandbox: crate::slots::SandboxKind,
+    /// 贡献来源：WASM 运行时声明（v1）或 manifest 声明（v2）。
+    pub source: ContributionSource,
+}
+
+/// UI 贡献的声明来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributionSource {
+    /// v1：WASM `contributions()` 运行时声明。
+    Wasm,
+    /// v2：manifest `ui.contributions` 声明。
+    Manifest,
 }
 
 /// 打开插件页面，返回入口 HTML。
@@ -854,6 +979,7 @@ pub fn set_plugin_enabled(
         }
     } else {
         create_disabled_marker(&marker)?;
+        crate::bridge::clear_plugin_subscriptions(plugin_id);
         let (instances, sidecar) = {
             let mut plugins = loaded_plugins()
                 .lock()
@@ -947,6 +1073,7 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
         );
     }
     stop_loaded_sidecar(plugin_id)?;
+    crate::bridge::clear_plugin_subscriptions(plugin_id);
     // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
@@ -1000,6 +1127,7 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
     ensure_directory(staged_path)?;
     let manifest = PluginManifest::load(&staged_path.join(MANIFEST_FILE))?;
     let signed_release = verify_signed_release(staged_path, &manifest)?;
+    manifest.validate_ui_native_sandbox(signed_release.is_some())?;
     let installed = InstalledPlugin {
         directory: staged_path.to_path_buf(),
         manifest,
@@ -1538,6 +1666,10 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
                         return None;
                     }
                 };
+                if let Err(error) = manifest.validate_ui_native_sandbox(signed_release.is_some()) {
+                    tracing::warn!(path = %path.display(), %error, "忽略沙箱声明越权的插件");
+                    return None;
+                }
                 Some(InstalledPlugin {
                     enabled: !directory.join(DISABLED_MARKER).is_file(),
                     directory,

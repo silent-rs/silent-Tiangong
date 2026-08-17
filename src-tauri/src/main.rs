@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
 use tauri::Emitter;
 use tauri::Manager;
 use tracing::{debug, info, warn};
@@ -337,6 +339,23 @@ fn run_gui() {
             // 定时任务的 cron 调度已下沉到 scheduler sidecar 进程，本进程不再恢复
             // cron job 或启动 silent scheduler 循环。
 
+            // 宿主桥接事件推送：runtime 订阅表命中时经 Tauri event 送达前端。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_event_emitter(Arc::new(
+                    move |plugin_id: &str, channel: &str, payload: &str| {
+                        let _ = app_handle.emit(
+                            "bridge_event",
+                            serde_json::json!({
+                                "plugin_id": plugin_id,
+                                "channel": channel,
+                                "payload": payload,
+                            }),
+                        );
+                    },
+                ));
+            }
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
 
@@ -426,6 +445,11 @@ fn run_gui() {
             tiangong_app::commands::reload_plugin,
             tiangong_app::commands::plugin_open_view,
             tiangong_app::commands::plugin_call,
+            tiangong_app::commands::list_slot_contributions,
+            tiangong_app::commands::plugin_open_entry,
+            tiangong_app::commands::bridge_call,
+            tiangong_app::commands::bridge_subscribe,
+            tiangong_app::commands::bridge_unsubscribe,
             tiangong_app::commands::check_default_plugins,
             tiangong_app::commands::complete_first_launch,
             tiangong_app::commands::get_trust_mode,

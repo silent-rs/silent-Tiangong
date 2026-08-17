@@ -4451,6 +4451,29 @@ pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>,
         .collect())
 }
 
+/// 按挂载点列出 UI 贡献（UI 接缝统一入口）。
+///
+/// v1 插件的 WASM 设置页贡献映射到 `settings.plugin-page`（零改动兼容）；
+/// v2 插件取 manifest `ui.contributions` 中 slot 匹配的项。
+#[tauri::command]
+pub async fn list_slot_contributions(
+    slot: String,
+) -> Result<Vec<tiangong_plugin_runtime::registry::SlotContribution>, String> {
+    Ok(tiangong_plugin_runtime::registry::list_slot_contributions(
+        &slot,
+    ))
+}
+
+/// 读取 v2 manifest UI 贡献的入口 HTML（entry 相对插件目录）。
+#[tauri::command]
+pub async fn plugin_open_entry(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::open_manifest_view(&plugin_id, &contribution_id)
+        .map_err(|error| error.to_string())
+}
+
 /// 列出已安装插件、当前加载版本和 sidecar 状态。
 #[tauri::command]
 pub async fn list_plugins(
@@ -4724,6 +4747,37 @@ pub async fn plugin_call(
 ) -> Result<String, String> {
     tiangong_plugin_runtime::registry::handle_view_message(&plugin_id, &method, &payload)
         .ok_or_else(|| format!("插件 {plugin_id} 未加载或处理消息失败"))
+}
+
+// ── 宿主桥接（Host Bridge）──
+//
+// 统一插件 UI ↔ 宿主通信管道：命名空间白名单 + 权限校验 + 负载透传。
+// - bridge_call：调用宿主能力（plugin.* 转发到 WASM，其余命名空间按接缝任务接入）
+// - bridge_subscribe / bridge_unsubscribe：事件订阅骨架（事件源在事件接缝接入）
+
+/// 桥接调用：`method` 按命名空间路由（如 `plugin.getConfig` → WASM）。
+#[tauri::command]
+pub async fn bridge_call(
+    plugin_id: String,
+    method: String,
+    payload: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
+        .map_err(|error| error.to_string())
+}
+
+/// 订阅宿主事件通道（按 capabilities.events 授权放行）。
+#[tauri::command]
+pub async fn bridge_subscribe(plugin_id: String, channel: String) -> Result<(), String> {
+    tiangong_plugin_runtime::bridge_subscribe(&plugin_id, &channel)
+        .map_err(|error| error.to_string())
+}
+
+/// 取消订阅宿主事件通道。
+#[tauri::command]
+pub async fn bridge_unsubscribe(plugin_id: String, channel: String) -> Result<(), String> {
+    tiangong_plugin_runtime::bridge_unsubscribe(&plugin_id, &channel)
+        .map_err(|error| error.to_string())
 }
 
 /// 插件设置页贡献项（传给前端）。

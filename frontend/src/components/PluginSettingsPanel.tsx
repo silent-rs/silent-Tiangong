@@ -1,26 +1,26 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { api, type PluginContributionEntry } from '../api/tauri';
+import { api, type SlotContributionEntry } from '../api/tauri';
 import { useResolvedTheme } from '../hooks/useTheme';
 import { usePluginMask } from '../hooks/usePluginMask';
 
 /**
- * 插件设置面板：通用 iframe 容器。
+ * 插件设置面板：settings.plugin-page 挂载点的通用容器。
  *
  * 天工不处理插件页面内容，只提供容器和桥接：
- * - 列出插件 contributions（声明是否有页面）
- * - 用户点击进入时，调 pluginOpenView 获取 HTML → 渲染到 iframe（srcdoc）
- * - iframe 内 JS 经 postMessage → 本组件 → pluginCall → WASM handle-view-message
+ * - 经 listSlotContributions 按 Slot 读取贡献（v1 WASM 声明 + v2 manifest 声明）
+ * - 用户点击进入时按贡献来源取页面 HTML → 渲染到 iframe（srcdoc）
+ * - iframe 内 JS 经 postMessage → 本组件 → bridgeCall("plugin.*") → WASM
  *
  * 所有业务逻辑在 WASM 插件内部处理，天工完全通用。
  */
 export function PluginSettingsPanel() {
-  const [contributions, setContributions] = useState<PluginContributionEntry[]>([]);
-  const [selected, setSelected] = useState<PluginContributionEntry | null>(null);
+  const [contributions, setContributions] = useState<SlotContributionEntry[]>([]);
+  const [selected, setSelected] = useState<SlotContributionEntry | null>(null);
   const [html, setHtml] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.listPluginContributions()
+    api.listSlotContributions('settings.plugin-page')
       .then((entries) => {
         setContributions(entries);
       })
@@ -28,15 +28,18 @@ export function PluginSettingsPanel() {
       .finally(() => setLoading(false));
   }, []);
 
-  // 用户选中某个插件时，按需获取页面 HTML。
-  const selectContribution = useCallback(async (entry: PluginContributionEntry) => {
+  // 用户选中某个插件时，按贡献来源获取页面 HTML：
+  // wasm 来源走插件自身 open-view，manifest 来源读清单声明的 entry 文件。
+  const selectContribution = useCallback(async (entry: SlotContributionEntry) => {
     setSelected(entry);
     if (!entry.has_view) {
       setHtml('');
       return;
     }
     try {
-      const pageHtml = await api.pluginOpenView(entry.plugin_id, entry.contribution_id);
+      const pageHtml = entry.source === 'manifest'
+        ? await api.pluginOpenEntry(entry.plugin_id, entry.contribution_id)
+        : await api.pluginOpenView(entry.plugin_id, entry.contribution_id);
       setHtml(pageHtml);
     } catch {
       setHtml('<p style="padding:16px;color:#888">页面加载失败</p>');
@@ -132,8 +135,8 @@ const pluginCallQueues = new Map<string, Promise<void>>();
  * 插件 iframe 容器 + postMessage 桥接。
  *
  * iframe 内的 JS 经 window.parent.postMessage({ type: 'plugin_call', ... }) 发消息，
- * 本组件收到后调 api.pluginCall 转发到 WASM，再把结果 postMessage 回 iframe。
- * 天工不关心消息内容，只做透传。
+ * 本组件收到后调 api.bridgeCall 经宿主桥接的 plugin.* 命名空间转发到 WASM，
+ * 再把结果 postMessage 回 iframe。天工不关心消息内容，只做透传。
  */
 export function PluginIframe({ pluginId, html }: { pluginId: string; html: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -169,7 +172,8 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
       const queue = pluginCallQueues.get(pluginId) ?? Promise.resolve();
       pluginCallQueues.set(pluginId, queue.then(async () => {
         try {
-          const result = await api.pluginCall(pluginId, method, payload);
+          // 经宿主桥接的 plugin.* 命名空间转发（命名空间校验 + WASM 透传）
+          const result = await api.bridgeCall(pluginId, `plugin.${method}`, payload);
           source.postMessage({ id, channel, result }, '*');
         } catch (e) {
           source.postMessage(

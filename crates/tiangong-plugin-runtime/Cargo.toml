@@ -29,3 +29,6 @@ scru128 = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 minisign-verify = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }

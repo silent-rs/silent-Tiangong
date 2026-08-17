@@ -462,6 +462,105 @@ export interface PluginInstallProgress {
   total: number;
 }
 
+// ============================================================================
+// 插件 Harness（Slot / Seam / UI 贡献）
+// ============================================================================
+
+/** 首版 Slot 目录（与后端 BUILTIN_SLOTS 对齐，字段 snake_case）。 */
+export const SLOT_IDS = [
+  'session.turn-node',
+  'session.message-item',
+  'session.message-action',
+  'session.before-input',
+  'session.after-input',
+  'session.empty-state',
+  'extension.tab',
+  'extension.side',
+  'sidebar.nav-item',
+  'sidebar.panel',
+  'sidebar.bottom',
+  'settings.plugin-page',
+  'global.status-item',
+  'global.command',
+  'global.toast-action',
+] as const;
+
+/** 挂载点稳定 ID。 */
+export type SlotId = (typeof SLOT_IDS)[number];
+
+/** Slot 可注入的上下文键。 */
+export type SlotContextKey = 'session' | 'turn' | 'message' | 'workspace';
+
+/** 接缝类别（与后端 SeamKind 对齐）。 */
+export type SeamKind =
+  | 'tool'
+  | 'prompt'
+  | 'lifecycle'
+  | 'ui'
+  | 'approval'
+  | 'interaction'
+  | 'event'
+  | 'storage';
+
+/** App 打开模式，仅对 `extension.tab` 生效。 */
+export type OpenMode = 'singleton' | 'multi';
+
+/** UI 贡献的沙箱级别。 */
+export type SandboxKind = 'shadow' | 'iframe' | 'native';
+
+/** manifest `ui.contributions[]` 声明的 UI 贡献。 */
+export interface UiContribution {
+  slot: SlotId;
+  id: string;
+  title: string;
+  icon: string;
+  entry: string;
+  open_mode: OpenMode;
+  context: string[];
+  sandbox: SandboxKind;
+}
+
+/** manifest v2 `capabilities` 能力声明。 */
+export interface PluginCapabilities {
+  tools: boolean;
+  prompt: boolean;
+  lifecycle: boolean;
+  approval: boolean;
+  interaction: boolean;
+  events: string[];
+}
+
+/** Slot 元数据（来自后端 SlotDescriptor）。 */
+export interface SlotDescriptorInfo {
+  id: SlotId;
+  instances: 'singleton' | 'multiple';
+  context: SlotContextKey[];
+  description: string;
+}
+
+/** 宿主桥接事件推送（bridge_event）。 */
+export interface BridgeEventPayload {
+  plugin_id: string;
+  channel: string;
+  payload: string;
+}
+
+/** 按挂载点查询得到的统一 UI 贡献项（对应后端 SlotContribution）。 */
+export interface SlotContributionEntry {
+  plugin_id: string;
+  contribution_id: string;
+  slot: SlotId;
+  title: string;
+  description: string;
+  icon: string;
+  group: string;
+  has_view: boolean;
+  open_mode: OpenMode;
+  sandbox: SandboxKind;
+  /** 贡献来源：wasm（v1 运行时声明）或 manifest（v2 清单声明）。 */
+  source: 'wasm' | 'manifest';
+}
+
 export type ProvisionStatus =
   | { status: 'pending'; retry_after?: number }
   | { status: 'success' }
@@ -1198,6 +1297,29 @@ export const api = {
   /// 通用桥接：转发到 WASM 的 handle-view-message。
   pluginCall: (pluginId: string, method: string, payload: string): Promise<string> =>
     invoke('plugin_call', { pluginId, method, payload }),
+
+  /// 按挂载点列出 UI 贡献（v1 WASM 设置页 + v2 manifest 声明合并）。
+  listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
+    invoke('list_slot_contributions', { slot }),
+
+  /// 读取 v2 manifest UI 贡献的入口 HTML。
+  pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>
+    invoke('plugin_open_entry', { pluginId, contributionId }),
+
+  // ── 宿主桥接（Host Bridge）：插件 UI ↔ 宿主统一通道 ──
+  // method 按命名空间路由：plugin.* 转发到本插件 WASM，其余命名空间按接缝任务接入。
+
+  bridgeCall: (pluginId: string, method: string, payload: string): Promise<string> =>
+    invoke('bridge_call', { pluginId, method, payload }),
+
+  bridgeSubscribe: (pluginId: string, channel: string): Promise<void> =>
+    invoke('bridge_subscribe', { pluginId, channel }),
+
+  bridgeUnsubscribe: (pluginId: string, channel: string): Promise<void> =>
+    invoke('bridge_unsubscribe', { pluginId, channel }),
+
+  onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
+    listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),
 };
 
 /// 插件设置页贡献项。

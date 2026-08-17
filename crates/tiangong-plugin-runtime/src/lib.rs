@@ -13,6 +13,7 @@
 pub mod adapter;
 pub mod artifacts;
 pub mod bindings;
+pub mod bridge;
 pub mod config;
 mod execution;
 pub mod host_state;
@@ -20,13 +21,24 @@ pub mod loader;
 pub mod manifest;
 pub mod protocol;
 pub mod registry;
+pub mod seams;
 pub mod sidecar;
 pub mod signature;
+pub mod slots;
 
 pub use adapter::WasmPluginAdapter;
+pub use bridge::{
+    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, bridge_call, bridge_emit, bridge_subscribe,
+    bridge_unsubscribe, set_event_emitter,
+};
 pub use config::PluginRuntimeConfig;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
 };
+pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+pub use slots::{
+    BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
+    SlotInstances, SlotRegistry, UiContribution,
+};

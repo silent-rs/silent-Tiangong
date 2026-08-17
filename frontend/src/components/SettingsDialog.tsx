@@ -20,7 +20,7 @@ import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
 import { PluginIframe } from './PluginSettingsPanel';
 import { PluginManagerSettings } from './PluginManagerSettings';
-import { type PluginContributionEntry } from '../api/tauri';
+import { type SlotContributionEntry } from '../api/tauri';
 
 const appWindow = getCurrentWindow();
 
@@ -35,7 +35,7 @@ export function SettingsDialog() {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('agent');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
-  const [pluginContributions, setPluginContributions] = useState<PluginContributionEntry[]>([]);
+  const [pluginContributions, setPluginContributions] = useState<SlotContributionEntry[]>([]);
   const [pluginStatuses, setPluginStatuses] = useState<import('../api/tauri').PluginStatus[]>([]);
   const [availablePlugins, setAvailablePlugins] = useState<import('../api/tauri').AvailablePlugin[]>([]);
   const [pluginCatalogError, setPluginCatalogError] = useState<string | null>(null);
@@ -45,10 +45,10 @@ export function SettingsDialog() {
   const pendingSettingsTab = useStore((s) => s.pendingSettingsTab);
   const setPendingSettingsTab = useStore((s) => s.setPendingSettingsTab);
 
-  // 加载插件 contributions（有 has-view 的才显示设置页入口）。
+  // 加载 settings.plugin-page 挂载点的贡献（有页面的才显示设置页入口）。
   useEffect(() => {
     if (open && pluginContributions.length === 0) {
-      api.listPluginContributions()
+      api.listSlotContributions('settings.plugin-page')
         .then((entries) => setPluginContributions(entries.filter((e) => e.has_view)))
         .catch(() => {});
     }
@@ -153,7 +153,7 @@ export function SettingsDialog() {
                   <span className="sr-only sm:not-sr-only">插件管理</span>
                 </TabsTrigger>
                 {pluginContributions.map((entry) => (
-                  <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                     {contributionIcon(entry.icon)}
                     <span className="sr-only sm:not-sr-only">{entry.title}</span>
                   </TabsTrigger>
@@ -205,7 +205,7 @@ export function SettingsDialog() {
                 <DataCleanupSettings />
               </TabsContent>
               {pluginContributions.map((entry) => (
-                <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                   <PluginView contribution={entry} />
                 </TabsContent>
               ))}
@@ -1615,13 +1615,16 @@ function formatBytes(value: number) {
 }
 
 /// 插件设置页视图：选中时才加载 HTML，用 iframe 渲染。
-function PluginView({ contribution }: { contribution: PluginContributionEntry }) {
+function PluginView({ contribution }: { contribution: SlotContributionEntry }) {
   const [html, setHtml] = useState<string>('');
 
   useEffect(() => {
     let active = true;
     setHtml('');
-    api.pluginOpenView(contribution.plugin_id, contribution.contribution_id)
+    const load = contribution.source === 'manifest'
+      ? api.pluginOpenEntry(contribution.plugin_id, contribution.contribution_id)
+      : api.pluginOpenView(contribution.plugin_id, contribution.contribution_id);
+    load
       .then((page) => {
         if (active) setHtml(page);
       })
@@ -1631,7 +1634,7 @@ function PluginView({ contribution }: { contribution: PluginContributionEntry })
     return () => {
       active = false;
     };
-  }, [contribution.plugin_id, contribution.contribution_id, contribution.generation]);
+  }, [contribution.plugin_id, contribution.contribution_id, contribution.source]);
 
   if (!html) {
     return <div className="p-4 text-sm text-muted-foreground">加载中…</div>;

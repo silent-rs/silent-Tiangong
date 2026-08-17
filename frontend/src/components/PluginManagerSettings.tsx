@@ -19,7 +19,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import {
   api,
   type AvailablePlugin,
-  type PluginContributionEntry,
+  type SlotContributionEntry,
   type PluginStatus,
 } from '@/api/tauri';
 import { Badge } from './ui/badge';
@@ -41,7 +41,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/t
 import { useToast } from './Toast';
 
 type Props = {
-  onContributionsChanged: (entries: PluginContributionEntry[]) => void;
+  onContributionsChanged: (entries: SlotContributionEntry[]) => void;
   initialPlugins: PluginStatus[];
   initialAvailable: AvailablePlugin[];
   initialCatalogError: string | null;
@@ -124,7 +124,7 @@ export function PluginManagerSettings({
   }, [initialAvailable, initialCatalogError, initialPlugins]);
 
   const refreshContributions = useCallback(async () => {
-    const contributions = await api.listPluginContributions();
+    const contributions = await api.listSlotContributions('settings.plugin-page');
     onContributionsChanged(contributions.filter((entry) => entry.has_view));
   }, [onContributionsChanged]);
 
