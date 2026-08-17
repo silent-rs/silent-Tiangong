@@ -13,10 +13,21 @@ use crate::rumination;
 use crate::store::MemoryStore;
 use crate::types::{EnhancedTurnResult, MemoryCandidate};
 
-struct RuminationJob {
-    turn_result: EnhancedTurnResult,
-    model: Option<tiangong_llm::LlmEndpointConfig>,
+/// 反刍后台任务：Actor 主循环只做「读快照 → 入队」与「落库」两类快操作，
+/// LLM 提炼与本地评估全部在 worker 上并发执行——Actor 内联长任务会阻塞
+/// micro 反刍的入队确认，进而拉长 WASM 收尾的实例锁持有窗口。
+enum RuminationJob {
+    EnhancedMicro {
+        turn_result: Box<EnhancedTurnResult>,
+        model: Option<tiangong_llm::LlmEndpointConfig>,
+    },
+    Meso(Box<rumination::MesoJob>),
+    Meta(Box<rumination::MetaJob>),
 }
+
+/// 反刍 worker 的 LLM 提炼并发上限：保守值，避免高频多轮对话时打爆
+/// 模型端点限流；积压由有界队列（64）兜底。
+const RUMINATION_CONCURRENCY: usize = 2;
 
 /// Memory Actor（独立运行时）
 pub(crate) struct MemoryActor {
@@ -292,8 +303,8 @@ impl MemoryActor {
                 enhanced.memory_candidates.extend(pending.iter().cloned());
                 let session_id = enhanced.session_id.clone();
                 let turn_id = enhanced.turn_id.clone();
-                let job = RuminationJob {
-                    turn_result: enhanced,
+                let job = RuminationJob::EnhancedMicro {
+                    turn_result: Box::new(enhanced),
                     model: self.options.model.clone(),
                 };
                 let result = self.rumination_tx.try_send(job).map_err(|error| {
@@ -344,28 +355,54 @@ impl MemoryActor {
                 }
             }
 
-            // Phase C 实现
+            // Phase C 实现：读快照后投后台 worker 提炼，Actor 不内联 LLM。
             MemoryCommand::RunMesoRumination {
                 session_id,
                 workspace_id,
             } => {
-                if let Err(e) = rumination::process_meso(
-                    &mut self.store,
-                    &session_id,
-                    &workspace_id,
-                    self.options.model.as_ref(),
-                )
-                .await
-                {
-                    tracing::warn!("Meso 反刍失败: {}", e);
+                let model = self.options.model.clone();
+                match rumination::prepare_meso_job(&self.store, &workspace_id, model) {
+                    Some(job) => {
+                        if let Err(error) = self
+                            .rumination_tx
+                            .try_send(RuminationJob::Meso(Box::new(job)))
+                        {
+                            tracing::warn!(
+                                %session_id,
+                                %workspace_id,
+                                %error,
+                                "Meso 反刍入队失败，本次整理丢弃"
+                            );
+                        }
+                    }
+                    None => tracing::debug!(
+                        %session_id,
+                        %workspace_id,
+                        "Meso 反刍：无可用 Episode，跳过"
+                    ),
                 }
             }
 
-            // Phase D 实现
+            // Phase D 实现：读节点快照后投后台 worker 评估，Actor 不内联文件/URL 检查。
             MemoryCommand::RunMetaRumination => {
-                if let Err(e) = rumination::process_meta(&mut self.store).await {
-                    tracing::warn!("Meta 反刍失败: {}", e);
+                let job = rumination::prepare_meta_job(&self.store);
+                if let Err(error) = self
+                    .rumination_tx
+                    .try_send(RuminationJob::Meta(Box::new(job)))
+                {
+                    tracing::warn!(%error, "Meta 反刍入队失败，本次整理丢弃");
                 }
+            }
+
+            MemoryCommand::ApplyMesoRumination { outcome } => {
+                let workspace_id = outcome.workspace_id.clone();
+                if let Err(error) = rumination::apply_meso(&mut self.store, *outcome).await {
+                    tracing::warn!(%workspace_id, %error, "Meso 反刍写入失败");
+                }
+            }
+
+            MemoryCommand::ApplyMetaRumination { outcome } => {
+                rumination::apply_meta(&mut self.store, *outcome).await;
             }
 
             MemoryCommand::Reconfigure { options, reply } => {
@@ -417,6 +454,10 @@ pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<Memor
 /// 与进程级全局静态析构产生竞态（Linux 偶发 SIGSEGV）。不需要显式 join
 /// 的调用方（如生产路径）可直接丢弃返回的 JoinHandle，actor 线程会在
 /// handle 全部释放后随通道关闭自行退出。
+/// 反刍 worker：单线程驱动，LLM 提炼经信号量限流并发执行（上限
+/// [`RUMINATION_CONCURRENCY`]）。提取乱序完成，但结果统一发回 Actor 命令
+/// 通道**串行落库**——乱序写库会触发 Session/Workspace Injection 覆盖与
+/// Episode 去重竞态。
 fn spawn_rumination_worker(
     mut rx: mpsc::Receiver<RuminationJob>,
     actor_tx: mpsc::WeakSender<MemoryCommand>,
@@ -429,42 +470,96 @@ fn spawn_rumination_worker(
                 .build()
                 .expect("Memory 反刍 runtime 构建失败");
             runtime.block_on(async move {
+                let semaphore =
+                    std::sync::Arc::new(tokio::sync::Semaphore::new(RUMINATION_CONCURRENCY));
+                let mut in_flight: tokio::task::JoinSet<()> = Default::default();
                 while let Some(job) = rx.recv().await {
-                    let started = std::time::Instant::now();
-                    let session_id = job.turn_result.session_id.clone();
-                    let turn_id = job.turn_result.turn_id.clone();
-                    let extraction =
-                        rumination::extract_enhanced_micro(&job.turn_result, job.model.as_ref())
-                            .await;
-                    tracing::info!(
-                        %session_id,
-                        %turn_id,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        episode_count = extraction.episodes.len(),
-                        entity_count = extraction.entities.len(),
-                        decision_count = extraction.decisions.len(),
-                        evidence_count = extraction.evidences.len(),
-                        "Memory 增强反刍提取完成"
-                    );
-                    let Some(actor_tx) = actor_tx.upgrade() else {
-                        tracing::debug!("Memory Actor 已关闭，停止反刍 worker");
+                    // 手满时先等空位再取新任务（有界队列兜底背压）。
+                    let Ok(permit) = semaphore.clone().acquire_owned().await else {
                         break;
                     };
-                    if actor_tx
-                        .send(MemoryCommand::ApplyEnhancedMicroRumination {
-                            turn_result: Box::new(job.turn_result),
-                            extraction: Box::new(extraction),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        tracing::debug!("Memory Actor 已关闭，停止反刍 worker");
-                        break;
-                    }
+                    let actor_tx = actor_tx.clone();
+                    in_flight.spawn(async move {
+                        let _permit = permit;
+                        dispatch_rumination_job(actor_tx, job).await;
+                    });
+                    // 回收已完成任务，防 JoinSet 无界增长。
+                    while in_flight.try_join_next().is_some() {}
                 }
+                // 通道关闭：等在途提取全部提交回 Actor 后退出。
+                while in_flight.join_next().await.is_some() {}
             });
         })
         .map_err(Into::into)
+}
+
+/// 单个反刍任务的「提取 → 回投 Actor」链：提取在 worker 上执行（LLM/
+/// 本地评估），落库由 Actor 串行完成。
+async fn dispatch_rumination_job(actor_tx: mpsc::WeakSender<MemoryCommand>, job: RuminationJob) {
+    match job {
+        RuminationJob::EnhancedMicro { turn_result, model } => {
+            let started = std::time::Instant::now();
+            let session_id = turn_result.session_id.clone();
+            let turn_id = turn_result.turn_id.clone();
+            let extraction = rumination::extract_enhanced_micro(&turn_result, model.as_ref()).await;
+            tracing::info!(
+                %session_id,
+                %turn_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                episode_count = extraction.episodes.len(),
+                entity_count = extraction.entities.len(),
+                decision_count = extraction.decisions.len(),
+                evidence_count = extraction.evidences.len(),
+                "Memory 增强反刍提取完成"
+            );
+            if send_to_actor(
+                &actor_tx,
+                MemoryCommand::ApplyEnhancedMicroRumination {
+                    turn_result,
+                    extraction: Box::new(extraction),
+                },
+            )
+            .await
+            {
+                return;
+            }
+        }
+        RuminationJob::Meso(job) => {
+            let outcome = rumination::extract_meso(*job).await;
+            if send_to_actor(
+                &actor_tx,
+                MemoryCommand::ApplyMesoRumination {
+                    outcome: Box::new(outcome),
+                },
+            )
+            .await
+            {
+                return;
+            }
+        }
+        RuminationJob::Meta(job) => {
+            let outcome = rumination::evaluate_meta(*job);
+            if send_to_actor(
+                &actor_tx,
+                MemoryCommand::ApplyMetaRumination {
+                    outcome: Box::new(outcome),
+                },
+            )
+            .await
+            {
+                return;
+            }
+        }
+    }
+    tracing::debug!("Memory Actor 已关闭，反刍结果丢弃");
+}
+
+/// 回投 Actor；返回 false 表示 Actor 已关闭。
+async fn send_to_actor(actor_tx: &mpsc::WeakSender<MemoryCommand>, command: MemoryCommand) -> bool {
+    match actor_tx.upgrade() {
+        Some(tx) => tx.send(command).await.is_ok(),
+        None => false,
+    }
 }
 
 pub(crate) fn spawn_memory_actor(

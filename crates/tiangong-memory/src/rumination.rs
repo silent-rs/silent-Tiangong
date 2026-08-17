@@ -56,7 +56,7 @@ JSON 格式：
   ]
 }";
 
-struct MesoMemorySet {
+pub(crate) struct MesoMemorySet {
     entities: Vec<Entity>,
     decisions: Vec<Decision>,
     used_llm: bool,
@@ -333,15 +333,28 @@ fn link_written_memories(
 /// Meso 反刍（Phase C）：会话结束时调用
 ///
 /// 从最近的 Episodes 中提炼关键词/实体，更新 Workspace Injection 文件。
-pub(crate) async fn process_meso(
-    store: &mut MemoryStore,
-    _session_id: &str,
-    workspace_id: &str,
-    model: Option<&LlmEndpointConfig>,
-) -> Result<()> {
-    tracing::debug!("Meso 反刍 workspace={workspace_id}");
+/// Meso 反刍的后台提取任务：Actor 主循环读取的 store 快照。
+///
+/// 快照跨线程交给反刍 worker 做 LLM 提炼——Actor 主循环不得内联长任务，
+/// 否则会阻塞 micro 反刍的入队确认，进而拉长 WASM 收尾的实例锁持有窗口。
+pub(crate) struct MesoJob {
+    pub(crate) workspace_id: String,
+    pub(crate) model: Option<LlmEndpointConfig>,
+    pub(crate) full_episodes: Vec<Episode>,
+    pub(crate) top_kws: Vec<String>,
+    pub(crate) recent_titles: Vec<String>,
+    pub(crate) existing_entities: Vec<Entity>,
+    pub(crate) existing_decisions: Vec<Decision>,
+}
 
-    // 1. 查询最近 30 个 Episode 的完整内容
+/// 读取 Meso 提炼所需的 store 快照（纯读操作，可在 Actor 主循环内执行）。
+///
+/// 无可用 Episode 时返回 None（跳过本次反刍）。
+pub(crate) fn prepare_meso_job(
+    store: &MemoryStore,
+    workspace_id: &str,
+    model: Option<LlmEndpointConfig>,
+) -> Option<MesoJob> {
     let full_episodes = store.recent_episodes(Some(workspace_id), 30);
     let episodes = full_episodes
         .iter()
@@ -349,10 +362,10 @@ pub(crate) async fn process_meso(
         .collect::<Vec<_>>();
     if episodes.is_empty() {
         tracing::debug!("Meso 反刍：无可用 Episode，跳过");
-        return Ok(());
+        return None;
     }
 
-    // 2. 提炼高频关键词（不调用 LLM，纯统计）
+    // 提炼高频关键词（不调用 LLM，纯统计）
     let mut kw_count: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (_, kws) in &episodes {
         for kw in kws {
@@ -369,20 +382,47 @@ pub(crate) async fn process_meso(
         .map(|(k, _)| k.clone())
         .collect();
 
-    // 3. 构建 Workspace Injection 内容（近期活动摘要 + 高频关键词）
     let recent_titles: Vec<String> = episodes
         .iter()
         .take(5)
         .map(|(title, _)| format!("- {title}"))
         .collect();
-    let existing_entities = store.list_entities(Some(workspace_id));
-    let existing_decisions = store.list_decisions(Some(workspace_id));
+    Some(MesoJob {
+        workspace_id: workspace_id.to_string(),
+        model,
+        full_episodes,
+        top_kws,
+        recent_titles,
+        existing_entities: store.list_entities(Some(workspace_id)),
+        existing_decisions: store.list_decisions(Some(workspace_id)),
+    })
+}
+
+/// Meso 反刍的提取结果（worker 产出，回到 Actor 落库）。
+pub(crate) struct MesoOutcome {
+    pub(crate) workspace_id: String,
+    pub(crate) memories: MesoMemorySet,
+    pub(crate) top_kws: Vec<String>,
+    pub(crate) recent_titles: Vec<String>,
+}
+
+/// Meso 提炼（LLM 段）：在反刍 worker 上执行，不持有 store。
+pub(crate) async fn extract_meso(job: MesoJob) -> MesoOutcome {
+    let MesoJob {
+        workspace_id,
+        model,
+        full_episodes,
+        top_kws,
+        recent_titles,
+        existing_entities,
+        existing_decisions,
+    } = job;
     let MesoMemorySet {
-        entities,
-        decisions,
+        ref entities,
+        ref decisions,
         used_llm,
     } = extract_meso_memories(
-        model,
+        model.as_ref(),
         &full_episodes,
         &top_kws,
         &existing_entities,
@@ -397,12 +437,37 @@ pub(crate) async fn process_meso(
         decision_count = decisions.len(),
         "Meso 反刍结构化提炼完成"
     );
+    MesoOutcome {
+        workspace_id,
+        memories: MesoMemorySet {
+            entities: entities.clone(),
+            decisions: decisions.clone(),
+            used_llm,
+        },
+        top_kws,
+        recent_titles,
+    }
+}
+
+/// Meso 落库（Actor 串行执行）：写入 Entity/Decision、关系与 Workspace Injection。
+pub(crate) async fn apply_meso(store: &mut MemoryStore, outcome: MesoOutcome) -> Result<()> {
+    let MesoOutcome {
+        workspace_id,
+        memories:
+            MesoMemorySet {
+                entities,
+                decisions,
+                used_llm,
+            },
+        top_kws,
+        recent_titles,
+    } = outcome;
     for entity in &entities {
-        store.upsert_entity(entity.clone(), Some(workspace_id))?;
+        store.upsert_entity(entity.clone(), Some(&workspace_id))?;
         link_entity_to_source_episodes(store, entity);
     }
     for decision in &decisions {
-        store.upsert_decision(decision.clone(), Some(workspace_id))?;
+        store.upsert_decision(decision.clone(), Some(&workspace_id))?;
         link_decision_to_source_episodes(store, decision);
     }
 
@@ -434,8 +499,8 @@ pub(crate) async fn process_meso(
             .join("\n"),
     );
 
-    // 4. 写入 Workspace Injection 文件
-    store.update_injection(InjectionLevel::Workspace, workspace_id, &content)?;
+    // 写入 Workspace Injection 文件
+    store.update_injection(InjectionLevel::Workspace, &workspace_id, &content)?;
     tracing::info!(
         "Meso 反刍完成，workspace={workspace_id}，used_llm={used_llm}，关键词={:?}，entities={}，decisions={}",
         &top_kws[..top_kws.len().min(5)],
@@ -946,15 +1011,15 @@ fn dedupe_strings(items: Vec<String>) -> Vec<String> {
 }
 
 #[derive(Debug, Default)]
-struct MetaRuminationReport {
-    checked_nodes: usize,
-    checked_paths: usize,
-    checked_urls: usize,
-    low_activity_archived: usize,
-    invalid_reference_archived: usize,
-    missing_paths: usize,
-    expired_urls: usize,
-    project_archived: usize,
+pub(crate) struct MetaRuminationReport {
+    pub(crate) checked_nodes: usize,
+    pub(crate) checked_paths: usize,
+    pub(crate) checked_urls: usize,
+    pub(crate) low_activity_archived: usize,
+    pub(crate) invalid_reference_archived: usize,
+    pub(crate) missing_paths: usize,
+    pub(crate) expired_urls: usize,
+    pub(crate) project_archived: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -964,30 +1029,52 @@ enum MetaArchiveReason {
     ProjectArchived,
 }
 
-/// Meta 反刍（Phase D）：定期调度（启动时检测，距上次超过 24h 才执行）
+/// Meta 反刍的后台评估任务：Actor 主循环读取的节点快照。
 ///
-/// 1. 检测低活跃（30天未使用，importance < 0.3）节点并归档
-/// 2. 检查文件路径、产物 URL 和项目归档标记，归档过时节点
-/// 3. Profile 更新（Phase D 高级功能预留）
-pub(crate) async fn process_meta(store: &mut MemoryStore) -> Result<()> {
-    tracing::debug!("Meta 反刍开始");
-    let mut report = MetaRuminationReport::default();
+/// 评估内容（在 worker 上执行）：检测低活跃（30 天未使用且 importance < 0.3）
+/// 节点、检查文件路径/产物 URL/项目归档标记，归档过时引用节点。
+pub(crate) struct MetaJob {
+    pub(crate) stale_ids: Vec<String>,
+    pub(crate) active_nodes: Vec<MemoryNode>,
+}
 
-    // 归档低活跃节点（30天未使用 + importance < 0.3）
-    let stale = store.list_stale_nodes(30, 0.3);
-    let mut archived_node_ids = HashSet::new();
-    report.low_activity_archived = stale.len();
-    for (node_id, _importance) in stale {
-        archived_node_ids.insert(node_id.clone());
-        store.archive_node(&node_id).await;
-    }
-
+/// 读取 Meta 评估所需的节点快照（纯读操作，可在 Actor 主循环内执行）。
+pub(crate) fn prepare_meta_job(store: &MemoryStore) -> MetaJob {
+    let stale_ids = store
+        .list_stale_nodes(30, 0.3)
+        .into_iter()
+        .map(|(node_id, _importance)| node_id)
+        .collect();
     let active_nodes = store.list_nodes(&MemoryListQuery {
         status: Some(MemoryStatus::Active),
         limit: 500,
         ..Default::default()
     });
-    report.checked_nodes = active_nodes.len();
+    MetaJob {
+        stale_ids,
+        active_nodes,
+    }
+}
+
+/// Meta 评估结果：待归档节点与统计（worker 产出，回到 Actor 归档）。
+pub(crate) struct MetaOutcome {
+    pub(crate) archive_ids: Vec<String>,
+    pub(crate) report: MetaRuminationReport,
+}
+
+/// Meta 评估（本地文件/URL 检查，无 LLM）：在反刍 worker 上执行，不持有 store。
+pub(crate) fn evaluate_meta(job: MetaJob) -> MetaOutcome {
+    tracing::debug!("Meta 反刍开始");
+    let MetaJob {
+        stale_ids,
+        active_nodes,
+    } = job;
+    let mut report = MetaRuminationReport {
+        checked_nodes: active_nodes.len(),
+        ..MetaRuminationReport::default()
+    };
+    report.low_activity_archived = stale_ids.len();
+    let mut archived_node_ids = stale_ids.into_iter().collect::<HashSet<_>>();
 
     for node in active_nodes {
         if archived_node_ids.contains(&node.id) {
@@ -1011,10 +1098,24 @@ pub(crate) async fn process_meta(store: &mut MemoryStore) -> Result<()> {
                 reason = ?reason,
                 "Meta 反刍归档过时引用节点"
             );
-            store.archive_node(&node.id).await;
         }
     }
 
+    MetaOutcome {
+        archive_ids: archived_node_ids.into_iter().collect(),
+        report,
+    }
+}
+
+/// Meta 归档（Actor 串行执行）。
+pub(crate) async fn apply_meta(store: &mut MemoryStore, outcome: MetaOutcome) {
+    let MetaOutcome {
+        archive_ids,
+        report,
+    } = outcome;
+    for node_id in &archive_ids {
+        store.archive_node(node_id).await;
+    }
     tracing::info!(
         checked_nodes = report.checked_nodes,
         checked_paths = report.checked_paths,
@@ -1026,8 +1127,6 @@ pub(crate) async fn process_meta(store: &mut MemoryStore) -> Result<()> {
         project_archived = report.project_archived,
         "Meta 反刍完成"
     );
-
-    Ok(())
 }
 
 #[derive(Debug, Default)]

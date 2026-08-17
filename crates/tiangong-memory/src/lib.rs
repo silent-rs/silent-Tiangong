@@ -10,7 +10,7 @@
 //! let injections = tiangong_memory::load_injection_sync("session-1", None);
 //! ```
 
-pub mod command;
+pub(crate) mod command;
 pub mod config;
 pub mod election;
 pub mod handle;
