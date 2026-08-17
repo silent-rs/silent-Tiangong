@@ -62,10 +62,21 @@ vi.mock('@/components/LazyComponents', () => ({
     <button data-testid="extension-toggle" onClick={onToggleExtension}>拓展区</button>
   ),
 }));
-// TabsContainer 桩：暴露收到的 kind 与启动台按钮
+// TabsContainer 桩：暴露 mode/kind、内嵌矩阵内容与启动台按钮
 vi.mock('@/components/TabsContainer', () => ({
-  TabsContainer: ({ initialTabKind, onShowMatrix }: { initialTabKind: string; onShowMatrix?: () => void }) => (
-    <div data-testid="tabs-container" data-kind={initialTabKind}>
+  TabsContainer: ({
+    initialTabKind,
+    mode,
+    matrix,
+    onShowMatrix,
+  }: {
+    initialTabKind: string;
+    mode?: string;
+    matrix?: ReactNode;
+    onShowMatrix?: () => void;
+  }) => (
+    <div data-testid="tabs-container" data-kind={initialTabKind} data-mode={mode ?? 'app'}>
+      {mode === 'matrix' && matrix}
       <button data-testid="show-matrix" onClick={onShowMatrix}>启动台</button>
     </div>
   ),
@@ -79,6 +90,7 @@ vi.mock('@/utils/desktopNotification', () => ({
 }));
 
 const { MainApp } = await import('@/pages/MainApp');
+const { useStore } = await import('@/store/useStore');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
@@ -127,13 +139,16 @@ describe('拓展区三态状态机（T008）', () => {
     expect(container!.querySelector('[data-testid="tabs-container"]')).toBeNull();
     await click('[data-testid="extension-toggle"]');
 
-    // 矩阵态：ExtensionMatrix 渲染官方卡片
-    expect(container!.textContent).toContain('浏览器');
-    expect(container!.textContent).toContain('终端');
+    // 矩阵态：tab 栏容器保留，矩阵作为内容区渲染（含官方卡片）
+    const tabsHost = container!.querySelector('[data-testid="tabs-container"]');
+    expect(tabsHost, '矩阵态 tab 栏容器应保留').toBeTruthy();
+    expect(tabsHost!.getAttribute('data-mode')).toBe('matrix');
+    expect(tabsHost!.textContent).toContain('浏览器');
+    expect(tabsHost!.textContent).toContain('终端');
 
     // 从矩阵打开终端 → App 态
     const terminalCard = [...container!.querySelectorAll('button')]
-      .find((button) => button.textContent?.includes('终端'));
+      .find((button) => button.textContent?.trim() === '终端');
     expect(terminalCard).toBeTruthy();
     await act(async () => {
       terminalCard!.click();
@@ -142,31 +157,35 @@ describe('拓展区三态状态机（T008）', () => {
 
     const tabs = container!.querySelector('[data-testid="tabs-container"]');
     expect(tabs, '应进入 App 态渲染 TabsContainer').toBeTruthy();
+    expect(tabs!.getAttribute('data-mode')).toBe('app');
     expect(tabs!.getAttribute('data-kind')).toBe('terminal');
   });
 
-  it('App 态点启动台回矩阵态，再点拓展按钮收起面板', async () => {
+  it('App 态点启动台回矩阵态（tab 栏保留），再点拓展按钮收起面板', async () => {
     mocks.setSessionTabsValue({
       tabs: [{ id: 't1', kind: 'terminal', title: '终端', url: '', created_at: '2026-08-17T00:00:00Z' }],
       active_tab_id: 't1',
     });
+    useStore.setState({ activeSessionId: 'session-1' });
     await renderMainApp();
 
     // 有已打开 tab：点击进入上次 App 态
     await click('[data-testid="extension-toggle"]');
-    expect(container!.querySelector('[data-testid="tabs-container"]')).toBeTruthy();
+    const tabsHost = container!.querySelector('[data-testid="tabs-container"]')!;
+    expect(tabsHost.getAttribute('data-mode')).toBe('app');
 
-    // 启动台 → 矩阵态（TabsContainer 隐藏保活，矩阵显示）
+    // 启动台 → 矩阵态：容器保留、模式切换、矩阵内容出现
     await click('[data-testid="show-matrix"]');
-    expect(container!.querySelector('[data-testid="tabs-container"]')!.closest('.hidden')).toBeTruthy();
-    expect(container!.textContent).toContain('拓展区');
+    const matrixHost = container!.querySelector('[data-testid="tabs-container"]')!;
+    expect(matrixHost.getAttribute('data-mode')).toBe('matrix');
+    expect(matrixHost.textContent).toContain('拓展区');
 
     // 矩阵态再点拓展按钮 → 收起（关闭态）
     await click('[data-testid="extension-toggle"]');
     await act(async () => {
       await flushMicrotasks();
     });
-    const panelHost = container!.querySelector('[data-testid="tabs-container"]')?.parentElement?.parentElement;
+    const panelHost = container!.querySelector('[data-testid="tabs-container"]')?.parentElement;
     expect(panelHost?.className).toContain('hidden');
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Globe, Grid3x3, Plus, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
@@ -17,6 +17,10 @@ interface TabsContainerProps {
   onClose: () => void;
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
+  /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
+  mode?: 'app' | 'matrix';
+  /** 矩阵态渲染到内容区的视图（由宿主注入，保持容器与矩阵解耦）。 */
+  matrix?: ReactNode;
   onActiveKindChange?: (kind: TabKind | null) => void;
 }
 
@@ -74,6 +78,8 @@ export function TabsContainer({
   terminalSyncVersion = 0,
   onClose,
   onShowMatrix,
+  mode = 'app',
+  matrix,
   onActiveKindChange,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -675,7 +681,11 @@ export function TabsContainer({
             <Button
               size="sm"
               variant="ghost"
-              className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+              className={`h-7 w-7 shrink-0 p-0 ${
+                mode === 'matrix'
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
               onClick={onShowMatrix}
               title="启动台（回到拓展区矩阵）"
               aria-label="启动台"
@@ -762,14 +772,15 @@ export function TabsContainer({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
+      {/* App 实例内容：矩阵态隐藏保活（切换矩阵不销毁浏览器/终端实例） */}
+      <div className={mode === 'matrix' ? 'hidden' : 'min-h-0 flex-1'}>
         {tabs.map((tab) => (
           tab.kind === 'terminal' ? (
             <TerminalTabContent
               key={`${terminalSessionId}:${tab.id}`}
               sessionId={terminalSessionId}
               tabId={tab.id}
-              isActive={isVisible && tab.id === activeTab?.id}
+              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
             />
           ) : (
             <BrowserTabContent
@@ -777,12 +788,15 @@ export function TabsContainer({
               sessionId={terminalSessionId}
               tabId={tab.id}
               initialUrl={tab.url}
-              isActive={isVisible && tab.id === activeTab?.id}
+              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
               onMetadataChange={handleBrowserMetadataChange}
             />
           )
         ))}
       </div>
+      {mode === 'matrix' && matrix && (
+        <div className="min-h-0 flex-1">{matrix}</div>
+      )}
     </div>
   );
 }
