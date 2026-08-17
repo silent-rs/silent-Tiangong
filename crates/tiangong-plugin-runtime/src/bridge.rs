@@ -73,13 +73,16 @@ pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
 
 /// 权限校验。
 ///
-/// v1 清单 `permissions` 为空时放行（等价旧 `plugin_call` 无权限校验的行为，
-/// 保证现有 WASM 插件零改动）；v2 与显式声明过权限的 v1 按声明校验。
-fn has_bridge_permission(manifest: &PluginManifest, permission: &str) -> bool {
-    if manifest.schema_version == 1 && manifest.permissions.is_empty() {
-        return true;
+/// - `plugin.*`：只到达本插件自身 WASM 逻辑层，等价旧 `plugin_call` 透传通道。
+///   v1 清单早于桥接权限体系（`bridge.call` 为 v2 新增，v1 插件无从声明），
+///   对 v1 一律放行，保证现有 WASM 插件零改动；v2 按声明校验。
+/// - 其余宿主能力命名空间：仅 v2 声明对应权限后可达；v1 插件先于该体系，
+///   一律拒绝，避免未来宿主服务接入时 v1 插件意外获得越权能力。
+fn has_bridge_permission(manifest: &PluginManifest, namespace: &BridgeNamespace) -> bool {
+    if manifest.schema_version == 1 {
+        return namespace.prefix == "plugin.";
     }
-    manifest.has_permission(permission)
+    manifest.has_permission(namespace.permission)
 }
 
 /// 判断事件订阅声明（`capabilities.events`）是否覆盖某 channel。
@@ -115,13 +118,19 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
 
     let manifest = crate::registry::plugin_manifest(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
-    if !has_bridge_permission(&manifest, namespace.permission) {
+    if !has_bridge_permission(&manifest, namespace) {
         tracing::warn!(
             plugin_id,
             method,
             permission = namespace.permission,
             "bridge.call 权限不足"
         );
+        if manifest.schema_version == 1 {
+            bail!(
+                "bridge.call 插件 {plugin_id} 为 schema_version 1，宿主能力命名空间 {} 需要升级清单为 schema_version 2 后使用",
+                namespace.prefix
+            );
+        }
         bail!(
             "bridge.call 插件 {plugin_id} 未声明权限 {}，无法调用 {}",
             namespace.permission,
@@ -309,27 +318,40 @@ mod tests {
     fn 权限校验规则覆盖_v1_v2() {
         use crate::manifest::PluginManifest;
 
-        // v1 + 空 permissions：放行（等价旧 plugin_call 行为）
+        let plugin_ns = namespace_of("plugin.x").unwrap();
+        let session_ns = namespace_of("session.x").unwrap();
+
+        // v1 + 空 permissions：plugin.* 放行（等价旧 plugin_call 通道）
         let v1_empty: PluginManifest = serde_json::from_str(
             r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v1_empty, "bridge.call"));
-        assert!(has_bridge_permission(&v1_empty, "session.read"));
+        assert!(has_bridge_permission(&v1_empty, plugin_ns));
+        assert!(!has_bridge_permission(&v1_empty, session_ns));
 
-        // v1 + 显式声明：按声明校验
-        let v1_declared: PluginManifest = serde_json::from_str(
-            r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["bridge.call"]}"#,
+        // v1 + 声明了其他权限（如 model-config.read）：plugin.* 同样放行。
+        // v1 清单早于 bridge 权限体系，不能因声明过其他权限就要求 bridge.call，
+        // 否则 generate-image-openai 等现有插件的设置页会被误拒。
+        let v1_other_permissions: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["model-config.read","sidecar.invoke"]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v1_declared, "bridge.call"));
-        assert!(!has_bridge_permission(&v1_declared, "session.read"));
+        assert!(has_bridge_permission(&v1_other_permissions, plugin_ns));
+        assert!(!has_bridge_permission(&v1_other_permissions, session_ns));
 
         // v2：一律按声明校验
         let v2: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(!has_bridge_permission(&v2, "bridge.call"));
+        assert!(!has_bridge_permission(&v2, plugin_ns));
+        assert!(!has_bridge_permission(&v2, session_ns));
+
+        let v2_declared: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["bridge.call"]}"#,
+        )
+        .unwrap();
+        assert!(has_bridge_permission(&v2_declared, plugin_ns));
+        assert!(!has_bridge_permission(&v2_declared, session_ns));
     }
 }

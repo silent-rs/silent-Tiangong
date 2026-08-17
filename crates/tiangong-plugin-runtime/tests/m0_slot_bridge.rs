@@ -170,8 +170,20 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
     let error = bridge_call("prompt", "rag.query", "{}").unwrap_err();
     assert!(format!("{error:#}").contains("拒绝未知 method"));
 
-    // v1 + 空 permissions 的旧插件调用 plugin.* 放行（等价旧通道），
-    // 白名单内但未接入的命名空间返回「尚未接入」而非崩溃。
+    // v1 插件调用宿主能力命名空间被拒（需升级 schema_version 2），
+    // 而不是白名单内未接入命名空间的「尚未接入」。
     let error = bridge_call("prompt", "session.getMessages", "{}").unwrap_err();
-    assert!(format!("{error:#}").contains("尚未接入"));
+    assert!(format!("{error:#}").contains("schema_version 1"));
+
+    // ── 6. v1 + 非空 permissions 插件走 plugin.* 放行（回归 generate-image-openai）──
+    // memory 声明了 sidecar.invoke 等权限但没有（也不可能有）bridge.call；
+    // plugin.* 等价旧 plugin_call 透传通道，不得因声明过其他权限被误拒。
+    // 其 bootstrap 依赖 sidecar（测试环境缺失），期望错误是 WASM 处理失败
+    // 而非「未声明权限」——即已通过权限层到达插件。
+    let error = bridge_call("memory", "plugin.bootstrap", "{}").unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        !message.contains("未声明权限") && !message.contains("权限"),
+        "v1 + 非空 permissions 插件走 plugin.* 不应被权限层拒绝，实际: {message}"
+    );
 }
