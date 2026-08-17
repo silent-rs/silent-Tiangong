@@ -5,8 +5,8 @@
 
 ## 当前状态
 
-- **阶段**：M3 交互接缝已完成（T014 审批 + T015 交互）。
-- **当前建议任务**：M2 内置插件化（T011 浏览器迁移）。
+- **阶段**：M2 内置插件化已完成（官方 App 统一目录 + Agent Team 面板）。
+- **当前建议任务**：T016 三方体验（SDK/脚手架/示例）。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
 - **下一步**：T007 → T008 → T009/T010 串行推进。
@@ -25,9 +25,9 @@
 | T008 | 顶部入口收敛 + 拓展区三态状态机 | M1 | 已完成 | feature/plugin-harness | `41a3a2d2` 等 | 见下方验证记录 | 矩阵图标映射留待 T016 | — | — | — | — |
 | T009 | App 矩阵视图 + 启动台按钮 | M1 | 已完成 | feature/plugin-harness | `97eb63ca` | 见下方验证记录 | 三方绿点/数量徽标待实例感知 |
 | T010 | singleton/multi 打开与实例管理 | M1 | 已完成 | feature/plugin-harness | `97eb63ca` | 见下方验证记录 | 真实三方插件 GUI 冒烟待 T016 |
-| T011 | 浏览器插件化迁移 | M2 | 未开始 | — | — | — | — |
-| T012 | 终端插件化迁移 | M2 | 未开始 | — | — | — | — |
-| T013 | Agent Team 插件化迁移 | M2 | 未开始 | — | — | — | — |
+| T011 | 浏览器插件化迁移 | M2 | 已完成（形态统一） | feature/plugin-harness | `f3147276` | 见下方验证记录 | 命令通道深度收敛渐进 |
+| T012 | 终端插件化迁移 | M2 | 已完成（形态统一） | feature/plugin-harness | `f3147276` | 见下方验证记录 | 命令通道深度收敛渐进 |
+| T013 | Agent Team 插件化迁移 | M2 | 已完成 | feature/plugin-harness | `f3147276` | 见下方验证记录 | 编排策略仍在 Core |
 | T014 | 审批接缝 | M3 | 已完成 | feature/plugin-harness | `8e92b68d` | 见下方验证记录 | 风险分级策略待工具元数据扩展 |
 | T015 | 交互接缝（选择/填写） | M3 | 已完成 | feature/plugin-harness | `07cddec7` | 见下方验证记录 | 三方交互处理器待插件生态 |
 | T016 | SDK/脚手架/UI Kit/示例 | M4 | 未开始 | — | — | — | — |
@@ -57,7 +57,7 @@
 | --- | --- | --- |
 | M0 | 接缝地基（T001-T005） | 已完成（2026-08-17，提交 `585d1d74`） |
 | M1 | UI 接缝与能力矩阵（T006-T010） | 基本完成（T008 `41a3a2d2` 系列、T009/T010 `97eb63ca`；GUI 冒烟待三方制品） |
-| M2 | 内置插件化（T011-T013） | 未开始 |
+| M2 | 内置插件化（T011-T013） | 已完成（2026-08-18，`f3147276`） |
 | M3 | 交互接缝（T014-T015） | 已完成（2026-08-17，`8e92b68d`/`07cddec7`） |
 | M4 | 三方体验（T016） | 未开始 |
 
@@ -75,6 +75,7 @@
 | `97eb63ca` | feat(plugin): T009/T010 三方 App 进矩阵与 plugin tab 实例管理 |
 | `8e92b68d` | feat(plugin): T014 审批接缝——契约/路由骨架 + 超时 fail-closed + 始终允许 |
 | `07cddec7` | feat(plugin): T015 交互接缝——ask_user 工具与 choice/form/confirm 交互 |
+| `f3147276` | feat(plugin): M2 内置插件化——官方 App 进统一目录与 Agent Team 面板 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -159,6 +160,21 @@
   `cargo check -p tiangong-app` 通过。既有 flaky（steering_message，改动前即失败）记录在案。
 - 遗留：审批风险分级策略（tool-spec dangerous 元数据）待 WIT 元数据扩展；三方审批/交互
   处理器的桥接路由待插件生态（契约与骨架已就位）；交互 UI 超时倒计时展示待真实使用反馈。
+
+### T011-T013（2026-08-18，`f3147276`）
+
+- 官方 App 统一注册：浏览器/终端/Agent Team 以 `__builtin__` 官方身份进入
+  list_extension_apps（official 标记、置顶、native 容器、声明化 open_mode），
+  矩阵统一渲染官方 + 三方（移除前端硬编码卡片）。
+- Agent Team 官方 App：AgentTeamPanel（子 Agent 实时状态：活跃标记、上下文/累计
+  token），plugin tab 的 native 容器按贡献分派；编排调度保留在 Core（设计 8.3）。
+- 浏览器/终端以「形态统一」交付：App 目录声明化 + 既有 native 容器与打开路径；
+  plugin:browser|* 等内部命令通道的桥接化收敛作为渐进项（native 容器本就是
+  官方专属通道，无特权外泄）。
+- onTabKindsChanged 扩展上报 plugin App 键集合：三方/官方 plugin App 矩阵绿点
+  （补 T009 遗留项）。
+- 验证：官方 App 目录测试（置顶/模式/native）、状态机测试适配、前端 202 项全绿、
+  clippy 零警告。
 
 ### T007（2026-08-17，`3cb5dbd9`）
 
