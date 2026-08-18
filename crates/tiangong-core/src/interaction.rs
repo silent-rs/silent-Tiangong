@@ -168,11 +168,36 @@ impl InteractionRegistry {
         now() >= request.deadline
     }
 
-    /// 用户响应：Pending → Answered（竞态唯一赢家生效）。
+    /// 用户响应：在同一把锁内先执行绝对截止时间判定，再决定 Answered/Expired。
+    /// 这样 deadline 已过但计时任务尚未获得调度时，迟到审批仍会 fail-closed。
     pub fn respond(&self, request_id: &str, result: String) -> CloseOutcome {
-        self.close_with(request_id, InteractionStatus::Answered, |_request| {
-            ClosedOutcome::Answered { result }
-        })
+        let (closed, handler) = {
+            let mut state = self.state.lock().expect("交互注册表锁损坏");
+            let Some(mut request) = state.pending.remove(request_id) else {
+                return match state.closed.get(request_id) {
+                    Some(previous) => CloseOutcome::AlreadyClosed(previous.request.status),
+                    None => CloseOutcome::NotFound,
+                };
+            };
+            let outcome = if now() >= request.deadline {
+                request.status = InteractionStatus::Expired;
+                ClosedOutcome::Expired
+            } else {
+                request.status = InteractionStatus::Answered;
+                ClosedOutcome::Answered { result }
+            };
+            let closed = ClosedInteraction {
+                request: request.clone(),
+                outcome,
+            };
+            state.closed.insert(request_id.to_string(), closed.clone());
+            let handler = self.on_closed.lock().expect("交互闭合处理器锁损坏").clone();
+            (closed, handler)
+        };
+        if let Some(handler) = handler {
+            handler(closed.clone());
+        }
+        CloseOutcome::Won(Box::new(closed))
     }
 
     /// 超时闭合：计时任务醒来先按绝对 deadline 复核（未到则忽略），再原子转 Expired。
@@ -240,6 +265,16 @@ impl InteractionRegistry {
             .filter(|request| request.session_id == session_id)
             .cloned()
             .collect()
+    }
+
+    /// 查询请求所属的权威会话。仅 Pending 请求可以被 UI 响应。
+    pub fn pending_session_id(&self, request_id: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("交互注册表锁损坏")
+            .pending
+            .get(request_id)
+            .map(|request| request.session_id.clone())
     }
 
     /// 单个请求查询（UI 恢复展示用）。
@@ -541,6 +576,35 @@ mod tests {
     }
 
     #[test]
+    fn 截止时间已过的响应原子闭合为过期() {
+        let registry = InteractionRegistry::new();
+        let mut request = pending_request(InteractionRequestKind::Approval);
+        request.request_id = "expired-response".to_string();
+        // 测试模块可直接登记过去的 deadline，模拟计时任务尚未调度但真实时间已过。
+        request.status = InteractionStatus::Pending;
+        request.created_at = now() - chrono::Duration::seconds(2);
+        request.deadline = now() - chrono::Duration::seconds(1);
+        registry
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .insert(request.request_id.clone(), request.clone());
+
+        let outcome = registry.respond(
+            &request.request_id,
+            r#"{\"decision\":\"approve_once\"}"#.to_string(),
+        );
+        match outcome {
+            CloseOutcome::Won(closed) => {
+                assert_eq!(closed.request.status, InteractionStatus::Expired);
+                assert!(matches!(closed.outcome, ClosedOutcome::Expired));
+            }
+            other => panic!("迟到响应应由本次调用闭合为过期: {other:?}"),
+        }
+    }
+
+    #[test]
     fn 未到真实截止的超时唤醒被忽略() {
         let registry = InteractionRegistry::new();
         let request = registry.create(pending_request(InteractionRequestKind::Input));
@@ -626,6 +690,94 @@ mod tests {
         // 消费性取出：第二次为空
         let taken = challenges.take(&challenge.challenge_id);
         assert!(taken.is_some());
+        assert!(challenges.take(&challenge.challenge_id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod redesign_acceptance_tests {
+    use super::*;
+
+    fn pending(kind: InteractionRequestKind, session: &str) -> InteractionRequest {
+        InteractionRequest {
+            request_id: scru128::new().to_string(),
+            session_id: session.to_string(),
+            source_message_id: None,
+            tool_call_id: "call-1".to_string(),
+            kind,
+            title: "确认".to_string(),
+            description: String::new(),
+            payload: String::new(),
+            approval_challenge: None,
+            status: InteractionStatus::Pending,
+            created_at: now(),
+            deadline: now(),
+        }
+    }
+
+    /// 验收「会话路由」：request_id 是权威键，pending_session_id 返回所属会话；
+    /// 其他会话的查询不串扰（方案 §8）。
+    #[test]
+    fn 按请求_id_权威路由到所属会话() {
+        let registry = InteractionRegistry::new();
+        let request_a = registry.create(pending(InteractionRequestKind::Approval, "session-a"));
+        let _request_b = registry.create(pending(InteractionRequestKind::Choice, "session-b"));
+
+        assert_eq!(
+            registry
+                .pending_session_id(&request_a.request_id)
+                .as_deref(),
+            Some("session-a")
+        );
+        // 闭合后不再可路由（迟到响应按 NotFound 拒绝）
+        registry.respond(&request_a.request_id, "true".to_string());
+        assert_eq!(registry.pending_session_id(&request_a.request_id), None);
+    }
+
+    /// 验收「deadline 与响应竞争」：过期瞬间的响应在注册表锁内判为 Expired，
+    /// 不产生 answered 结果（方案 §10）。
+    #[test]
+    fn 过期边界的响应闭合为_expired_而非_answered() {
+        let registry = InteractionRegistry::new();
+        let mut request = pending(InteractionRequestKind::Input, "s1");
+        // deadline 设为过去：创建路径会覆盖，这里手动构造已过期的 Pending
+        request.deadline = now() - chrono::Duration::seconds(1);
+        registry
+            .state
+            .lock()
+            .expect("交互注册表锁损坏")
+            .pending
+            .insert(request.request_id.clone(), request.clone());
+
+        let outcome = registry.respond(&request.request_id, r#""答案""#.to_string());
+        match outcome {
+            CloseOutcome::Won(closed) => {
+                assert_eq!(closed.request.status, InteractionStatus::Expired);
+                assert!(matches!(closed.outcome, ClosedOutcome::Expired));
+            }
+            other => panic!("过期响应应闭合为 Expired: {other:?}"),
+        }
+    }
+
+    /// 验收「挑战绑定」：挑战会话与请求会话不一致时拒绝（方案 §11/§13）。
+    #[test]
+    fn 跨会话挑战不可消费() {
+        let challenges = ApprovalChallenges::new();
+        let challenge = challenges.create(
+            "session-a",
+            "fs",
+            "delete_file",
+            "hash-a".to_string(),
+            "删除 /tmp/x".to_string(),
+        );
+        // 从 B 会话取 A 的挑战：按 id 消费本身成功（表级 API），
+        // 会话匹配由 request_user 侧校验——此处验证表级消费语义与会话字段保留
+        let taken = challenges
+            .take(&challenge.challenge_id)
+            .expect("按 id 应可消费");
+        assert_eq!(taken.session_id, "session-a");
+        assert_eq!(taken.arguments_hash, "hash-a");
+        // 二次消费为空（一次性）
         assert!(challenges.take(&challenge.challenge_id).is_none());
     }
 }

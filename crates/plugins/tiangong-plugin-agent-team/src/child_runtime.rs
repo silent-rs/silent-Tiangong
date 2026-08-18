@@ -871,6 +871,8 @@ fn handle_child_event(
             title,
             description,
             payload,
+            created_at,
+            deadline,
         } => {
             if let Some(feedback) = feedback_for_event(active_turn, base_feedback) {
                 forward_event(
@@ -883,6 +885,8 @@ fn handle_child_event(
                         title,
                         description,
                         payload,
+                        created_at,
+                        deadline,
                     },
                 );
             }

@@ -179,6 +179,46 @@ export async function createTiangongBridge(): Promise<HostBridge> {
   throw new Error('未检测到天工容器（不在插件沙箱内运行）');
 }
 
+export interface InteractionRequest {
+  request_id: string;
+  session_id: string;
+  tool_call_id: string;
+  kind: 'approval' | 'confirm' | 'choice' | 'multi_choice' | 'input' | 'form';
+  title: string;
+  description: string;
+  payload: string;
+  created_at: string;
+  deadline: string;
+}
+
+export interface InteractionClosed {
+  request_id: string;
+  session_id: string;
+  status: 'answered' | 'expired' | 'cancelled';
+}
+
+/** 交互处理器便捷客户端。宿主仍是截止时间、唯一闭合和审批授权的权威。 */
+export function createInteractionHandler(bridge: HostBridge) {
+  return {
+    onRequested(handler: (request: InteractionRequest) => void): () => void {
+      return bridge.on('interaction.requested', (payload) => {
+        handler(JSON.parse(payload) as InteractionRequest);
+      });
+    },
+    onClosed(handler: (closed: InteractionClosed) => void): () => void {
+      return bridge.on('interaction.closed', (payload) => {
+        handler(JSON.parse(payload) as InteractionClosed);
+      });
+    },
+    async resolve(requestId: string, result: unknown): Promise<void> {
+      await bridge.call('interaction.resolve', JSON.stringify({
+        request_id: requestId,
+        result_json: JSON.stringify(result),
+      }));
+    },
+  };
+}
+
 /** 便捷的存储读写（storage.* 封装，值为字符串）。 */
 export const pluginStorage = {
   async get(bridge: HostBridge, key: string): Promise<string | null> {

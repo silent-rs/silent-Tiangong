@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "id": "com.example.interaction-handler",
+  "version": "0.1.0",
+  "entrypoints": ["desktop"],
+  "permissions": ["interaction.handle"],
+  "capabilities": {
+    "interaction": true,
+    "events": ["interaction.*"]
+  },
+  "ui": {
+    "sandbox": "iframe",
+    "contributions": [
+      {
+        "slot": "session.interaction",
+        "id": "interaction-handler",
+        "title": "交互处理器",
+        "description": "审批、确认、选择、输入与表单的第三方处理器样板",
+        "entry": "app/index.html",
+        "context": ["session"]
+      }
+    ]
+  }
+}

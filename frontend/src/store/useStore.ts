@@ -673,13 +673,8 @@ function applyEventToSessionView(
       break;
     case 'interaction_requested':
       runStatus = 'waiting_approval';
-      pendingInteraction = {
-        request_id: event.request_id || '',
-        kind: event.kind || 'input',
-        title: event.title || '需要您的输入',
-        description: event.description || '',
-        payload: event.payload || '',
-      };
+      // 具体界面由 session.interaction 插件通过 interaction.requested 事件渲染。
+      pendingInteraction = null;
       runSummary = event.title || runSummary;
       break;
     case 'interaction_closed':

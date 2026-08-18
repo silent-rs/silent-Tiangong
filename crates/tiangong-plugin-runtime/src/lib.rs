@@ -35,10 +35,12 @@ pub use approval::{
 };
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, bridge_call, bridge_emit, bridge_subscribe,
-    bridge_unsubscribe, set_event_emitter,
+    bridge_unsubscribe, set_event_emitter, set_interaction_response_handler,
 };
 pub use config::PluginRuntimeConfig;
-pub use interaction::{InteractionKind, InteractionRequest, InteractionResponse};
+pub use interaction::{
+    InteractionClosed, InteractionKind, InteractionRequest, InteractionResponse,
+};
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,

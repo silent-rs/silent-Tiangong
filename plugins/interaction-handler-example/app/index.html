@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>交互处理器样板</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 14px; color: var(--foreground, #222); background: var(--background, transparent); }
+    #empty { color: #777; font-size: 13px; }
+    #card[hidden], #error[hidden] { display: none; }
+    h3 { margin: 0 0 6px; font-size: 15px; } p { margin: 0 0 10px; color: #777; font-size: 12px; }
+    #deadline { font-size: 12px; color: #888; margin-bottom: 10px; }
+    #content { display: grid; gap: 7px; margin-bottom: 10px; }
+    label, button, input, select { font: inherit; font-size: 13px; }
+    input[type=text], input[type=number], select { box-sizing: border-box; width: 100%; padding: 7px; border: 1px solid #8886; border-radius: 6px; background: transparent; color: inherit; }
+    .option { display: flex; align-items: center; gap: 7px; }
+    #actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    button { border: 0; border-radius: 6px; padding: 7px 11px; cursor: pointer; background: #2563eb; color: white; }
+    button.reject { background: #dc2626; } button.runtime { background: #16803f; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #error { margin-top: 8px; color: #dc2626; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="empty">等待 Agent 发起交互请求…</div>
+  <section id="card" hidden>
+    <h3 id="title"></h3><p id="description"></p><div id="deadline"></div>
+    <div id="content"></div><div id="actions"></div><div id="error" hidden></div>
+  </section>
+  <script>
+    let channel = null, request = null, submitting = false, timer = null, seq = 0;
+    const pending = new Map();
+    const $ = id => document.getElementById(id);
+    function call(method, value) {
+      const id = `interaction-${++seq}`;
+      return new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        parent.postMessage({ type: 'plugin_call', channel, id, method, payload: JSON.stringify(value) }, '*');
+      });
+    }
+    function subscribe(event) { parent.postMessage({ type: 'plugin_subscribe', channel, event }, '*'); }
+    addEventListener('message', event => {
+      const data = event.data || {};
+      if (data.type === 'tiangong_host_context' && data.channel) {
+        channel = data.channel;
+        subscribe('interaction.requested'); subscribe('interaction.closed');
+        return;
+      }
+      if (data.id && data.channel === channel && pending.has(data.id)) {
+        const waiter = pending.get(data.id); pending.delete(data.id);
+        data.error ? waiter.reject(new Error(data.error)) : waiter.resolve(data.result);
+        return;
+      }
+      if (data.type === 'bridge_event' && data.channel === 'interaction.requested') {
+        show(JSON.parse(data.payload));
+      } else if (data.type === 'bridge_event' && data.channel === 'interaction.closed') {
+        const closed = JSON.parse(data.payload);
+        if (request && closed.request_id === request.request_id) close(closed.status);
+      }
+    });
+    function parse(text, fallback) { try { return JSON.parse(text); } catch { return fallback; } }
+    function deadlineMs(value) { return new Date(value).getTime(); }
+    function updateDeadline() {
+      if (!request) return;
+      const remaining = Math.max(0, deadlineMs(request.deadline) - Date.now());
+      $('deadline').textContent = remaining ? `剩余 ${Math.ceil(remaining / 1000)} 秒` : '已到期，等待宿主闭合';
+      if (!remaining) disable();
+    }
+    function disable() { document.querySelectorAll('button,input,select').forEach(node => node.disabled = true); }
+    function show(next) {
+      request = next; submitting = false; $('empty').hidden = true; $('card').hidden = false; $('error').hidden = true;
+      $('title').textContent = next.title; $('description').textContent = next.description || '';
+      $('content').replaceChildren(); $('actions').replaceChildren();
+      const payload = parse(next.payload, next.payload); renderContent(next.kind, payload); renderActions(next.kind);
+      clearInterval(timer); updateDeadline(); timer = setInterval(updateDeadline, 250);
+    }
+    function addButton(text, result, className = '') {
+      const button = document.createElement('button'); button.textContent = text; button.className = className;
+      button.onclick = () => submit(typeof result === 'function' ? result() : result); $('actions').append(button);
+    }
+    function renderContent(kind, payload) {
+      if (kind === 'choice' || kind === 'multi_choice') {
+        (Array.isArray(payload) ? payload : []).forEach(option => {
+          const label = document.createElement('label'); label.className = 'option';
+          const input = document.createElement('input'); input.type = kind === 'choice' ? 'radio' : 'checkbox'; input.name = 'choice'; input.value = option;
+          label.append(input, document.createTextNode(option)); $('content').append(label);
+        });
+      } else if (kind === 'input') {
+        const input = document.createElement('input'); input.type = 'text'; input.id = 'text-input'; input.placeholder = '请输入…'; $('content').append(input);
+      } else if (kind === 'form') {
+        (Array.isArray(payload) ? payload : []).forEach(field => {
+          const label = document.createElement('label'); label.textContent = field.label || field.key;
+          const input = field.type === 'select' ? document.createElement('select') : document.createElement('input'); input.dataset.key = field.key; input.dataset.type = field.type;
+          if (field.type === 'number') input.type = 'number'; if (field.type === 'boolean') input.type = 'checkbox';
+          (field.options || []).forEach(value => { const option = document.createElement('option'); option.value = value; option.textContent = value; input.append(option); });
+          label.append(input); $('content').append(label);
+        });
+      } else if (payload && typeof payload === 'string') $('content').textContent = payload;
+    }
+    function selectedResult(multiple) { const values = [...document.querySelectorAll('input[name=choice]:checked')].map(input => input.value); return multiple ? values : values[0]; }
+    function formResult() { const answer = {}; document.querySelectorAll('[data-key]').forEach(input => { answer[input.dataset.key] = input.dataset.type === 'boolean' ? input.checked : input.dataset.type === 'number' ? Number(input.value) : input.value; }); return answer; }
+    function renderActions(kind) {
+      if (kind === 'approval') { addButton('仅本次允许', { decision: 'approve_once' }); addButton('本次运行内允许', { decision: 'approve_for_runtime' }, 'runtime'); addButton('拒绝', { decision: 'reject' }, 'reject'); }
+      else if (kind === 'confirm') { addButton('是', true); addButton('否', false, 'reject'); }
+      else if (kind === 'choice') addButton('提交', () => selectedResult(false));
+      else if (kind === 'multi_choice') addButton('提交', () => selectedResult(true));
+      else if (kind === 'input') addButton('提交', () => $('text-input').value);
+      else addButton('提交', formResult);
+    }
+    async function submit(result) {
+      if (!request || submitting || Date.now() >= deadlineMs(request.deadline) || result === undefined) return;
+      submitting = true; disable();
+      try { await call('interaction.resolve', { request_id: request.request_id, result_json: JSON.stringify(result) }); }
+      catch (error) { submitting = false; $('error').textContent = String(error); $('error').hidden = false; updateDeadline(); if (Date.now() < deadlineMs(request.deadline)) document.querySelectorAll('button,input,select').forEach(node => node.disabled = false); }
+    }
+    function close(status) { clearInterval(timer); disable(); $('deadline').textContent = ({ answered: '已提交', expired: '已过期', cancelled: '已取消' })[status] || status; }
+  </script>
+</body>
+</html>

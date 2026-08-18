@@ -90,7 +90,8 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
     },
-    /// 交互请求已创建（request_user 工具阻塞等待用户响应）
+    /// 交互请求已创建（request_user 工具异步等待 Tool Result）。桌面端通过
+    /// `interaction.requested` Bridge 事件交给交互处理器插件渲染。
     InteractionRequested {
         request_id: String,
         session_id: String,
@@ -103,6 +104,10 @@ pub enum StreamEvent {
         /// 交互负载 JSON（options/fields/question 等）
         #[serde(default)]
         payload: String,
+        /// 宿主权威的请求创建时间（本地时间）。
+        created_at: String,
+        /// 宿主权威的绝对截止时间（本地时间）。
+        deadline: String,
     },
     /// 交互请求已闭合（answered/expired/cancelled）：界面据此禁用输入
     InteractionClosed {

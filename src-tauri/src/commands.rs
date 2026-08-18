@@ -1054,9 +1054,29 @@ pub(crate) fn start_stream_consumer(
                 request_id,
                 kind,
                 title,
-                ..
+                session_id: request_session_id,
+                tool_call_id,
+                description,
+                payload,
+                created_at,
+                deadline,
             } = &event
             {
+                let plugin_request = tiangong_plugin_runtime::InteractionRequest {
+                    request_id: request_id.clone(),
+                    session_id: request_session_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    kind: serde_json::from_value(serde_json::Value::String(kind.clone()))
+                        .expect("Core 只产生已登记的交互类型"),
+                    title: title.clone(),
+                    description: description.clone(),
+                    payload: payload.clone(),
+                    created_at: created_at.clone(),
+                    deadline: deadline.clone(),
+                };
+                if let Ok(payload) = serde_json::to_string(&plugin_request) {
+                    tiangong_plugin_runtime::bridge_emit("interaction.requested", &payload);
+                }
                 rt.block_on(send_approval_notification_if_background(
                     app.clone(),
                     sid.clone(),
@@ -1064,6 +1084,22 @@ pub(crate) fn start_stream_consumer(
                     kind.clone(),
                     title.clone(),
                 ));
+            }
+
+            if let StreamEvent::InteractionClosed { request_id, status } = &event {
+                if let Some(request) = tiangong_core::shared_runtime::interactions()
+                    .registry
+                    .query(request_id)
+                {
+                    let closed = tiangong_plugin_runtime::InteractionClosed {
+                        request_id: request_id.clone(),
+                        session_id: request.session_id,
+                        status: status.clone(),
+                    };
+                    if let Ok(payload) = serde_json::to_string(&closed) {
+                        tiangong_plugin_runtime::bridge_emit("interaction.closed", &payload);
+                    }
+                }
             }
 
             if is_done || is_error {
@@ -1443,21 +1479,28 @@ pub async fn append_message(
     Ok(true)
 }
 
-/// 响应交互请求（request_user 审批/确认/选择/输入），resultJson 为用户响应 JSON
+/// 响应交互请求（request_user 审批/确认/选择/输入），resultJson 为用户响应 JSON。
+/// 保留给非插件宿主/兼容调用；桌面默认界面使用 interaction.resolve Bridge。
 #[tauri::command]
 pub async fn resolve_interaction(
     request_id: String,
     result_json: String,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
-    state
-        .inner()
-        .core_manager
-        .resolve_interaction_to_core(&session_id, request_id, result_json);
-    Ok(true)
+    let session_id = tiangong_core::shared_runtime::interactions()
+        .registry
+        .pending_session_id(&request_id)
+        .ok_or_else(|| "交互请求不存在、已闭合或已过期".to_string())?;
+    let delivered = state.inner().core_manager.resolve_interaction_to_core(
+        &session_id,
+        request_id,
+        result_json,
+    );
+    if delivered {
+        Ok(true)
+    } else {
+        Err("交互请求所属会话当前不可响应".to_string())
+    }
 }
 
 /// 获取当前信任模式

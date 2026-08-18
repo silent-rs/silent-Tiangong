@@ -61,8 +61,14 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
-pub const EVENT_NAMESPACE_PREFIXES: &[&str] =
-    &["session.", "tool.", "approval.", "lifecycle.", "config."];
+pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
+    "session.",
+    "tool.",
+    "approval.",
+    "interaction.",
+    "lifecycle.",
+    "config.",
+];
 
 /// 查找 method 所属的桥接命名空间。
 pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
@@ -151,6 +157,8 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         }
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
+        // interaction.*：由桌面/CLI 宿主注入响应处理器，插件无权自行闭合请求。
+        "interaction." => interaction_call(plugin_id, method, payload),
         // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
@@ -160,6 +168,33 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
             )
         }
     }
+}
+
+/// 交互响应宿主处理器：桌面入口注入后，纯 UI 插件即可提交响应。
+pub type InteractionResponseHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+static INTERACTION_RESPONSE_HANDLER: OnceLock<InteractionResponseHandler> = OnceLock::new();
+
+pub fn set_interaction_response_handler(handler: InteractionResponseHandler) {
+    let _ = INTERACTION_RESPONSE_HANDLER.set(handler);
+}
+
+fn interaction_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    let manifest = crate::registry::plugin_manifest(plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("交互处理器插件 {plugin_id} 未加载"))?;
+    if !manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.interaction)
+    {
+        bail!("插件 {plugin_id} 未声明 capabilities.interaction=true");
+    }
+    if method != "interaction.resolve" {
+        bail!("未知交互桥接方法 {method}");
+    }
+    let handler = INTERACTION_RESPONSE_HANDLER
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入交互响应服务"))?;
+    handler(plugin_id, method, payload)
 }
 
 // ── bridge.on / bridge.off ──

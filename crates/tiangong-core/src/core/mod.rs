@@ -383,9 +383,18 @@ impl TiangongCore {
         }
     }
 
-    /// 交互响应入口：注册表原子闭合（answered/expired/cancelled 竞争唯一胜者），
-    /// 胜出后将闭合产物投递给阻塞等待 request_user 的 turn task。
-    pub fn resolve_interaction(&self, request_id: &str, result_json: String) {
+    /// 交互响应入口：先核对请求确实属于当前 Core，再由注册表原子闭合；
+    /// 胜出后将闭合产物投递给异步等待 request_user Tool Result 的 turn task。
+    pub fn resolve_interaction(&self, request_id: &str, result_json: String) -> bool {
+        if crate::shared_runtime::interactions()
+            .registry
+            .pending_session_id(request_id)
+            .as_deref()
+            != Some(self.session_id.as_str())
+        {
+            tracing::warn!(request_id, %self.session_id, "交互响应会话归属不匹配");
+            return false;
+        }
         match crate::shared_runtime::interactions()
             .registry
             .respond(request_id, result_json)
@@ -408,13 +417,17 @@ impl TiangongCore {
                     },
                 ) {
                     tracing::warn!(request_id, %self.session_id, "交互闭合投递失败（等待 turn 可能已结束）");
+                    return false;
                 }
+                true
             }
             crate::interaction::CloseOutcome::AlreadyClosed(status) => {
                 tracing::warn!(request_id, ?status, "交互响应迟到，请求已闭合");
+                false
             }
             crate::interaction::CloseOutcome::NotFound => {
                 tracing::warn!(request_id, "交互响应目标不存在");
+                false
             }
         }
     }
@@ -605,8 +618,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }) => {
                 // 响应统一经注册表原子闭合（多界面竞争唯一胜者），胜出后投递
                 // 给阻塞等待中的 turn task。
-                self.resolve_interaction(&request_id, result_json);
-                Ok(())
+                if self.resolve_interaction(&request_id, result_json) {
+                    Ok(())
+                } else {
+                    Err(CoreError::WorkerStopped)
+                }
             }
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {

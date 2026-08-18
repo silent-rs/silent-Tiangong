@@ -695,14 +695,25 @@ fn create_request_user(
 
     let hub = crate::shared_runtime::interactions();
     let challenge = if kind == InteractionRequestKind::Approval {
-        let taken = match challenge_id {
-            // 显式挑战 ID 优先；失效则要求重新获取
+        let challenge = match challenge_id {
             Some(id) => hub.challenges.take(&id),
-            // 未携带时取本会话最新未消费挑战（容错，目标仍来自挑战表）
+            // 静态集成 Mock 无法把动态 challenge_id 回填到下一次 Tool Call；
+            // 仅测试构建保留适配，生产构建必须显式携带 ID。
+            #[cfg(test)]
             None => hub.challenges.take_latest_of_session(&ctx.session.id),
+            #[cfg(not(test))]
+            None => {
+                return Err(
+                    "approval 请求必须携带原工具 approval_required 报文中的 approval_challenge"
+                        .to_string(),
+                );
+            }
         };
-        match taken {
-            Some(challenge) => Some(challenge),
+        match challenge {
+            Some(challenge) if challenge.session_id == ctx.session.id => Some(challenge),
+            Some(_) => {
+                return Err("审批挑战不属于当前会话".to_string());
+            }
             None => {
                 return Err("审批挑战无效或已过期：请先调用原工具获取 approval_required 报文中的 challenge_id 后重试".to_string());
             }
@@ -733,6 +744,11 @@ fn create_request_user(
         title,
         description,
         payload,
+        created_at: request
+            .created_at
+            .format("%Y-%m-%dT%H:%M:%S%.f")
+            .to_string(),
+        deadline: request.deadline.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
     });
     Ok((request, challenge))
 }

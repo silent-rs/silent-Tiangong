@@ -90,6 +90,12 @@ pub const BUILTIN_SLOTS: &[SlotDescriptor] = &[
         description: "输入框下方（附加输入辅助区）",
     },
     SlotDescriptor {
+        id: "session.interaction",
+        instances: SlotInstances::Singleton,
+        context: &[SlotContextKey::Session],
+        description: "审批、确认、选择和输入请求的交互处理器界面",
+    },
+    SlotDescriptor {
         id: "session.empty-state",
         instances: SlotInstances::Multiple,
         context: &[SlotContextKey::Session, SlotContextKey::Workspace],
@@ -330,6 +336,7 @@ mod tests {
                 "session.after-input",
                 "session.before-input",
                 "session.empty-state",
+                "session.interaction",
                 "session.message-action",
                 "session.message-item",
                 "session.turn-node",

@@ -134,11 +134,11 @@ impl CoreManager {
         session_id: &str,
         request_id: String,
         result_json: String,
-    ) {
+    ) -> bool {
         self.deliver_to_core_if_live(
             session_id,
             AgentInputKind::resolve_interaction(request_id, result_json),
-        );
+        )
     }
 
     /// 设置指定会话 core 的信任模式（实时生效）。

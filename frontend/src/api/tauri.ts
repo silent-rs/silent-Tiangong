@@ -291,6 +291,9 @@ export interface StreamEvent {
   /** title_changed 事件携带的新标题。 */
   title?: string;
   /** interaction_requested / interaction_closed 事件补充字段（request_user 阻塞等待）。 */
+  /** 宿主权威的本地创建/截止时间。 */
+  created_at?: string;
+  deadline?: string;
   kind?: string;
   description?: string;
   payload?: string;
@@ -498,6 +501,7 @@ export const SLOT_IDS = [
   'session.message-action',
   'session.before-input',
   'session.after-input',
+  'session.interaction',
   'session.empty-state',
   'extension.tab',
   'extension.side',

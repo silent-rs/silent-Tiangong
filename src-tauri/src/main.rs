@@ -356,6 +356,34 @@ fn run_gui() {
                 ));
             }
 
+            // 交互插件只能提交 request_id + 结果；宿主按注册表权威会话路由到等待中的 Core。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_interaction_response_handler(Arc::new(
+                    move |_plugin_id: &str, method: &str, payload: &str| {
+                        if method != "interaction.resolve" {
+                            anyhow::bail!("未知交互方法 {method}");
+                        }
+                        let response: tiangong_plugin_runtime::InteractionResponse =
+                            serde_json::from_str(payload)
+                                .map_err(|error| anyhow::anyhow!("交互响应格式无效：{error}"))?;
+                        let session_id = tiangong_core::shared_runtime::interactions()
+                            .registry
+                            .pending_session_id(&response.request_id)
+                            .ok_or_else(|| anyhow::anyhow!("交互请求不存在、已闭合或已过期"))?;
+                        let state = app_handle.state::<tiangong_app::TiangongApp>();
+                        if !state.core_manager.resolve_interaction_to_core(
+                            &session_id,
+                            response.request_id,
+                            response.result_json,
+                        ) {
+                            anyhow::bail!("交互请求所属会话当前不可响应");
+                        }
+                        Ok("true".to_string())
+                    },
+                ));
+            }
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
 

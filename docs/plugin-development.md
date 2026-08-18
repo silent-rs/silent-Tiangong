@@ -384,3 +384,14 @@ await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
 
 在 v1 清单基础上补 `schema_version: 2` 与 `ui`/`capabilities` 即可：WASM 侧
 （工具/提示词/生命周期）零改动，界面从「仅设置页」升级为可挂拓展区矩阵。
+
+## 交互处理器插件（审批与用户征询）
+
+`request_user` 工具发起的审批/确认/选择/输入请求，默认由桌面内置界面处理；
+声明了 `interaction.handle` 权限与 `capabilities.interaction=true` 的插件可注册为
+处理器接管展示与响应（宿主保留闭合判定、授权与超时权威）。
+
+完整可运行的交互处理器样板见 **`plugins/interaction-handler-example`**
+（零构建、可直接导入的 iframe 插件：六种请求渲染、倒计时、提交锁、闭合状态）。
+SDK 封装（`createInteractionHandler`：onRequested/onClosed/resolve）见
+`plugins/sdk`。通用插件脚手架（`new-plugin`）不含交互权限，需按需自行声明。

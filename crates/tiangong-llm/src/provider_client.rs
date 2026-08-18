@@ -2030,6 +2030,9 @@ mod tests {
             phase: MessagePhase::Normal,
             created_at: String::new(),
             elapsed_ms: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
+            duration_ms: None,
             turn_status: None,
         };
         let req = ModelRequest {
@@ -2657,6 +2660,9 @@ mod tests {
             phase: MessagePhase::Normal,
             created_at: String::new(),
             elapsed_ms: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
+            duration_ms: None,
             turn_status: None,
         }
     }
@@ -2687,6 +2693,9 @@ mod tests {
             phase: MessagePhase::Normal,
             created_at: String::new(),
             elapsed_ms: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
+            duration_ms: None,
             turn_status: None,
         };
 

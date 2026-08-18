@@ -57,6 +57,21 @@ interface HostBridge {
 
 负载均为字符串（JSON 序列化），宿主不做业务解析。
 
+## 交互处理器
+
+声明 `capabilities.interaction=true`、`interaction.handle` 权限、`interaction.*` 事件以及
+`session.interaction` Slot 后，插件可以接管审批与用户征询界面：
+
+```ts
+import { createInteractionHandler, createTiangongBridge } from '@tiangong/plugin-sdk';
+const interaction = createInteractionHandler(await createTiangongBridge());
+interaction.onRequested((request) => console.log(request, request.deadline));
+await interaction.resolve(requestId, { decision: 'reject' });
+```
+
+完整可运行样板见 `plugins/interaction-handler-example`。插件只提交用户选择，宿主保持
+截止时间、唯一闭合、会话路由、审批挑战和授权的最终控制。
+
 ## 主题
 
 宿主在挂载与主题切换时推送设计 token：iframe 容器经 `tiangong_host_context`
