@@ -4,7 +4,8 @@
 
 use tiangong_plugin_runtime::bridge_call;
 use tiangong_plugin_runtime::registry::{
-    list_extension_apps, list_slot_contributions, preload_installed_plugins,
+    RuntimeKind, list_extension_apps, list_plugins, list_slot_contributions,
+    preload_installed_plugins, set_plugin_enabled,
 };
 
 static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -128,5 +129,40 @@ fn 纯_ui_插件免_wasm_加载并经_storage_桥接读写() {
     let error = bridge_call("com.example.board", "plugin.anything", "{}").unwrap_err();
     assert!(
         format!("{error:#}").contains("处理消息失败") || format!("{error:#}").contains("未加载")
+    );
+}
+
+#[test]
+fn 纯_ui_插件启停状态即时且不受其他无效插件影响() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let root = tempfile::TempDir::new().unwrap();
+    tiangong_config::registry::init_from_dir(root.path());
+    stage_ui_only_plugin(root.path());
+    assert_eq!(preload_installed_plugins(root.path()), 1);
+
+    // 目标插件启停不应扫描其他插件。即使存在无效清单，也应立即返回目标插件状态。
+    let invalid_dir = root.path().join("plugins").join("invalid-neighbor");
+    std::fs::create_dir_all(&invalid_dir).unwrap();
+    std::fs::write(invalid_dir.join("plugin.json"), "{ not valid json").unwrap();
+
+    let disabled = set_plugin_enabled(root.path(), "com.example.board", false).unwrap();
+    assert!(!disabled.enabled);
+    assert_eq!(disabled.state, "disabled");
+
+    let enabled = set_plugin_enabled(root.path(), "com.example.board", true).unwrap();
+    assert!(enabled.enabled);
+    assert_eq!(enabled.state, "loaded");
+    assert_eq!(
+        enabled.loaded_version, None,
+        "纯 UI 插件不需要 WASM 描述信息"
+    );
+
+    let refreshed = list_plugins(root.path(), RuntimeKind::Desktop)
+        .into_iter()
+        .find(|status| status.id == "com.example.board")
+        .expect("刷新列表后仍应找到纯 UI 插件");
+    assert_eq!(
+        refreshed.state, enabled.state,
+        "单插件操作与刷新列表状态应一致"
     );
 }

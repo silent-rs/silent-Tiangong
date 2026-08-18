@@ -322,15 +322,13 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 .sidecar
                 .as_ref()
                 .is_some_and(|connection| connection.has_runtime_endpoint());
-            let state = if !loaded.enabled {
-                "disabled"
-            } else if loaded.ui_plugin.is_none() && loaded.manifest.wasm_binary().is_some() {
-                "error"
-            } else if loaded.last_error.is_some() {
-                "degraded"
-            } else {
-                "loaded"
-            };
+            let state = plugin_state(
+                manifest,
+                loaded.enabled,
+                loaded.ui_plugin.is_some(),
+                sidecar_running,
+                loaded.last_error.as_deref(),
+            );
             PluginStatus {
                 unavailable_reason: if loaded.enabled {
                     check_plugin_availability(manifest, runtime, &configured)
@@ -1084,6 +1082,27 @@ fn set_last_error(plugin_id: &str, error: String) {
     }
 }
 
+/// 使用同一套规则计算全量列表与单插件操作的状态。
+///
+/// `ui_plugin` 仅代表 WASM UI 实例；纯 UI 插件没有该实例，不能因此判为加载失败。
+fn plugin_state(
+    manifest: &PluginManifest,
+    enabled: bool,
+    has_wasm_ui: bool,
+    sidecar_running: bool,
+    last_error: Option<&str>,
+) -> &'static str {
+    if !enabled {
+        "disabled"
+    } else if !has_wasm_ui && manifest.wasm_binary().is_some() {
+        "error"
+    } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
+        "degraded"
+    } else {
+        "loaded"
+    }
+}
+
 fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<PluginStatus> {
     let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = {
         let plugins = loaded_plugins().lock().ok()?;
@@ -1101,15 +1120,13 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     let sidecar_running = sidecar
         .as_ref()
         .is_some_and(|connection| connection.has_runtime_endpoint());
-    let state = if !enabled {
-        "disabled"
-    } else if !has_ui {
-        "error"
-    } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
-        "degraded"
-    } else {
-        "loaded"
-    };
+    let state = plugin_state(
+        manifest,
+        enabled,
+        has_ui,
+        sidecar_running,
+        last_error.as_deref(),
+    );
     let configured = configured_model_capabilities();
     Some(PluginStatus {
         unavailable_reason: if enabled {
@@ -1936,10 +1953,44 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
 }
 
 fn find_installed_plugin(storage_root: &Path, plugin_id: &str) -> Result<InstalledPlugin> {
-    discover_installed_plugins(storage_root)
-        .into_iter()
-        .find(|installed| installed.manifest.id == plugin_id)
-        .ok_or_else(|| anyhow::anyhow!("插件未安装: {plugin_id}"))
+    if plugin_id.is_empty()
+        || !plugin_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || plugin_id == "."
+        || plugin_id == ".."
+    {
+        bail!("插件 ID 无效: {plugin_id}");
+    }
+
+    // 单插件操作直接读取目标目录，不能扫描并验签全部插件。
+    let directory = plugin_directory(storage_root, plugin_id);
+    let directory_metadata = std::fs::symlink_metadata(&directory)
+        .with_context(|| format!("插件未安装: {plugin_id}"))?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        bail!("插件安装路径必须是实际目录: {}", directory.display());
+    }
+    let manifest_path = directory.join(MANIFEST_FILE);
+    let manifest_metadata = std::fs::symlink_metadata(&manifest_path)
+        .with_context(|| format!("插件未安装: {plugin_id}"))?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        bail!("插件清单必须是实际文件: {}", manifest_path.display());
+    }
+    let manifest = PluginManifest::load(&manifest_path)?;
+    if manifest.id != plugin_id {
+        bail!(
+            "插件安装目录与清单 ID 不一致: expected={plugin_id}, actual={}",
+            manifest.id
+        );
+    }
+    let signed_release = verify_signed_release(&directory, &manifest)?;
+    manifest.validate_ui_native_sandbox(signed_release.is_some())?;
+    Ok(InstalledPlugin {
+        enabled: !directory.join(DISABLED_MARKER).is_file(),
+        directory,
+        manifest,
+        signed_release,
+    })
 }
 
 fn resolve_sidecar(
