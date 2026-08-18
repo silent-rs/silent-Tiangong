@@ -1189,6 +1189,29 @@ pub fn set_plugin_enabled(
     }
 
     let marker = installed.directory.join(DISABLED_MARKER);
+
+    // 纯 UI 插件没有 WASM 实例和 sidecar，启停只需更新标记和注册表状态。
+    // 避免进入通用热加载流程，切换应即时完成。
+    if installed.manifest.wasm_binary().is_none() && installed.manifest.sidecar.is_none() {
+        if enabled {
+            remove_file_if_exists(&marker)?;
+        } else {
+            create_disabled_marker(&marker)?;
+            crate::bridge::clear_plugin_subscriptions(plugin_id);
+        }
+        let mut plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get_mut(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
+        loaded.enabled = enabled;
+        loaded.last_error = None;
+        drop(plugins);
+        return list_plugin_status_without_preload(&installed.manifest)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"));
+    }
+
     if enabled {
         remove_file_if_exists(&marker)?;
         let mut enabled_plugin = installed.clone();

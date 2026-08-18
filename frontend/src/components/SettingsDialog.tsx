@@ -41,7 +41,7 @@ export function SettingsDialog() {
   const [availablePlugins, setAvailablePlugins] = useState<import('../api/tauri').AvailablePlugin[]>([]);
   const [pluginCatalogError, setPluginCatalogError] = useState<string | null>(null);
   const [pluginDataLoaded, setPluginDataLoaded] = useState(false);
-  const [pluginDataLoading, setPluginDataLoading] = useState(false);
+  const [, setPluginDataLoading] = useState(false);
   const [pluginRefreshMask, setPluginRefreshMask] = useState(false);
   const pendingSettingsTab = useStore((s) => s.pendingSettingsTab);
   const setPendingSettingsTab = useStore((s) => s.setPendingSettingsTab);
@@ -56,26 +56,39 @@ export function SettingsDialog() {
   }, [open, pluginContributions.length]);
 
   useEffect(() => {
-    if (open && activeTab === 'plugin-manager' && !pluginDataLoaded && !pluginDataLoading) {
-      setPluginDataLoading(true);
-      setPluginRefreshMask(true);
-      Promise.allSettled([api.listPlugins(), api.listAvailablePlugins()])
-        .then(([installed, available]) => {
-          if (installed.status === 'fulfilled') setPluginStatuses(installed.value);
-          if (available.status === 'fulfilled') {
-            setAvailablePlugins(available.value);
-            setPluginCatalogError(null);
-          } else {
-            setPluginCatalogError(String(available.reason));
-          }
-          setPluginDataLoaded(true);
+    if (!open || activeTab !== 'plugin-manager') return;
+
+    let cancelled = false;
+    // 每次进入插件管理都读取本地运行时状态，确保启停后重新进入显示真实值。
+    // 远程目录只在首次进入时后台加载，不能阻塞本地状态展示。
+    setPluginDataLoading(true);
+    void api.listPlugins()
+      .then((installed) => {
+        if (!cancelled) setPluginStatuses(installed);
+      })
+      .finally(() => {
+        if (!cancelled) setPluginDataLoading(false);
+      });
+
+    if (!pluginDataLoaded) {
+      void api.listAvailablePlugins()
+        .then((available) => {
+          if (cancelled) return;
+          setAvailablePlugins(available);
+          setPluginCatalogError(null);
+        })
+        .catch((error) => {
+          if (!cancelled) setPluginCatalogError(String(error));
         })
         .finally(() => {
-          setPluginDataLoading(false);
-          setPluginRefreshMask(false);
+          if (!cancelled) setPluginDataLoaded(true);
         });
     }
-  }, [activeTab, open, pluginDataLoaded, pluginDataLoading]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, open, pluginDataLoaded]);
 
   // 响应外部触发打开设置页
   useEffect(() => {

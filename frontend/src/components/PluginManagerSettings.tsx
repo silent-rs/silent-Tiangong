@@ -179,14 +179,19 @@ export function PluginManagerSettings({
   }, [available, normalizedQuery]);
 
   const finishOperation = async () => {
-    const [, contributionsResult] = await Promise.allSettled([
-      refresh(),
+    // 先刷新本地真实状态与 UI Slot；远程插件目录不应阻塞启停反馈。
+    const [installedResult, contributionsResult] = await Promise.allSettled([
+      api.listPlugins(),
       refreshContributions(),
     ]);
+    if (installedResult.status === 'fulfilled') {
+      setPlugins(installedResult.value);
+    } else {
+      showError('读取失败', String(installedResult.reason));
+    }
     if (contributionsResult.status === 'rejected') {
       showError('插件页面刷新失败', String(contributionsResult.reason));
     }
-    // 通知所有 UI Slot 立即重查贡献，安装、启停、重载和卸载无需重启。
     window.dispatchEvent(new CustomEvent('tiangong:plugins-changed'));
   };
 
@@ -205,7 +210,8 @@ export function PluginManagerSettings({
       return true;
     } catch (error) {
       showError(`${operationLabel(operation)}失败`, String(error));
-      await refresh();
+      const current = await api.listPlugins().catch(() => null);
+      if (current) setPlugins(current);
       return false;
     } finally {
       setActiveOperation(null);
