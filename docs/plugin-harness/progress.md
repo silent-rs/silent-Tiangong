@@ -5,8 +5,10 @@
 
 ## 当前状态
 
-- **阶段**：全部里程碑完成（M0-M4，T001-T016）。插件 Harness 首轮建设收官。
-- **当前建议任务**：真实使用反馈驱动的迭代（示例插件 GUI 冒烟、风险分级、事件源接入）。
+- **阶段**：Harness 主体（T001-T016）完成；交互模型按新方案重做（T017-T019 已交付，
+  T018 采用阻塞模型——按用户纠正，request_user 与 LLM 调用同为 turn task 外部 IO，
+  不做挂起退出/续跑机制）。
+- **当前建议任务**：T020 验收补全（方案 §19 剩余场景）与真实使用冒烟。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
@@ -80,6 +82,9 @@
 | `d39d3be5` | feat(plugin): T016 三方体验——纯 UI 插件/SDK/脚手架/文档 |
 | `b5ed0357` | fix(plugin): 浏览器改为多实例打开模式（审查前反馈） |
 | `5af7faa6` | fix(plugin): 审查问题修复——iframe 桥接透传/事件订阅与始终允许运行时化 |
+| `2b8801f0` | feat(core): T017 交互请求管理器与审批授权/挑战表 |
+| `a1b9e9a1` 等 | feat(core): T018 交互模型改造——request_user 阻塞等待与挑战驱动审批（含非阻塞方案回退） |
+| `eae12223` | feat(plugin): T019 交互模型入口与 UI——resolve_interaction 统一响应链路 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -194,6 +199,24 @@
   后端 68 项全绿，clippy 零警告。
 - 遗留：@tiangong/plugin-ui-kit 组件库按需迭代；npm 发布渠道待定；示例插件的
   GUI 手动冒烟待用户执行。
+
+### 交互模型重做（2026-08-18，T017-T019，方案 `./interaction-model-redesign.md`）
+
+按新方案重做审批与交互（替代 T014/T015 实现）：
+- T017 `2b8801f0`：InteractionRegistry（原子闭合/绝对 deadline/竞态唯一赢家）、
+  ApprovalGrants（Once 参数绑定/Runtime 跨 turn）、ApprovalChallenges（一次性消费）。
+- T018：request_user 统一工具（六 kind、独占批次、15s fail-closed 超时）、
+  挑战驱动审批（Supervised 无授权返回 approval_required；approve_once/Runtime 授权）、
+  删除 wait_approval/wait_interaction/旧命令与 Session.approved_tools。
+  **关键决策（用户纠正）**：采用阻塞等待模型（工具等待用户 = turn task 等待外部 IO，
+  与等待 LLM 同构）；方案中的非阻塞（挂起退出+续跑）在天工常驻 turn task 架构下
+  属对抗性设计，已回退。
+- T019 `eae12223`：resolve_interaction 统一响应命令/前端六 kind 交互卡片/
+  CLI 文本交互/agent-team 上抛/后台通知。
+- 验证：Core 98 项（审批闭环/拒绝闭环新用例通过；steering 为既有并发 flaky）、
+  interaction 10 项、前端 204 项全绿。
+- 遗留（T020）：方案 §19 部分场景（多界面同时响应、批次独占协议修复等）
+  待补自动化；GUI 手动冒烟。
 
 ### 代码审查修复（2026-08-18，`5af7faa6`）
 
