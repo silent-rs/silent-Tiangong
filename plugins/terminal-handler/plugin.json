@@ -1,0 +1,124 @@
+{
+  "schema_version": 2,
+  "id": "terminal-handler",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "terminal.use",
+    "bridge.call"
+  ],
+  "tools": [
+    {
+      "name": "run_command",
+      "description": "执行受控命令（通过 PTY，输出回显到终端面板）。支持 cwd 和超时设置。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cmd": {
+            "type": "string",
+            "description": "命令名"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "命令参数列表"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "工作目录（可选）"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "可选的最长运行秒数；仅在任务有明确时间边界时设置，不填则持续到命令完成或被中断",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "cmd"
+        ]
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "name": "run_shell",
+      "description": "在终端执行 shell 脚本（通过 PTY，支持交互式程序）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "script": {
+            "type": "string",
+            "description": "要执行的 shell 脚本"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "工作目录（可选）"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "可选的最长运行秒数；不填则持续到脚本完成或被中断",
+            "minimum": 1
+          },
+          "interactive": {
+            "type": "boolean",
+            "description": "是否启动交互程序，默认 false"
+          }
+        },
+        "required": [
+          "script"
+        ]
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "name": "terminal_send",
+      "description": "向终端发送按键/文本输入。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "要发送的按键/文本"
+          },
+          "wait": {
+            "type": "integer",
+            "description": "发送后等待秒数，默认 3",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "timeout_ms": 120000
+    }
+  ],
+  "prompt": [
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；需要在运行中的终端输入内容时用 terminal_send。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
+  ],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "terminal",
+        "title": "终端",
+        "description": "嵌入式终端，支持多标签与会话隔离",
+        "icon": "terminal",
+        "entry": "index.html",
+        "open_mode": "multi",
+        "context": [
+          "session"
+        ]
+      }
+    ]
+  },
+  "capabilities": {
+    "tools": true,
+    "prompt": true
+  }
+}

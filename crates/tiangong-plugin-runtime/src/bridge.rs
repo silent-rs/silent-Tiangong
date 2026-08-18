@@ -65,6 +65,10 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
         "session.write"
     } else if method == "tool.resolve" {
         "tool.provide"
+    } else if method.starts_with("terminal.") {
+        "terminal.use"
+    } else if method.starts_with("browser.") {
+        "browser.use"
     } else {
         namespace.permission
     }
@@ -155,6 +159,14 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
         }
+        // terminal.* / browser.*：原生能力宿主服务（PTY/webview），插件声明
+        // 对应权限后经此通道调用；运行时仅做权限与路由，不感知命令语义。
+        "tool." if method.starts_with("terminal.") => {
+            native_service_call(&TERMINAL_HANDLER, "terminal", plugin_id, method, payload)
+        }
+        "tool." if method.starts_with("browser.") => {
+            native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
+        }
         // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
@@ -169,6 +181,35 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
 /// 输入草稿宿主处理器：桌面入口注入后，UI 插件可提交经宿主校验的输入附件。
 pub type SessionInputHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
 static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
+
+/// 原生能力宿主服务处理器：`(plugin_id, method, payload) -> 结果 JSON`。
+pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+
+static TERMINAL_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static BROWSER_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+
+/// 注入终端原生服务（PTY 会话管理，桌面入口启动时调用）。
+pub fn set_terminal_handler(handler: NativeServiceHandler) {
+    let _ = TERMINAL_HANDLER.set(handler);
+}
+
+/// 注入浏览器原生服务（webview 管理，桌面入口启动时调用）。
+pub fn set_browser_handler(handler: NativeServiceHandler) {
+    let _ = BROWSER_HANDLER.set(handler);
+}
+
+fn native_service_call(
+    handler: &OnceLock<NativeServiceHandler>,
+    service: &str,
+    plugin_id: &str,
+    method: &str,
+    payload: &str,
+) -> Result<String> {
+    let handler = handler
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入 {service} 原生服务"))?;
+    handler(plugin_id, method, payload)
+}
 
 pub fn set_session_input_handler(handler: SessionInputHandler) {
     let _ = SESSION_INPUT_HANDLER.set(handler);
