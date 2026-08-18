@@ -1,0 +1,19 @@
+[package]
+name = "tiangong-terminal-handler-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+tiangong-plugin-sidecar = { path = "../../../crates/tiangong-plugin-sidecar" }
+tiangong-plugin-runtime = { path = "../../../crates/tiangong-plugin-runtime" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+async-trait = "0.1"
+portable-pty = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[workspace]

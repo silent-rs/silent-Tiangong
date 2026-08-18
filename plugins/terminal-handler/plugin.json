@@ -7,8 +7,9 @@
   ],
   "permissions": [
     "tool.provide",
-    "terminal.use",
-    "bridge.call"
+    "sidecar.invoke",
+    "bridge.call",
+    "bridge.events"
   ],
   "tools": [
     {
@@ -109,7 +110,7 @@
         "title": "终端",
         "description": "嵌入式终端，支持多标签与会话隔离",
         "icon": "terminal",
-        "entry": "index.html",
+        "entry": "dist/index.html",
         "open_mode": "multi",
         "context": [
           "session"
@@ -120,5 +121,12 @@
   "capabilities": {
     "tools": true,
     "prompt": true
+  },
+  "sidecar": {
+    "binary": "terminal-handler-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 300000
   }
 }

@@ -156,6 +156,7 @@ pub struct ProcessSidecarConnection {
     config: SidecarConfig,
     start_lock: Mutex<()>,
     exec_env: Mutex<std::collections::BTreeMap<String, String>>,
+    notification_started: std::sync::atomic::AtomicBool,
 }
 
 impl ProcessSidecarConnection {
@@ -164,6 +165,7 @@ impl ProcessSidecarConnection {
             config,
             start_lock: Mutex::new(()),
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
+            notification_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -180,6 +182,36 @@ impl ProcessSidecarConnection {
     }
 
     pub fn ensure_running(&self) -> Result<()> {
+        let result = self.ensure_running_inner();
+        if result.is_ok() {
+            self.ensure_notification_listener();
+        }
+        result
+    }
+
+    /// sidecar 就绪后启动一次常驻通知监听（幂等）。
+    fn ensure_notification_listener(&self) {
+        if self
+            .notification_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        if let (Ok(endpoint_json), Ok(token)) = (
+            std::fs::read_to_string(&self.config.endpoint),
+            load_endpoint(&self.config.endpoint).map(|endpoint| endpoint.token),
+        ) {
+            let _ = endpoint_json;
+            let endpoint_path = self.config.endpoint.clone();
+            spawn_sidecar_notification_listener(
+                self.config.plugin_id.clone(),
+                endpoint_path,
+                token,
+            );
+        }
+    }
+
+    fn ensure_running_inner(&self) -> Result<()> {
         match self.health_check() {
             Ok(()) => return Ok(()),
             Err(error)
@@ -608,6 +640,108 @@ fn load_endpoint(path: &Path) -> Result<IpcEndpoint> {
         .with_context(|| format!("读取 sidecar endpoint 失败: {}", path.display()))?;
     serde_json::from_str(&content)
         .with_context(|| format!("解析 sidecar endpoint 失败: {}", path.display()))
+}
+
+/// sidecar 通知转发回调：`(plugin_id, channel, payload)`。
+///
+/// 常驻通知连接收到 Notification 帧后调用；桌面入口注入后转 bridge 事件。
+pub type SidecarNotificationForwarder = std::sync::Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+static SIDECAR_NOTIFICATION_FORWARDER: std::sync::OnceLock<SidecarNotificationForwarder> =
+    std::sync::OnceLock::new();
+
+/// 注入 sidecar 通知转发回调（宿主入口启动时调用）。
+pub fn set_sidecar_notification_forwarder(forwarder: SidecarNotificationForwarder) {
+    let _ = SIDECAR_NOTIFICATION_FORWARDER.set(forwarder);
+}
+
+/// sidecar 通知常驻连接：认证后只读，收到 Notification 帧即转发。
+/// 连接断开（sidecar 重启）时指数退避重连；任务句柄 detached（随进程存活）。
+pub fn spawn_sidecar_notification_listener(
+    plugin_id: String,
+    endpoint_path: std::path::PathBuf,
+    token: String,
+) {
+    let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
+    // 常驻任务跑共享 tokio runtime；句柄 detached（随进程存活）
+    let task = tokio::spawn(async move {
+        let mut backoff_ms = 250u64;
+        loop {
+            match run_notification_connection(
+                &plugin_id,
+                &endpoint_path,
+                &token,
+                forwarder.as_ref(),
+            )
+            .await
+            {
+                Ok(()) => break, // sidecar 正常关闭（endpoint 移除）
+                Err(error) => {
+                    tracing::debug!(
+                        plugin_id = %plugin_id,
+                        %error,
+                        "sidecar 通知连接断开，重连"
+                    );
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(5_000);
+        }
+    });
+    std::mem::forget(task);
+}
+
+async fn run_notification_connection(
+    plugin_id: &str,
+    endpoint_path: &std::path::Path,
+    token: &str,
+    forwarder: Option<&SidecarNotificationForwarder>,
+) -> Result<()> {
+    let endpoint_json = tokio::fs::read_to_string(endpoint_path)
+        .await
+        .with_context(|| "读取 sidecar endpoint 失败")?;
+    let endpoint: crate::protocol::IpcEndpoint =
+        serde_json::from_str(&endpoint_json).with_context(|| "解析 sidecar endpoint 失败")?;
+    let address = (endpoint.host.as_str(), endpoint.port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("sidecar 地址为空"))?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .with_context(|| "连接 sidecar 超时")??;
+
+    let mut stream = stream;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let auth = serde_json::to_string(&crate::protocol::IpcFrame::Auth(crate::protocol::IpcAuth {
+        token: token.to_string(),
+    }))?;
+    stream.write_all(auth.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).await?;
+        if bytes == 0 {
+            bail!("sidecar 通知连接已关闭");
+        }
+        match serde_json::from_str::<crate::protocol::IpcFrame>(line.trim_end()) {
+            Ok(crate::protocol::IpcFrame::Notification { channel, payload }) => {
+                if let Some(forwarder) = forwarder {
+                    forwarder(plugin_id, &channel, &payload);
+                }
+            }
+            Ok(_) => { /* 其他帧与通知连接无关，忽略 */ }
+            Err(error) => {
+                tracing::debug!(plugin_id, %error, "sidecar 通知帧解析失败");
+            }
+        }
+    }
 }
 
 fn connect(endpoint: &IpcEndpoint, timeout: Duration) -> Result<TcpStream> {

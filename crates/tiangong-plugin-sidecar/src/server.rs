@@ -208,12 +208,52 @@ async fn run_bridge(
     Ok(())
 }
 
+/// 全局通知广播：service 代码经 [`emit_notification`] 推送，活跃连接写出
+/// Notification 帧（每宿主一条连接，全部送达）。
+static NOTIFICATIONS: once_link::OnceLock<tokio::sync::broadcast::Sender<(String, String)>> =
+    once_link::OnceLock::new();
+
+mod once_link {
+    pub use std::sync::OnceLock;
+}
+
+fn notification_sender() -> &'static tokio::sync::broadcast::Sender<(String, String)> {
+    NOTIFICATIONS.get_or_init(|| tokio::sync::broadcast::channel(256).0)
+}
+
+/// service 主动推送通知（如 PTY 输出流）。无活跃订阅者时静默丢弃
+/// （容量 256 满时丢最旧，调用方不需处理背压——流式场景可容忍）。
+pub fn emit_notification(channel: impl Into<String>, payload: impl Into<String>) {
+    let _ = notification_sender().send((channel.into(), payload.into()));
+}
+
 async fn serve_connection(
     mut connection: IpcConnection,
     service_obj: Arc<dyn SidecarService>,
 ) -> Result<()> {
+    let mut notifications = notification_sender().subscribe();
     loop {
-        let request = connection.read_request().await?;
+        let request = tokio::select! {
+            request = connection.read_request() => request?,
+            notification = notifications.recv() => {
+                match notification {
+                    Ok((channel, payload)) => {
+                        connection
+                            .write_frame(&IpcFrame::Notification { channel, payload })
+                            .await?;
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::debug!(count, "sidecar 通知积压丢弃最旧");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // 发送端与订阅同生命周期（静态），不会关闭
+                        continue;
+                    }
+                }
+            }
+        };
         let operation = request
             .payload
             .get("operation")
@@ -299,5 +339,16 @@ impl IpcConnection {
             bail!("IPC 连接已关闭");
         }
         serde_json::from_str(buf.trim_end()).with_context(|| "解析 IPC 帧失败")
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn emit_notification_available_without_subscriber() {
+        // 无订阅者时发送静默丢弃，不 panic（背压安全）
+        emit_notification("terminal.output", "hello");
     }
 }

@@ -18,6 +18,11 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// sidecar 二进制（本平台构建产物）随插件包分发
+const sidecarBinary = join(pluginRoot, 'terminal-handler-sidecar');
+if (existsSync(sidecarBinary)) {
+  copyFileSync(sidecarBinary, join(release, 'terminal-handler-sidecar'));
+}
 
 // 打包即校验：清单与 entry 就位，避免导入时才发现问题
 const manifest = JSON.parse(readFileSync(join(release, 'plugin.json'), 'utf8'));

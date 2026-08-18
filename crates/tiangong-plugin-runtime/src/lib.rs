@@ -39,7 +39,10 @@ pub use loader::{
     WasmPluginLoader,
 };
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
-pub use sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+pub use sidecar::{
+    ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
+    set_sidecar_notification_forwarder,
+};
 pub use slots::{
     BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
     SlotInstances, SlotRegistry, UiContribution,

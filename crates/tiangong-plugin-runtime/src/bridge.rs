@@ -51,7 +51,8 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
-pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &["session.", "tool.", "lifecycle.", "config."];
+pub const EVENT_NAMESPACE_PREFIXES: &[&str] =
+    &["session.", "tool.", "lifecycle.", "config.", "sidecar."];
 
 /// 查找 method 所属的桥接命名空间。
 pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
@@ -179,7 +180,8 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
                 .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
                 .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
                 .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
-            let result = crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
+            let result =
+                crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
             serde_json::to_string(&result).with_context(|| "序列化 sidecar 结果失败")
         }
         "tool." if method.starts_with("browser.") => {

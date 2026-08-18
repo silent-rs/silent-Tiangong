@@ -149,9 +149,19 @@ pub struct IpcAuth {
 pub enum IpcFrame {
     Auth(IpcAuth),
     Request(IpcRequest),
-    Progress { request_id: String, message: String },
+    Progress {
+        request_id: String,
+        message: String,
+    },
+    /// sidecar 主动推送的通知（与请求无关的全局事件流，如 PTY 输出）。
+    Notification {
+        channel: String,
+        payload: String,
+    },
     Response(IpcResponse),
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 fn next_request_id() -> String {

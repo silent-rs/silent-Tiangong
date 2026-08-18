@@ -16,6 +16,8 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "typescript": "~5.6.2",
     "vite": "^6.0.5",
     "vite-plugin-singlefile": "^2.1.0",
