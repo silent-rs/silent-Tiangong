@@ -244,7 +244,7 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 | `session.message-action` | 消息操作按钮区 | 多 | session, message | 在「复制/重试」旁新增动作按钮 |
 | `session.before-input` | 输入框上方 | 多 | session | 输入上下文提示、快捷操作条 |
 | `session.after-input` | 输入框下方 | 多 | session | 附加输入辅助区 |
-| `session.interaction` | 输入框上方的临时交互区 | 单 | session | 审批、确认、选择和输入请求；不进入消息历史 |
+| `session.interaction` | 覆盖输入区的临时交互层 | 单 | session | 审批、确认、选择和输入请求；显示时锁定输入区，不进入消息历史 |
 | `session.empty-state` | 空会话占位 | 多 | session, workspace | 自定义新会话引导 |
 
 **拓展区（extension，即现有 workspace panel）**

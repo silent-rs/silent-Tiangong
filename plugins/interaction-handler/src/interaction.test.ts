@@ -7,6 +7,7 @@ import {
   normalizeHostTokenValue,
   parseInvocation,
   payloadResult,
+  userClosedFeedback,
 } from './interaction';
 
 function invocation(argumentsValue: Record<string, unknown>): ToolInvocation {
@@ -65,6 +66,25 @@ describe('interaction-handler 业务边界', () => {
       stderr: '',
       exit_code: 0,
     });
+  });
+
+  it('关闭界面时向 Agent 返回明确的取消原因', () => {
+    const result = payloadResult(
+      'invocation-1',
+      'confirm',
+      'cancelled',
+      userClosedFeedback(),
+      false,
+    );
+
+    expect(JSON.parse(result.summary)).toEqual({
+      status: 'cancelled',
+      kind: 'confirm',
+      request_id: 'invocation-1',
+      reason: '用户关闭了相关操作',
+      message: '用户关闭了相关操作',
+    });
+    expect(result.stderr).toBe('用户关闭了相关操作');
   });
 
   it('选择和表单参数规则完全由插件校验', () => {

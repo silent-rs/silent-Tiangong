@@ -13,6 +13,7 @@ import {
   normalizeHostTokenValue,
   parseInvocation,
   payloadResult,
+  userClosedFeedback,
   type InteractionKind,
   type InteractionRequest,
 } from './interaction';
@@ -114,7 +115,7 @@ async function cancelRequest() {
   const item = request.value;
   if (!provider || !item || item.status !== 'pending') return;
   replaceRequest(item.invocationId, { status: 'submitting', error: '' });
-  const reason = '用户取消了本次征询';
+  const feedback = userClosedFeedback();
   try {
     await provider.resolve({
       invocation_id: item.invocationId,
@@ -123,7 +124,7 @@ async function cancelRequest() {
         item.invocationId,
         item.kind,
         'cancelled',
-        { reason, message: reason },
+        feedback,
         false,
       ),
     });
@@ -277,13 +278,25 @@ onUnmounted(() => {
           <h3>{{ request.title }}</h3>
           <p v-if="request.description" class="muted">{{ request.description }}</p>
         </div>
-        <span
-          class="deadline"
-          :class="{ overdue: remainingMs <= 0 || request.status === 'expired' }"
-          aria-live="polite"
-        >
-          {{ remainingText }}
-        </span>
+        <div class="heading-actions">
+          <span
+            class="deadline"
+            :class="{ overdue: remainingMs <= 0 || request.status === 'expired' }"
+            aria-live="polite"
+          >
+            {{ remainingText }}
+          </span>
+          <button
+            type="button"
+            class="close"
+            aria-label="关闭本次操作"
+            title="关闭本次操作"
+            :disabled="locked"
+            @click="cancelRequest"
+          >
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
       </div>
 
       <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
@@ -432,6 +445,13 @@ section {
 
 .heading-copy {
   min-width: 0;
+}
+
+.heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
 }
 
 h3 {
@@ -586,6 +606,26 @@ button.secondary {
   border-color: var(--border, #d1d5db);
   background: var(--muted, #e5e7eb);
   color: var(--foreground, #222);
+}
+
+button.close {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  border-color: transparent;
+  padding: 0;
+  background: transparent;
+  color: var(--muted-foreground, #777);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+button.close:hover:not(:disabled) {
+  background: var(--muted, #e5e7eb);
+  color: var(--foreground, #222);
+  filter: none;
 }
 
 button:hover:not(:disabled) {

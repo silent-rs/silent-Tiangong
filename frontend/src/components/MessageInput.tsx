@@ -1,4 +1,4 @@
-import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, useCallback } from 'react';
+import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
@@ -81,6 +81,7 @@ export function MessageInput() {
   const isComposingRef = useRef(false);
   const editorRef = useRef<MentionEditorHandle>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
+  const interactionContentRef = useRef<HTMLDivElement>(null);
   const lastNativeDropAtRef = useRef(0);
 
   // @提及补全状态
@@ -96,6 +97,24 @@ export function MessageInput() {
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [interactionVisible, setInteractionVisible] = useState(false);
+
+  useLayoutEffect(() => {
+    const content = interactionContentRef.current;
+    if (!content) return;
+    if (interactionVisible) {
+      content.setAttribute('inert', '');
+      setMentionOpen(false);
+      setIsDraggingFiles(false);
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && content.contains(activeElement)) {
+        activeElement.blur();
+      }
+    } else {
+      content.removeAttribute('inert');
+    }
+    return () => content.removeAttribute('inert');
+  }, [interactionVisible]);
 
   const setInputContent = useCallback((content: string) => {
     if (cacheKey) setInputCacheText(cacheKey, content);
@@ -174,10 +193,11 @@ export function MessageInput() {
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = !isSending
+  const canSend = !interactionVisible
+    && !isSending
     && !!cacheKey
     && (inputContent.trim().length > 0 || attachments.length > 0);
-  const isTextDropTargetActive = !voiceMode && !!cacheKey;
+  const isTextDropTargetActive = !interactionVisible && !voiceMode && !!cacheKey;
 
   // 运行中实时计时：维护单调递增的显示基准（baseMs@baseAt），事件到达与本地
   // tick 都只向前推进——事件值与外推值取大，杜绝显示回跳；TurnElapsed 事件
@@ -655,7 +675,7 @@ export function MessageInput() {
 
   // ===== 语音模式相关 =====
   const startVoiceRecording = useCallback(async () => {
-    if (isRecordingRef.current || !isIdle) return;
+    if (interactionVisible || isRecordingRef.current || !isIdle) return;
     isRecordingRef.current = true;
     setVoiceCancelled(false);
     setVoiceTooShort(false);
@@ -665,7 +685,7 @@ export function MessageInput() {
       isRecordingRef.current = false;
       alert(e.message || "录音启动失败");
     }
-  }, [recording, isIdle]);
+  }, [interactionVisible, recording, isIdle]);
 
   const stopVoiceAndSend = useCallback(async () => {
     if (!isRecordingRef.current) return;
@@ -745,9 +765,13 @@ export function MessageInput() {
     setTimeout(() => setVoiceCancelled(false), 1500);
   }, [recording]);
 
+  useEffect(() => {
+    if (interactionVisible && isRecordingRef.current) cancelVoiceRecording();
+  }, [cancelVoiceRecording, interactionVisible]);
+
   // 语音模式全局键盘事件（空格键录音）
   useEffect(() => {
-    if (!voiceMode || !hasStt) return;
+    if (interactionVisible || !voiceMode || !hasStt) return;
 
     const handleGlobalKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.code === 'Space' && !e.repeat && !isRecordingRef.current && isIdle) {
@@ -773,7 +797,7 @@ export function MessageInput() {
       window.removeEventListener('keydown', handleGlobalKeyDown);
       window.removeEventListener('keyup', handleGlobalKeyUp);
     };
-  }, [voiceMode, hasStt, isIdle, startVoiceRecording, stopVoiceAndSend, cancelVoiceRecording]);
+  }, [interactionVisible, voiceMode, hasStt, isIdle, startVoiceRecording, stopVoiceAndSend, cancelVoiceRecording]);
 
   const displayCwd = sessionCwd
     ? sessionCwd.split('/').filter(Boolean).slice(-2).join('/')
@@ -795,9 +819,13 @@ export function MessageInput() {
   }, []);
 
   return (
-    <div ref={containerRef} className="p-4 border-t bg-background">
-      <div className="max-w-3xl mx-auto">
-        <InteractionPluginHost />
+    <div ref={containerRef} className="relative isolate border-t bg-background p-4">
+      <InteractionPluginHost onVisibilityChange={setInteractionVisible} />
+      <div
+        ref={interactionContentRef}
+        aria-hidden={interactionVisible}
+        className="max-w-3xl mx-auto"
+      >
         {voiceMode && hasStt ? (
           // ===== 语音模式 =====
           <div>

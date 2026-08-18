@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api, type SlotContributionEntry } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { PluginSandbox } from './PluginSandbox';
@@ -13,11 +13,15 @@ interface ToolClosedEvent {
   status: 'answered' | 'expired' | 'cancelled';
 }
 
+interface InteractionPluginHostProps {
+  onVisibilityChange?: (visible: boolean) => void;
+}
+
 /**
- * Desktop 交互插件宿主。容器固定挂在输入框上方，iframe 始终挂载以持续
+ * Desktop 交互插件宿主。容器显示时覆盖输入区，iframe 始终挂载以持续
  * 接收工具调用；宿主只根据调用所属会话控制显隐，不解析业务参数。
  */
-export function InteractionPluginHost() {
+export function InteractionPluginHost({ onVisibilityChange }: InteractionPluginHostProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const newConversationId = useStore((state) => state.newConversationId);
   const currentSessionId = activeSessionId ?? newConversationId;
@@ -159,29 +163,43 @@ export function InteractionPluginHost() {
     : false;
   const visible = Boolean(currentSessionId && (hasPending || recentSessions.has(currentSessionId)));
 
+  useLayoutEffect(() => {
+    onVisibilityChange?.(visible);
+  }, [onVisibilityChange, visible]);
+
+  useEffect(() => () => {
+    onVisibilityChange?.(false);
+  }, [onVisibilityChange]);
+
   if (!handler) return null;
 
   return (
     <div
       aria-hidden={!visible}
       aria-label="用户交互"
+      aria-modal={visible || undefined}
+      role="dialog"
       className={visible
-        ? 'mb-3 h-[196px] w-full overflow-hidden rounded-md border bg-card opacity-100 shadow-sm transition-[height,margin,opacity] duration-150'
-        : 'pointer-events-none mb-0 h-0 w-full overflow-hidden border-0 opacity-0 transition-[height,margin,opacity] duration-150'}
+        ? 'absolute inset-0 z-[60] bg-background opacity-100 transition-opacity duration-150'
+        : 'pointer-events-none invisible absolute inset-0 z-[60] opacity-0 transition-opacity duration-150'}
     >
-      {html ? (
-        <PluginSandbox
-          pluginId={handler.plugin_id}
-          contributionId={handler.contribution_id}
-          sandbox={handler.sandbox}
-          html={html}
-          sessionId={currentSessionId}
-        />
-      ) : visible ? (
-        <div className="p-3 text-sm text-destructive">
-          交互处理器页面加载失败{loadError ? `：${loadError}` : ''}
+      <div className="mx-auto h-full w-full max-w-3xl p-4">
+        <div className="h-full w-full overflow-hidden rounded-md border bg-card shadow-sm">
+          {html ? (
+            <PluginSandbox
+              pluginId={handler.plugin_id}
+              contributionId={handler.contribution_id}
+              sandbox={handler.sandbox}
+              html={html}
+              sessionId={currentSessionId}
+            />
+          ) : visible ? (
+            <div className="p-3 text-sm text-destructive">
+              交互处理器页面加载失败{loadError ? `：${loadError}` : ''}
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
