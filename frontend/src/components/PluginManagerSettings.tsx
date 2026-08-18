@@ -186,6 +186,8 @@ export function PluginManagerSettings({
     if (contributionsResult.status === 'rejected') {
       showError('插件页面刷新失败', String(contributionsResult.reason));
     }
+    // 通知所有 UI Slot 立即重查贡献，安装、启停、重载和卸载无需重启。
+    window.dispatchEvent(new CustomEvent('tiangong:plugins-changed'));
   };
 
   const runOperation = async (

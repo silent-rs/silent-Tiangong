@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, type SlotContributionEntry } from '@/api/tauri';
 import { PluginSandbox } from './PluginSandbox';
 
@@ -10,33 +10,45 @@ interface SessionInputPluginHostProps {
 export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
   const [items, setItems] = useState<Array<SlotContributionEntry & { html: string }>>([]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void api.listSlotContributions(slot).then(async (contributions) => {
-      const loaded = await Promise.all(contributions.map(async (item) => ({
-        ...item,
-        html: item.source === 'manifest'
-          ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
-          : await api.pluginOpenView(item.plugin_id, item.contribution_id),
-      })));
-      if (!cancelled) setItems(loaded);
-    }).catch((error) => console.warn(`[session-input-plugin] 加载 ${slot} 失败`, error));
-    return () => { cancelled = true; };
+  const refresh = useCallback(async () => {
+    const contributions = await api.listSlotContributions(slot);
+    const loaded = await Promise.all(contributions.map(async (item) => ({
+      ...item,
+      html: item.source === 'manifest'
+        ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
+        : await api.pluginOpenView(item.plugin_id, item.contribution_id),
+    })));
+    setItems(loaded);
   }, [slot]);
+
+  useEffect(() => {
+    let disposed = false;
+    const reload = () => {
+      void refresh().catch((error) => {
+        if (!disposed) console.warn(`[session-input-plugin] 加载 ${slot} 失败`, error);
+      });
+    };
+    reload();
+    window.addEventListener('tiangong:plugins-changed', reload);
+    return () => {
+      disposed = true;
+      window.removeEventListener('tiangong:plugins-changed', reload);
+    };
+  }, [refresh, slot]);
 
   if (items.length === 0) return null;
   return (
-    <div className={slot === 'session.input-action' ? 'flex h-8 w-8 shrink-0 items-center justify-center' : 'flex min-w-0 flex-wrap items-center gap-1.5'}>
+    <>
       {items.map((item) => (
-        <div key={`${item.plugin_id}:${item.contribution_id}`} className={slot === 'session.input-action' ? 'h-8 w-8 shrink-0' : 'min-w-0'}>
-          <PluginSandbox
-            pluginId={item.plugin_id}
-            contributionId={item.contribution_id}
-            sandbox={item.sandbox}
-            html={item.html}
-          />
-        </div>
+        <PluginSandbox
+          key={`${item.plugin_id}:${item.contribution_id}`}
+          pluginId={item.plugin_id}
+          contributionId={item.contribution_id}
+          sandbox={item.sandbox}
+          html={item.html}
+          className={slot === 'session.input-action' ? 'h-8 w-8 shrink-0 overflow-hidden' : undefined}
+        />
       ))}
-    </div>
+    </>
   );
 }

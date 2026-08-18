@@ -19,11 +19,12 @@ export interface PluginSandboxProps {
   contributionId: string;
   sandbox: SandboxKind;
   html: string;
+  className?: string;
 }
 
-export function PluginSandbox({ sandbox, pluginId, contributionId, html }: PluginSandboxProps) {
+export function PluginSandbox({ sandbox, pluginId, contributionId, html, className }: PluginSandboxProps) {
   if (sandbox === 'shadow') {
-    return <ShadowContainer pluginId={pluginId} contributionId={contributionId} html={html} />;
+    return <ShadowContainer pluginId={pluginId} contributionId={contributionId} html={html} className={className} />;
   }
   if (sandbox === 'native') {
     return (
@@ -110,7 +111,7 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
 }
 
 /** Shadow DOM 沙箱容器：入口 HTML 注入 shadow root，脚本受控执行。 */
-function ShadowContainer({ pluginId, contributionId, html }: Omit<PluginSandboxProps, 'sandbox'>) {
+function ShadowContainer({ pluginId, contributionId, html, className }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const theme = useResolvedTheme();
 
@@ -144,7 +145,7 @@ function ShadowContainer({ pluginId, contributionId, html }: Omit<PluginSandboxP
     <div
       ref={hostRef}
       data-plugin-shadow-host={`${pluginId}:${contributionId}`}
-      className="block h-full min-h-0 min-w-0 w-full flex-1 overflow-auto"
+      className={className ?? 'block h-full min-h-0 min-w-0 w-full flex-1 overflow-auto'}
     />
   );
 }
