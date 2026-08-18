@@ -48,6 +48,26 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         permission: "storage.private",
         description: "读写插件私有数据",
     },
+    BridgeNamespace {
+        prefix: "terminal.",
+        permission: "terminal.use",
+        description: "终端原生服务（宿主注入）",
+    },
+    BridgeNamespace {
+        prefix: "browser.",
+        permission: "browser.use",
+        description: "浏览器原生服务（宿主注入）",
+    },
+    BridgeNamespace {
+        prefix: "webview.",
+        permission: "webview.use",
+        description: "webview 容器原语",
+    },
+    BridgeNamespace {
+        prefix: "sidecar.",
+        permission: "sidecar.invoke",
+        description: "本插件 sidecar 原生逻辑层",
+    },
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
@@ -164,19 +184,18 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
         }
-        // terminal.* / browser.*：原生能力宿主服务（PTY/webview），插件声明
-        // 对应权限后经此通道调用；运行时仅做权限与路由，不感知命令语义。
-        "tool." if method.starts_with("terminal.") => {
+        // terminal.*：宿主注入的原生服务（PTY 等）
+        "terminal." => {
             native_service_call(&TERMINAL_HANDLER, "terminal", plugin_id, method, payload)
         }
+        // browser.*：宿主注入的浏览器原生服务
+        "browser." => native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload),
         // webview.*：宿主 webview 容器原语（声明式创建/导航/eval），插件
         // 在其上构建浏览器类能力；运行时只做权限与路由，引擎在宿主进程。
-        "tool." if method.starts_with("webview.") => {
-            native_service_call(&WEBVIEW_HANDLER, "webview", plugin_id, method, payload)
-        }
+        "webview." => native_service_call(&WEBVIEW_HANDLER, "webview", plugin_id, method, payload),
         // sidecar.*：TS 插件调用本插件 sidecar（请求-响应；输出流经通知事件）。
         // 仅到达本插件 sidecar，宿主不解析业务负载。
-        "tool." if method.starts_with("sidecar.") => {
+        "sidecar." => {
             let request: serde_json::Value = serde_json::from_str(payload)
                 .with_context(|| "sidecar 请求负载必须是 JSON 对象")?;
             let operation = method.strip_prefix("sidecar.").unwrap_or_default();

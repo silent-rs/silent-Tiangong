@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{Context as _, Result, bail};
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem, ChildKiller};
+use portable_pty::{ChildKiller, CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
 use tiangong_plugin_runtime::protocol::{
-    ErrorCode, Request, Response, HANDSHAKE_OPERATION, PROTOCOL_VERSION,
+    ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, Response,
 };
 use tiangong_plugin_sidecar::server::emit_notification;
 
@@ -126,7 +126,11 @@ impl TerminalService {
         // 脚本走 shell -c；命令直接执行
         let mut command = if let Some(script) = request.script.as_deref() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-                if cfg!(windows) { "cmd".to_string() } else { "sh".to_string() }
+                if cfg!(windows) {
+                    "cmd".to_string()
+                } else {
+                    "sh".to_string()
+                }
             });
             let mut builder = CommandBuilder::new(shell);
             builder.arg("-c");
@@ -134,7 +138,11 @@ impl TerminalService {
             builder
         } else if request.cmd.is_empty() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-                if cfg!(windows) { "cmd".to_string() } else { "sh".to_string() }
+                if cfg!(windows) {
+                    "cmd".to_string()
+                } else {
+                    "sh".to_string()
+                }
             });
             CommandBuilder::new(shell)
         } else {
@@ -147,14 +155,20 @@ impl TerminalService {
             command.cwd(cwd);
         }
 
-        let mut child = pair.slave.spawn_command(command).context("启动 PTY 子进程失败")?;
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .context("启动 PTY 子进程失败")?;
         drop(pair.slave);
 
         let session_id = self.next_session_id();
         let killer = child.clone_killer();
 
         // 输出读取线程：阻塞读 → 节流批量 → 通知推送
-        let mut reader = pair.master.try_clone_reader().context("克隆 PTY 读取端失败")?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("克隆 PTY 读取端失败")?;
         let output_session = session_id.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
@@ -214,10 +228,14 @@ impl TerminalService {
         let writer = pair.master.take_writer().context("获取 PTY 写入端失败")?;
         // master 保留在会话中（resize 用）；openpty 返回的即 Box<dyn MasterPty + Send>
         let master = pair.master;
-        self.sessions
-            .lock()
-            .expect("会话表锁损坏")
-            .insert(session_id.clone(), PtySession { writer, killer, master });
+        self.sessions.lock().expect("会话表锁损坏").insert(
+            session_id.clone(),
+            PtySession {
+                writer,
+                killer,
+                master,
+            },
+        );
 
         Ok(SpawnResponse { session_id })
     }
@@ -274,7 +292,12 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         let payload = match dispatch_operation(self, &request.operation, request.payload).await {
             Ok(value) => value,
             Err(error) => {
-                return Response::error(&request_id, ErrorCode::ServiceError, error.to_string(), false);
+                return Response::error(
+                    &request_id,
+                    ErrorCode::ServiceError,
+                    error.to_string(),
+                    false,
+                );
             }
         };
         Response::success(&request_id, payload)
@@ -290,7 +313,9 @@ async fn dispatch_operation(
         HANDSHAKE_OPERATION => Ok(serde_json::json!({
             "plugin_id": "terminal-handler",
             "plugin_version": env!("CARGO_PKG_VERSION"),
+            "sidecar_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
+            "business_protocol": 1,
         })),
         "terminalSpawn" => {
             let request: SpawnRequest =

@@ -102,7 +102,9 @@ impl SignedPluginRelease {
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
         match plugin_manifest.wasm_binary() {
             Some(wasm_binary) => self.wasm.verify(directory, wasm_binary)?,
-            None => bail!("签名插件必须包含 wasm 制品（纯 UI 插件无需签名发布）"),
+            // 无 wasm（纯 TS/sidecar 插件）：签名建立的是 sidecar 信任边界，
+            // manifest 哈希已覆盖 plugin.json；无需 wasm 制品。
+            None => {}
         }
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {
@@ -141,8 +143,11 @@ fn permission_set(permissions: &[String]) -> Result<BTreeSet<&str>> {
 }
 
 fn verify_minisign(content: &[u8], signature_b64: &str) -> Result<()> {
+    // 公钥可被环境变量覆盖（CI/本地端到端验证用；不改变内置官方公钥）
+    let pubkey_b64 = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
+        .unwrap_or_else(|_| OFFICIAL_PLUGIN_PUBKEY_B64.to_string());
     let public_text = base64::engine::general_purpose::STANDARD
-        .decode(OFFICIAL_PLUGIN_PUBKEY_B64)
+        .decode(pubkey_b64)
         .context("解析内置插件公钥失败")?;
     let public_text = String::from_utf8(public_text).context("内置插件公钥非 UTF-8")?;
     let public_key = PublicKey::decode(&public_text).context("解析插件公钥失败")?;
