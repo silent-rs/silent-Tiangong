@@ -19,9 +19,6 @@ use tiangong_types::StreamEvent;
 
 use typed_builder::TypedBuilder;
 
-/// 审批等待默认超时：超时按拒绝闭合（fail-closed），避免处理器卡死阻塞 agent。
-pub const DEFAULT_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
 /// 一轮对话的执行上下文（替代原 ReactEngine + RuntimeEngine）。
 ///
 /// 生命周期严格限制为单个 turn：收到 Message 时构造,
@@ -57,9 +54,6 @@ pub struct TurnContext {
     // ===== turn 级配置 =====
     /// 当前执行单元可用的工具集
     pub tools: Vec<ToolSpec>,
-    /// 审批等待超时：超时按拒绝闭合（fail-closed，需求 #57）。
-    #[builder(default = DEFAULT_APPROVAL_TIMEOUT)]
-    pub approval_timeout: std::time::Duration,
 }
 
 impl TurnContext {

@@ -122,7 +122,9 @@ async fn tool_roundtrip_executes_plugin_and_answers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn approval_granted_executes_tool_and_completes() {
+async fn approval_flow_grants_once_and_executes() {
+    // 交互模型闭环（方案 §13）：无授权调用返回挑战 → request_user(approval)
+    // 阻塞等待 → approve_once 授权 → 重调消费授权执行 → 完成。
     let (env, sid) = TestEnv::new("approve");
     let server = MockServer::start().await;
     let tool = RecordingTool::succeed("echo");
@@ -134,12 +136,44 @@ async fn approval_granted_executes_tool_and_completes() {
         &server,
         vec![
             PromptRoute::new(
-                "approved-result",
+                "final-answer",
                 |request| request.has_tool_result("approve-call", "done"),
                 MockReply::sse(stream_text_chunks(&["已按批准", "执行。"])),
             ),
             PromptRoute::new(
-                "approval-call",
+                "request-approval",
+                |request| {
+                    request
+                        .tool_results()
+                        .iter()
+                        .any(|(_, content)| content.contains("approval_required"))
+                        && !request
+                            .tool_results()
+                            .iter()
+                            .any(|(_, content)| content.contains("answered"))
+                },
+                MockReply::sse(stream_tool_call_chunks(
+                    "ask-call",
+                    "request_user",
+                    &[r#"{"kind":"approval","title":"允许执行 echo？"}"#],
+                )),
+            ),
+            PromptRoute::new(
+                "recall-after-grant",
+                |request| {
+                    request
+                        .tool_results()
+                        .iter()
+                        .any(|(_, content)| content.contains("answered"))
+                        && !request
+                            .tool_results()
+                            .iter()
+                            .any(|(_, content)| content.contains("done"))
+                },
+                MockReply::sse(stream_tool_call_chunks("approve-call", "echo", &["{", "}"])),
+            ),
+            PromptRoute::new(
+                "first-call",
                 |request| {
                     request
                         .latest_user_text()
@@ -160,10 +194,14 @@ async fn approval_granted_executes_tool_and_completes() {
     );
 
     send_message(&core, "msg-1", "审批后执行 echo");
-    let request_id = events.wait_approval_needed();
-    assert_eq!(tool.count(), 0, "审批前工具不得执行");
-    core.deliver(AgentInputKind::approval(request_id, true, false))
-        .expect("批准投递应成功");
+    let request_id = events.wait_interaction_requested();
+    assert_eq!(tool.count(), 0, "无授权时工具不得执行");
+    // 阻塞等待中的 turn 由响应命令解锁：approve_once → 授权 → 重调消费执行
+    core.deliver(AgentInputKind::resolve_interaction(
+        request_id,
+        r#"{"decision":"approve_once"}"#.to_string(),
+    ))
+    .expect("批准投递应成功");
 
     assert_eq!(
         wait_turn_status(&env, &sid, "msg-1").await,
@@ -173,18 +211,15 @@ async fn approval_granted_executes_tool_and_completes() {
     assert_eq!(tool.count(), 1, "批准后工具应恰好执行一次");
     events.wait_done();
     events.assert_single_success_terminal();
-    assert!(
-        chat_request_at(&server, 1)
-            .await
-            .has_tool_result("approve-call", "done")
-    );
-    routes["approval-call"].assert_hits(1);
-    routes["approved-result"].assert_hits(1);
+    routes["first-call"].assert_hits(1);
+    routes["request-approval"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approval_rejected_records_result_and_model_explains() {
+    // 拒绝闭环：request_user(approval) 阻塞 → reject 响应 → 无授权，
+    // 模型看到拒绝结果后解释结束，工具不执行。
     let (env, sid) = TestEnv::new("reject");
     let server = MockServer::start().await;
     let tool = RecordingTool::succeed("echo");
@@ -196,12 +231,35 @@ async fn approval_rejected_records_result_and_model_explains() {
         &server,
         vec![
             PromptRoute::new(
-                "rejected-result",
-                |request| request.has_tool_result("reject-call", "拒绝"),
+                "rejected-explain",
+                |request| {
+                    request
+                        .tool_results()
+                        .iter()
+                        .any(|(_, content)| content.contains("reject"))
+                },
                 MockReply::sse(stream_text_chunks(&["好的，", "已取消执行。"])),
             ),
             PromptRoute::new(
-                "rejection-call",
+                "request-approval",
+                |request| {
+                    request
+                        .tool_results()
+                        .iter()
+                        .any(|(_, content)| content.contains("approval_required"))
+                        && !request
+                            .tool_results()
+                            .iter()
+                            .any(|(_, content)| content.contains("answered"))
+                },
+                MockReply::sse(stream_tool_call_chunks(
+                    "ask-call",
+                    "request_user",
+                    &[r#"{"kind":"approval","title":"允许执行 echo？"}"#],
+                )),
+            ),
+            PromptRoute::new(
+                "first-call",
                 |request| {
                     request
                         .latest_user_text()
@@ -222,9 +280,12 @@ async fn approval_rejected_records_result_and_model_explains() {
     );
 
     send_message(&core, "msg-1", "拒绝执行 echo");
-    let request_id = events.wait_approval_needed();
-    core.deliver(AgentInputKind::approval(request_id, false, false))
-        .expect("拒绝投递应成功");
+    let request_id = events.wait_interaction_requested();
+    core.deliver(AgentInputKind::resolve_interaction(
+        request_id,
+        r#"{"decision":"reject"}"#.to_string(),
+    ))
+    .expect("拒绝投递应成功");
 
     assert_eq!(
         wait_turn_status(&env, &sid, "msg-1").await,
@@ -234,26 +295,7 @@ async fn approval_rejected_records_result_and_model_explains() {
     assert_eq!(tool.count(), 0, "拒绝后工具不得执行");
     events.wait_done();
     events.assert_single_success_terminal();
-
-    let second = chat_request_at(&server, 1).await;
-    assert!(second.has_tool_result("reject-call", "拒绝"));
-    let session = env.load_session(&sid);
-    let reject_pos = session
-        .messages
-        .iter()
-        .position(|message| {
-            message.role == MessageRole::Tool
-                && message.tool_call_id.as_deref() == Some("reject-call")
-        })
-        .expect("会话中应存在拒绝工具结果");
-    let explain_pos = session
-        .messages
-        .iter()
-        .position(|message| message.text_content().contains("已取消执行"))
-        .expect("会话中应存在最终解释");
-    assert!(explain_pos > reject_pos);
-    routes["rejection-call"].assert_hits(1);
-    routes["rejected-result"].assert_hits(1);
+    routes["first-call"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
 

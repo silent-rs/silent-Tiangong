@@ -265,9 +265,9 @@ impl TiangongCore {
         let mut turn_tools = prepared_plugins.tools;
         if !turn_tools
             .iter()
-            .any(|spec| spec.name == crate::react::tools::ASK_USER_TOOL)
+            .any(|spec| spec.name == crate::react::tools::REQUEST_USER_TOOL)
         {
-            turn_tools.push(crate::react::tools::ask_user_tool_spec());
+            turn_tools.push(crate::react::tools::request_user_tool_spec());
         }
 
         Ok(TurnContext::builder()
@@ -380,6 +380,42 @@ impl TiangongCore {
         }
         if let Err(error) = session.try_persist_to_disk() {
             tracing::warn!(%error, session_id = %self.session_id, "排队消息落盘失败");
+        }
+    }
+
+    /// 交互响应入口：注册表原子闭合（answered/expired/cancelled 竞争唯一胜者），
+    /// 胜出后将闭合产物投递给阻塞等待 request_user 的 turn task。
+    pub fn resolve_interaction(&self, request_id: &str, result_json: String) {
+        match crate::shared_runtime::interactions()
+            .registry
+            .respond(request_id, result_json)
+        {
+            crate::interaction::CloseOutcome::Won(closed) => {
+                let closed = *closed;
+                let _ = self.stream_tx.send(StreamEvent::InteractionClosed {
+                    request_id: closed.request.request_id.clone(),
+                    status: match closed.outcome {
+                        crate::interaction::ClosedOutcome::Answered { .. } => "answered",
+                        crate::interaction::ClosedOutcome::Expired => "expired",
+                        crate::interaction::ClosedOutcome::Cancelled { .. } => "cancelled",
+                    }
+                    .to_string(),
+                });
+                if !crate::shared_runtime::send_command(
+                    &self.session_id,
+                    Command::ResolveInteraction {
+                        request: Box::new(closed),
+                    },
+                ) {
+                    tracing::warn!(request_id, %self.session_id, "交互闭合投递失败（等待 turn 可能已结束）");
+                }
+            }
+            crate::interaction::CloseOutcome::AlreadyClosed(status) => {
+                tracing::warn!(request_id, ?status, "交互响应迟到，请求已闭合");
+            }
+            crate::interaction::CloseOutcome::NotFound => {
+                tracing::warn!(request_id, "交互响应目标不存在");
+            }
         }
     }
 
@@ -530,7 +566,7 @@ impl TiangongCore {
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{
-            AgentInputKind, ApprovalInput, CommandInput, InteractionInput, MessageInput,
+            AgentInputKind, CommandInput, MessageInput, ResolveInteractionInput,
         };
 
         match input {
@@ -563,28 +599,15 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 },
                 "InjectTool",
             ),
-            AgentInputKind::Approval(ApprovalInput::Response {
+            AgentInputKind::ResolveInteraction(ResolveInteractionInput::Response {
                 request_id,
-                approved,
-                always_allow,
-            }) => self.deliver_to_turn(
-                Command::Approval {
-                    request_id,
-                    approved,
-                    always_allow,
-                },
-                "ApprovalResponse",
-            ),
-            AgentInputKind::Interaction(InteractionInput::Response {
-                interaction_id,
                 result_json,
-            }) => self.deliver_to_turn(
-                Command::Interaction {
-                    interaction_id,
-                    result_json,
-                },
-                "InteractionResponse",
-            ),
+            }) => {
+                // 响应统一经注册表原子闭合（多界面竞争唯一胜者），胜出后投递
+                // 给阻塞等待中的 turn task。
+                self.resolve_interaction(&request_id, result_json);
+                Ok(())
+            }
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {
                     let _ = crate::shared_runtime::send_command(&self.session_id, Command::Cancel);

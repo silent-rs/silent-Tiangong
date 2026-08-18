@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::core::command::Command;
 use crate::core::plugin::PluginFeedbackTx;
+use crate::interaction::{ApprovalChallenges, ApprovalGrants, InteractionRegistry};
 use crate::turn_context::TurnContext;
 
 /// 共享 runtime 的 worker 线程数。
@@ -43,6 +44,25 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn turn_tasks() -> &'static Mutex<TurnTaskMap> {
     TURN_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 进程级交互设施：请求注册表、审批授权表与挑战表（交互模型方案 §7/§12/§13）。
+/// 授权与挑战为运行期内存态（会话隔离、重启失效）。
+pub struct InteractionHub {
+    pub registry: InteractionRegistry,
+    pub grants: ApprovalGrants,
+    pub challenges: ApprovalChallenges,
+}
+
+static INTERACTION_HUB: OnceLock<InteractionHub> = OnceLock::new();
+
+/// 进程级交互设施单例。
+pub fn interactions() -> &'static InteractionHub {
+    INTERACTION_HUB.get_or_init(|| InteractionHub {
+        registry: InteractionRegistry::new(),
+        grants: ApprovalGrants::new(),
+        challenges: ApprovalChallenges::new(),
+    })
 }
 
 /// 获取进程级共享 tokio runtime。

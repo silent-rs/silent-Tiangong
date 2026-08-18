@@ -97,8 +97,9 @@ pub(super) async fn handle_command(
         ));
     }
     match deferred_command {
-        Deferred::Command(Command::Interaction { .. }) => {
-            // 交互等待已闭合后的迟到响应：丢弃
+        Deferred::Command(Command::ResolveInteraction { .. }) => {
+            // 交互等待在工具流水线内部；流水线之外到达的闭合结果一律是
+            // 迟到或不匹配的（等待已由注册表原子闭合），明确忽略。
             CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::InjectUserMessage {
@@ -122,15 +123,6 @@ pub(super) async fn handle_command(
                     ))
                 }
             }
-        }
-        Deferred::Command(Command::Approval { .. }) => {
-            // 审批等待在工具流水线内部（ALR-302）；流水线之外到达的审批
-            // 一律是迟到或不匹配的响应，明确忽略。
-            tracing::debug!(
-                session_id = %ctx.session.id,
-                "迟到或不匹配的审批响应：忽略"
-            );
-            CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::SetTrustMode(mode)) => {
             // 流水线内（审批等待/工具执行中）的信任模式变化由流水线就地处理；

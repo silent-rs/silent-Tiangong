@@ -299,21 +299,21 @@ impl EventLog {
         );
     }
 
-    /// 等待审批请求并返回 request_id。
-    pub fn wait_approval_needed(&mut self) -> String {
+    /// 等待交互请求并返回 request_id。
+    pub fn wait_interaction_requested(&mut self) -> String {
         let deadline = Instant::now() + WAIT;
         loop {
             self.pump();
-            if let Some(StreamEvent::ApprovalNeeded { request_id, .. }) = self
+            if let Some(StreamEvent::InteractionRequested { request_id, .. }) = self
                 .seen
                 .iter()
-                .find(|e| matches!(e, StreamEvent::ApprovalNeeded { .. }))
+                .find(|e| matches!(e, StreamEvent::InteractionRequested { .. }))
             {
                 return request_id.clone();
             }
             assert!(
                 Instant::now() < deadline,
-                "等待审批事件超时；已收到：{}",
+                "等待交互请求事件超时；已收到：{}",
                 self.summarize()
             );
             std::thread::sleep(POLL);
@@ -469,7 +469,7 @@ fn name_of(event: &StreamEvent) -> &'static str {
         StreamEvent::Done { .. } => "Done",
         StreamEvent::Error { .. } => "Error",
         StreamEvent::UserMessage { .. } => "UserMessage",
-        StreamEvent::ApprovalNeeded { .. } => "ApprovalNeeded",
+        StreamEvent::InteractionRequested { .. } => "InteractionRequested",
         StreamEvent::ToolStart { .. } => "ToolStart",
         StreamEvent::ToolResult { .. } => "ToolResult",
         StreamEvent::ContextCompressing { .. } => "ContextCompressing",

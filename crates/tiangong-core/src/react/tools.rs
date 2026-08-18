@@ -24,8 +24,7 @@ use super::compression::observed_total_tokens;
 use super::execute::{
     AgentLoopState, CompletedToolCall, ToolInjectionBuffer, ToolPreflightOutcome,
     append_failure_recovery_prompt, append_invalid_tool_calls_context, prepare_tool_call,
-    record_completed_tool_call, record_parallel_duplicate_tool_call, record_rejected_tool_call,
-    set_runtime_trust_mode,
+    record_completed_tool_call, record_parallel_duplicate_tool_call, set_runtime_trust_mode,
 };
 use super::helpers::record_plugin_usage;
 use super::message::append_tool_result_message;
@@ -46,53 +45,87 @@ pub(super) enum ToolBatchOutcome {
     Interrupted(Deferred),
 }
 
-/// 内置交互工具名：经交互接缝挂起等待用户选择/填写/确认。
-pub(crate) const ASK_USER_TOOL: &str = "ask_user";
+/// 内置统一交互工具名：审批/确认/选择/输入经 request_user 发起（阻塞等待
+/// 用户——与等待 LLM 同为 turn task 的外部 IO），响应作为该 Tool Call 的
+/// 唯一结果写回（方案 §2）。
+pub(crate) const REQUEST_USER_TOOL: &str = "request_user";
 
-/// ask_user 的工具规格（模型可调用；参数即交互请求负载）。
-/// ask_user 的输入 schema 常量（JSON 文本，构建时解析为 Value）。
-const ASK_USER_INPUT_SCHEMA: &str = r#"{
+/// request_user 的工具规格（六 kind；超时由宿主统一定，模型不可自定义）。
+pub(crate) fn request_user_tool_spec() -> crate::model::ToolSpec {
+    crate::model::ToolSpec {
+        name: REQUEST_USER_TOOL.to_string(),
+        description: "向用户发起限时审批、确认、选择或输入请求。调用后当前执行暂停，用户响应将作为该工具调用的结果返回。需要用户决策或补充信息时使用；本工具必须独占一个工具调用批次，不要与其他工具同时调用。".to_string(),
+        input_schema: serde_json::from_str(
+            r#"{
   "type": "object",
   "properties": {
-    "kind": {"type": "string", "enum": ["choice", "form", "confirm"]},
-    "title": {"type": "string", "description": "交互标题"},
-    "options": {"type": "array", "items": {"type": "string"}, "description": "kind=choice 时的候选项"},
-    "fields": {"type": "array", "description": "kind=form 时的字段定义", "items": {"type": "object", "properties": {"key": {"type": "string"}, "label": {"type": "string"}, "type": {"type": "string", "enum": ["string", "number", "boolean", "select"]}, "options": {"type": "array", "items": {"type": "string"}}}, "required": ["key", "label", "type"]}},
-    "question": {"type": "string", "description": "kind=confirm 时的问题文案"}
+    "kind": {"type": "string", "enum": ["approval", "confirm", "choice", "multi_choice", "input", "form"]},
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+    "options": {"type": "array", "items": {}, "description": "choice/multi_choice 的候选项"},
+    "fields": {"type": "array", "items": {}, "description": "form 的字段定义"},
+    "question": {"type": "string", "description": "confirm 的问题文案"},
+    "approval_challenge": {"type": "string", "description": "工具返回 approval_required 时的 challenge_id"}
   },
   "required": ["kind", "title"]
-}"#;
-
-/// ask_user 的工具规格（模型可调用；参数即交互请求负载）。
-pub(crate) fn ask_user_tool_spec() -> crate::model::ToolSpec {
-    crate::model::ToolSpec {
-        name: ASK_USER_TOOL.to_string(),
-        description: "向用户发起交互并等待响应：choice（用户在候选中选择一项）、form（用户填写表单）、confirm（用户确认）。需要用户决策、选择或补充信息时使用，结果直接来自用户。".to_string(),
-        input_schema: serde_json::from_str(ASK_USER_INPUT_SCHEMA)
-            .expect("ask_user 输入 schema 必须是合法 JSON"),
+}"#,
+        )
+        .expect("request_user 输入 schema 必须是合法 JSON"),
     }
 }
 
-/// 待审批工具的审批结论。
-enum ApprovalDecision {
-    Approved,
-    Rejected,
-    /// 审批等待超时：按拒绝闭合（fail-closed，需求 #57）。
-    TimedOut,
-    /// 审批等待被中断类命令打断（待审批工具已按拒绝闭合）。
-    Interrupted(Deferred),
-}
-
-/// ask_user 交互等待结论。
-enum InteractionOutcome {
-    /// 用户已响应（负载 JSON 文本）。
-    Answered(String),
-    /// 用户取消（按拒绝闭合）。
-    Cancelled,
-    /// 等待超时（fail-closed）。
-    TimedOut,
-    /// 被中断类命令打断。
-    Interrupted(Deferred),
+/// 解析 request_user 参数（kind/title/description/payload/挑战 ID）。
+fn parse_request_user_args(
+    value: &serde_json::Value,
+) -> Result<
+    (
+        crate::interaction::InteractionRequestKind,
+        String,
+        String,
+        String,
+        Option<String>,
+    ),
+    String,
+> {
+    use crate::interaction::InteractionRequestKind;
+    let kind = value
+        .get("kind")
+        .and_then(|item| item.as_str())
+        .ok_or("缺少 kind")?;
+    let kind = match kind {
+        "approval" => InteractionRequestKind::Approval,
+        "confirm" => InteractionRequestKind::Confirm,
+        "choice" => InteractionRequestKind::Choice,
+        "multi_choice" => InteractionRequestKind::MultiChoice,
+        "input" => InteractionRequestKind::Input,
+        "form" => InteractionRequestKind::Form,
+        other => return Err(format!("非法 kind：{other}")),
+    };
+    let title = value
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or("需要您的输入")
+        .to_string();
+    let description = value
+        .get("description")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+    let payload_field = match kind {
+        InteractionRequestKind::Choice | InteractionRequestKind::MultiChoice => "options",
+        InteractionRequestKind::Form => "fields",
+        _ => "question",
+    };
+    let payload = value
+        .get(payload_field)
+        .cloned()
+        .map(|item| item.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let challenge = value
+        .get("approval_challenge")
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+    Ok((kind, title, description, payload, challenge))
 }
 
 /// 已就绪待执行的单个工具调用（自 phase.rs 迁入，随流水线归属 tools.rs）。
@@ -127,6 +160,36 @@ pub(super) async fn execute_tool_batch(
         std::collections::VecDeque::new();
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
 
+    // request_user 独占批次（方案 §15）：与其他调用同批时，其余调用不执行，
+    // 写入明确未执行结果（模型在交互结束后可重新发起）。
+    if batch
+        .calls
+        .iter()
+        .any(|(_, call)| call.name == REQUEST_USER_TOOL)
+    {
+        let mut remaining = std::collections::VecDeque::new();
+        while let Some((index, call)) = batch.calls.pop_front() {
+            if call.name == REQUEST_USER_TOOL {
+                remaining.push_back((index, call));
+                continue;
+            }
+            let note =
+                "request_user 必须独占一个工具调用批次，本调用未执行，请在交互结束后重新发起。"
+                    .to_string();
+            append_tool_result_message(&mut ctx.session, &call.id, &call.name, note.clone(), true);
+            let _ = stream_tx.send(StreamEvent::ToolResult {
+                name: call.name.clone(),
+                tool_call_id: Some(call.id.clone()),
+                ok: false,
+                output: note,
+                full_output: None,
+                duration_ms: None,
+            });
+        }
+        batch.calls = remaining;
+        ctx.session.persist_to_disk();
+    }
+
     'pipeline: loop {
         // ── 准备：逐个弹出待处理调用（校验/去重/权限分流）──
         while let Some((index, call)) = batch.calls.pop_front() {
@@ -149,100 +212,135 @@ pub(super) async fn execute_tool_batch(
                         args_summary,
                         dedupe_key,
                     };
-                    // ask_user：内置交互工具，经交互接缝挂起等待用户响应
-                    //（本身就是用户交互，无需审批），结果直接来自用户。
-                    if tool.call.name == ASK_USER_TOOL {
-                        let started_at = std::time::Instant::now();
-                        match wait_interaction(
-                            ctx,
-                            state,
-                            injections,
-                            trust_mode,
-                            plugins,
-                            stream_tx,
-                            context_limit,
-                            cmd_rx,
-                            &tool,
-                        )
-                        .await
-                        {
-                            InteractionOutcome::Answered(result_json) => {
-                                let result = crate::tool::ToolResult {
-                                    ok: true,
-                                    summary: result_json,
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                    execution: None,
-                                };
-                                let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
-                                    name: tool.call.name.clone(),
-                                    args_summary: tool.args_summary.clone(),
-                                });
-                                record_completed_tool_call(
+                    // request_user：统一用户交互工具（审批/确认/选择/输入）。
+                    // 与等待 LLM 同为 turn task 的外部 IO：阻塞等待用户响应，
+                    // 响应/超时/取消作为本 Tool Call 的唯一结果写回（方案 §2）。
+                    if tool.call.name == REQUEST_USER_TOOL {
+                        match create_request_user(ctx, stream_tx, &tool) {
+                            Ok((request, challenge)) => {
+                                match wait_request_user(
                                     ctx,
-                                    CompletedToolCall {
-                                        call: &tool.call,
-                                        args_summary: &tool.args_summary,
-                                        dedupe_key: tool.dedupe_key.clone(),
-                                        result: &result,
-                                        duration_ms: started_at.elapsed().as_millis() as u64,
-                                    },
-                                    &mut state.tool_history,
-                                );
-                            }
-                            InteractionOutcome::Cancelled => {
-                                record_interaction_closed(ctx, &tool, "用户取消了交互。");
-                            }
-                            InteractionOutcome::TimedOut => {
-                                record_interaction_closed(
-                                    ctx,
-                                    &tool,
-                                    "等待用户响应超时（fail-closed）。",
-                                );
-                            }
-                            InteractionOutcome::Interrupted(deferred) => {
-                                record_interaction_closed(
-                                    ctx,
-                                    &tool,
-                                    "工具调用因用户发送新消息而中断。",
-                                );
-                                close_pending_calls(
-                                    ctx,
+                                    state,
+                                    injections,
+                                    trust_mode,
+                                    plugins,
                                     stream_tx,
-                                    "工具调用因用户发送新消息而中断。",
+                                    context_limit,
+                                    cmd_rx,
+                                    &request,
+                                    &challenge,
+                                    &tool,
+                                )
+                                .await
+                                {
+                                    RequestUserOutcome::Answered { result } => {
+                                        let tool_result = crate::tool::ToolResult {
+                                            ok: true,
+                                            summary: result,
+                                            stdout: String::new(),
+                                            stderr: String::new(),
+                                            exit_code: 0,
+                                            execution: None,
+                                        };
+                                        record_completed_tool_call(
+                                            ctx,
+                                            CompletedToolCall {
+                                                call: &tool.call,
+                                                args_summary: &tool.args_summary,
+                                                dedupe_key: tool.dedupe_key.clone(),
+                                                result: &tool_result,
+                                                duration_ms: 0,
+                                            },
+                                            &mut state.tool_history,
+                                        );
+                                    }
+                                    RequestUserOutcome::Failed { reason } => {
+                                        append_tool_result_message(
+                                            &mut ctx.session,
+                                            &tool.call.id,
+                                            REQUEST_USER_TOOL,
+                                            reason.clone(),
+                                            true,
+                                        );
+                                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                                            name: REQUEST_USER_TOOL.to_string(),
+                                            tool_call_id: Some(tool.call.id.clone()),
+                                            ok: false,
+                                            output: reason,
+                                            full_output: None,
+                                            duration_ms: None,
+                                        });
+                                        ctx.session.persist_to_disk();
+                                    }
+                                    RequestUserOutcome::Interrupted(deferred_command) => {
+                                        close_pending_calls(
+                                            ctx,
+                                            stream_tx,
+                                            "工具调用因用户发送新消息而中断。",
+                                        );
+                                        return ToolBatchOutcome::Interrupted(deferred_command);
+                                    }
+                                }
+                            }
+                            Err(message) => {
+                                append_tool_result_message(
+                                    &mut ctx.session,
+                                    &tool.call.id,
+                                    REQUEST_USER_TOOL,
+                                    message.clone(),
+                                    true,
                                 );
-                                return ToolBatchOutcome::Interrupted(deferred);
+                                let _ = stream_tx.send(StreamEvent::ToolResult {
+                                    name: REQUEST_USER_TOOL.to_string(),
+                                    tool_call_id: Some(tool.call.id.clone()),
+                                    ok: false,
+                                    output: message,
+                                    full_output: None,
+                                    duration_ms: None,
+                                });
+                                ctx.session.persist_to_disk();
                             }
                         }
                         continue;
                     }
+                    // 审批挑战驱动（方案 §12/§13；Supervised 即 Always 策略）：
+                    // 无授权的受保护工具不执行，返回 approval_required 挑战，
+                    // 模型据此发起 request_user(approval) 征询用户。
                     let trust_mode_label = format!("{trust_mode:?}");
-                    if *trust_mode == TrustMode::FullTrust
-                        || ctx
-                            .session
-                            .approved_tools
-                            .iter()
-                            .any(|name| name == &tool.call.name)
-                    {
-                        // FullTrust 放行一切；用户「始终允许」过的工具本会话直接放行
-                        //（审计仍记录，标签区分放行来源）。
+                    if *trust_mode == TrustMode::FullTrust {
                         ctx.observer.audit_permission(
                             &ctx.session.id,
                             &tool.call.name,
-                            if *trust_mode == TrustMode::FullTrust {
-                                "approved"
-                            } else {
-                                "approved_always_allowed"
-                            },
+                            "approved",
                             &trust_mode_label,
                             (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
                         );
                         batch.ready_tools.push(tool);
                         continue;
                     }
-                    // 需要审批：流水线内部等待（与工具共享同一命令通道，ALR-302）。
-                    let request_id = scru128::new().to_string();
+                    let hub = crate::shared_runtime::interactions();
+                    let arguments_hash = tool.call.arguments.to_string();
+                    if hub
+                        .grants
+                        .try_consume(&ctx.session.id, "", &tool.call.name, &arguments_hash)
+                    {
+                        ctx.observer.audit_permission(
+                            &ctx.session.id,
+                            &tool.call.name,
+                            "approved_by_grant",
+                            &trust_mode_label,
+                            (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
+                        );
+                        batch.ready_tools.push(tool);
+                        continue;
+                    }
+                    let challenge = hub.challenges.create(
+                        &ctx.session.id,
+                        "",
+                        &tool.call.name,
+                        arguments_hash,
+                        tool.args_summary.clone(),
+                    );
                     ctx.observer.audit_permission(
                         &ctx.session.id,
                         &tool.call.name,
@@ -250,54 +348,22 @@ pub(super) async fn execute_tool_batch(
                         &trust_mode_label,
                         (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
                     );
-                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                        request_id: request_id.clone(),
-                        tool_name: tool.call.name.clone(),
-                        args_summary: tool.args_summary.clone(),
+                    append_tool_result_message(
+                        &mut ctx.session,
+                        &tool.call.id,
+                        &tool.call.name,
+                        challenge.to_tool_payload(),
+                        true,
+                    );
+                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                        name: tool.call.name.clone(),
+                        tool_call_id: Some(tool.call.id.clone()),
+                        ok: false,
+                        output: challenge.to_tool_payload(),
+                        full_output: None,
+                        duration_ms: None,
                     });
-                    match wait_approval(
-                        ctx,
-                        state,
-                        injections,
-                        trust_mode,
-                        plugins,
-                        stream_tx,
-                        context_limit,
-                        cmd_rx,
-                        &request_id,
-                        &tool,
-                    )
-                    .await
-                    {
-                        ApprovalDecision::Approved => {
-                            start_tool_execution(ctx, tool, &mut tasks, &mut running);
-                        }
-                        ApprovalDecision::Rejected => {
-                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            // 拒绝结果已写入会话：回到 NeedModel 让模型看到拒绝并
-                            // 决定（解释结束 / 换路径 / 重试）。是否允许完成由完成
-                            // 门控判定——必需义务被拒不会虚假成功（ALR-307）。
-                            injections.commit(ctx);
-                            close_pending_calls(ctx, stream_tx, "工具调用因审批被拒绝而未执行。");
-                            return ToolBatchOutcome::Completed;
-                        }
-                        ApprovalDecision::TimedOut => {
-                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            injections.commit(ctx);
-                            close_pending_calls(
-                                ctx,
-                                stream_tx,
-                                "工具调用因等待审批超时被拒绝（fail-closed）。",
-                            );
-                            return ToolBatchOutcome::Completed;
-                        }
-                        ApprovalDecision::Interrupted(deferred_command) => {
-                            // 待审批工具按拒绝闭合，剩余调用一并闭合。
-                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
-                            return ToolBatchOutcome::Interrupted(deferred_command);
-                        }
-                    }
+                    ctx.session.persist_to_disk();
                 }
             }
         }
@@ -406,215 +472,6 @@ pub(super) async fn execute_tool_batch(
     ToolBatchOutcome::Completed
 }
 
-/// 解析 ask_user 参数为交互事件负载（kind/title/schema）。
-fn parse_ask_user_args(
-    value: &serde_json::Value,
-) -> std::result::Result<(String, String, String), String> {
-    let kind = value
-        .get("kind")
-        .and_then(|item| item.as_str())
-        .ok_or("缺少 kind（choice/form/confirm）")?
-        .to_string();
-    if !matches!(kind.as_str(), "choice" | "form" | "confirm") {
-        return Err(format!("非法 kind：{kind}"));
-    }
-    let title = value
-        .get("title")
-        .and_then(|item| item.as_str())
-        .unwrap_or("需要您的输入")
-        .to_string();
-    let schema = match kind.as_str() {
-        "choice" => serde_json::to_string(
-            &value
-                .get("options")
-                .cloned()
-                .unwrap_or(serde_json::json!([])),
-        )
-        .unwrap_or_else(|_| "[]".to_string()),
-        "form" => serde_json::to_string(
-            &value
-                .get("fields")
-                .cloned()
-                .unwrap_or(serde_json::json!([])),
-        )
-        .unwrap_or_else(|_| "[]".to_string()),
-        _ => value
-            .get("question")
-            .and_then(|item| item.as_str())
-            .unwrap_or("是否继续？")
-            .to_string(),
-    };
-    Ok((kind, title, schema))
-}
-
-/// ask_user 交互失败闭合（取消/超时/参数无效）：按失败记录并通知前端。
-fn record_interaction_closed(ctx: &mut TurnContext, tool: &PreparedToolCall, reason: &str) {
-    ctx.observer.audit_tool_execution(
-        &ctx.session.id,
-        &tool.call.name,
-        false,
-        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-        reason,
-    );
-    append_tool_result_message(
-        &mut ctx.session,
-        &tool.call.id,
-        &tool.call.name,
-        reason.to_string(),
-        true,
-    );
-    ctx.session.persist_to_disk();
-    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-        name: tool.call.name.clone(),
-        tool_call_id: Some(tool.call.id.clone()),
-        ok: false,
-        output: reason.to_string(),
-        full_output: None,
-        duration_ms: None,
-    });
-}
-
-/// 等待用户交互响应：响应/取消/超时/中断四类出口；其余命令就地消化。
-/// 时限与审批等待共用 `approval_timeout`（fail-closed 语义一致）。
-#[allow(clippy::too_many_arguments)]
-async fn wait_interaction(
-    ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    injections: &mut ToolInjectionBuffer,
-    trust_mode: &mut TrustMode,
-    plugins: &[Arc<dyn Plugin>],
-    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
-    context_limit: usize,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    tool: &PreparedToolCall,
-) -> InteractionOutcome {
-    let (kind, title, schema) = match parse_ask_user_args(&tool.call.arguments) {
-        Ok(parsed) => parsed,
-        Err(message) => {
-            record_interaction_closed(ctx, tool, &format!("ask_user 参数无效：{message}"));
-            return InteractionOutcome::Cancelled;
-        }
-    };
-    let interaction_id = scru128::new().to_string();
-    let _ = stream_tx.send(StreamEvent::InteractionNeeded {
-        interaction_id: interaction_id.clone(),
-        kind,
-        title,
-        schema,
-    });
-    let deadline = tokio::time::Instant::now() + ctx.approval_timeout;
-    loop {
-        let command = tokio::select! {
-            command = cmd_rx.recv() => match command {
-                Some(command) => command,
-                None => return InteractionOutcome::Interrupted(Deferred::Closed),
-            },
-            _ = tokio::time::sleep_until(deadline) => {
-                tracing::warn!(%interaction_id, "等待用户交互超时，按拒绝闭合");
-                return InteractionOutcome::TimedOut;
-            }
-        };
-        match command {
-            Command::Interaction {
-                interaction_id: responded,
-                result_json,
-            } if responded == interaction_id => {
-                return match result_json {
-                    Some(json) => InteractionOutcome::Answered(json),
-                    None => InteractionOutcome::Cancelled,
-                };
-            }
-            command if is_interrupting(&command) => {
-                return InteractionOutcome::Interrupted(Deferred::Command(command));
-            }
-            command => {
-                handle_ambient_command(
-                    ctx,
-                    state,
-                    injections,
-                    trust_mode,
-                    plugins,
-                    stream_tx,
-                    context_limit,
-                    command,
-                );
-            }
-        }
-    }
-}
-
-/// 等待审批结论：审批/FullTrust 解锁/中断/超时四类出口；其余命令就地消化。
-/// 超时按拒绝闭合（fail-closed），时限自请求发出起算（ambient 命令不重置）。
-#[allow(clippy::too_many_arguments)]
-async fn wait_approval(
-    ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    injections: &mut ToolInjectionBuffer,
-    trust_mode: &mut TrustMode,
-    plugins: &[Arc<dyn Plugin>],
-    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
-    context_limit: usize,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    request_id: &str,
-    tool: &PreparedToolCall,
-) -> ApprovalDecision {
-    let deadline = tokio::time::Instant::now() + ctx.approval_timeout;
-    let mut tool_name = tool.call.name.clone();
-    loop {
-        let command = tokio::select! {
-            command = cmd_rx.recv() => match command {
-                Some(command) => command,
-                None => return ApprovalDecision::Interrupted(Deferred::Closed),
-            },
-            _ = tokio::time::sleep_until(deadline) => {
-                tracing::warn!(request_id, tool = %tool_name, "等待审批超时，按拒绝闭合");
-                return ApprovalDecision::TimedOut;
-            }
-        };
-        match command {
-            Command::Approval {
-                request_id: responded,
-                approved,
-                always_allow,
-            } if responded == request_id => {
-                if approved {
-                    // 始终允许：记录到会话并落盘，同工具本会话后续放行。
-                    if always_allow && !ctx.session.approved_tools.contains(&tool_name) {
-                        ctx.session
-                            .approved_tools
-                            .push(std::mem::take(&mut tool_name));
-                        ctx.session.persist_to_disk();
-                    }
-                    return ApprovalDecision::Approved;
-                }
-                return ApprovalDecision::Rejected;
-            }
-            Command::SetTrustMode(mode) => {
-                set_runtime_trust_mode(trust_mode, plugins, mode);
-                if *trust_mode == TrustMode::FullTrust {
-                    // FullTrust 解锁待审批工具：直接就绪（原 WaitingApproval 迁移）。
-                    return ApprovalDecision::Approved;
-                }
-            }
-            command if is_interrupting(&command) => {
-                return ApprovalDecision::Interrupted(Deferred::Command(command));
-            }
-            command => {
-                handle_ambient_command(
-                    ctx,
-                    state,
-                    injections,
-                    trust_mode,
-                    plugins,
-                    stream_tx,
-                    context_limit,
-                    command,
-                );
-            }
-        }
-    }
-}
-
 /// 中断类命令：取消/关闭/引导消息——批次收敛闭合后交还执行驱动。
 fn is_interrupting(command: &Command) -> bool {
     matches!(
@@ -636,8 +493,8 @@ fn handle_ambient_command(
     command: Command,
 ) {
     match command {
-        // 无等待的交互响应（如等待已被中断闭合）直接丢弃
-        Command::Interaction { .. } => {}
+        // ResolveInteraction 在批次外到达（无活跃等待）：由注册表判定迟到，丢弃
+        Command::ResolveInteraction { .. } => {}
         Command::SetTrustMode(mode) => {
             set_runtime_trust_mode(trust_mode, plugins, mode);
         }
@@ -679,7 +536,7 @@ fn handle_ambient_command(
             // Driver 在 turn 结束后的空闲边界执行维护命令。
         }
         // 迟到或不匹配的审批：明确忽略。
-        Command::Approval { .. } | Command::Cancel | Command::Shutdown => {}
+        Command::Cancel | Command::Shutdown => {}
         Command::InjectUserMessage { .. } => unreachable!("中断类命令已在上方分流"),
     }
 }
@@ -804,5 +661,185 @@ fn close_pending_calls(
             full_output: None,
             duration_ms: None,
         });
+    }
+}
+
+/// request_user 等待结论。
+enum RequestUserOutcome {
+    /// 用户已响应：结果负载（含审批授权生成）。
+    Answered { result: String },
+    /// 超时/取消/闭合异常：按失败结果闭合。
+    Failed { reason: String },
+    /// 中断类命令打断。
+    Interrupted(Deferred),
+}
+
+/// 创建 request_user 交互请求：解析参数 → approval 消费挑战（取得真实审批
+/// 目标，不信 Agent 报文）→ 登记注册表 → 发事件。返回 (请求, 审批目标)。
+fn create_request_user(
+    ctx: &mut TurnContext,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    tool: &PreparedToolCall,
+) -> std::result::Result<
+    (
+        crate::interaction::InteractionRequest,
+        Option<crate::interaction::ApprovalChallenge>,
+    ),
+    String,
+> {
+    use crate::interaction::{InteractionRequest, InteractionRequestKind};
+
+    let value = serde_json::from_str::<serde_json::Value>(&tool.call.arguments.to_string())
+        .map_err(|error| format!("request_user 参数不是合法 JSON：{error}"))?;
+    let (kind, title, description, payload, challenge_id) = parse_request_user_args(&value)?;
+
+    let hub = crate::shared_runtime::interactions();
+    let challenge = if kind == InteractionRequestKind::Approval {
+        let taken = match challenge_id {
+            // 显式挑战 ID 优先；失效则要求重新获取
+            Some(id) => hub.challenges.take(&id),
+            // 未携带时取本会话最新未消费挑战（容错，目标仍来自挑战表）
+            None => hub.challenges.take_latest_of_session(&ctx.session.id),
+        };
+        match taken {
+            Some(challenge) => Some(challenge),
+            None => {
+                return Err("审批挑战无效或已过期：请先调用原工具获取 approval_required 报文中的 challenge_id 后重试".to_string());
+            }
+        }
+    } else {
+        None
+    };
+
+    let request = hub.registry.create(InteractionRequest {
+        request_id: scru128::new().to_string(),
+        session_id: ctx.session.id.clone(),
+        source_message_id: None,
+        tool_call_id: tool.call.id.clone(),
+        kind,
+        title: title.clone(),
+        description: description.clone(),
+        payload: payload.clone(),
+        approval_challenge: None,
+        status: crate::interaction::InteractionStatus::Pending,
+        created_at: chrono::Local::now().naive_local(),
+        deadline: chrono::Local::now().naive_local(),
+    });
+    let _ = stream_tx.send(StreamEvent::InteractionRequested {
+        request_id: request.request_id.clone(),
+        session_id: request.session_id.clone(),
+        tool_call_id: request.tool_call_id.clone(),
+        kind: kind.as_str().to_string(),
+        title,
+        description,
+        payload,
+    });
+    Ok((request, challenge))
+}
+
+/// 阻塞等待 request_user 结果：响应命令/超时/中断三类出口；其余命令就地消化。
+/// 超时按绝对 deadline（注册表复核）fail-closed；审批批准时按挑战真实目标
+/// 生成授权（方案 §9/§12）。
+#[allow(clippy::too_many_arguments)]
+async fn wait_request_user(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    trust_mode: &mut TrustMode,
+    plugins: &[Arc<dyn Plugin>],
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    request: &crate::interaction::InteractionRequest,
+    challenge: &Option<crate::interaction::ApprovalChallenge>,
+    tool: &PreparedToolCall,
+) -> RequestUserOutcome {
+    let request_id = request.request_id.clone();
+    let hub = crate::shared_runtime::interactions();
+    let deadline = tokio::time::Instant::now()
+        + (request.deadline - chrono::Local::now().naive_local())
+            .to_std()
+            .unwrap_or(std::time::Duration::from_millis(1));
+    let _ = tool;
+    loop {
+        let command = tokio::select! {
+            command = cmd_rx.recv() => match command {
+                Some(command) => command,
+                None => {
+                    let _ = hub.registry.cancel(&request_id, "命令通道关闭".to_string());
+                    return RequestUserOutcome::Failed { reason: "等待被关闭".to_string() };
+                }
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                // 超时 fail-closed：注册表按绝对截止原子闭合（响应竞态时胜者唯一）
+                return match hub.registry.expire(&request_id) {
+                    crate::interaction::CloseOutcome::Won(closed) => {
+                        let (payload, _) = crate::interaction::render_closed_tool_result(&closed);
+                        let _ = stream_tx.send(StreamEvent::InteractionClosed {
+                            request_id: request_id.clone(),
+                            status: "expired".to_string(),
+                        });
+                        RequestUserOutcome::Failed { reason: payload }
+                    }
+                    // 已被响应闭合：响应命令应在通道中，继续接收
+                    _ => continue,
+                };
+            }
+        };
+        match command {
+            Command::ResolveInteraction { request: closed }
+                if closed.request.request_id == request_id =>
+            {
+                // 审批批准：按挑战真实目标生成授权（approve_once 参数绑定 /
+                // approve_for_runtime 跨 turn；拒绝/超时不产生授权）
+                if let (Some(challenge), crate::interaction::ClosedOutcome::Answered { result }) =
+                    (challenge, &closed.outcome)
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(result)
+                    && let Some(decision) = value.get("decision").and_then(|d| d.as_str())
+                {
+                    match decision {
+                        "approve_once" => hub.grants.grant_once(
+                            &challenge.session_id,
+                            &challenge.plugin_id,
+                            &challenge.tool_name,
+                            challenge.arguments_hash.clone(),
+                        ),
+                        "approve_for_runtime" => hub.grants.grant_runtime(
+                            &challenge.session_id,
+                            &challenge.plugin_id,
+                            &challenge.tool_name,
+                        ),
+                        _ => {}
+                    }
+                }
+                let (payload, ok) = crate::interaction::render_closed_tool_result(&closed);
+                if ok {
+                    return RequestUserOutcome::Answered { result: payload };
+                }
+                return RequestUserOutcome::Failed { reason: payload };
+            }
+            command if is_interrupting(&command) => {
+                let _ = hub
+                    .registry
+                    .cancel(&request_id, "用户发送了新的消息".to_string());
+                let _ = stream_tx.send(StreamEvent::InteractionClosed {
+                    request_id,
+                    status: "cancelled".to_string(),
+                });
+                return RequestUserOutcome::Interrupted(Deferred::Command(command));
+            }
+            command => {
+                handle_ambient_command(
+                    ctx,
+                    state,
+                    injections,
+                    trust_mode,
+                    plugins,
+                    stream_tx,
+                    context_limit,
+                    command,
+                );
+            }
+        }
     }
 }

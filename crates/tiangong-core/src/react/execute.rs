@@ -330,6 +330,7 @@ pub(super) fn record_parallel_duplicate_tool_call(ctx: &mut TurnContext, call: &
     });
 }
 
+#[allow(dead_code)]
 pub(super) fn record_rejected_tool_call(
     ctx: &mut TurnContext,
     call: &ToolCall,

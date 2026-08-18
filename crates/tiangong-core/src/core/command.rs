@@ -4,18 +4,10 @@
 pub enum Command {
     /// 取消当前执行
     Cancel,
-    /// 审批响应；approved=true 且 always_allow=true 时同工具本会话后续放行
-    #[allow(dead_code)]
-    Approval {
-        request_id: String,
-        approved: bool,
-        always_allow: bool,
-    },
-    /// 交互响应（解锁挂起的 ask_user 工具）；result_json=None 表示取消
-    #[allow(dead_code)]
-    Interaction {
-        interaction_id: String,
-        result_json: Option<String>,
+    /// 交互闭合结果（request_user 阻塞等待的响应/超时/取消）：
+    /// 闭合判定已在 InteractionRegistry 原子完成，命令只携带胜出产物。
+    ResolveInteraction {
+        request: Box<crate::interaction::ClosedInteraction>,
     },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
@@ -56,8 +48,7 @@ impl Command {
     pub(crate) fn kind_name(&self) -> &'static str {
         match self {
             Self::Cancel => "Cancel",
-            Self::Approval { .. } => "ApprovalResponse",
-            Self::Interaction { .. } => "InteractionResponse",
+            Self::ResolveInteraction { .. } => "ResolveInteraction",
             Self::SetTrustMode(_) => "SetTrustMode",
             Self::SetReasoningEffort(_) => "SetReasoningEffort",
             Self::SetTitle { .. } => "SetTitle",

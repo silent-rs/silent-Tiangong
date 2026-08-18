@@ -28,10 +28,8 @@ pub enum AgentInputKind {
     /// 也可通过 `AgentInputKind::tool(name, json)` 匿名注入。
     /// 渲染由 core 的 render_tool_output 统一处理。
     Tool(Box<dyn ToolInput>),
-    /// 审批层：审批响应，解锁阻塞等待审批的 turn。
-    Approval(ApprovalInput),
-    /// 交互层：ask_user 等交互请求的响应，解锁挂起的工具。
-    Interaction(InteractionInput),
+    /// 交互层：request_user 阻塞等待中的用户响应。
+    ResolveInteraction(ResolveInteractionInput),
     /// 控制层：控制指令。
     Command(CommandInput),
 }
@@ -87,19 +85,10 @@ impl AgentInputKind {
         })
     }
 
-    /// 便捷构造：审批响应。always_allow=true 时同工具本会话后续放行。
-    pub fn approval(request_id: impl Into<String>, approved: bool, always_allow: bool) -> Self {
-        AgentInputKind::Approval(ApprovalInput::Response {
-            request_id: request_id.into(),
-            approved,
-            always_allow,
-        })
-    }
-
     /// 便捷构造：交互响应。
-    pub fn interaction(interaction_id: impl Into<String>, result_json: Option<String>) -> Self {
-        AgentInputKind::Interaction(InteractionInput::Response {
-            interaction_id: interaction_id.into(),
+    pub fn resolve_interaction(request_id: impl Into<String>, result_json: String) -> Self {
+        AgentInputKind::ResolveInteraction(ResolveInteractionInput::Response {
+            request_id: request_id.into(),
             result_json,
         })
     }
@@ -136,21 +125,11 @@ pub enum MessageInput {
 
 /// 审批层输入。
 /// 交互层输入。
-pub enum InteractionInput {
-    /// 交互响应：result_json=None 表示用户取消。
-    Response {
-        interaction_id: String,
-        result_json: Option<String>,
-    },
-}
-
-pub enum ApprovalInput {
-    /// 审批响应（解锁当前阻塞等待审批的 turn）。
-    /// approved=true 且 always_allow=true 时，同工具本会话后续放行。
+pub enum ResolveInteractionInput {
+    /// 用户响应（负载 JSON 文本）。
     Response {
         request_id: String,
-        approved: bool,
-        always_allow: bool,
+        result_json: String,
     },
 }
 

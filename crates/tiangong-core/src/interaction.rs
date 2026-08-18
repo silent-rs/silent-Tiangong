@@ -108,7 +108,7 @@ pub type InteractionCloseHandler = Arc<dyn Fn(ClosedInteraction) + Send + Sync +
 #[derive(Debug, Clone)]
 pub enum CloseOutcome {
     /// 本方胜出：闭合已生效，宿主收到通知。
-    Won(ClosedInteraction),
+    Won(Box<ClosedInteraction>),
     /// 请求已闭合（迟到方）：携带已生效的终态。
     AlreadyClosed(InteractionStatus),
     /// 请求不存在（从未创建或已被清理）。
@@ -170,7 +170,7 @@ impl InteractionRegistry {
 
     /// 用户响应：Pending → Answered（竞态唯一赢家生效）。
     pub fn respond(&self, request_id: &str, result: String) -> CloseOutcome {
-        self.close_with(request_id, InteractionStatus::Answered, |request| {
+        self.close_with(request_id, InteractionStatus::Answered, |_request| {
             ClosedOutcome::Answered { result }
         })
     }
@@ -227,7 +227,7 @@ impl InteractionRegistry {
         if let Some(handler) = handler {
             handler(closed.clone());
         }
-        CloseOutcome::Won(closed)
+        CloseOutcome::Won(Box::new(closed))
     }
 
     /// 会话的 Pending 请求（新消息到达时逐个取消，方案 §16）。
@@ -430,6 +430,64 @@ impl ApprovalChallenges {
         let mut challenges = self.challenges.lock().expect("挑战表锁损坏");
         let challenge = challenges.remove(challenge_id)?;
         (challenge.expires_at > now()).then_some(challenge)
+    }
+
+    /// 取会话最新的未消费挑战（模型未携带 challenge_id 时的容错路径；
+    /// 仍由宿主从挑战表取得真实目标，不信 Agent 报文）。
+    pub fn take_latest_of_session(&self, session_id: &str) -> Option<ApprovalChallenge> {
+        let mut challenges = self.challenges.lock().expect("挑战表锁损坏");
+        let (challenge_id, _) = challenges
+            .iter()
+            .filter(|(_, item)| item.session_id == session_id && item.expires_at > now())
+            .max_by_key(|(_, item)| item.created_at)?;
+        let challenge_id = challenge_id.clone();
+        challenges.remove(&challenge_id)
+    }
+}
+
+/// 闭合请求渲染为 request_user 的 Tool Result 负载（方案 §3/§9）。
+/// 返回 (payload, ok)：answered 为 ok，expired/cancelled 为失败结果。
+pub fn render_closed_tool_result(closed: &ClosedInteraction) -> (String, bool) {
+    let kind = closed.request.kind.as_str();
+    match &closed.outcome {
+        ClosedOutcome::Answered { result } => {
+            let parsed = serde_json::from_str::<serde_json::Value>(result)
+                .unwrap_or(serde_json::Value::Null);
+            (
+                serde_json::json!({
+                    "status": "answered",
+                    "kind": kind,
+                    "request_id": closed.request.request_id,
+                    "result": parsed,
+                })
+                .to_string(),
+                true,
+            )
+        }
+        ClosedOutcome::Expired => (
+            serde_json::json!({
+                "status": "expired",
+                "kind": kind,
+                "request_id": closed.request.request_id,
+                "message": if kind == "approval" {
+                    "用户未在规定时间内响应，操作未获批准"
+                } else {
+                    "用户未在规定时间内响应"
+                },
+            })
+            .to_string(),
+            false,
+        ),
+        ClosedOutcome::Cancelled { reason } => (
+            serde_json::json!({
+                "status": "cancelled",
+                "kind": kind,
+                "request_id": closed.request.request_id,
+                "reason": reason,
+            })
+            .to_string(),
+            false,
+        ),
     }
 }
 
