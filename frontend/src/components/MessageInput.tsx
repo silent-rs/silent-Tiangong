@@ -365,6 +365,21 @@ export function MessageInput() {
     });
   }, [setAttachments]);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void api.onSessionInputAttachment(({ attachment }) => {
+      if (disposed || !cacheKey) return;
+      if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;
+      addAttachments([attachment]);
+      editorRef.current?.focus();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => console.warn('监听插件输入附件失败:', error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [addAttachments, cacheKey]);
+
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
     addAttachments(paths.map(attachmentFromPath));
   }, [addAttachments]);

@@ -9,9 +9,9 @@
     button {
       width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
       padding: 0; border: 0; border-radius: 6px; background: transparent;
-      color: var(--tg-muted, #71717a); cursor: pointer;
+      color: hsl(var(--muted-foreground)); cursor: pointer;
     }
-    button:hover { color: var(--tg-foreground, #18181b); background: color-mix(in srgb, var(--tg-muted, #71717a) 10%, transparent); }
+    button:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .65); }
     button:disabled { opacity: .55; cursor: wait; }
     svg { width: 16px; height: 16px; }
   </style>

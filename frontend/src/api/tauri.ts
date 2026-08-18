@@ -606,6 +606,11 @@ export interface SlotContributionEntry {
   source: 'wasm' | 'manifest';
 }
 
+export interface SessionInputAttachmentPayload {
+  plugin_id: string;
+  attachment: RawAttachment;
+}
+
 /** 插件入口资源响应（字节数组 + MIME）。 */
 export interface PluginEntryResource {
   data: number[];
@@ -1381,6 +1386,9 @@ export const api = {
 
   bridgeUnsubscribe: (pluginId: string, channel: string): Promise<void> =>
     invoke('bridge_unsubscribe', { pluginId, channel }),
+
+  onSessionInputAttachment: (callback: (event: SessionInputAttachmentPayload) => void) =>
+    listen<SessionInputAttachmentPayload>('session_input_attachment', (event) => callback(event.payload)),
 
   onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
     listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),

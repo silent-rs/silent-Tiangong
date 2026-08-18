@@ -26,9 +26,9 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
 
   if (items.length === 0) return null;
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+    <div className={slot === 'session.input-action' ? 'flex h-8 w-8 shrink-0 items-center justify-center' : 'flex min-w-0 flex-wrap items-center gap-1.5'}>
       {items.map((item) => (
-        <div key={`${item.plugin_id}:${item.contribution_id}`} className="min-w-0">
+        <div key={`${item.plugin_id}:${item.contribution_id}`} className={slot === 'session.input-action' ? 'h-8 w-8 shrink-0' : 'min-w-0'}>
           <PluginSandbox
             pluginId={item.plugin_id}
             contributionId={item.contribution_id}
