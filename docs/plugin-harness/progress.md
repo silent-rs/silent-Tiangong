@@ -8,7 +8,7 @@
 - **阶段**：Harness 主体（T001-T016）完成；交互模型按新方案重做（T017-T019 已交付，
   T018 采用阻塞模型——按用户纠正，request_user 与 LLM 调用同为 turn task 外部 IO，
   不做挂起退出/续跑机制）。
-- **当前建议任务**：T020 验收补全（方案 §19 剩余场景）与真实使用冒烟。
+- **当前建议任务**：真实使用冒烟（request_user 全链路 + 示例处理器插件导入）。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
 - **当前阻塞**：无。
@@ -215,8 +215,13 @@
   CLI 文本交互/agent-team 上抛/后台通知。
 - 验证：Core 98 项（审批闭环/拒绝闭环新用例通过；steering 为既有并发 flaky）、
   interaction 10 项、前端 204 项全绿。
-- 遗留（T020）：方案 §19 部分场景（多界面同时响应、批次独占协议修复等）
-  待补自动化；GUI 手动冒烟。
+- T020（2026-08-18，`6e4ca6f9`）：交互处理器插件化完成（方案 v2）——session.interaction
+  Slot、interaction.resolve 桥接（权限双校验+宿主注入）、interaction.requested/closed 事件、
+  request_id 权威会话路由、deadline 锁内原子判定、approval 强制显式 challenge、
+  InteractionPluginHost 替换内置卡片、SDK createInteractionHandler、CLI/Server 宿主接口、
+  示例插件移至 plugins/interaction-handler-example（文档路径引导）。
+  验收测试补 4 项；Core 102 / runtime 42 / 前端 204 全绿（steering 为 origin 既有 flaky）；
+  另修 tiangong-llm 测试构造缺 Message 耗时字段的既有编译失败。
 
 ### 代码审查修复（2026-08-18，`5af7faa6`）
 
