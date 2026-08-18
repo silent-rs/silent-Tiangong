@@ -2569,8 +2569,11 @@ async fn always_allow_skips_subsequent_approval() {
     assert_eq!(invocations.lock().unwrap().len(), 2, "两次调用都应执行");
     assert!(
         ctx.session.approved_tools.iter().any(|name| name == "echo"),
-        "会话应记录始终允许的工具"
+        "运行期应记录始终允许的工具"
     );
+    // 始终允许不落盘：会话序列化不携带该字段，重启后恢复审批确认
+    let session_json = serde_json::to_string(&ctx.session).unwrap();
+    assert!(!session_json.contains("approved_tools"));
 }
 
 /// ask_user(choice)：用户点选后工具携带所选值完成，轮次继续。

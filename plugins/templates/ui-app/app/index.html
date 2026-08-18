@@ -79,7 +79,24 @@
             window.parent.postMessage({ type: 'plugin_call', channel, id, method, payload }, '*');
           });
         },
-        on() { return () => {}; },
+        on(eventChannel, handler) {
+          const subscribe = () => window.parent.postMessage(
+            { type: 'plugin_subscribe', channel, event: eventChannel }, '*');
+          // hostContext 通常挂载即送达；未就绪时短暂轮询重试
+          if (channel) subscribe();
+          else { let tries = 0; const timer = setInterval(() => (channel || ++tries > 50) && (clearInterval(timer), subscribe()), 100); }
+          const listener = (event) => {
+            const data = event.data;
+            if (data && data.type === 'bridge_event' && data.channel === eventChannel) {
+              handler(data.payload);
+            }
+          };
+          window.addEventListener('message', listener);
+          return () => {
+            window.removeEventListener('message', listener);
+            window.parent.postMessage({ type: 'plugin_unsubscribe', channel, event: eventChannel }, '*');
+          };
+        },
       };
     }
 

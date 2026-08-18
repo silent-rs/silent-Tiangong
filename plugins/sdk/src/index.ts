@@ -133,10 +133,34 @@ class IframeBridge implements HostBridge {
     });
   }
 
-  on(_channel: string, _handler: (payload: string) => void): () => void {
-    // iframe 容器的事件推送通道随宿主版本开放，当前返回空取消函数
-    console.warn('[tiangong-plugin-sdk] 事件订阅在 iframe 容器暂不可用');
-    return () => {};
+  on(eventChannel: string, handler: (payload: string) => void): () => void {
+    // 经 postMessage 发起订阅（宿主按 capabilities.events 校验放行），
+    // 事件经 { type: 'bridge_event', channel, payload } 回推。
+    let stopEvents: (() => void) | null = null;
+    void this.ensureChannel().then((channel) => {
+      window.parent.postMessage(
+        { type: 'plugin_subscribe', channel, event: eventChannel },
+        '*',
+      );
+    });
+    const listener = (event: MessageEvent) => {
+      const data = event.data as Record<string, unknown> | null;
+      if (data?.type === 'bridge_event' && data.channel === eventChannel
+        && typeof data.payload === 'string') {
+        handler(data.payload);
+      }
+    };
+    window.addEventListener('message', listener);
+    stopEvents = () => {
+      window.removeEventListener('message', listener);
+      void this.ensureChannel().then((channel) => {
+        window.parent.postMessage(
+          { type: 'plugin_unsubscribe', channel, event: eventChannel },
+          '*',
+        );
+      });
+    };
+    return () => stopEvents?.();
   }
 }
 
