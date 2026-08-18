@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "id": "screenshot-input",
+  "version": "0.1.0",
+  "entrypoints": ["desktop"],
+  "permissions": ["session.write"],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "session.input-action",
+        "id": "screenshot-input",
+        "title": "截图",
+        "description": "截取屏幕或窗口并加入当前输入草稿",
+        "icon": "camera",
+        "entry": "index.html",
+        "context": ["session"]
+      }
+    ]
+  }
+}

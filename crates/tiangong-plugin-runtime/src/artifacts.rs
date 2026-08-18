@@ -162,6 +162,15 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         set_executable(&destination)?;
     }
 
+    for contribution in manifest.ui_contributions() {
+        copy_local_artifact(
+            source,
+            Path::new(&contribution.entry),
+            &staged.path,
+            "UI 入口",
+        )?;
+    }
+
     for file in ["release.json", "release.json.sig"] {
         let source_file = source.join(file);
         if source_file.exists() {

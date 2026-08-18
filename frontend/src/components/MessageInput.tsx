@@ -23,6 +23,7 @@ import {
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { formatDuration } from './message/utils';
+import { SessionInputPluginHost } from './SessionInputPluginHost';
 
 interface MentionCandidate {
   value: string;
@@ -363,6 +364,21 @@ export function MessageInput() {
       return next;
     });
   }, [setAttachments]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void api.onSessionInputAttachment(({ attachment }) => {
+      if (disposed || !cacheKey) return;
+      if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;
+      addAttachments([attachment]);
+      editorRef.current?.focus();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => console.warn('监听插件输入附件失败:', error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [addAttachments, cacheKey]);
 
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
     addAttachments(paths.map(attachmentFromPath));
@@ -1006,6 +1022,7 @@ export function MessageInput() {
               )}
               {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                <SessionInputPluginHost slot="session.input-action" />
                 <Button
                   onClick={handleAttachFiles}
                   disabled={!cacheKey}

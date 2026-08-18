@@ -78,6 +78,12 @@ pub const BUILTIN_SLOTS: &[SlotDescriptor] = &[
         description: "消息操作按钮区（复制/重试旁的动作按钮）",
     },
     SlotDescriptor {
+        id: "session.input-action",
+        instances: SlotInstances::Multiple,
+        context: &[SlotContextKey::Session],
+        description: "输入框动作按钮区（附件、语音等按钮旁）",
+    },
+    SlotDescriptor {
         id: "session.before-input",
         instances: SlotInstances::Multiple,
         context: &[SlotContextKey::Session],

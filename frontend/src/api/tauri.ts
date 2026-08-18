@@ -499,6 +499,7 @@ export const SLOT_IDS = [
   'session.turn-node',
   'session.message-item',
   'session.message-action',
+  'session.input-action',
   'session.before-input',
   'session.after-input',
   'session.interaction',
@@ -603,6 +604,11 @@ export interface SlotContributionEntry {
   sandbox: SandboxKind;
   /** 贡献来源：wasm（v1 运行时声明）或 manifest（v2 清单声明）。 */
   source: 'wasm' | 'manifest';
+}
+
+export interface SessionInputAttachmentPayload {
+  plugin_id: string;
+  attachment: RawAttachment;
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */
@@ -1380,6 +1386,9 @@ export const api = {
 
   bridgeUnsubscribe: (pluginId: string, channel: string): Promise<void> =>
     invoke('bridge_unsubscribe', { pluginId, channel }),
+
+  onSessionInputAttachment: (callback: (event: SessionInputAttachmentPayload) => void) =>
+    listen<SessionInputAttachmentPayload>('session_input_attachment', (event) => callback(event.payload)),
 
   onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
     listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),

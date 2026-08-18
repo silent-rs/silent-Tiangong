@@ -356,6 +356,32 @@ fn run_gui() {
                 ));
             }
 
+            // 截图输入桥接：macOS 使用系统原生交互式区域/窗口截图。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_session_input_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, _payload: &str| {
+                        if method != "session.input.captureRegion" { anyhow::bail!("未知输入草稿方法 {method}"); }
+                        #[cfg(target_os = "macos")]
+                        {
+                            let capture_dir = std::env::temp_dir().join("tiangong-captures");
+                            std::fs::create_dir_all(&capture_dir)?;
+                            let file_name = format!("screenshot-{}.png", scru128::new());
+                            let path = capture_dir.join(&file_name);
+                            let status = std::process::Command::new("/usr/sbin/screencapture").arg("-i").arg("-o").arg(&path).status()?;
+                            if !status.success() || !path.is_file() { return Ok(serde_json::json!({"cancelled":true}).to_string()); }
+                            let bytes = std::fs::read(&path)?; let _ = std::fs::remove_file(&path);
+                            let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+                            if encoded.len() as u64 > 50 * 1024 * 1024 { anyhow::bail!("截图超过 50MB 限制"); }
+                            app_handle.emit("session_input_attachment", serde_json::json!({"plugin_id":plugin_id,"attachment":{"kind":"image","source":format!("data:image/png;base64,{encoded}"),"original_name":file_name,"mime_type":"image/png"}}))?;
+                            return Ok(serde_json::json!({"cancelled":false}).to_string());
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        anyhow::bail!("当前平台暂不支持交互式区域截图");
+                    },
+                ));
+            }
+
             // 交互插件只能提交 request_id + 结果；宿主按注册表权威会话路由到等待中的 Core。
             {
                 let app_handle = app.handle().clone();

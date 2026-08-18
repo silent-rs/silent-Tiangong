@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    :host { display: inline-flex; width: 32px; height: 32px; overflow: hidden; }
+    * { box-sizing: border-box; }
+    body { margin: 0; width: 32px; height: 32px; overflow: hidden; }
+    button {
+      width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; border: 0; border-radius: 6px; background: transparent;
+      color: hsl(var(--muted-foreground)); cursor: pointer;
+    }
+    button:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .65); }
+    button:disabled { opacity: .55; cursor: wait; }
+    svg { width: 16px; height: 16px; }
+  </style>
+</head>
+<body>
+  <button id="capture" type="button" title="截图（拖动选择区域，空格选择窗口，Enter/双击确认，Esc 取消）">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 4 16 7h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3l1.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+  </button>
+  <script>
+    const button = this.getElementById('capture');
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await bridge.call('session.input.captureRegion', '{}');
+      } catch (error) {
+        alert(error instanceof Error ? error.message : String(error));
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
