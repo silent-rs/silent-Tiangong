@@ -219,7 +219,7 @@
   Slot、interaction.resolve 桥接（权限双校验+宿主注入）、interaction.requested/closed 事件、
   request_id 权威会话路由、deadline 锁内原子判定、approval 强制显式 challenge、
   InteractionPluginHost 替换内置卡片、SDK createInteractionHandler、CLI/Server 宿主接口、
-  示例插件移至 plugins/interaction-handler-example（文档路径引导）。
+  交互处理器插件为正式默认处理器：plugins/interaction-handler（id: interaction-handler，文档路径引导，非示例标记）。
   验收测试补 4 项；Core 102 / runtime 42 / 前端 204 全绿（steering 为 origin 既有 flaky）；
   另修 tiangong-llm 测试构造缺 Message 耗时字段的既有编译失败。
 

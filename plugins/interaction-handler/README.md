@@ -1,4 +1,4 @@
-# 第三方交互处理器样板
+# 交互处理器插件（Interaction Handler）
 
 这个纯 UI 插件演示如何接管天工的审批、确认、单选、多选、文本输入和表单请求。
 
@@ -28,4 +28,4 @@
 
 插件只负责界面和提交。会话归属、截止时间、唯一响应、审批挑战及授权均由宿主验证。即使插件篡改文案或在过期后提交，也不能直接授权受保护操作。
 
-工程化项目可使用 `@tiangong/plugin-sdk` 的 `createInteractionHandler()`；本样板不依赖构建工具，便于直接阅读和本地导入。
+作为默认交互处理器真实使用：处理 request_user 发起的审批、确认、选择与输入请求。零构建可直接导入；工程化扩展可使用 `@tiangong/plugin-sdk` 的 `createInteractionHandler()`。

@@ -69,7 +69,7 @@ interaction.onRequested((request) => console.log(request, request.deadline));
 await interaction.resolve(requestId, { decision: 'reject' });
 ```
 
-完整可运行样板见 `plugins/interaction-handler-example`。插件只提交用户选择，宿主保持
+默认交互处理器实现见 `plugins/interaction-handler`（真实使用，可作参考）。插件只提交用户选择，宿主保持
 截止时间、唯一闭合、会话路由、审批挑战和授权的最终控制。
 
 ## 主题

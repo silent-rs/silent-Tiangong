@@ -103,9 +103,9 @@ Agent request_user Tool Call
 
 审批批准后，Core 只按挑战中的可信目标生成一次性或运行期授权。
 
-## 7. 样板
+## 7. 默认处理器插件
 
-`plugins/interaction-handler-example` 是零构建、可直接导入的 iframe 插件，覆盖六种请求、倒计时、提交锁和闭合状态。工程化插件可使用 `plugins/sdk` 的 `createInteractionHandler()`。
+`plugins/interaction-handler` 是零构建、可直接导入的 iframe 插件，作为默认交互处理器真实使用：覆盖六种请求、倒计时、提交锁和闭合状态。第三方工程化处理器可使用 `plugins/sdk` 的 `createInteractionHandler()` 开发并替换。
 
 ## 8. 非目标
 
