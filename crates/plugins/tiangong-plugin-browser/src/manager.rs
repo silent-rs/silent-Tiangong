@@ -1814,6 +1814,11 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// 执行 JS 并返回结果文本（无活跃页或超时返回 None）；供 webview 原语使用。
+    pub fn eval_result_text(&self, js: &str) -> Option<String> {
+        self.eval_with_result(js)
+    }
+
     pub(crate) fn eval_with_result(&self, js: &str) -> Option<String> {
         self.eval_with_result_timeout(js, Duration::from_secs(15))
     }

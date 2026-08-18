@@ -12,7 +12,7 @@ import {
  */
 
 const TOOL_METHOD: Record<string, string> = {
-  browser_open: 'webview.navigate',
+  browser_open: 'webview.create',
   browser_navigate: 'webview.navigate',
   browser_eval: 'webview.eval',
 };
@@ -34,15 +34,27 @@ async function main() {
       }
       try {
         const raw = await bridge.call(method, JSON.stringify(invocation.arguments ?? {}));
-        const parsed = JSON.parse(raw) as { supported?: boolean; note?: string };
+        const parsed = JSON.parse(raw) as {
+          view_id?: string;
+          tabs?: Array<{ id?: string; url?: string; title?: string }>;
+          active_tab_id?: string | null;
+          result?: string | null;
+        };
+        // 真实结果摘要：导航/创建返回 tab 快照；eval 返回 JS 结果
+        let summary: string;
+        if (invocation.name === 'browser_eval') {
+          summary = parsed.result ?? '(无返回值)';
+        } else {
+          const tabs = parsed.tabs ?? [];
+          const active = tabs.find((tab) => tab.id === parsed.active_tab_id) ?? tabs[0];
+          summary = active
+            ? `webview 实例 ${parsed.view_id ?? '?'}，当前页：${active.title ?? active.url ?? '未知'}`
+            : `webview 实例 ${parsed.view_id ?? '?'} 已就绪`;
+        }
         await tools.resolve({
           invocation_id: invocation.invocation_id,
           status: 'answered',
-          result: {
-            ok: parsed.supported !== false,
-            summary: parsed.note ?? '操作已提交 webview 容器',
-            exit_code: 0,
-          },
+          result: { ok: true, summary, exit_code: 0 },
         });
       } catch (error) {
         await tools.resolve({

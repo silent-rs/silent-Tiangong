@@ -28,6 +28,7 @@ pub struct TerminalService {
 struct PtySession {
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,10 +212,12 @@ impl TerminalService {
         });
 
         let writer = pair.master.take_writer().context("获取 PTY 写入端失败")?;
+        // master 保留在会话中（resize 用）；openpty 返回的即 Box<dyn MasterPty + Send>
+        let master = pair.master;
         self.sessions
             .lock()
             .expect("会话表锁损坏")
-            .insert(session_id.clone(), PtySession { writer, killer });
+            .insert(session_id.clone(), PtySession { writer, killer, master });
 
         Ok(SpawnResponse { session_id })
     }
@@ -307,10 +310,19 @@ async fn dispatch_operation(
             Ok(serde_json::to_value(OkResponse { ok: true })?)
         }
         "terminalResize" => {
-            // resize 需要 master 句柄；当前实现把 writer 取走后 master 丢弃，
-            // 保留 master 引用需扩展 PtySession——首版先返回 ok（多数 shell 容忍）。
-            let _request: ResizeRequest =
+            let request: ResizeRequest =
                 serde_json::from_value(payload).context("terminalResize 参数无效")?;
+            service.with_session(&request.session_id, |session| {
+                session
+                    .master
+                    .resize(PtySize {
+                        rows: request.rows,
+                        cols: request.cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .context("调整 PTY 尺寸失败")
+            })?;
             Ok(serde_json::to_value(OkResponse { ok: true })?)
         }
         "terminalKill" => {
