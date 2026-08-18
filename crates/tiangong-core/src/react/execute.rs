@@ -487,7 +487,7 @@ pub(super) fn append_failure_recovery_prompt(
 
 /// Agent Loop 状态：单一 `ExecutionPhase`（take/install 所有权模式，见 design.md
 /// 3.1）+ 预算 + 累计用量 + 工具去重记录 + 工具义务契约。阶段持有的活动资源
-/// （模型请求/工具任务/审批/压缩）都在 phase 变体内，不再有并列活动 `Option`
+/// （模型请求/工具任务/压缩）都在 phase 变体内，不再有并列活动 `Option`
 /// （ALR-001）。
 pub(super) struct AgentLoopState {
     pub(super) phase: Option<ExecutionPhase>,
@@ -536,9 +536,7 @@ impl AgentLoopState {
     }
 }
 
-// 阶段数据类型（ToolBatchState / PreparedToolCall / PendingApproval /
-// RunningToolCall / ToolTaskOutput / LlmPurpose / ActiveLlm 及
-// ToolExecutionPhase / ApprovalPhase）统一定义在 super::phase。
+// 阶段数据类型统一定义在 super::phase。
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);

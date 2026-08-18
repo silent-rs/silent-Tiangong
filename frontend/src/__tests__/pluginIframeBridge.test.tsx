@@ -23,7 +23,7 @@ describe('iframe 桥接方法透传（审查问题 1 回归）', () => {
     expect(normalizeBridgeMethod('storage.set')).toBe('storage.set');
     expect(normalizeBridgeMethod('session.getMessages')).toBe('session.getMessages');
     expect(normalizeBridgeMethod('plugin.getConfig')).toBe('plugin.getConfig');
-    expect(normalizeBridgeMethod('interaction.submit')).toBe('interaction.submit');
+    expect(normalizeBridgeMethod('tool.resolve')).toBe('tool.resolve');
   });
 
   it('旧协议裸方法名补 plugin. 前缀（v1 设置页兼容）', () => {

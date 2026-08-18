@@ -415,15 +415,14 @@ pub fn is_allowed_command(cmd: &str) -> bool {
 
 /// 命令校验结果。
 ///
-/// 白名单机制不做硬性拦截——白名单外的命令不再直接拒绝，而是返回
-/// [`CommandValidation::NeedsApproval`]，由上层 PermissionGate 审批网关决定
-/// 是否放行（Supervised 模式下走用户审批）。硬性拒绝（forbidden tokens、
-/// 路径越界、shell 形式不合法）仍通过 `Err` 返回。
+/// 白名单机制不做硬性拦截——白名单外的命令返回
+/// [`CommandValidation::NeedsApproval`] 作为风险信息。硬性拒绝（forbidden
+/// tokens、路径越界、shell 形式不合法）仍通过 `Err` 返回。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandValidation {
     /// 命令在内置白名单或用户扩展白名单内，校验通过。
     Allowed,
-    /// 命令不在白名单内，但未命中硬性拒绝条件，需走审批流程。
+    /// 命令不在白名单内，但未命中硬性拒绝条件。
     NeedsApproval { cmd: String },
 }
 

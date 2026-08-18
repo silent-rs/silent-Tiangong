@@ -1,8 +1,7 @@
 //! 能力接缝（Capability Seam）注册骨架。
 //!
-//! Seam 是「宿主向插件开放的一类扩展点」的契约集合（工具、提示词、UI、审批、
-//! 交互、事件、存储等）。Seam Hub 登记各插件在某类 Seam 上的注册项，为后续
-//! 审批/交互路由（设计文档 7.5/7.6）提供统一的注册与查询入口。
+//! Seam 是「宿主向插件开放的一类扩展点」的契约集合。Seam Hub 登记各插件
+//! 在某类 Seam 上的注册项，为通用能力提供统一的注册与查询入口。
 //!
 //! 本模块只登记「谁注册了什么能力」，不感知具体插件业务、不解析业务负载。
 
@@ -20,10 +19,6 @@ pub enum SeamKind {
     Lifecycle,
     /// UI：贡献界面到挂载点。
     Ui,
-    /// 审批：拦截需人确认的操作。
-    Approval,
-    /// 交互：Agent 需要用户选择/填写。
-    Interaction,
     /// 事件：订阅宿主事件流。
     Event,
     /// 存储：数据目录与 sidecar。
@@ -79,7 +74,7 @@ impl SeamHub {
     /// 把一条请求路由到该接缝的处理器。
     ///
     /// 接口契约：`payload` 为不透明序列化负载（宿主不解析），返回处理结果。
-    /// 当前为占位实现，具体路由策略在审批/交互接缝任务中落地。
+    /// 当前为占位实现，具体路由策略按通用能力逐步接入。
     pub fn route(&self, kind: SeamKind, payload: &str) -> anyhow::Result<String> {
         let _ = payload;
         anyhow::bail!("接缝 {:?} 的路由尚未实现：当前版本仅提供注册与查询", kind)
@@ -98,9 +93,9 @@ mod tests {
     fn register_lookup_往返一致() {
         let mut hub = SeamHub::new();
         hub.register(SeamRegistration {
-            kind: SeamKind::Approval,
-            plugin_id: "com.example.auditor".to_string(),
-            key: "approval-handler".to_string(),
+            kind: SeamKind::Tool,
+            plugin_id: "com.example.tools".to_string(),
+            key: "example-tool".to_string(),
         });
         hub.register(SeamRegistration {
             kind: SeamKind::Ui,
@@ -108,11 +103,9 @@ mod tests {
             key: "board-tab".to_string(),
         });
 
-        let approvals = hub.lookup(SeamKind::Approval);
-        assert_eq!(approvals.len(), 1);
-        assert_eq!(approvals[0].plugin_id, "com.example.auditor");
-
-        assert!(hub.lookup(SeamKind::Interaction).is_empty());
+        let tools = hub.lookup(SeamKind::Tool);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].plugin_id, "com.example.tools");
     }
 
     #[test]
@@ -142,15 +135,15 @@ mod tests {
     #[test]
     fn route_占位返回未实现() {
         let hub = SeamHub::new();
-        let error = hub.route(SeamKind::Approval, "{}").unwrap_err();
+        let error = hub.route(SeamKind::Tool, "{}").unwrap_err();
         assert!(error.to_string().contains("尚未实现"));
     }
 
     #[test]
     fn seam_kind_序列化为_snake_case() {
         assert_eq!(
-            serde_json::to_string(&SeamKind::Interaction).unwrap(),
-            "\"interaction\""
+            serde_json::to_string(&SeamKind::Event).unwrap(),
+            "\"event\""
         );
         let parsed: SeamKind = serde_json::from_str("\"tool\"").unwrap();
         assert_eq!(parsed, SeamKind::Tool);

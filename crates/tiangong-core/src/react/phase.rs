@@ -1,7 +1,7 @@
 //! 执行阶段数据与执行预算（任务 03）。
 //!
-//! 阶段数据类型集中于此，供 execute.rs 及后续拆分的兄弟模块（模型/工具/审批/
-//! 压缩驱动）统一使用。所有权模式（take/install）与取消方式已由任务 02 原型验证，
+//! 阶段数据类型集中于此，供 execute.rs 及后续拆分的兄弟模块统一使用。
+//! 所有权模式（take/install）与取消方式已由任务 02 原型验证，
 //! 结论见 design.md 3.1；任务 04 起在此数据模型上接入正式 `ExecutionPhase` 驱动。
 
 use std::collections::{HashSet, VecDeque};
@@ -19,8 +19,6 @@ use crate::stream_throttle::ThrottledStreamSink;
 /// Ready 阶段（NeedModel / PendingFinish）由驱动同步推进；
 /// Waiting 阶段持有活动资源并进入事件等待。
 ///
-/// 工具/审批/压缩变体均为正式阶段：批次、任务集合、审批与批次同体持有；
-/// 压缩的续接去向由 `CompressionContinuation` 完整表达（任务 06）。
 /// 任务 15 起不再有独立完成度检查（Summary）或强制最终回复阶段：模型无工具
 /// 调用的响应只形成候选完成，由 `contract::TaskContract` 同步门控（ALR-003）。
 pub(super) enum ExecutionPhase {

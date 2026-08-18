@@ -898,7 +898,7 @@ export function MessageList() {
               )}
 
               {/* 无流式但有思考中 */}
-              {!streamingGroup && isThinking && runStatus !== "waiting_approval" && (
+              {!streamingGroup && isThinking && (
                 isContextCompressing ||
                 (!streamingMessageId && !streamingContent &&
                   !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))

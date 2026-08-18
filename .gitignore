@@ -5,7 +5,7 @@ output/
 openspec
 .claude
 .tmp/
-frontend/dist
+dist/
 *.tsbuildinfo
 .env
 .env.local

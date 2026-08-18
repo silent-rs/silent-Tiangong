@@ -128,15 +128,6 @@ pub struct Session {
     storage_root: Option<PathBuf>,
 }
 
-/// 待审批请求记录（存储在独立的 approval_store 中）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingApproval {
-    pub request_id: String,
-    pub tool_name: String,
-    pub tool_args_summary: String,
-    pub created_at: String,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionTaskStatus {
@@ -147,8 +138,6 @@ pub enum SessionTaskStatus {
     Executing,
     /// 阻塞（等待外部依赖）
     Blocked,
-    /// 等待用户审批
-    WaitingApproval,
     /// 后台运行
     Backgrounded,
     Completed,

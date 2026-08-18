@@ -34,7 +34,7 @@
 
 2. **原生能力硬编码**：浏览器、终端等内建能力通过 `plugin:browser|...`、`plugin:terminal|...` 这类硬编码 Tauri 命令调用，前端也有对应的 `BrowserTabContent`、`TerminalTabContent` 专用组件。每加一种「面板类」能力都要同时改后端命令和前端组件，无法复用。
 
-3. **交互类能力尚未完成统一**：操作审核（审批）、Agent 需要用户选择/填写等「需要人参与」的流程，目前分别由工具流水线等待和交互命令处理，缺少统一的 UI 承载和扩展点。这里的“统一”指统一插件接缝与用户响应契约，不表示 Core 存在常驻统一命令通道。
+3. **交互类能力原先割裂**：操作审核（审批）、Agent 需要用户选择/填写等「需要人参与」的流程曾分别由工具流水线和交互命令处理。当前方案统一为 Desktop TypeScript 插件声明的 `request_user` 工具。
 
 4. **三方开发门槛高**：WASM 插件要求开发者掌握 Rust + `wasm32-wasip2` + WIT 绑定，且 UI 只能写裸 HTML 字符串。这与大多数「想给天工加个面板/按钮/表单」的三方开发者技能栈（JS/TS + 前端框架）不匹配。
 
@@ -44,7 +44,7 @@
 
 1. **统一插件形态**：用一个 manifest + 一套贡献协议表达所有扩展能力，原生能力与三方能力同构。
 2. **UI 挂载到主界面**：插件可声明挂载到会话区、拓展区、侧边栏、状态栏等 DOM 锚点，而不仅限于设置页。
-3. **内置能力插件化**：嵌入式浏览器、嵌入式终端、Agent Team、操作审核、用户交互、三方 App 拓展全部改写为插件。
+3. **内置能力插件化**：嵌入式浏览器、嵌入式终端、Agent Team、用户征询、三方 App 拓展全部改写为插件。
 4. **三方开发友好**：提供 SDK、脚手架、类型定义、调试与分发工具，支持 JS/TS 编写 UI 与逻辑。
 5. **可平滑演进**：新增能力 = 新增接缝，不破坏既有插件；现有 WASM 插件可平滑升级。
 
@@ -86,8 +86,7 @@ DeepSeek Harness 的核心启示是「**Everything is a Plugin**」：模型适�
 │  │    ├─ 工具贡献（Tool）                                     │
 │  │    ├─ 提示词贡献（Prompt）                                 │
 │  │    ├─ 生命周期钩子（Lifecycle）                            │
-│  │    ├─ 审批处理（Approval）                                 │
-│  │    └─ 交互处理（Interaction）                              │
+│  ├─ Desktop TS 工具              工具逻辑 + 用户征询 UI        │
 │  ├─ UI 贡献                     HTML/CSS/JS 资源 + Slot 声明   │
 │  │    ├─ 会话区（session.*）                                  │
 │  │    ├─ 拓展区（extension.*）                                │
@@ -116,8 +115,7 @@ DeepSeek Harness 的核心启示是「**Everything is a Plugin**」：模型适�
 | 提示词（Prompt） | 向 system prompt 注入段落 | 记忆、技能等插件 | ✅ |
 | 生命周期（Lifecycle） | 会话/轮次钩子 | Memory 反刍 | ✅ |
 | UI（UI） | 贡献界面到挂载点 | 浏览器/终端/设置 | ✅（本文核心） |
-| 审批（Approval） | 拦截需人确认的操作 | 默认审批 UI 插件 | ✅ |
-| 交互（Interaction） | Agent 需要用户选择/填写 | 默认表单 UI 插件 | ✅ |
+| Desktop TS 工具 | Desktop 端纯 TS 工具与用户征询 | `interaction-handler` | ✅ |
 | 事件（Event） | 订阅宿主事件流 | 无默认 | ✅ |
 | 存储（Storage） | 数据目录与 sidecar | 无默认 | ✅ |
 
@@ -136,7 +134,7 @@ UI Seam 的关键是**挂载点（Slot）**：主应用 React 树中预留的稳
 宿主桥接层（Host Bridge）
    │  鉴权 + 白名单校验 + 序列化 + 事件路由
    ▼
-逻辑运行时（WASM） / 内置服务（Core、审批、事件总线）
+逻辑运行时（WASM） / Desktop TS 工具 / 内置服务
 ```
 
 ### 4.4 整体数据流
@@ -149,7 +147,7 @@ UI Seam 的关键是**挂载点（Slot）**：主应用 React 树中预留的稳
        │ bridge.call                            │ 路由
        ▼                                        ▼
 ┌──────────────┐                        ┌──────────────────┐
-│ 宿主桥接层    │ ◀──── 事件 / 审批 ────▶│  天工 Core / 服务  │
+│ 宿主桥接层    │ ◀──── 调用 / 事件 ────▶│  天工 Core / 服务  │
 └──────┬───────┘                        └──────────────────┘
        │ 渲染
        ▼
@@ -179,8 +177,7 @@ UI Seam 的关键是**挂载点（Slot）**：主应用 React 树中预留的稳
     "tools": true,            // 实现工具接缝（WASM 内 tool-specs/handle-tool）
     "prompt": true,           // 实现提示词接缝
     "lifecycle": true,        // 实现生命周期接缝
-    "approval": false,        // 是否参与审批接缝
-    "interaction": true,      // 是否处理交互接缝（表单/选择/填写）
+    "interaction": false,     // 是否贡献用户交互界面
     "events": ["session.*", "tool.*"]  // 订阅的事件命名空间
   },
 
@@ -212,9 +209,7 @@ UI Seam 的关键是**挂载点（Slot）**：主应用 React 树中预留的稳
     "ui.shadow",            // 允许 Shadow DOM 挂载
     "bridge.call",          // 允许调用宿主桥接
     "bridge.events",        // 允许订阅事件
-    "storage.private",      // 私有数据目录
-    "approval.handle",      // 参与审批处理
-    "interaction.handle"    // 参与交互处理
+    "storage.private"       // 私有数据目录
   ]
 }
 ```
@@ -225,7 +220,7 @@ UI Seam 的关键是**挂载点（Slot）**：主应用 React 树中预留的稳
 - `ui.sandbox = native` 仅对携带有效官方签名的插件开放（等价现有 sidecar 签名约束）。
 - `ui.contributions[].slot` 必须是宿主登记的合法 Slot ID，未知 Slot 在导入时拒绝并提示版本不匹配。
 - `ui.contributions[].open_mode` 仅对 `extension.tab` 生效：`singleton` 表示该 App 全局至多一个 tab（重复打开聚焦已有实例），`multi` 表示每次打开新建 tab；缺省为 `singleton`。
-- `permissions` 中敏感项（`approval.handle`、`interaction.handle`、`storage.app`、`native`）不接受仅靠修改 manifest 自授，需官方签名或用户显式授权。
+- `permissions` 中敏感项（`storage.app`、`native`）需显式授权。
 
 ---
 
@@ -350,12 +345,10 @@ interface HostBridge {
 | --- | --- | --- |
 | `plugin.*` | 转发到本插件 WASM 逻辑层（等价现有 `handle-view-message`） | `bridge.call` |
 | `session.*` | 读取/操作当前会话（读消息、发消息、切换会话） | `session.read` / `session.write` |
-| `tool.*` | 主动触发工具、读取工具执行结果 | `tool.read` / `tool.invoke` |
-| `approval.*` | 响应审批、查询审批状态 | `approval.handle` |
-| `interaction.*` | 发起/响应交互请求 | `interaction.handle` |
+| `tool.*` | Desktop TS 工具调用、结果提交与事件 | `tool.provide` 等 |
 | `storage.*` | 读写插件私有数据 | `storage.private` |
 
-事件（`bridge.on`）命名空间与事件接缝一致（见 7.7）：`session.*`、`tool.*`、`approval.*`、`lifecycle.*`。
+事件（`bridge.on`）命名空间与事件接缝一致（见 7.7）：`session.*`、`tool.*`、`lifecycle.*`。
 
 ### 6.4 主题与设计 Token
 
@@ -471,10 +464,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 
 ### 7.1 工具接缝（Tool）
 
-沿用现有 `plugin.wit` 的 `tool-specs` / `handle-tool`，语义不变。新增两点：
-
-- **工具级元数据**：`tool-spec` 增加可选 `category`、`dangerous`（是否触发审批）、`interaction`（是否可能触发交互接缝）字段，供 UI 摘要分类与审批路由使用。
-- **工具结果结构化**：`tool-result` 增加可选 `ui-hint`（如 `render: "card" | "terminal" | "diff"`），提示前端如何渲染结果，为会话区插件的富渲染留钩子。
+沿用现有 `plugin.wit` 的 `tool-specs` / `handle-tool`，语义不变。本阶段不为审批征询扩展 WIT 接口或工具元数据。
 
 ### 7.2 提示词接缝（Prompt）
 
@@ -492,56 +482,38 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 - **资源获取**：宿主按需调用 `open-view(contribution-id)` 取入口 HTML、`get-view-resource(path)` 取 CSS/JS/图片（沿用现有 WASM 接口并扩展为支持多 Slot）。
 - **通信**：宿主桥接 `bridge.call` / `bridge.on`（见 6.3）。
 
-### 7.5 审批接缝（Approval）
+### 7.5 Desktop TypeScript 工具桥
 
-**目标**：把「操作审核」从 Core 的硬编码状态中抽离，成为可插拔、可替换、可自定义 UI 的接缝。
+Desktop 纯 TypeScript 插件可直接在 schema v2 manifest 中声明 `tools` 与 `prompt`，
+不包含 WASM，也不扩展 `plugin.wit`。宿主把工具注册到现有 Core 工具流水线，
+并使用以下中立协议把调用交给插件页面：
 
-**现状问题**：审批目前由工具流水线阻塞等待活动 turn 的命令响应，审批 UI 与审批策略仍与核心执行路径耦合，三方既无法自定义审批界面，也无法新增「需要人确认」的自定义操作。
+1. `tool.requested` 提供权威 `invocation_id`、会话、工具调用 ID、工具名、参数和创建时间。
+2. 插件通过 `tool.resolve` 提交完整 Tool Result，可标记 `answered`、`expired` 或 `cancelled`。
+3. `tool.closed` 通知最终闭合状态；错插件、迟到和重复提交均被宿主拒绝。
+4. 插件禁用、卸载、页面销毁或 turn 取消时，宿主取消仍在等待的调用。
 
-**契约设计**：
+该桥只透传工具名、参数和结果，不识别具体插件、工具或业务类型。
 
-1. **审批请求（Approval Request）**：任何需要人确认的操作（工具执行、插件自定义操作、agent 拟执行的高危动作）产生一条 `ApprovalRequest`，字段：`request_id`、`plugin_id`、`tool_name`、`summary`、`arguments`、`risk`（safe/standard/elevated/critical）、`options`（允许/拒绝/始终允许/带修改执行）。
+### 7.6 审批与用户征询插件
 
-2. **路由（Routing）**：审批请求进入**审批路由表**。默认路由到官方「审批 UI 插件」（`sandbox: "native"` 或 `shadow`，渲染确认对话框）。三方插件可声明 `capabilities.approval = true` 并注册为「审批处理器」，接管某类风险级别或某类工具的审批展示（例如企业插件自定义审批流）。
+默认 `plugins/interaction-handler` 在上述通用工具桥上声明 `request_user`，并独立实现
+approval、confirm、choice、multi_choice、input、form 六类参数解析、界面和结果。
+插件按调用创建时间独立执行 15 秒用户时限，宿主只保留 20 秒通用工具执行上限。
 
-3. **响应（Response）**：处理器经桥接 `approval.*` 返回 `approved / rejected / always-allow / modified`，Core 按结果继续或中止，并保证超时默认拒绝（fail-closed）。
-
-4. **可逆注册**：处理器按优先级/作用域注册，卸载时回滚到默认处理器。
-
-**内置迁移**：审批请求的生成、展示与响应逐步收敛到审批接缝；是否复用用户消息与引导处理路径，需按当前 `TiangongCore::deliver`、`start_user_turn` 和活动 turn 命令处理继续细化。本节不引入常驻 Driver、Agent Inbox 或新的统一命令循环。
-
-### 7.6 交互接缝（Interaction）
-
-**目标**：把「agent 需要用户选择、填写」这类**请求用户输入**的能力统一为一套可扩展契约，替代散落的命令行提示、弹窗等。
-
-**典型场景**：
-
-- agent 需要用户在几个候选中选择一个（如「用哪个分支」「选哪个文件」）；
-- agent 需要用户填写表单（如「请输入 API Key」「确认发布信息」）；
-- agent 需要用户确认/补充参数（如「确认是否执行删除」）；
-- 工具执行中途需要额外输入（多步向导）。
-
-**契约设计**：
-
-1. **交互请求（Interaction Request）**：`{ interaction_id, plugin_id, kind: "choice" | "form" | "confirm", title, schema, timeout_ms }`。`schema` 是结构化表单描述（JSON Schema 子集），宿主据此渲染或转交处理器。
-
-2. **路由**：与审批类似，默认官方「交互 UI 插件」渲染（下拉/表单/确认框）。三方可注册自定义处理器接管特定 `kind` 或特定插件发起的交互。
-
-3. **响应**：处理器返回 `{ interaction_id, result }`，经桥接回传给发起方（工具/agent）。支持超时与取消。
-
-4. **与工具的联动**：工具接缝的 `tool-result` 可返回「等待交互」信号（而非终止），由交互接缝挂起该工具调用、渲染表单、拿到结果后恢复。这是「agent 需要用户填写」的机制落点。
-
-**内置迁移**：现有 CLI/桌面的「用户确认」路径统一走交互接缝；`mentionBlocks`、快捷选择等前端交互可逐步接入。
+审批结果是插件收集后返回给 Agent 的普通工具结果。Agent 自行决定后续步骤；Core
+和公共运行时不解释决定、不放行工具，也不保存征询时限、挑战或授权。完整契约见
+`docs/plugin-harness/interaction-model-redesign.md`。
 
 ### 7.7 事件接缝（Event）
 
 **目标**：让插件订阅宿主事件流，从「被动响应生命周期」升级为「主动感知宿主状态」。
 
-**现状**：插件只有 `feedback.emit-stream-event`（单向输出）和有限生命周期回调，无法订阅会话更新、工具执行、审批等事件。
+**现状**：插件只有 `feedback.emit-stream-event`（单向输出）和有限生命周期回调，无法订阅会话和工具执行等事件。
 
 **契约设计**：
 
-- 宿主定义**事件命名空间**：`session.*`（会话创建/更新/标题/消息）、`tool.*`（工具开始/结束/结果）、`approval.*`（审批请求/响应）、`lifecycle.*`（轮次/会话钩子）、`config.*`（配置变更）。
+- 宿主定义**事件命名空间**：`session.*`（会话创建/更新/标题/消息）、`tool.*`（工具调用与结果）、`lifecycle.*`（轮次/会话钩子）、`config.*`（配置变更）。
 - 插件在 manifest `capabilities.events` 声明订阅的命名空间（最小授权）。
 - 运行时经桥接 `bridge.on(channel, handler)` 订阅，宿主按命名空间路由推送，插件卸载自动退订。
 
@@ -594,23 +566,17 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 
 ### 8.4 操作审核（Approval）
 
-现状：工具流水线在活动 turn 内等待审批响应，前端提供内置审批界面。
+当前实现：Agent 在需要用户意见时调用 `request_user(kind=approval)`，Desktop
+`interaction-handler` 插件显示操作框，并在 15 秒内返回普通工具结果。
 
-迁移：
-
-- 默认审批 UI 改写为官方「审批」插件（`global.*` 或会话区容器 + 审批接缝处理器）。
-- Core 保留最终权限判断与 fail-closed 策略；请求展示、响应收集和路由策略移到审批接缝（见 7.5），具体消息衔接按当前用户输入与引导路径继续设计。
-- 迁移后，三方可替换审批界面（如企业级多级审批），或为特定工具注册专用审批流。
+- 用户选择只作为 Tool Result 返回 Agent，由 Agent 决定后续步骤。
+- Core 和公共运行时不维护审批计时、挑战、授权或放行状态。
+- 三方可用相同的 TS 工具协议替换交互处理器界面和结果表达。
 
 ### 8.5 用户交互（选择 / 填写）
 
-现状：散落的弹窗、命令行提示、输入补全等，无统一抽象。
-
-迁移：
-
-- 官方「交互」插件默认渲染 choice/form/confirm 三类交互（交互接缝，见 7.6）。
-- Agent 或工具发出的「等待用户输入」请求经交互接缝发布；响应如何回到 Agent，优先评估复用当前用户消息与引导处理路径。
-- 迁移后，三方可为特定交互注册自定义 UI，或在自有工具中复用标准交互能力。
+`request_user` 同时支持 confirm、choice、multi_choice、input 和 form。插件负责参数
+解析、界面、15 秒时限及结果生成；Agent 通过普通 Tool Result 取得用户输入。
 
 ### 8.6 三方 App 拓展（Third-party App Extension）
 
@@ -682,11 +648,11 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 安全分层沿用现有「签名 + 权限声明 + 运行时中立」体系，按新形态扩展：
 
 1. **沙箱分级**：`shadow` / `iframe` / `native` 三级（见 6.2）。三方默认 `shadow`，可用 `iframe` 自降为强隔离；`native` 需官方签名。
-2. **最小权限**：`permissions` 逐项声明，导入时校验；敏感项（审批处理、交互处理、共享存储、原生容器、sidecar）不接受仅靠 manifest 自授。
+2. **最小权限**：`permissions` 逐项声明，导入时校验；敏感项（共享存储、原生容器、sidecar）不接受仅靠 manifest 自授。
 3. **桥接白名单**：`bridge.call` 的 method 按权限命名空间放行，未知 method 拒绝并记录；`bridge.on` 的事件按 manifest `capabilities.events` 放行。
 4. **CSP 与资源约束**：Shadow/iframe 容器施加 CSP；插件资源经 `get-view-resource` 按白名单路径读取，禁止任意本地/网络资源加载（需 `network.*` 权限）。
-5. **审批 fail-closed**：审批/交互请求超时默认拒绝，避免沙箱卡死阻塞 agent。
-6. **可逆卸载**：插件卸载/禁用时撤销全部注册（Slot、审批处理器、事件订阅、sidecar 进程），不残留 UI 与状态。
+5. **插件时限**：交互处理器自行在 15 秒后返回超时结果；宿主 20 秒通用上限只处理插件崩溃或失联。
+6. **可逆卸载**：插件卸载/禁用时撤销全部注册（Slot、工具、事件订阅、sidecar 进程），不残留 UI 与状态。
 7. **宿主中性**：`tiangong-plugin-runtime` 不感知具体插件业务，仅转发不透明负载；UI 桥接同样只做鉴权与透传，不解析业务 JSON。
 
 ---
@@ -704,7 +670,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 1. **阶段 0：接缝地基**。在 Runtime/前端建立 Slot Registry、Seam Hub、Host Bridge 基础协议；`settings.plugin-page` 作为第一个 Slot 落地，验证「旧插件经新桥接渲染设置页」。
 2. **阶段 1：UI 接缝与能力矩阵**。开放 `extension.tab`、`session.*` 等 Slot；实现 Shadow/iframe 容器与桥接白名单；收敛顶部入口为「拓展区」按钮，落地 App 矩阵、启动台按钮与 singleton/multi 打开。
 3. **阶段 2：内置插件化**。浏览器、终端迁移为官方 `extension.tab` 插件；Agent Team 迁移为官方面板插件。
-4. **阶段 3：交互类接缝**。审批接缝、交互接缝落地，替换内置审批/表单；默认审批与交互 UI 插件化。
+4. **阶段 3：用户征询插件**。以 Desktop TS `request_user` 工具替换内置审批与表单路径。
 5. **阶段 4：三方体验**。SDK、脚手架、UI Kit、示例、市场展示能力/权限；开放 App 形态。
 
 每阶段产出可独立交付、可回滚，且不破坏上一阶段插件。
@@ -730,7 +696,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 
 - **不引入 Cordis / 不在天工内复刻 Cordis**：仅借鉴其插件组织思想。
 - **不实现通用插件市场平台**：短期沿用现有 OSS 静态目录分发，仅增强目录项的能力/权限展示。
-- **不在本次重写 Core 的 Agent Loop**：审批/交互接缝只替换 UI 与路由策略，Core 状态机与工具流水线主体保留。
+- **不在本次重写 Core 的 Agent Loop**：`request_user` 作为普通插件工具接入现有工具流水线。
 - **不追求跨语言逻辑运行时**：逻辑层仍以 WASM Component 为统一契约；JS 逻辑层属可选增强，不替代 WASM。
 - **不做任意网页内嵌浏览器的通用沙箱**：iframe/WebView 容器的安全边界沿用现有浏览器插件策略，不新增通用站点沙箱承诺。
 
@@ -744,7 +710,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 | M1 | UI 接缝：Shadow/iframe 容器 + `extension.tab`/`session.*` 开放 | 三方示例插件可挂载拓展区 tab 与会话区节点 |
 | M2 | 拓展区能力矩阵：顶部入口收敛为「拓展区」按钮 + App 矩阵 + 启动台 + singleton/multi 打开 | 终端/浏览器作为 App 在矩阵中打开，单例/多实例切换正确 |
 | M3 | 内置插件化：浏览器/终端/Agent Team 迁移为官方插件 | 三个能力以插件形态运行，行为不劣于现状 |
-| M4 | 交互接缝：审批 + 交互落地 | 审批/表单可被三方处理，Agent 选择/填写共享插件接缝与用户响应契约 |
+| M4 | 用户征询插件：审批 + 交互落地 | 审批/表单由 Desktop TS 插件处理，结果作为普通 Tool Result 返回 Agent |
 | M5 | 三方体验：SDK/脚手架/UI Kit/示例/市场展示 | 开发者用脚手架可完成「面板 + 工具 + 审批」全链路插件 |
 
 ---
@@ -755,7 +721,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 
 | 现有 WIT 接口 | 新归属 |
 | --- | --- |
-| `describe` / `tool-specs` / `handle-tool` | 工具接缝（不变，扩展 tool-spec/tool-result 元数据） |
+| `describe` / `tool-specs` / `handle-tool` | 工具接缝（不变） |
 | `prompt-sections` | 提示词接缝（不变） |
 | `set-workspace` / `on-config-updated` / `on-session-ready` / `on-turn-*` / `on-session-ended` | 生命周期接缝（不变） |
 | `contributions` / `open-view` / `get-view-resource` / `handle-view-message` | UI 接缝（映射到 Slot + Host Bridge，扩展为多 Slot） |
@@ -763,4 +729,5 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 | `sidecar.invoke` | 存储/原生能力接缝（保留） |
 | `feedback.emit-stream-event` | 事件接缝的「输出」侧（扩展为双向订阅） |
 
-新增 WIT/协议增量集中在：`plugin-ui` 扩展 `contribution` 的 `slot`/`sandbox`/`context`/`open_mode` 字段、审批与交互接口、事件订阅接口。这些作为独立接口新增，不改动现有接口签名，保证旧插件二进制兼容。
+Desktop TS 工具、审批与用户征询不修改 `plugin.wit`。新增声明位于 schema v2
+`plugin.json`，调用通过宿主 `tool.*` 桥完成；现有 WASM 插件接口和二进制保持不变。

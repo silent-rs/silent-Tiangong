@@ -64,8 +64,7 @@ pub trait Plugin:
     /// 之后在其自身的固有方法里读取（例如 `is_full_trust`）。
     ///
     /// 默认实现为空操作——不关心信任模式的插件（`scheduler` / `terminal` / `browser`）
-    /// 无需覆写；这些插件的工具执行仍受 engine 层信任模式审批统一兜底
-    ///（`FullTrust` 放行一切，否则走 turn 层审批流程）。
+    /// 无需覆写。Core 不依据该模式发起用户征询。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
     fn set_trust_mode(&self, _trust: TrustMode) {}

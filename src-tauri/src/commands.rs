@@ -185,41 +185,6 @@ fn show_desktop_notification(
         .map_err(|err| err.to_string())
 }
 
-fn main_window_is_focused(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
-        .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false)
-}
-
-async fn send_approval_notification_if_background(
-    app: AppHandle,
-    session_id: String,
-    request_id: String,
-    kind: String,
-    title: String,
-) {
-    let _ = &title;
-    let is_current_session = app
-        .state::<TiangongApp>()
-        .with_state_read(|state| Ok(state.active_session_id.as_str() == session_id))
-        .await
-        .unwrap_or(false);
-    if is_current_session && main_window_is_focused(&app) {
-        return;
-    }
-
-    let permission = app.notification().request_permission();
-    if !matches!(permission, Ok(PermissionState::Granted)) {
-        return;
-    }
-
-    let title = "天工 - 需要审批".to_string();
-    let body = format!("[{kind}] {title}");
-
-    let _ = request_id;
-    let _ = show_desktop_notification(&app, title, body, "tiangong-approval-requests");
-}
-
 fn parse_model_capability(
     capability: &str,
 ) -> Result<tiangong_llm::models_config::ModelCapability, String> {
@@ -1050,58 +1015,6 @@ pub(crate) fn start_stream_consumer(
                 }));
             }
 
-            if let StreamEvent::InteractionRequested {
-                request_id,
-                kind,
-                title,
-                session_id: request_session_id,
-                tool_call_id,
-                description,
-                payload,
-                created_at,
-                deadline,
-            } = &event
-            {
-                let plugin_request = tiangong_plugin_runtime::InteractionRequest {
-                    request_id: request_id.clone(),
-                    session_id: request_session_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                    kind: serde_json::from_value(serde_json::Value::String(kind.clone()))
-                        .expect("Core 只产生已登记的交互类型"),
-                    title: title.clone(),
-                    description: description.clone(),
-                    payload: payload.clone(),
-                    created_at: created_at.clone(),
-                    deadline: deadline.clone(),
-                };
-                if let Ok(payload) = serde_json::to_string(&plugin_request) {
-                    tiangong_plugin_runtime::bridge_emit("interaction.requested", &payload);
-                }
-                rt.block_on(send_approval_notification_if_background(
-                    app.clone(),
-                    sid.clone(),
-                    request_id.clone(),
-                    kind.clone(),
-                    title.clone(),
-                ));
-            }
-
-            if let StreamEvent::InteractionClosed { request_id, status } = &event {
-                if let Some(request) = tiangong_core::shared_runtime::interactions()
-                    .registry
-                    .query(request_id)
-                {
-                    let closed = tiangong_plugin_runtime::InteractionClosed {
-                        request_id: request_id.clone(),
-                        session_id: request.session_id,
-                        status: status.clone(),
-                    };
-                    if let Ok(payload) = serde_json::to_string(&closed) {
-                        tiangong_plugin_runtime::bridge_emit("interaction.closed", &payload);
-                    }
-                }
-            }
-
             if is_done || is_error {
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
@@ -1477,30 +1390,6 @@ pub async fn append_message(
     )
     .await?;
     Ok(true)
-}
-
-/// 响应交互请求（request_user 审批/确认/选择/输入），resultJson 为用户响应 JSON。
-/// 保留给非插件宿主/兼容调用；桌面默认界面使用 interaction.resolve Bridge。
-#[tauri::command]
-pub async fn resolve_interaction(
-    request_id: String,
-    result_json: String,
-    state: State<'_, TiangongApp>,
-) -> Result<bool, String> {
-    let session_id = tiangong_core::shared_runtime::interactions()
-        .registry
-        .pending_session_id(&request_id)
-        .ok_or_else(|| "交互请求不存在、已闭合或已过期".to_string())?;
-    let delivered = state.inner().core_manager.resolve_interaction_to_core(
-        &session_id,
-        request_id,
-        result_json,
-    );
-    if delivered {
-        Ok(true)
-    } else {
-        Err("交互请求所属会话当前不可响应".to_string())
-    }
 }
 
 /// 获取当前信任模式

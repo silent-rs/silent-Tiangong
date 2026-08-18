@@ -53,24 +53,39 @@ interface HostBridge {
 | --- | --- | --- |
 | `plugin.*` | 转发到本插件 WASM 逻辑层 | `bridge.call` |
 | `storage.get/set/delete/list` | 插件私有数据读写 | `storage.private` |
-| `session.*` / `tool.*` / `approval.*` / `interaction.*` | 按宿主版本渐进开放 | 见设计文档 6.3 |
+| `session.*` | 按宿主版本渐进开放 | 见设计文档 6.3 |
+| `tool.resolve` | Desktop TS 插件闭合自己声明的工具调用 | `tool.provide` |
 
 负载均为字符串（JSON 序列化），宿主不做业务解析。
 
-## 交互处理器
+## Desktop TypeScript 工具提供器
 
-声明 `capabilities.interaction=true`、`interaction.handle` 权限、`interaction.*` 事件以及
-`session.interaction` Slot 后，插件可以接管审批与用户征询界面：
+纯 TypeScript 插件在 manifest 声明 `entrypoints: ["desktop"]`、`tools`、
+`capabilities.tools=true`、`tool.provide` 权限和 `tool.*` 事件后，可以接收并闭合
+自己声明的工具调用：
 
 ```ts
-import { createInteractionHandler, createTiangongBridge } from '@tiangong/plugin-sdk';
-const interaction = createInteractionHandler(await createTiangongBridge());
-interaction.onRequested((request) => console.log(request, request.deadline));
-await interaction.resolve(requestId, { decision: 'reject' });
+import { createTiangongBridge, createToolProvider } from '@tiangong/plugin-sdk';
+
+const tools = createToolProvider(await createTiangongBridge());
+tools.onRequested(async (invocation) => {
+  await tools.resolve({
+    invocation_id: invocation.invocation_id,
+    status: 'answered',
+    result: {
+      ok: true,
+      summary: JSON.stringify({ status: 'answered', result: true }),
+      exit_code: 0,
+    },
+  });
+});
+tools.onClosed((closed) => console.log(closed.invocation_id, closed.status));
 ```
 
-默认交互处理器见 `plugins/interaction-handler`（Vue 3 + Vite 工程，含完整六种请求实现）。插件只提交用户选择，宿主保持
-截止时间、唯一闭合、会话路由、审批挑战和授权的最终控制。
+`status` 可为 `answered`、`expired` 或 `cancelled`。宿主保证调用只能闭合一次，
+拒绝错插件、迟到和重复提交，并在插件未响应时按 manifest 的 `timeout_ms` 兜底。
+默认交互处理器见 `plugins/interaction-handler`，它只是在这套通用协议上实现的一个
+Desktop TS 工具插件。
 
 ## 主题
 

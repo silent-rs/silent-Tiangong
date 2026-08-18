@@ -42,15 +42,6 @@ interface SessionViewCache {
   runStatus: string;
   runSummary: string;
   contextManagementPending: boolean;
-  approvalRequestId: string | null;
-  /** 挂起中的交互请求（request_user 阻塞等待）：非空时消息区渲染交互卡片。 */
-  pendingInteraction: {
-    request_id: string;
-    kind: string;
-    title: string;
-    description: string;
-    payload: string;
-  } | null;
   tokenStats: TokenStats | null;
   lastUsage: AppState['lastUsage'];
   lastDurationMs: number | null;
@@ -494,8 +485,6 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     runStatus,
     runSummary: runStatus === 'idle' ? '' : '正在处理',
     contextManagementPending: false,
-    approvalRequestId: null,
-    pendingInteraction: null,
     tokenStats: null,
     lastUsage: null,
     lastDurationMs: null,
@@ -516,8 +505,6 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     runStatus: state.runStatus,
     runSummary: state.runSummary,
     contextManagementPending: false,
-    approvalRequestId: state.approvalRequestId,
-    pendingInteraction: state.pendingInteraction,
     tokenStats: state.tokenStats,
     lastUsage: state.lastUsage,
     lastDurationMs: state.lastDurationMs,
@@ -563,8 +550,6 @@ function applyEventToSessionView(
   let runStatus = current.runStatus;
   let runSummary = current.runSummary;
   let contextManagementPending = current.contextManagementPending;
-  let approvalRequestId = current.approvalRequestId;
-  let pendingInteraction = current.pendingInteraction;
   let tokenStats = current.tokenStats;
   let lastUsage = current.lastUsage;
   let lastDurationMs = current.lastDurationMs;
@@ -591,8 +576,6 @@ function applyEventToSessionView(
       runSummary = '正在处理';
       lastDurationMs = null;
       toolCallStartedAt = {};
-      approvalRequestId = null;
-      pendingInteraction = null;
       currentPlan = undefined;
       break;
     case 'delta':
@@ -647,8 +630,6 @@ function applyEventToSessionView(
       break;
     case 'tool_start':
       runStatus = 'executing';
-      approvalRequestId = null;
-      pendingInteraction = null;
       runSummary = event.args_summary
         ? `正在执行：${event.name || ''} ${event.args_summary}`
         : `正在执行：${event.name || ''}`;
@@ -670,15 +651,6 @@ function applyEventToSessionView(
           total_tokens: tokenStats.total_tokens,
         };
       }
-      break;
-    case 'interaction_requested':
-      runStatus = 'waiting_approval';
-      // 具体界面由 session.interaction 插件通过 interaction.requested 事件渲染。
-      pendingInteraction = null;
-      runSummary = event.title || runSummary;
-      break;
-    case 'interaction_closed':
-      pendingInteraction = null;
       break;
     case 'retry':
       runStatus = 'executing';
@@ -743,8 +715,6 @@ function applyEventToSessionView(
         runStatus = 'idle';
         if (event.action === 'cancelled') runSummary = '';
         contextManagementPending = false;
-        approvalRequestId = null;
-        pendingInteraction = null;
         streamingMessageId = null;
         streamingContent = '';
         streamingReasoningContent = '';
@@ -768,8 +738,6 @@ function applyEventToSessionView(
       runStatus = 'idle';
       runSummary = '';
       contextManagementPending = false;
-      approvalRequestId = null;
-      pendingInteraction = null;
       currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
@@ -786,8 +754,6 @@ function applyEventToSessionView(
       runStatus = 'idle';
       runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
       contextManagementPending = false;
-      approvalRequestId = null;
-      pendingInteraction = null;
       currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
@@ -804,8 +770,6 @@ function applyEventToSessionView(
     runStatus,
     runSummary,
     contextManagementPending,
-    approvalRequestId,
-    pendingInteraction,
     tokenStats,
     lastUsage,
     lastDurationMs,
@@ -850,15 +814,6 @@ export interface AppState {
   toolCallStartedAt: Record<string, number>;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
-  approvalRequestId: string | null;
-  /** 挂起中的交互请求（request_user 阻塞等待）：非空时消息区渲染交互卡片。 */
-  pendingInteraction: {
-    request_id: string;
-    kind: string;
-    title: string;
-    description: string;
-    payload: string;
-  } | null;
   currentPlan: TaskPlan | undefined;
   mcpServers: McpServer[] | null;
 
@@ -975,7 +930,6 @@ export function selectCurrentIsSending(state: AppState): boolean {
 
 export const useStore = create<AppState>((set, get) => ({
   // 初始状态
-  pendingInteraction: null,
   sessions: [],
   activeSessionId: null as string | null,
   newConversationId: null as string | null,
@@ -987,7 +941,6 @@ export const useStore = create<AppState>((set, get) => ({
   toolCallStartedAt: {},
   lastUsage: null,
   tokenStats: null,
-  approvalRequestId: null,
   currentPlan: undefined,
   mcpServers: null,
   isNewConversation: true,
@@ -1231,11 +1184,8 @@ export const useStore = create<AppState>((set, get) => ({
         const knownRunStatus = state.sessionRunStatuses[id];
         cache = {
           ...cache,
-          runStatus: knownRunStatus
-            ? cache.runStatus === 'waiting_approval' ? 'waiting_approval' : knownRunStatus
-            : 'idle',
+          runStatus: knownRunStatus || 'idle',
           runSummary: knownRunStatus ? cache.runSummary || '正在处理' : '',
-          approvalRequestId: knownRunStatus ? cache.approvalRequestId : null,
         };
         sessionViewCaches.set(id, cache);
         const keepsStreamingMessage = !!cache.streamingMessageId
@@ -1259,7 +1209,6 @@ export const useStore = create<AppState>((set, get) => ({
           toolCallStartedAt: cache.toolCallStartedAt,
           lastUsage: cache.lastUsage,
           tokenStats: cache.tokenStats,
-          approvalRequestId: cache.approvalRequestId,
           currentPlan: cache.currentPlan,
           sessionCwd: cache.cwd,
           streamingMessageId: keepsStreamingMessage ? cache.streamingMessageId : null,
@@ -1944,7 +1893,6 @@ export const useStore = create<AppState>((set, get) => ({
         toolCallStartedAt: currentCache.toolCallStartedAt,
         lastUsage: currentCache.lastUsage,
         tokenStats: currentCache.tokenStats,
-        approvalRequestId: currentCache.approvalRequestId,
         streamingMessageId: currentCache.streamingMessageId,
         streamingContent: currentCache.streamingContent,
         streamingReasoningContent: currentCache.streamingReasoningContent,

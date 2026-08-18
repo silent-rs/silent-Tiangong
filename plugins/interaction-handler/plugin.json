@@ -1,17 +1,19 @@
 {
   "schema_version": 2,
   "id": "interaction-handler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entrypoints": [
     "desktop"
   ],
   "permissions": [
-    "interaction.handle"
+    "tool.provide"
   ],
   "capabilities": {
+    "tools": true,
+    "prompt": true,
     "interaction": true,
     "events": [
-      "interaction.*"
+      "tool.*"
     ]
   },
   "ui": {
@@ -48,28 +50,67 @@
             ]
           },
           "title": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "description": {
             "type": "string"
           },
           "options": {
             "type": "array",
-            "items": {},
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
             "description": "choice/multi_choice 的候选项"
           },
           "fields": {
             "type": "array",
-            "items": {},
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "label": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "select"
+                  ]
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "placeholder": {
+                  "type": "string"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "type"
+              ]
+            },
+            "minItems": 1,
             "description": "form 的字段定义"
           },
           "question": {
             "type": "string",
-            "description": "confirm 的问题文案"
-          },
-          "approval_challenge": {
-            "type": "string",
-            "description": "工具返回 approval_required 时的 challenge_id"
+            "description": "approval/confirm/input 的问题文案"
           }
         },
         "required": [
@@ -77,10 +118,10 @@
           "title"
         ]
       },
-      "host_handler": "interaction.request_user"
+      "timeout_ms": 20000
     }
   ],
   "prompt": [
-    "交互工具使用规范：当需要用户审批（工具返回 approval_required 时）、确认、选择或补充信息时，调用 request_user 工具。审批请求必须携带原工具返回的 approval_challenge。request_user 必须独占一个工具调用批次，不要与其他工具同时调用。用户响应（含超时 expired）会作为该工具调用的结果返回，据此决定继续、换路径或放弃。"
+    "交互工具使用规范：当操作需要用户审批时，在执行相关操作之前调用 request_user，并将 kind 设为 approval；需要确认、选择或补充信息时也调用 request_user。choice/multi_choice 必须提供非空 options；form 必须提供 fields。request_user 必须独占一个工具调用批次，不要与其他工具同时调用。插件会在 15 秒内返回用户响应、取消或超时结果；只有 approval 结果明确允许时才继续相关操作。"
   ]
 }

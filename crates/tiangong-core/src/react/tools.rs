@@ -1,11 +1,9 @@
 //! 工具执行流水线（ALR-301/302，任务 17）。
 //!
 //! 模型响应中的工具调用整批交给 [`execute_tool_batch`]：规范化与参数校验
-//! （去重/无效调用上下文）→ 权限判断 → 必要时等待审批 → 有界并行执行 →
-//! 顺序提交结果并更新 [`TaskContract`](super::contract::TaskContract) → 闭合
-//! Provider 工具协议。审批是流水线内部的异步等待，与工具共享同一命令通道：
-//! 取消/引导到达时批次收敛闭合后把命令交还执行驱动，Loop 不再拥有
-//! `PreparingTools` / `WaitingTools` / `WaitingApproval` 顶层阶段。
+//! （去重/无效调用上下文）→ 有界并行执行 → 顺序提交结果并更新
+//! [`TaskContract`](super::contract::TaskContract) → 闭合 Provider 工具协议。
+//! 取消/引导到达时批次收敛闭合后把命令交还执行驱动。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,7 +55,7 @@ pub(super) struct ToolTaskOutput {
     pub(super) duration_ms: u64,
 }
 
-/// 执行一个完整的工具批次（准备 → 审批 → 并行执行 → 收尾）。
+/// 执行一个完整的工具批次（准备 → 并行执行 → 收尾）。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_batch(
     ctx: &mut TurnContext,
@@ -78,7 +76,7 @@ pub(super) async fn execute_tool_batch(
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
 
     'pipeline: loop {
-        // ── 准备：逐个弹出待处理调用（校验/去重/权限分流）──
+        // ── 准备：逐个弹出待处理调用（校验/去重）──
         while let Some((index, call)) = batch.calls.pop_front() {
             match prepare_tool_call(ctx, &call, &mut state.tool_history) {
                 ToolPreflightOutcome::Skip { needs_recovery } => {
@@ -99,72 +97,7 @@ pub(super) async fn execute_tool_batch(
                         args_summary,
                         dedupe_key,
                     };
-                    // 审批挑战驱动（方案 §12/§13；Supervised 即 Always 策略）：
-                    // 无授权的受保护工具不执行，返回 approval_required 挑战，
-                    // 模型据此发起 request_user(approval) 征询用户。
-                    // 宿主服务工具（如 request_user）的执行本身是受控用户交互，放行。
-                    let trust_mode_label = format!("{trust_mode:?}");
-                    let host_service_tool = ctx
-                        .tool_overrides
-                        .get(&tool.call.name)
-                        .is_some_and(|handler| handler.is_host_service_tool());
-                    if *trust_mode == TrustMode::FullTrust || host_service_tool {
-                        ctx.observer.audit_permission(
-                            &ctx.session.id,
-                            &tool.call.name,
-                            "approved",
-                            &trust_mode_label,
-                            (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                        );
-                        batch.ready_tools.push(tool);
-                        continue;
-                    }
-                    let hub = crate::shared_runtime::interactions();
-                    let arguments_hash = tool.call.arguments.to_string();
-                    if hub
-                        .grants
-                        .try_consume(&ctx.session.id, "", &tool.call.name, &arguments_hash)
-                    {
-                        ctx.observer.audit_permission(
-                            &ctx.session.id,
-                            &tool.call.name,
-                            "approved_by_grant",
-                            &trust_mode_label,
-                            (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                        );
-                        batch.ready_tools.push(tool);
-                        continue;
-                    }
-                    let challenge = hub.challenges.create(
-                        &ctx.session.id,
-                        "",
-                        &tool.call.name,
-                        arguments_hash,
-                        tool.args_summary.clone(),
-                    );
-                    ctx.observer.audit_permission(
-                        &ctx.session.id,
-                        &tool.call.name,
-                        "needs_approval",
-                        &trust_mode_label,
-                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                    );
-                    append_tool_result_message(
-                        &mut ctx.session,
-                        &tool.call.id,
-                        &tool.call.name,
-                        challenge.to_tool_payload(),
-                        true,
-                    );
-                    let _ = stream_tx.send(StreamEvent::ToolResult {
-                        name: tool.call.name.clone(),
-                        tool_call_id: Some(tool.call.id.clone()),
-                        ok: false,
-                        output: challenge.to_tool_payload(),
-                        full_output: None,
-                        duration_ms: None,
-                    });
-                    ctx.session.persist_to_disk();
+                    batch.ready_tools.push(tool);
                 }
             }
         }
@@ -334,7 +267,6 @@ fn handle_ambient_command(
         Command::CompressContext | Command::ResetContext => {
             // Driver 在 turn 结束后的空闲边界执行维护命令。
         }
-        // 迟到或不匹配的审批：明确忽略。
         Command::Cancel | Command::Shutdown => {}
         Command::InjectUserMessage { .. } => unreachable!("中断类命令已在上方分流"),
     }

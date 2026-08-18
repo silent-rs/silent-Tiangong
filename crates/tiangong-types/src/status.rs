@@ -10,9 +10,6 @@ pub enum RunStatus {
     Idle,
     Planning,
     Executing,
-    /// 等待用户审批
-    #[serde(alias = "waitingapproval")]
-    WaitingApproval,
     Completed,
     Failed,
 }
@@ -23,7 +20,6 @@ impl RunStatus {
             Self::Idle => "idle",
             Self::Planning => "planning",
             Self::Executing => "executing",
-            Self::WaitingApproval => "waiting_approval",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }

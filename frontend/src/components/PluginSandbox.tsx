@@ -20,9 +20,17 @@ export interface PluginSandboxProps {
   sandbox: SandboxKind;
   html: string;
   className?: string;
+  sessionId?: string | null;
 }
 
-export function PluginSandbox({ sandbox, pluginId, contributionId, html, className }: PluginSandboxProps) {
+export function PluginSandbox({
+  sandbox,
+  pluginId,
+  contributionId,
+  html,
+  className,
+  sessionId,
+}: PluginSandboxProps) {
   if (sandbox === 'shadow') {
     return <ShadowContainer pluginId={pluginId} contributionId={contributionId} html={html} className={className} />;
   }
@@ -33,7 +41,7 @@ export function PluginSandbox({ sandbox, pluginId, contributionId, html, classNa
       </div>
     );
   }
-  return <PluginIframe pluginId={pluginId} html={html} />;
+  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} />;
 }
 
 /** 宿主注入插件脚本的桥接对象（设计文档 6.3 的 Shadow 容器子集）。 */

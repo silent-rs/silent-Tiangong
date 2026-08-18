@@ -45,7 +45,7 @@ pub struct TurnContext {
     pub context_limit: usize,
     /// Agent 配置（reasoning_effort 等）
     pub agent_config: AgentConfig,
-    /// 会话信任模式（FullTrust 放行一切,否则需审批;审批在 turn 层统一完成）
+    /// 会话信任模式（供插件按自身策略使用）。
     pub trust_mode: crate::permission::TrustMode,
     /// 观测器（审计日志写入,持有 storage_root）
     pub observer: crate::observe::Observer,

@@ -1,18 +1,16 @@
 # 插件 Harness 开发进度记录
 
 > 关联：需求 `./requirements.md`、设计 `../plugin-harness-design.md`、任务总览 `./tasks/README.md`
-> 开发分支：`feature/plugin-harness`
+> 开发分支：`fix/interaction-handler-popup`
 
 ## 当前状态
 
-- **阶段**：Harness 主体（T001-T016）完成；交互模型按新方案重做（T017-T019 已交付，
-  T018 采用阻塞模型——按用户纠正，request_user 与 LLM 调用同为 turn task 外部 IO，
-  不做挂起退出/续跑机制）。
-- **当前建议任务**：真实使用冒烟（request_user 全链路 + 示例处理器插件导入）。
+- **阶段**：Desktop 纯 TypeScript 交互处理器已完成自动验证。
+- **当前实现**：`request_user` 的六类语义、界面、结果和 15 秒时限均在
+  `plugins/interaction-handler`；Core 与公共运行时不保存审批挑战或授权，也不解释用户意见。
+- **决策归属**：插件把用户意见作为普通 Tool Result 返回，Agent 自行决定后续步骤。
 - **当前阻塞**：无。
-- **当前阻塞**：无。
-- **当前阻塞**：无。
-- **下一步**：T007 → T008 → T009/T010 串行推进。
+- **下一步**：由用户在 Desktop 中验证实际交互体验。
 
 ## 任务总览表
 
@@ -31,8 +29,8 @@
 | T011 | 浏览器插件化迁移 | M2 | 已完成（形态统一） | feature/plugin-harness | `f3147276` | 见下方验证记录 | 命令通道深度收敛渐进 |
 | T012 | 终端插件化迁移 | M2 | 已完成（形态统一） | feature/plugin-harness | `f3147276` | 见下方验证记录 | 命令通道深度收敛渐进 |
 | T013 | Agent Team 插件化迁移 | M2 | 已完成 | feature/plugin-harness | `f3147276` | 见下方验证记录 | 编排策略仍在 Core |
-| T014 | 审批接缝 | M3 | 已完成 | feature/plugin-harness | `8e92b68d` | 见下方验证记录 | 风险分级策略待工具元数据扩展 |
-| T015 | 交互接缝（选择/填写） | M3 | 已完成 | feature/plugin-harness | `07cddec7` | 见下方验证记录 | 三方交互处理器待插件生态 |
+| T014 | 审批接缝 | M3 | 历史实现，已被 TS 工具方案替代 | feature/plugin-harness | `8e92b68d` | 见下方验证记录 | — |
+| T015 | 交互接缝（选择/填写） | M3 | 历史实现，已被 TS 工具方案替代 | feature/plugin-harness | `07cddec7` | 见下方验证记录 | — |
 | T016 | SDK/脚手架/UI Kit/示例 | M4 | 已完成 | feature/plugin-harness | `d39d3be5` | 见下方验证记录 | UI Kit 组件库按需迭代 |
 
 ## 任务依赖表
@@ -200,9 +198,9 @@
 - 遗留：@tiangong/plugin-ui-kit 组件库按需迭代；npm 发布渠道待定；示例插件的
   GUI 手动冒烟待用户执行。
 
-### 交互模型重做（2026-08-18，T017-T019，方案 `./interaction-model-redesign.md`）
+### 交互模型演进记录（2026-08-18，T017-T020）
 
-按新方案重做审批与交互（替代 T014/T015 实现）：
+以下是已经被当前纯 TS 工具方案替代的历史实现记录：
 - T017 `2b8801f0`：InteractionRegistry（原子闭合/绝对 deadline/竞态唯一赢家）、
   ApprovalGrants（Once 参数绑定/Runtime 跨 turn）、ApprovalChallenges（一次性消费）。
 - T018：request_user 统一工具（六 kind、独占批次、15s fail-closed 超时）、
@@ -222,6 +220,21 @@
   交互处理器插件为正式默认处理器：plugins/interaction-handler（id: interaction-handler，文档路径引导，非示例标记）。
   验收测试补 4 项；Core 102 / runtime 42 / 前端 204 全绿（steering 为 origin 既有 flaky）；
   另修 tiangong-llm 测试构造缺 Message 耗时字段的既有编译失败。
+
+当前收敛结果：
+
+- 删除 Core 内的交互请求管理、审批挑战、授权表和工具放行判断；
+- 删除公共运行时的审批专用桥接，`tool.requested` / `tool.closed` / `tool.resolve`
+  只处理通用 TS 工具调用；
+- `interaction-handler` 独立实现六类参数、界面、15 秒超时和普通 Tool Result；
+- 用户意见返回 Agent，后续是否调用其他工具完全由 Agent 决定。
+
+最终自动验证（2026-08-18）：
+
+- 插件业务单元测试 3 项通过，覆盖 15 秒时限归属、审批普通结果和插件参数校验；
+- 插件类型检查、正式构建与 `release/` 打包通过；
+- Rust 格式、工作区检查、Core/公共运行时检查与测试通过，并覆盖多实例独立退订；
+- 前端构建及 204 项测试通过；Desktop 实际交互按用户要求不做自动冒烟。
 
 ### 代码审查修复（2026-08-18，`5af7faa6`）
 

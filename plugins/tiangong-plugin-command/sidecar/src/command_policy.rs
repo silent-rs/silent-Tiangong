@@ -24,7 +24,7 @@ use tiangong_toolkit as shared;
 pub trait CommandPolicy: Send + Sync {
     /// 校验 run_command（非 shell）：白名单 + 路径越界 + shell 形式。
     /// 仅对硬性拒绝条件（forbidden token、路径越界、shell 形式不合法）报错；
-    /// 白名单外命令返回 Ok（审批由 engine 层接管，与原实现一致）。
+    /// 白名单结果只作为风险信息，不在本策略内触发用户征询。
     fn validate_run_command(
         &self,
         cmd: &str,
@@ -77,8 +77,7 @@ impl CommandPolicy for TrustModeCommandPolicy {
             return Ok(());
         }
         // 复用原进程内 validate_command 包装逻辑：shell 形式走 shell 校验，
-        // 否则走路径越界 + 白名单。白名单外命令返回 NeedsApproval 但不报错
-        //（审批由 engine 层 PermissionGate 接管）。
+        // 否则走路径越界 + 白名单。白名单外命令返回 NeedsApproval 但不报错。
         let _ = validate_command(cmd, args, cwd, &ctx.allowed_commands)?;
         Ok(())
     }

@@ -2,7 +2,7 @@
 //!
 //! 输入经 [`AgentInput::deliver`] 进入：空闲起轮（Core 直接构建 TurnContext 并
 //! spawn turn task）、运行中投通道（命令进入活跃 turn 的命令通道，由 turn 内
-//! 部仲裁：引导/审批/取消）。每个 turn 从最新磁盘 Session 构建上下文（ALR-201/204）。
+//! 部仲裁：引导/取消）。每个 turn 从最新磁盘 Session 构建上下文（ALR-201/204）。
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::sync::Arc;
@@ -377,35 +377,6 @@ impl TiangongCore {
         }
     }
 
-    /// 交互响应入口：先核对请求确实属于当前 Core，再由注册表原子闭合。
-    /// 闭合后由 hub 通知链唤醒等待中的 request_user 工具 Future（标准工具
-    /// 流水线内），闭合事件由等待方经反馈通道发送——无需命令投递。
-    pub fn resolve_interaction(&self, request_id: &str, result_json: String) -> bool {
-        if crate::shared_runtime::interactions()
-            .registry
-            .pending_session_id(request_id)
-            .as_deref()
-            != Some(self.session_id.as_str())
-        {
-            tracing::warn!(request_id, %self.session_id, "交互响应会话归属不匹配");
-            return false;
-        }
-        match crate::shared_runtime::interactions()
-            .registry
-            .respond(request_id, result_json)
-        {
-            crate::interaction::CloseOutcome::Won(_) => true,
-            crate::interaction::CloseOutcome::AlreadyClosed(status) => {
-                tracing::warn!(request_id, ?status, "交互响应迟到，请求已闭合");
-                false
-            }
-            crate::interaction::CloseOutcome::NotFound => {
-                tracing::warn!(request_id, "交互响应目标不存在");
-                false
-            }
-        }
-    }
-
     /// 活动期输入守门：仅当有活跃 turn 时投递其命令通道；空闲时明确拒绝。
     fn deliver_to_turn(
         &self,
@@ -552,9 +523,7 @@ impl TiangongCore {
 
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
-        use crate::agent_input::{
-            AgentInputKind, CommandInput, MessageInput, ResolveInteractionInput,
-        };
+        use crate::agent_input::{AgentInputKind, CommandInput, MessageInput};
 
         match input {
             // 空闲起轮、运行中投通道：运行中的用户消息由活跃 turn 作为引导处理
@@ -586,18 +555,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 },
                 "InjectTool",
             ),
-            AgentInputKind::ResolveInteraction(ResolveInteractionInput::Response {
-                request_id,
-                result_json,
-            }) => {
-                // 响应统一经注册表原子闭合（多界面竞争唯一胜者），胜出后投递
-                // 给阻塞等待中的 turn task。
-                if self.resolve_interaction(&request_id, result_json) {
-                    Ok(())
-                } else {
-                    Err(CoreError::WorkerStopped)
-                }
-            }
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {
                     let _ = crate::shared_runtime::send_command(&self.session_id, Command::Cancel);

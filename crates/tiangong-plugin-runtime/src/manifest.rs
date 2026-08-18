@@ -47,11 +47,10 @@ pub struct PluginManifest {
     /// UI 贡献声明（schema v2 新增）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiManifest>,
-    /// 宿主服务工具声明（schema v2 新增）：spec 归插件，执行经 host_handler
-    /// 白名单路由到宿主服务（声明与执行分离）。
+    /// Desktop 纯 TypeScript 插件声明的工具规格。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<HostToolDecl>>,
-    /// 系统提示注入段落（schema v2 新增）：引导模型使用本插件声明的工具。
+    pub tools: Option<Vec<TsToolDecl>>,
+    /// 系统提示注入段落。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<Vec<String>>,
 }
@@ -69,9 +68,6 @@ pub struct CapabilitiesManifest {
     /// 实现生命周期接缝。
     #[serde(default)]
     pub lifecycle: bool,
-    /// 参与审批接缝。
-    #[serde(default)]
-    pub approval: bool,
     /// 处理交互接缝（表单/选择/填写）。
     #[serde(default)]
     pub interaction: bool,
@@ -80,16 +76,20 @@ pub struct CapabilitiesManifest {
     pub events: Vec<String>,
 }
 
-/// 宿主服务工具声明（manifest v2 的 `tools[]`）。
+fn default_ts_tool_timeout_ms() -> u64 {
+    20_000
+}
+
+/// Desktop 纯 TypeScript 插件工具声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HostToolDecl {
+pub struct TsToolDecl {
     pub name: String,
     pub description: String,
-    /// JSON Schema（必须为 object 形态）。
     pub input_schema: serde_json::Value,
-    /// 宿主服务路由键（白名单校验）。
-    pub host_handler: String,
+    /// 前端插件崩溃或未响应时的宿主兜底上限。
+    #[serde(default = "default_ts_tool_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 /// UI 贡献声明（schema v2 的 `ui` 字段）。
@@ -299,7 +299,7 @@ impl PluginManifest {
             }
         } else {
             self.validate_v2()?;
-            self.validate_host_tools()?;
+            self.validate_ts_tools()?;
         }
         Ok(())
     }
@@ -367,6 +367,93 @@ impl PluginManifest {
         Ok(())
     }
 
+    fn validate_ts_tools(&self) -> Result<()> {
+        let tools = self.tools.as_deref().unwrap_or_default();
+        let prompts = self.prompt.as_deref().unwrap_or_default();
+        if !tools.is_empty() || !prompts.is_empty() {
+            if self.wasm_binary().is_some() {
+                bail!(
+                    "插件 {} 不能同时声明 WASM 与纯 TypeScript tools/prompt",
+                    self.id
+                );
+            }
+            if !self
+                .entrypoints
+                .as_ref()
+                .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
+            {
+                bail!("纯 TypeScript 工具插件 {} 只能声明 desktop 入口", self.id);
+            }
+        }
+        if !tools.is_empty() {
+            if !self.has_permission("tool.provide") {
+                bail!("插件 {} 声明 tools 时必须声明 tool.provide 权限", self.id);
+            }
+            if !self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.tools)
+            {
+                bail!("插件 {} 声明 tools 时必须启用 capabilities.tools", self.id);
+            }
+        }
+
+        let mut names = BTreeSet::new();
+        for tool in tools {
+            if tool.name.trim().is_empty()
+                || !tool
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!(
+                    "插件 {} 工具名 {} 无效（字母数字与 - _）",
+                    self.id,
+                    tool.name
+                );
+            }
+            if !names.insert(tool.name.as_str()) {
+                bail!("插件 {} 包含重复工具名 {}", self.id, tool.name);
+            }
+            if tool
+                .input_schema
+                .get("type")
+                .and_then(|value| value.as_str())
+                != Some("object")
+            {
+                bail!(
+                    "插件 {} 工具 {} 的 input_schema 必须为 object",
+                    self.id,
+                    tool.name
+                );
+            }
+            if !(1_000..=300_000).contains(&tool.timeout_ms) {
+                bail!(
+                    "插件 {} 工具 {} 的 timeout_ms 必须在 1000 到 300000 之间",
+                    self.id,
+                    tool.name
+                );
+            }
+        }
+
+        if !prompts.is_empty() {
+            if !self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.prompt)
+            {
+                bail!(
+                    "插件 {} 声明 prompt 时必须启用 capabilities.prompt",
+                    self.id
+                );
+            }
+            if prompts.iter().any(|section| section.trim().is_empty()) {
+                bail!("插件 {} prompt 段落不能为空", self.id);
+            }
+        }
+        Ok(())
+    }
+
     /// 归一化后的 UI 贡献列表（schema v2）。
     ///
     /// 沙箱级别逐级取值：贡献级 `sandbox` → `ui.sandbox` → `shadow`；
@@ -394,44 +481,6 @@ impl PluginManifest {
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
             })
             .collect()
-    }
-
-    /// 宿主服务工具声明校验：白名单路由、合法工具名、object schema。
-    fn validate_host_tools(&self) -> Result<()> {
-        for tool in self.tools.iter().flatten() {
-            if !matches!(tool.host_handler.as_str(), "interaction.request_user") {
-                bail!(
-                    "插件 {} 工具 {} 的 host_handler {0} 不在宿主白名单（当前仅 interaction.request_user）",
-                    self.id,
-                    tool.name
-                );
-            }
-            if tool.name.trim().is_empty()
-                || !tool
-                    .name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            {
-                bail!(
-                    "插件 {} 工具名 {} 无效（字母数字与 - _）",
-                    self.id,
-                    tool.name
-                );
-            }
-            if tool.input_schema.get("type").and_then(|v| v.as_str()) != Some("object") {
-                bail!(
-                    "插件 {} 工具 {} 的 input_schema 必须为 object 形态",
-                    self.id,
-                    tool.name
-                );
-            }
-        }
-        for section in self.prompt.iter().flatten() {
-            if section.trim().is_empty() {
-                bail!("插件 {} prompt 段落不能为空", self.id);
-            }
-        }
-        Ok(())
     }
 
     /// v2 UI 贡献的 `native` 沙箱仅对携带有效官方签名的插件开放。
@@ -550,7 +599,6 @@ mod tests {
                 "tools": true,
                 "prompt": true,
                 "lifecycle": true,
-                "approval": false,
                 "interaction": true,
                 "events": ["session.*", "tool.*"]
             },
@@ -610,7 +658,6 @@ mod tests {
         let manifest = parse(&v2_json()).expect("v2 应解析通过");
         let capabilities = manifest.capabilities.as_ref().unwrap();
         assert!(capabilities.tools);
-        assert!(!capabilities.approval);
         assert_eq!(capabilities.events, vec!["session.*", "tool.*"]);
 
         let contributions = manifest.ui_contributions();

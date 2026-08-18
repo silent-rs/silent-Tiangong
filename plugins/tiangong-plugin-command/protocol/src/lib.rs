@@ -48,7 +48,7 @@ pub struct CommandAccessContext {
     /// 是否完全信任模式（跳过命令/路径校验，与原进程内实现一致）。
     #[serde(default)]
     pub full_trust: bool,
-    /// 用户自定义允许命令列表（扩展内置白名单，免审批）。
+    /// 用户自定义允许命令列表（扩展内置白名单）。
     #[serde(default)]
     pub allowed_commands: Vec<String>,
 }

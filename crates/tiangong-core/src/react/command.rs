@@ -58,7 +58,7 @@ pub(super) enum Deferred {
 pub(super) enum CommandEffect {
     /// 副作用已应用，阶段保持（处理器未触碰阶段）。
     KeepCurrent,
-    /// 产出新阶段（重启/审批迁移/暂定结果撤销等），由驱动统一安装。
+    /// 产出新阶段（重启/暂定结果撤销等），由驱动统一安装。
     ToPhase(ExecutionPhase),
     /// 终止本轮（取消/关闭/保存失败）。
     Terminate(TurnExecutionResult),
@@ -68,7 +68,7 @@ pub(super) enum CommandEffect {
 ///
 /// 命令按到达顺序处理（ALR-203）：决定性取消/关闭立即终止；引导消息中断后从
 /// 新意图重启；PendingFinish 收到 InjectTool 撤销暂定结果重新分析（不重置用户
-/// 意图预算）；迟到审批明确忽略。
+/// 意图预算）。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_command(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -122,7 +122,7 @@ pub(super) async fn handle_command(
             }
         }
         Deferred::Command(Command::SetTrustMode(mode)) => {
-            // 流水线内（审批等待/工具执行中）的信任模式变化由流水线就地处理；
+            // 工具执行中的信任模式变化由流水线就地处理；
             // 其余阶段只更新运行时值，下一次权限判断生效。
             set_runtime_trust_mode(trust_mode, plugins, mode);
             CommandEffect::KeepCurrent

@@ -521,8 +521,8 @@ fn validate_terminal_command(cmd: &str, args: &[String], cwd: Option<&str>) -> a
         base
     };
     if matches!(cmd, "bash" | "sh" | "powershell" | "pwsh") {
-        // terminal 走 PTY 交互式执行，不经过 PermissionGate 审批流程，
-        // 此处仅做硬性校验（forbidden tokens / 路径越界 / shell 形式），
+        // terminal 走 PTY 交互式执行，此处仅做硬性校验
+        //（forbidden tokens / 路径越界 / shell 形式），
         // 白名单外命令不再直接拒绝（与 command 插件行为保持一致）。
         let _ = shared::validate_shell_command_args(cmd, args, &effective_cwd, &[])?;
     } else {

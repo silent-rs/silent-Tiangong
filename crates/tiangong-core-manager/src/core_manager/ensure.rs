@@ -128,19 +128,6 @@ impl CoreManager {
             .is_some_and(|core| core.deliver(input).is_ok())
     }
 
-    /// 响应交互请求（request_user 阻塞等待中）：注册表原子闭合后投递等待 turn。
-    pub fn resolve_interaction_to_core(
-        &self,
-        session_id: &str,
-        request_id: String,
-        result_json: String,
-    ) -> bool {
-        self.deliver_to_core_if_live(
-            session_id,
-            AgentInputKind::resolve_interaction(request_id, result_json),
-        )
-    }
-
     /// 设置指定会话 core 的信任模式（实时生效）。
     pub fn set_core_trust_mode(&self, session_id: &str, mode: tiangong_types::TrustMode) {
         let registry = self.registry();

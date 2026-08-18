@@ -862,35 +862,6 @@ fn handle_child_event(
                 forward_agent_output(&feedback, descriptor, vec![message]);
             }
         }
-        // 交互请求原样上抛给父流由用户处理（request_user 阻塞等待在子代理内）
-        StreamEvent::InteractionRequested {
-            request_id,
-            session_id,
-            tool_call_id,
-            kind,
-            title,
-            description,
-            payload,
-            created_at,
-            deadline,
-        } => {
-            if let Some(feedback) = feedback_for_event(active_turn, base_feedback) {
-                forward_event(
-                    &feedback,
-                    StreamEvent::InteractionRequested {
-                        request_id,
-                        session_id,
-                        tool_call_id,
-                        kind,
-                        title,
-                        description,
-                        payload,
-                        created_at,
-                        deadline,
-                    },
-                );
-            }
-        }
         StreamEvent::UserMessage { message_id, .. } => {
             let feedback = if let Ok(mut active) = active_turn.lock() {
                 if let Some(turn) = active.as_mut() {

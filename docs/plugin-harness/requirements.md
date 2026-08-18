@@ -1,8 +1,8 @@
 # 统一插件形态（Plugin Harness）需求整理
 
 > 关联设计：`docs/plugin-harness-design.md`
-> 开发分支：`feature/plugin-harness`
-> 本阶段：文档与任务拆解（尚未进入编码）
+> 开发分支：`fix/interaction-handler-popup`
+> 本阶段：Desktop 纯 TypeScript 交互处理器收敛与验证
 
 ## 1. 背景与要解决的问题
 
@@ -31,8 +31,9 @@
 3. 顶部入口收敛后，原有「终端使用中」「agent 使用浏览器」的状态提示不丢失，聚合到「拓展区」按钮上。
 4. 单例/多实例打开规则明确：单例 App 重复打开聚焦已有实例；多实例 App 每次打开新建；切换会话时实例按会话隔离。
 5. 已打开 App 的标识、实例数量、运行态必须与真实状态一致（不能出现「已打开」却找不到 tab 的错位）。
-6. 三方插件默认运行在受限沙箱，能力按最小权限授予；特权能力（原生容器、sidecar、审批/交互处理、共享存储）需官方签名或显式授权。
+6. 三方插件默认运行在受限沙箱，能力按最小权限授予；特权能力（原生容器、sidecar、共享存储）需显式权限。
 7. `tiangong-plugin-runtime` 保持公共、中立、业务无关，不感知具体插件 ID、工具名、操作名、业务负载。
+8. 默认交互处理器必须是完整独立的纯 TypeScript 插件：`request_user` 的工具声明、参数规则、六类请求语义、界面和结果生成均在插件内；Core 与公共运行时不得内置该工具的专用适配器。
 
 ## 4. 应该满足（Should）
 
@@ -45,8 +46,8 @@
 
 1. 不引入 Cordis，也不在天工内复刻 Cordis 的插件框架。
 2. 短期不建设通用插件市场平台，沿用现有 OSS 静态目录分发，仅增强目录项的能力/权限展示。
-3. 本次不重写 Core 的 Agent Loop；审批/交互接缝只替换 UI 与路由策略，Core 状态机与工具流水线主体保留。
-4. 不追求跨语言逻辑运行时：逻辑层仍以 WASM Component 为统一契约，JS 逻辑层属可选增强。
+3. 本次不重写 Core 的 Agent Loop；交互工具通过通用 TS 插件工具桥接接入现有工具流水线，Core 不保存审批挑战或授权，也不解释用户意见。
+4. 不建设通用跨语言逻辑运行时；纯 TypeScript 工具仅在 Desktop 入口提供。
 5. 不做任意网页内嵌浏览器的通用沙箱，WebView/iframe 安全边界沿用现有浏览器插件策略。
 
 ## 6. 边界与兼容性要求
@@ -54,7 +55,7 @@
 1. `schema_version: 1` 的 `plugin.json` 按旧规则解析，`ui` 缺省等价于「仅设置页」。
 2. `schema_version: 2` 增加 `capabilities`、`ui.contributions`（含 `slot`/`sandbox`/`context`/`open_mode`）等字段。
 3. Slot ID 是宿主与插件的稳定契约：新增走版本化公告，删除/改名保留兼容别名。
-4. 审批/交互请求超时默认拒绝（fail-closed），避免沙箱卡死阻塞 agent。
+4. 交互插件独立计算并处理 15 秒用户时限；宿主仅以 20 秒通用工具执行上限处理插件崩溃或失联，不参与 15 秒征询规则。
 5. 现有浏览器/终端的会话绑定（同一 App 不同会话各自维护实例）在新形态中保持不变。
 
 ## 7. 与现有系统的关系
@@ -62,7 +63,8 @@
 - 现有 `docs/plugin-development.md` 描述的 WASM 插件开发指南继续有效，作为新形态的子集。
 - 现有 `plugin.wit` 的 `plugin`/`plugin-ui` 接口映射到工具/提示词/生命周期/UI 接缝，见设计文档附录。
 - 浏览器/终端当前通过 `plugin:browser|*`、`plugin:terminal|*` 硬编码命令与 `BrowserTabContent`/`TerminalTabContent` 组件实现，是本方案「内置能力插件化」的迁移对象。
-- 审批目前是 Core `WaitingApproval` 状态 + 内置弹窗；交互散落在 CLI/桌面的确认路径，是「审批接缝」「交互接缝」的迁移对象。
+- 审批、确认、选择和输入统一由 Desktop `interaction-handler` 插件通过 `request_user` 工具处理；CLI 与 Server 不加载这项 Desktop 专用工具。
+- 审批结果只是返回给 Agent 的用户意见；Agent 自行决定后续步骤，Core 与公共运行时不据此放行或拒绝工具。
 
 ## 8. 关键决策（已定稿）
 
@@ -70,7 +72,7 @@
 | --- | --- |
 | 扩展能力的抽象 | 能力接缝（Seam）+ 挂载点（Slot）+ 宿主桥接（Host Bridge）三层 |
 | UI 渲染与隔离 | Web Component + Shadow DOM（默认）/ iframe（强隔离）/ native（仅官方）三级 |
-| 逻辑层 | 沿用 WASM Component + WIT，不引入 Cordis |
+| 逻辑层 | 既有插件沿用 WASM Component + WIT；桌面交互处理器使用纯 TypeScript 工具桥接，不扩展 `plugin.wit` |
 | 顶部入口 | 删除终端/浏览器独立按钮，合并为「拓展区」按钮 |
 | App 打开方式 | manifest 声明 `open_mode: singleton \| multi` |
 | 拓展区交互 | 关闭态 / 矩阵态 / App 态三态，启动台按钮切回矩阵 |

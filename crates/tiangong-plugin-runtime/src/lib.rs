@@ -1,7 +1,7 @@
-//! WASM 插件运行时。
+//! 天工插件运行时。
 //!
-//! 提供单文件 WASM Component 的加载、资源限制、宿主适配，以及配套
-//! sidecar 的通用协议和运行管理。
+//! 提供单文件 WASM Component 的加载与资源限制、Desktop TypeScript 工具桥接，
+//! 以及配套 sidecar 的通用协议和运行管理。
 //!
 //! # 公共中立约束
 //!
@@ -11,15 +11,12 @@
 //! 运行时。完整约束见 `docs/plugin-development.md` 的“WASM Runtime 公共中立约束”。
 
 pub mod adapter;
-pub mod approval;
 pub mod artifacts;
 pub mod bindings;
 pub mod bridge;
 pub mod config;
-pub mod declarative;
 mod execution;
 pub mod host_state;
-pub mod interaction;
 pub mod loader;
 pub mod manifest;
 pub mod protocol;
@@ -28,21 +25,15 @@ pub mod seams;
 pub mod sidecar;
 pub mod signature;
 pub mod slots;
+mod ts_plugin;
+mod ts_tools;
 
 pub use adapter::WasmPluginAdapter;
-pub use approval::{
-    ApprovalDecisionKind, ApprovalHandler, ApprovalRequest, ApprovalResponse, ApprovalRisk,
-    ApprovalRouter, DEFAULT_HANDLER,
-};
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, bridge_call, bridge_emit, bridge_subscribe,
-    bridge_unsubscribe, set_event_emitter, set_interaction_response_handler,
-    set_session_input_handler,
+    bridge_unsubscribe, set_event_emitter, set_session_input_handler,
 };
 pub use config::PluginRuntimeConfig;
-pub use interaction::{
-    InteractionClosed, InteractionKind, InteractionRequest, InteractionResponse,
-};
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,

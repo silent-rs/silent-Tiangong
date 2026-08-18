@@ -40,13 +40,14 @@ export function collectHostTokens(): Record<string, string> {
 }
 
 /** iframe 容器的 hostContext 消息体（沿用既有协议，保持 v1 插件兼容）。 */
-export function hostContext(theme: HostTheme, channel: string) {
+export function hostContext(theme: HostTheme, channel: string, sessionId?: string | null) {
   return {
     type: 'tiangong_host_context',
     channel,
     theme,
     tokens: collectHostTokens(),
     fontFamily: getComputedStyle(document.body).fontFamily,
+    ...(sessionId ? { session: { id: sessionId } } : {}),
   };
 }
 

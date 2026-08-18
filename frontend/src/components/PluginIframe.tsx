@@ -15,7 +15,7 @@ const pluginCallQueues = new Map<string, Promise<void>>();
  * 订阅消息（plugin_subscribe/plugin_unsubscribe）对应宿主事件通道，
  * 宿主 bridge_event 经 onBridgeEvent 回推本 iframe。天工不解析业务负载。
  */
-const BRIDGE_METHOD_NAMESPACES = ['plugin.', 'storage.', 'session.', 'tool.', 'approval.', 'interaction.'];
+const BRIDGE_METHOD_NAMESPACES = ['plugin.', 'storage.', 'session.', 'tool.'];
 
 /** 旧协议裸方法名补 plugin. 前缀；SDK 的完整命名空间方法透传。 */
 export function normalizeBridgeMethod(method: string): string {
@@ -24,15 +24,23 @@ export function normalizeBridgeMethod(method: string): string {
   }
   return `plugin.${method}`;
 }
-export function PluginIframe({ pluginId, html }: { pluginId: string; html: string }) {
+export function PluginIframe({
+  pluginId,
+  html,
+  sessionId,
+}: {
+  pluginId: string;
+  html: string;
+  sessionId?: string | null;
+}) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const theme = useResolvedTheme();
   const channel = useMemo(() => crypto.randomUUID(), [pluginId, html]);
   const maskColor = usePluginMask(iframeRef, channel);
 
   const sendHostContext = useCallback(() => {
-    iframeRef.current?.contentWindow?.postMessage(hostContext(theme, channel), '*');
-  }, [channel, theme]);
+    iframeRef.current?.contentWindow?.postMessage(hostContext(theme, channel, sessionId), '*');
+  }, [channel, sessionId, theme]);
 
   useEffect(() => {
     sendHostContext();

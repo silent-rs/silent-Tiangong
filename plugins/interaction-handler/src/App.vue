@@ -1,244 +1,287 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
-  createInteractionHandler,
   createTiangongBridge,
+  createToolProvider,
   type HostBridge,
-  type InteractionHandler,
+  type ToolClosed,
+  type ToolInvocation,
 } from '@tiangong/plugin-sdk';
+import {
+  isRecord,
+  parseInvocation,
+  payloadResult,
+  type InteractionKind,
+  type InteractionRequest,
+} from './interaction';
 
-/**
- * 默认交互处理器（Vue 工程）。
- *
- * 职责（宿主保留闭合判定/授权/超时权威，方案 §2）：
- * - 监听 interaction.requested 展示六种请求（approval/confirm/choice/
- *   multi_choice/input/form），按宿主权威 deadline 显示剩余时间；
- * - 提交 interaction.resolve（提交后进入 submitting，禁止重复点击）；
- * - 以 interaction.closed 为最终状态，迟到/过期/取消展示真实结果。
- * - 主题：消费宿主 hostContext 的设计 token CSS 变量。
- */
+const requests = ref<InteractionRequest[]>([]);
+const currentSessionId = ref<string | null>(null);
+const nowMs = ref(Date.now());
+const connectionError = ref('');
 
-interface InteractionRequestPayload {
-  request_id: string;
-  kind: 'approval' | 'confirm' | 'choice' | 'multi_choice' | 'input' | 'form';
-  title: string;
-  description?: string;
-  payload: string;
-  deadline?: string;
-}
-
-interface FormField {
-  key: string;
-  label: string;
-  type: 'string' | 'number' | 'boolean' | 'select';
-  options?: string[];
-}
-
-const empty = ref(true);
-const request = ref<InteractionRequestPayload | null>(null);
-const closedStatus = ref<string | null>(null);
-const submitting = ref(false);
-const error = ref('');
-const formValues = reactive<Record<string, string>>({});
-const selected = ref<string[]>([]);
-const remainingMs = ref<number | null>(null);
-
-let handler: InteractionHandler | null = null;
+let bridge: HostBridge | null = null;
+let provider: ReturnType<typeof createToolProvider> | null = null;
+let stopRequested: (() => void) | null = null;
+let stopClosed: (() => void) | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
-let bridgeRef: HostBridge | null = null;
 
-const options = computed<string[]>(() => {
-  if (!request.value) return [];
-  try {
-    return JSON.parse(request.value.payload) as string[];
-  } catch {
-    return [];
-  }
+const request = computed(() => {
+  const matches = requests.value.filter((item) => item.sessionId === currentSessionId.value);
+  return matches.find((item) => item.status === 'pending' || item.status === 'submitting')
+    ?? matches[0]
+    ?? null;
 });
 
-const fields = computed<FormField[]>(() => {
-  if (!request.value) return [];
-  try {
-    return JSON.parse(request.value.payload) as FormField[];
-  } catch {
-    return [];
-  }
-});
-
-const question = computed(() => {
-  try {
-    return request.value ? (JSON.parse(request.value.payload) as string) : '';
-  } catch {
-    return request.value?.payload ?? '';
-  }
-});
+const remainingMs = computed(() => request.value
+  ? Math.max(0, request.value.deadlineMs - nowMs.value)
+  : 0);
 
 const remainingText = computed(() => {
-  if (remainingMs.value == null || remainingMs.value <= 0) return '已到期限';
-  const seconds = Math.ceil(remainingMs.value / 1000);
-  return `剩余 ${seconds} 秒`;
+  if (!request.value) return '';
+  if (request.value.status === 'answered') return '已提交';
+  if (request.value.status === 'expired') return '已过期';
+  if (request.value.status === 'cancelled') return '已取消';
+  if (request.value.status === 'submitting') return '正在提交';
+  if (remainingMs.value <= 0) return '已到期限';
+  return `剩余 ${Math.ceil(remainingMs.value / 1000)} 秒`;
 });
 
-const localExpired = computed(
-  () => remainingMs.value != null && remainingMs.value <= 0,
-);
-const locked = computed(
-  () => submitting.value || closedStatus.value != null || localExpired.value,
-);
+const locked = computed(() => !request.value || request.value.status !== 'pending');
 
-function startCountdown(deadline?: string) {
-  stopCountdown();
-  if (!deadline) {
-    remainingMs.value = null;
-    return;
-  }
-  const deadlineMs = Date.parse(deadline);
-  if (Number.isNaN(deadlineMs)) {
-    remainingMs.value = null;
-    return;
-  }
-  const tick = () => {
-    remainingMs.value = deadlineMs - Date.now();
-  };
-  tick();
-  countdownTimer = setInterval(tick, 250);
+const formIncomplete = computed(() => {
+  if (!request.value || request.value.kind !== 'form') return false;
+  return request.value.fields.some((field) => {
+    if (!field.required) return false;
+    const value = request.value?.values[field.key];
+    return value == null || value === '';
+  });
+});
+
+function replaceRequest(invocationId: string, update: Partial<InteractionRequest>) {
+  requests.value = requests.value.map((item) => item.invocationId === invocationId
+    ? { ...item, ...update }
+    : item);
 }
 
-function stopCountdown() {
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    countdownTimer = null;
+async function resolveInvalid(invocation: ToolInvocation, message: string) {
+  if (!provider) return;
+  const kind = isRecord(invocation.arguments)
+    && typeof invocation.arguments.kind === 'string'
+    && ['approval', 'confirm', 'choice', 'multi_choice', 'input', 'form'].includes(invocation.arguments.kind)
+    ? invocation.arguments.kind as InteractionKind
+    : 'unknown';
+  try {
+    await provider.resolve({
+      invocation_id: invocation.invocation_id,
+      result: payloadResult(
+        invocation.invocation_id,
+        kind,
+        'invalid',
+        { message: `request_user 参数无效：${message}` },
+        false,
+      ),
+    });
+  } catch (error) {
+    connectionError.value = `提交无效参数结果失败：${String(error)}`;
   }
 }
 
-function resetForm() {
-  Object.keys(formValues).forEach((key) => delete formValues[key]);
-  selected.value = [];
-  error.value = '';
+async function expire(item: InteractionRequest) {
+  if (!provider || item.status !== 'pending') return;
+  replaceRequest(item.invocationId, { status: 'submitting', error: '' });
+  const message = item.kind === 'approval'
+    ? '用户未在规定时间内响应，操作未获批准'
+    : '用户未在规定时间内响应';
+  try {
+    await provider.resolve({
+      invocation_id: item.invocationId,
+      status: 'expired',
+      result: payloadResult(
+        item.invocationId,
+        item.kind,
+        'expired',
+        { message },
+        false,
+      ),
+    });
+  } catch (error) {
+    replaceRequest(item.invocationId, { status: 'expired', error: String(error) });
+  }
+}
+
+async function cancelRequest() {
+  const item = request.value;
+  if (!provider || !item || item.status !== 'pending') return;
+  replaceRequest(item.invocationId, { status: 'submitting', error: '' });
+  const reason = '用户取消了本次征询';
+  try {
+    await provider.resolve({
+      invocation_id: item.invocationId,
+      status: 'cancelled',
+      result: payloadResult(
+        item.invocationId,
+        item.kind,
+        'cancelled',
+        { reason, message: reason },
+        false,
+      ),
+    });
+  } catch (error) {
+    replaceRequest(item.invocationId, {
+      status: Date.now() >= item.deadlineMs ? 'expired' : 'pending',
+      error: String(error),
+    });
+  }
+}
+
+async function answer(result: unknown) {
+  const item = request.value;
+  if (!provider || !item || item.status !== 'pending') return;
+  if (Date.now() >= item.deadlineMs) {
+    await expire(item);
+    return;
+  }
+  replaceRequest(item.invocationId, { status: 'submitting', error: '' });
+  try {
+    await provider.resolve({
+      invocation_id: item.invocationId,
+      result: payloadResult(
+        item.invocationId,
+        item.kind,
+        'answered',
+        { result },
+        true,
+      ),
+    });
+  } catch (error) {
+    replaceRequest(item.invocationId, {
+      status: Date.now() >= item.deadlineMs ? 'expired' : 'pending',
+      error: String(error),
+    });
+  }
 }
 
 function toggleChoice(option: string) {
-  if (locked.value) return;
-  if (request.value?.kind === 'multi_choice') {
-    selected.value = selected.value.includes(option)
-      ? selected.value.filter((item) => item !== option)
-      : [...selected.value, option];
-  } else {
-    selected.value = [option];
-  }
-}
-
-async function resolve(result: unknown) {
-  if (!handler || !request.value || locked.value) return;
-  submitting.value = true;
-  error.value = '';
-  try {
-    await handler.resolve(request.value.request_id, result);
-    // 提交成功后等待 interaction.closed；保持 submitting 防重复
-  } catch (e) {
-    error.value = String(e);
-    submitting.value = false;
-  }
+  const item = request.value;
+  if (!item || item.status !== 'pending') return;
+  const selected = item.kind === 'multi_choice'
+    ? item.selected.includes(option)
+      ? item.selected.filter((value) => value !== option)
+      : [...item.selected, option]
+    : [option];
+  replaceRequest(item.invocationId, { selected });
 }
 
 function resolveKindResult() {
-  const kind = request.value?.kind;
-  if (kind === 'choice') {
-    resolve(selected.value[0]);
-  } else if (kind === 'multi_choice') {
-    resolve(selected.value);
-  } else if (kind === 'input') {
-    resolve(formValues.input ?? '');
-  } else {
+  const item = request.value;
+  if (!item) return;
+  if (item.kind === 'choice') {
+    void answer(item.selected[0]);
+  } else if (item.kind === 'multi_choice') {
+    void answer(item.selected);
+  } else if (item.kind === 'input') {
+    void answer(String(item.values.input ?? ''));
+  } else if (item.kind === 'form') {
     const answers: Record<string, unknown> = {};
-    for (const field of fields.value) {
-      const raw = formValues[field.key] ?? '';
+    for (const field of item.fields) {
+      const raw = item.values[field.key];
       if (field.type === 'number') {
-        answers[field.key] = Number(raw) || 0;
+        answers[field.key] = raw === '' || raw == null ? 0 : Number(raw);
       } else if (field.type === 'boolean') {
-        answers[field.key] = raw === 'true';
+        answers[field.key] = raw === true;
       } else {
-        answers[field.key] = raw;
+        answers[field.key] = String(raw ?? '');
       }
     }
-    resolve(answers);
+    void answer(answers);
   }
 }
 
-/** 消费宿主 hostContext：主题 token 写入 CSS 变量。 */
+function onRequested(invocation: ToolInvocation) {
+  if (requests.value.some((item) => item.invocationId === invocation.invocation_id)) return;
+  try {
+    const parsed = parseInvocation(invocation);
+    requests.value = [...requests.value, parsed]
+      .sort((left, right) => left.createdAtMs - right.createdAtMs);
+    if (Date.now() >= parsed.deadlineMs) void expire(parsed);
+  } catch (error) {
+    void resolveInvalid(invocation, error instanceof Error ? error.message : String(error));
+  }
+}
+
+function onClosed(closed: ToolClosed) {
+  const item = requests.value.find((candidate) => candidate.invocationId === closed.invocation_id);
+  if (!item) return;
+  replaceRequest(closed.invocation_id, { status: closed.status, error: '' });
+  window.setTimeout(() => {
+    requests.value = requests.value.filter((candidate) => candidate.invocationId !== closed.invocation_id);
+  }, 1600);
+}
+
 function applyHostContext(data: Record<string, unknown>) {
-  const tokens = (data.tokens ?? {}) as Record<string, string>;
+  const tokens = isRecord(data.tokens) ? data.tokens : {};
   for (const [name, value] of Object.entries(tokens)) {
-    if (value) document.documentElement.style.setProperty(`--${name}`, value);
+    if (typeof value === 'string' && value) {
+      document.documentElement.style.setProperty(`--${name}`, value);
+    }
   }
   if (typeof data.fontFamily === 'string' && data.fontFamily) {
     document.body.style.fontFamily = data.fontFamily;
   }
+  const session = isRecord(data.session) ? data.session : null;
+  currentSessionId.value = session && typeof session.id === 'string' ? session.id : null;
+}
+
+function onHostMessage(event: MessageEvent) {
+  const data = event.data as Record<string, unknown> | null;
+  if (data?.type === 'tiangong_host_context') applyHostContext(data);
 }
 
 onMounted(async () => {
   window.addEventListener('message', onHostMessage);
+  countdownTimer = window.setInterval(() => {
+    nowMs.value = Date.now();
+    for (const item of requests.value) {
+      if (item.status === 'pending' && nowMs.value >= item.deadlineMs) void expire(item);
+    }
+  }, 250);
   try {
-    const bridge = await createTiangongBridge();
-    bridgeRef = bridge;
-    handler = createInteractionHandler(bridge);
-    handler.onRequested((payload) => {
-      let parsed: InteractionRequestPayload;
-      try {
-        parsed = JSON.parse(payload) as InteractionRequestPayload;
-      } catch {
-        return;
-      }
-      empty.value = false;
-      request.value = parsed;
-      closedStatus.value = null;
-      submitting.value = false;
-      resetForm();
-      startCountdown(parsed.deadline);
-    });
-    handler.onClosed((closed) => {
-      if (request.value && closed.request_id === request.value.request_id) {
-        closedStatus.value = closed.status;
-        submitting.value = false;
-        stopCountdown();
-      }
-    });
-  } catch (e) {
-    error.value = `桥接连线失败：${String(e)}`;
+    bridge = await createTiangongBridge();
+    provider = createToolProvider(bridge);
+    stopRequested = provider.onRequested(onRequested);
+    stopClosed = provider.onClosed(onClosed);
+  } catch (error) {
+    connectionError.value = `桥接连线失败：${String(error)}`;
   }
 });
 
-function onHostMessage(event: MessageEvent) {
-  const data = event.data as Record<string, unknown> | null;
-  if (data?.type === 'tiangong_host_context') {
-    applyHostContext(data as Record<string, unknown>);
-  }
-}
-
 onUnmounted(() => {
-  stopCountdown();
+  stopRequested?.();
+  stopClosed?.();
+  if (countdownTimer) window.clearInterval(countdownTimer);
   window.removeEventListener('message', onHostMessage);
-  void bridgeRef;
+  bridge = null;
+  provider = null;
 });
 </script>
 
 <template>
   <div class="wrap">
-    <div v-if="empty" class="muted">等待 Agent 发起交互请求…</div>
-
-    <section v-else-if="request">
-      <h3>{{ request.title }}</h3>
-      <p v-if="request.description" class="muted">{{ request.description }}</p>
-      <div class="deadline" :class="{ overdue: localExpired }">
-        {{ closedStatus ? `已${closedStatus === 'answered' ? '提交' : closedStatus === 'expired' ? '过期' : '取消'}` : remainingText }}
+    <section v-if="request">
+      <div class="heading">
+        <h3>{{ request.title }}</h3>
+        <span class="deadline" :class="{ overdue: remainingMs <= 0 || request.status === 'expired' }">
+          {{ remainingText }}
+        </span>
       </div>
+      <p v-if="request.description" class="muted">{{ request.description }}</p>
 
-      <!-- choice / multi_choice -->
       <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
-        <label v-for="option in options" :key="option" class="option">
+        <label v-for="option in request.options" :key="option" class="option">
           <input
             :type="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
-            :checked="selected.includes(option)"
+            :checked="request.selected.includes(option)"
             :disabled="locked"
             @change="toggleChoice(option)"
           />
@@ -246,99 +289,146 @@ onUnmounted(() => {
         </label>
       </div>
 
-      <!-- confirm -->
-      <div v-else-if="request.kind === 'confirm'" class="content muted">{{ question }}</div>
+      <div v-else-if="request.kind === 'confirm'" class="content question">
+        {{ request.question || request.description || '是否继续？' }}
+      </div>
 
-      <!-- input -->
+      <div v-else-if="request.kind === 'approval' && request.question" class="content question">
+        {{ request.question }}
+      </div>
+
       <div v-else-if="request.kind === 'input'" class="content">
+        <label v-if="request.question" class="input-question">{{ request.question }}</label>
         <input
-          v-model="formValues.input"
+          v-model="request.values.input"
           type="text"
-          placeholder="请输入…"
+          placeholder="请输入"
           :disabled="locked"
+          @keydown.enter.prevent="answer(String(request.values.input ?? ''))"
         />
       </div>
 
-      <!-- form -->
       <div v-else-if="request.kind === 'form'" class="content">
-        <template v-for="field in fields" :key="field.key">
-          <label class="field">
-            <span class="field-label">{{ field.label }}</span>
-            <input
-              v-if="field.type === 'boolean'"
-              v-model="formValues[field.key]"
-              type="checkbox"
-              :true-value="'true'"
-              :false-value="'false'"
-              :disabled="locked"
-            />
-            <select
-              v-else-if="field.type === 'select'"
-              v-model="formValues[field.key]"
-              :disabled="locked"
-            >
-              <option value="" disabled>请选择</option>
-              <option v-for="option in field.options ?? []" :key="option" :value="option">
-                {{ option }}
-              </option>
-            </select>
-            <input
-              v-else
-              v-model="formValues[field.key]"
-              :type="field.type === 'number' ? 'number' : 'text'"
-              :disabled="locked"
-            />
-          </label>
-        </template>
+        <label v-for="field in request.fields" :key="field.key" class="field">
+          <span class="field-label">{{ field.label }}<b v-if="field.required">*</b></span>
+          <input
+            v-if="field.type === 'boolean'"
+            v-model="request.values[field.key]"
+            type="checkbox"
+            :disabled="locked"
+          />
+          <select
+            v-else-if="field.type === 'select'"
+            v-model="request.values[field.key]"
+            :disabled="locked"
+          >
+            <option value="" disabled>请选择</option>
+            <option v-for="option in field.options ?? []" :key="option" :value="option">
+              {{ option }}
+            </option>
+          </select>
+          <input
+            v-else
+            v-model="request.values[field.key]"
+            :type="field.type === 'number' ? 'number' : 'text'"
+            :placeholder="field.placeholder"
+            :disabled="locked"
+          />
+        </label>
       </div>
 
       <div class="actions">
         <template v-if="request.kind === 'approval'">
-          <button class="primary" :disabled="locked" @click="resolve({ decision: 'approve_once' })">仅本次允许</button>
-          <button class="runtime" :disabled="locked" @click="resolve({ decision: 'approve_for_runtime' })">本次运行内允许</button>
-          <button class="reject" :disabled="locked" @click="resolve({ decision: 'reject' })">拒绝</button>
+          <button class="primary" :disabled="locked" @click="answer({ decision: 'approve_once' })">
+            仅本次允许
+          </button>
+          <button class="runtime" :disabled="locked" @click="answer({ decision: 'approve_for_runtime' })">
+            本次运行内允许
+          </button>
+          <button class="reject" :disabled="locked" @click="answer({ decision: 'reject' })">
+            拒绝
+          </button>
         </template>
         <template v-else-if="request.kind === 'confirm'">
-          <button class="primary" :disabled="locked" @click="resolve(true)">是</button>
-          <button class="reject" :disabled="locked" @click="resolve(false)">否</button>
+          <button class="primary" :disabled="locked" @click="answer(true)">是</button>
+          <button class="reject" :disabled="locked" @click="answer(false)">否</button>
         </template>
         <button
           v-else
           class="primary"
-          :disabled="locked || ((request.kind === 'choice' || request.kind === 'multi_choice') && selected.length === 0)"
-          @click="resolveKindResult()"
+          :disabled="locked || formIncomplete || ((request.kind === 'choice' || request.kind === 'multi_choice') && request.selected.length === 0)"
+          @click="resolveKindResult"
         >
-          {{ submitting ? '提交中…' : '提交' }}
+          提交
+        </button>
+        <button
+          v-if="request.kind !== 'approval' && request.kind !== 'confirm'"
+          class="cancel"
+          :disabled="locked"
+          @click="cancelRequest"
+        >
+          取消
         </button>
       </div>
 
-      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="request.error" class="error">{{ request.error }}</div>
     </section>
+    <div v-else-if="connectionError" class="error">{{ connectionError }}</div>
   </div>
 </template>
 
 <style scoped>
-.wrap { padding: 14px; color: var(--foreground, #222); }
-h3 { margin: 0 0 6px; font-size: 15px; }
+.wrap {
+  box-sizing: border-box;
+  min-height: 156px;
+  padding: 14px;
+  color: var(--foreground, #222);
+  background: var(--card, transparent);
+}
+.heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+h3 { margin: 0 0 6px; font-size: 15px; line-height: 1.35; letter-spacing: 0; }
 .muted { color: var(--muted-foreground, #777); font-size: 12px; margin: 0 0 10px; }
-.deadline { font-size: 12px; color: var(--muted-foreground, #888); margin-bottom: 10px; }
+.deadline { flex: 0 0 auto; font-size: 12px; color: var(--muted-foreground, #888); }
 .deadline.overdue { color: var(--status-error, #dc2626); }
-.content { display: grid; gap: 7px; margin-bottom: 10px; }
-.option { display: flex; align-items: center; gap: 7px; font-size: 13px; }
-.field { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-.field-label { width: 88px; flex-shrink: 0; color: var(--muted-foreground, #777); }
+.content { display: grid; gap: 8px; margin: 4px 0 12px; }
+.question { font-size: 13px; color: var(--foreground, #222); }
+.input-question { font-size: 12px; color: var(--muted-foreground, #777); }
+.option { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 13px; }
+.field { display: grid; grid-template-columns: minmax(80px, 112px) minmax(0, 1fr); align-items: center; gap: 8px; font-size: 13px; }
+.field-label { color: var(--muted-foreground, #777); overflow-wrap: anywhere; }
+.field-label b { margin-left: 2px; color: var(--status-error, #dc2626); }
 input[type='text'], input[type='number'], select {
-  box-sizing: border-box; width: 100%; padding: 7px;
-  border: 1px solid var(--border, #8886); border-radius: 6px;
-  background: transparent; color: inherit; font: inherit;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border, #8886);
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: inherit;
+  font: inherit;
 }
 .actions { display: flex; flex-wrap: wrap; gap: 7px; }
 button {
-  border: 0; border-radius: 6px; padding: 7px 11px; cursor: pointer;
-  font: inherit; font-size: 13px; background: var(--primary, #2563eb); color: white;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 11px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 0;
+  background: var(--primary, #2563eb);
+  color: var(--primary-foreground, white);
 }
-button.runtime { background: var(--status-success, #16803f); }
-button.reject { background: var(--status-error, #dc2626); }
+button.runtime { background: var(--status-success, #16803f); color: white; }
+button.reject { background: var(--status-error, #dc2626); color: white; }
+button.cancel { background: var(--muted, #e5e7eb); color: var(--foreground, #222); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-.error { margin-top: 8px; color: var(--status-error, #dc2626); font-size: 12px; }
+.error { margin-top: 8px; color: var(--status-error, #dc2626); font-size: 12px; overflow-wrap: anywhere; }
+
+@media (max-width: 420px) {
+  .field { grid-template-columns: 1fr; gap: 4px; }
+  .actions button { flex: 1 1 auto; }
+}
 </style>

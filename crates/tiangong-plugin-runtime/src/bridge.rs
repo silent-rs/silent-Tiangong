@@ -44,16 +44,6 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         description: "主动触发工具、读取工具执行结果",
     },
     BridgeNamespace {
-        prefix: "approval.",
-        permission: "approval.handle",
-        description: "响应审批、查询审批状态",
-    },
-    BridgeNamespace {
-        prefix: "interaction.",
-        permission: "interaction.handle",
-        description: "发起/响应交互请求",
-    },
-    BridgeNamespace {
         prefix: "storage.",
         permission: "storage.private",
         description: "读写插件私有数据",
@@ -61,14 +51,7 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
-pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
-    "session.",
-    "tool.",
-    "approval.",
-    "interaction.",
-    "lifecycle.",
-    "config.",
-];
+pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &["session.", "tool.", "lifecycle.", "config."];
 
 /// 查找 method 所属的桥接命名空间。
 pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
@@ -80,6 +63,8 @@ pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
 fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'static str {
     if method.starts_with("session.input.") {
         "session.write"
+    } else if method == "tool.resolve" {
+        "tool.provide"
     } else {
         namespace.permission
     }
@@ -164,8 +149,8 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         }
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
-        // interaction.*：由桌面/CLI 宿主注入响应处理器，插件无权自行闭合请求。
-        "interaction." => interaction_call(plugin_id, method, payload),
+        // tool.resolve：Desktop TS 工具插件提交自己声明的工具结果。
+        "tool." if method == "tool.resolve" => crate::ts_tools::resolve(plugin_id, payload),
         // session.input.*：由桌面宿主注入输入草稿处理器，运行时仅负责权限与路由。
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
@@ -202,42 +187,16 @@ fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<St
     handler(plugin_id, method, payload)
 }
 
-/// 交互响应宿主处理器：桌面入口注入后，纯 UI 插件即可提交响应。
-pub type InteractionResponseHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
-static INTERACTION_RESPONSE_HANDLER: OnceLock<InteractionResponseHandler> = OnceLock::new();
-
-pub fn set_interaction_response_handler(handler: InteractionResponseHandler) {
-    let _ = INTERACTION_RESPONSE_HANDLER.set(handler);
-}
-
-fn interaction_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
-    let manifest = crate::registry::plugin_manifest(plugin_id)
-        .ok_or_else(|| anyhow::anyhow!("交互处理器插件 {plugin_id} 未加载"))?;
-    if !manifest
-        .capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.interaction)
-    {
-        bail!("插件 {plugin_id} 未声明 capabilities.interaction=true");
-    }
-    if method != "interaction.resolve" {
-        bail!("未知交互桥接方法 {method}");
-    }
-    let handler = INTERACTION_RESPONSE_HANDLER
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入交互响应服务"))?;
-    handler(plugin_id, method, payload)
-}
-
 // ── bridge.on / bridge.off ──
 
 /// 事件推送回调：`(plugin_id, channel, payload)`。
 pub type BridgeEventEmitter = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 static EVENT_EMITTER: OnceLock<BridgeEventEmitter> = OnceLock::new();
-static EVENT_SUBSCRIPTIONS: OnceLock<Mutex<BTreeMap<String, Vec<String>>>> = OnceLock::new();
+static EVENT_SUBSCRIPTIONS: OnceLock<Mutex<BTreeMap<String, BTreeMap<String, usize>>>> =
+    OnceLock::new();
 
-fn event_subscriptions() -> &'static Mutex<BTreeMap<String, Vec<String>>> {
+fn event_subscriptions() -> &'static Mutex<BTreeMap<String, BTreeMap<String, usize>>> {
     EVENT_SUBSCRIPTIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -281,9 +240,12 @@ pub fn bridge_subscribe(plugin_id: &str, channel: &str) -> Result<()> {
         .lock()
         .map_err(|_| anyhow::anyhow!("事件订阅表已损坏"))?;
     let channels = subscriptions.entry(plugin_id.to_string()).or_default();
-    if !channels.iter().any(|item| item == channel) {
-        channels.push(channel.to_string());
-    }
+    *channels.entry(channel.to_string()).or_default() += 1;
+    drop(subscriptions);
+
+    // 工具调用可能早于插件页面完成订阅。订阅生效后重放仍在等待的调用；
+    // invocation_id 保持不变，插件可据此幂等处理并忽略重复投递。
+    crate::ts_tools::replay_pending(plugin_id, channel);
     Ok(())
 }
 
@@ -292,11 +254,25 @@ pub fn bridge_unsubscribe(plugin_id: &str, channel: &str) -> Result<()> {
     let mut subscriptions = event_subscriptions()
         .lock()
         .map_err(|_| anyhow::anyhow!("事件订阅表已损坏"))?;
+    let mut channel_removed = false;
     if let Some(channels) = subscriptions.get_mut(plugin_id) {
-        channels.retain(|item| item != channel);
+        if let Some(count) = channels.get_mut(channel) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                channels.remove(channel);
+                channel_removed = true;
+            }
+        }
         if channels.is_empty() {
             subscriptions.remove(plugin_id);
         }
+    }
+    drop(subscriptions);
+
+    // 最后一个工具提供页面退出后，已无人能够处理挂起调用，立即取消而不是
+    // 一直占用 Agent 工具任务到宿主超时。
+    if channel_removed && channel == "tool.requested" {
+        crate::ts_tools::cancel_plugin_calls(plugin_id);
     }
     Ok(())
 }
@@ -316,13 +292,38 @@ pub fn bridge_emit(channel: &str, payload: &str) {
     let Some(emitter) = EVENT_EMITTER.get() else {
         return;
     };
-    let Ok(subscriptions) = event_subscriptions().lock() else {
+    let targets = event_subscriptions()
+        .lock()
+        .map(|subscriptions| {
+            subscriptions
+                .iter()
+                .filter(|(_, channels)| channels.contains_key(channel))
+                .map(|(plugin_id, _)| plugin_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for plugin_id in targets {
+        emitter(&plugin_id, channel, payload);
+    }
+}
+
+/// 向一个已订阅的插件定向发送事件。
+///
+/// TS 工具调用属于声明它的插件，不能广播给其他同样订阅 `tool.*` 的插件。
+pub fn bridge_emit_to(plugin_id: &str, channel: &str, payload: &str) {
+    let Some(emitter) = EVENT_EMITTER.get() else {
         return;
     };
-    for (plugin_id, channels) in subscriptions.iter() {
-        if channels.iter().any(|item| item == channel) {
-            emitter(plugin_id, channel, payload);
-        }
+    let subscribed = event_subscriptions()
+        .lock()
+        .map(|subscriptions| {
+            subscriptions
+                .get(plugin_id)
+                .is_some_and(|channels| channels.contains_key(channel))
+        })
+        .unwrap_or(false);
+    if subscribed {
+        emitter(plugin_id, channel, payload);
     }
 }
 
@@ -381,6 +382,39 @@ mod tests {
         let error = bridge_subscribe("missing", "rag.updated").unwrap_err();
         assert!(format!("{error:#}").contains("拒绝未知 channel"));
         assert!(format!("{error:#}").contains("session."));
+    }
+
+    #[test]
+    fn 多实例退订不会移除其他实例的订阅() {
+        const PLUGIN_ID: &str = "bridge-ref-count-test";
+        const CHANNEL: &str = "session.ref-count-test";
+
+        clear_plugin_subscriptions(PLUGIN_ID);
+        event_subscriptions()
+            .lock()
+            .unwrap()
+            .entry(PLUGIN_ID.to_string())
+            .or_default()
+            .insert(CHANNEL.to_string(), 2);
+
+        bridge_unsubscribe(PLUGIN_ID, CHANNEL).unwrap();
+        assert_eq!(
+            event_subscriptions()
+                .lock()
+                .unwrap()
+                .get(PLUGIN_ID)
+                .and_then(|channels| channels.get(CHANNEL))
+                .copied(),
+            Some(1)
+        );
+
+        bridge_unsubscribe(PLUGIN_ID, CHANNEL).unwrap();
+        assert!(
+            !event_subscriptions()
+                .lock()
+                .unwrap()
+                .contains_key(PLUGIN_ID)
+        );
     }
 
     #[test]

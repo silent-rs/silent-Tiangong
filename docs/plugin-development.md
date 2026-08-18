@@ -445,13 +445,16 @@ await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
 
 ## 交互处理器插件（审批与用户征询）
 
-`request_user` 工具发起的审批/确认/选择/输入请求，默认由桌面内置界面处理；
-声明了 `interaction.handle` 权限与 `capabilities.interaction=true` 的插件可注册为
-处理器接管展示与响应（宿主保留闭合判定、授权与超时权威）。
+Desktop 可安装纯 TypeScript 工具插件，不需要 WASM，也不修改 `plugin.wit`。
+插件在 manifest 的 `tools` 与 `prompt` 中声明工具规格和提示词，使用
+`tool.provide` 权限接收 `tool.requested`，再通过 `tool.resolve` 提交完整工具结果。
 
 默认交互处理器插件见 **`plugins/interaction-handler`**（Vue 3 + Vite 工程：
-`src/App.vue` 实现六种请求渲染、倒计时、提交锁、闭合状态，`yarn build`
-产出自包含单文件），真实用于审批与征询；第三方可仿照该工程开发自己的
-处理器并替换。
-SDK 封装（`createInteractionHandler`：onRequested/onClosed/resolve）见
-`plugins/sdk`。通用插件脚手架（`new-plugin`）不含交互权限，需按需自行声明。
+`plugin.json` 声明 `request_user`，`src/App.vue` 完成六类参数解析、界面、
+15 秒倒计时和 answered/expired/cancelled 结果生成。宿主只转发不透明工具调用，
+并保留会话归属和 20 秒通用兜底时限，不解释审批结果。审批结果返回 Agent 后，
+由 Agent 自行决定后续步骤。
+
+SDK 的通用封装是 `createToolProvider`（onRequested/onClosed/resolve），见
+`plugins/sdk`。同一机制可供其他 Desktop TS 工具使用，运行时不识别
+`request_user` 或任何征询类型。

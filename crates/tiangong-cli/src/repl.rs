@@ -131,7 +131,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 处理响应流
-        handle_response(&stream_rx, &state.core_manager, &session_id);
+        handle_response(&stream_rx);
 
         output::separator();
     }
@@ -187,11 +187,7 @@ fn build_cli_plugins(
 }
 
 /// 处理完整的响应流
-fn handle_response(
-    rx: &mpsc::Receiver<StreamEvent>,
-    core_manager: &tiangong_app_state::app_state::CoreManager,
-    session_id: &str,
-) {
+fn handle_response(rx: &mpsc::Receiver<StreamEvent>) {
     let mut state = ResponseState::new();
     let mut last_event_at = Instant::now();
     let timeout = Duration::from_secs(300);
@@ -205,7 +201,7 @@ fn handle_response(
                 Ok(session_event) => {
                     had_event = true;
                     last_event_at = Instant::now();
-                    if state.process(&session_event, core_manager, session_id) {
+                    if state.process(&session_event) {
                         return;
                     }
                 }
@@ -251,12 +247,7 @@ impl ResponseState {
     }
 
     /// 处理单个事件，返回 true 表示本轮结束
-    fn process(
-        &mut self,
-        event: &StreamEvent,
-        core_manager: &tiangong_app_state::app_state::CoreManager,
-        session_id: &str,
-    ) -> bool {
+    fn process(&mut self, event: &StreamEvent) -> bool {
         match event {
             StreamEvent::TurnBoundary { .. } => {}
             StreamEvent::UserMessage { .. } => {
@@ -317,31 +308,6 @@ impl ResponseState {
             }
 
             StreamEvent::TokenUsage { .. } => {}
-
-            StreamEvent::InteractionRequested {
-                request_id,
-                kind,
-                title,
-                description,
-                payload,
-                ..
-            } => {
-                self.end_active_stream();
-                let result_json = cli_interact(kind, title, description, payload);
-                if !core_manager.deliver_to_core_if_live(
-                    session_id,
-                    AgentInputKind::resolve_interaction(request_id.clone(), result_json),
-                ) {
-                    tracing::warn!(%session_id, "交互响应投递失败（Core 可能已停止）");
-                }
-            }
-
-            StreamEvent::InteractionClosed { status, .. } => {
-                // 请求已由本端或其他界面闭合；若为超时/取消提示用户
-                if status != "answered" {
-                    eprintln!("  （交互已{status}）");
-                }
-            }
 
             StreamEvent::Done { .. } => {
                 self.finish();
@@ -560,141 +526,5 @@ impl ResponseState {
     fn finish(&mut self) {
         self.end_active_stream();
         println!();
-    }
-}
-
-/// CLI 文本交互：按 kind 收集用户输入并输出响应 JSON（request_user 协议）。
-fn cli_interact(kind: &str, title: &str, description: &str, payload: &str) -> String {
-    if !description.is_empty() {
-        eprintln!("  {description}");
-    }
-    match kind {
-        "approval" => {
-            eprintln!("\x1b[1m  {title}\x1b[0m");
-            loop {
-                eprint!("\x1b[1;33m  是否允许？(1=仅本次 2=本次运行内 3=拒绝): \x1b[0m");
-                let mut buf = String::new();
-                if std::io::stdin().read_line(&mut buf).is_err() {
-                    return r#"{"decision":"reject"}"#.to_string();
-                }
-                match buf.trim() {
-                    "1" => return r#"{"decision":"approve_once"}"#.to_string(),
-                    "2" => return r#"{"decision":"approve_for_runtime"}"#.to_string(),
-                    "3" | "n" | "no" => return r#"{"decision":"reject"}"#.to_string(),
-                    _ => eprintln!("  请输入 1、2 或 3"),
-                }
-            }
-        }
-        "confirm" => {
-            eprintln!("\x1b[1m  {title}\x1b[0m");
-            eprintln!("    {payload}");
-            let mut buf = String::new();
-            eprint!("\x1b[1;33m  (y/n): \x1b[0m");
-            let _ = std::io::stdin().read_line(&mut buf);
-            serde_json::json!(buf.trim().eq_ignore_ascii_case("y")).to_string()
-        }
-        "choice" | "multi_choice" => {
-            let options: Vec<String> = serde_json::from_str(payload).unwrap_or_default();
-            eprintln!("\x1b[1m  {title}\x1b[0m");
-            for (index, option) in options.iter().enumerate() {
-                eprintln!("    {}. {option}", index + 1);
-            }
-            let mut picked: Vec<usize> = Vec::new();
-            while picked.is_empty() {
-                eprint!(
-                    "\x1b[1;33m  输入序号{}: \x1b[0m",
-                    if kind == "multi_choice" {
-                        "（多选逗号分隔）"
-                    } else {
-                        ""
-                    }
-                );
-                let mut buf = String::new();
-                if std::io::stdin().read_line(&mut buf).is_err() {
-                    break;
-                }
-                for part in buf.trim().split(',') {
-                    if let Ok(number) = part.trim().parse::<usize>()
-                        && number >= 1
-                        && number <= options.len()
-                    {
-                        picked.push(number - 1);
-                    }
-                }
-            }
-            let selected: Vec<&String> = picked.iter().map(|index| &options[*index]).collect();
-            if kind == "multi_choice" {
-                serde_json::json!(selected).to_string()
-            } else {
-                serde_json::json!(selected[0]).to_string()
-            }
-        }
-        "form" => {
-            eprintln!("\x1b[1m  {title}\x1b[0m");
-            let fields: Vec<serde_json::Value> = serde_json::from_str(payload).unwrap_or_default();
-            let mut answers = serde_json::Map::new();
-            for field in fields {
-                let key = field.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                let label = field.get("label").and_then(|v| v.as_str()).unwrap_or(key);
-                let field_type = field
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("string");
-                let options: Vec<String> = field
-                    .get("options")
-                    .and_then(|v| v.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|i| i.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if field_type == "select" && !options.is_empty() {
-                    for (index, option) in options.iter().enumerate() {
-                        eprintln!("    {}. {option}", index + 1);
-                    }
-                    eprint!("\x1b[1;33m  {label}（序号）: \x1b[0m");
-                } else {
-                    eprint!("\x1b[1;33m  {label}: \x1b[0m");
-                }
-                let mut buf = String::new();
-                if std::io::stdin().read_line(&mut buf).is_err() {
-                    continue;
-                }
-                let trimmed = buf.trim();
-                if field_type == "number" {
-                    if let Ok(number) = trimmed.parse::<f64>() {
-                        answers.insert(key.to_string(), serde_json::json!(number));
-                    }
-                } else if field_type == "boolean" {
-                    answers.insert(
-                        key.to_string(),
-                        serde_json::json!(
-                            trimmed.eq_ignore_ascii_case("y")
-                                || trimmed.eq_ignore_ascii_case("true")
-                        ),
-                    );
-                } else if field_type == "select" && !options.is_empty() {
-                    if let Ok(number) = trimmed.parse::<usize>()
-                        && number >= 1
-                        && number <= options.len()
-                    {
-                        answers.insert(key.to_string(), serde_json::json!(options[number - 1]));
-                    }
-                } else {
-                    answers.insert(key.to_string(), serde_json::json!(trimmed));
-                }
-            }
-            serde_json::to_string(&serde_json::Value::Object(answers)).unwrap()
-        }
-        // input：单文本
-        _ => {
-            eprintln!("\x1b[1m  {title}\x1b[0m");
-            eprint!("\x1b[1;33m  请输入: \x1b[0m");
-            let mut buf = String::new();
-            let _ = std::io::stdin().read_line(&mut buf);
-            serde_json::json!(buf.trim()).to_string()
-        }
     }
 }

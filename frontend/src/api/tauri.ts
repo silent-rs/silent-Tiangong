@@ -271,8 +271,6 @@ export interface StreamEvent {
   role?: string;
   agent_label?: string;
   messages?: Message[];
-  request_id?: string;
-  tool_name?: string;
   args_summary?: string;
   attempt?: number;
   max_attempts?: number;
@@ -290,13 +288,6 @@ export interface StreamEvent {
   path?: string;
   /** title_changed 事件携带的新标题。 */
   title?: string;
-  /** interaction_requested / interaction_closed 事件补充字段（request_user 阻塞等待）。 */
-  /** 宿主权威的本地创建/截止时间。 */
-  created_at?: string;
-  deadline?: string;
-  kind?: string;
-  description?: string;
-  payload?: string;
 }
 
 export interface SessionStreamEvent {
@@ -808,10 +799,6 @@ export const api = {
       revision,
       baseContent,
     }),
-
-  /// 响应交互请求（request_user 审批/确认/选择/输入），resultJson 为用户响应 JSON。
-  resolveInteraction: (requestId: string, resultJson: string): Promise<boolean> =>
-    invoke('resolve_interaction', { requestId, resultJson }),
 
   getTrustMode: (sessionId?: string): Promise<string> =>
     invoke('get_trust_mode', { sessionId }),

@@ -8,7 +8,7 @@
  * 桥接方法命名空间（白名单控制）：
  * - `plugin.*`   转发到本插件 WASM 逻辑层（带逻辑层的插件）
  * - `storage.*`  插件私有数据读写：get/set/delete/list
- * - 其余命名空间（session/tool/approval/interaction）按宿主版本渐进开放。
+ * - 其余命名空间（session/tool）按宿主版本渐进开放。
  *
  * 用法（打包工具如 esbuild 把本 SDK 与插件代码一起构建）：
  * ```ts
@@ -62,6 +62,9 @@ export interface HostContext {
   theme: 'light' | 'dark';
   tokens: Record<string, string>;
   fontFamily?: string;
+  session?: {
+    id: string;
+  };
 }
 
 // ── 运行时 ──
@@ -179,42 +182,53 @@ export async function createTiangongBridge(): Promise<HostBridge> {
   throw new Error('未检测到天工容器（不在插件沙箱内运行）');
 }
 
-export interface InteractionRequest {
-  request_id: string;
+/** Desktop 纯 TypeScript 工具插件收到的权威调用。 */
+export interface ToolInvocation {
+  invocation_id: string;
   session_id: string;
   tool_call_id: string;
-  kind: 'approval' | 'confirm' | 'choice' | 'multi_choice' | 'input' | 'form';
-  title: string;
-  description: string;
-  payload: string;
+  name: string;
+  arguments: unknown;
   created_at: string;
-  deadline: string;
 }
 
-export interface InteractionClosed {
-  request_id: string;
-  session_id: string;
+/** 工具调用的宿主权威闭合事件。 */
+export interface ToolClosed {
+  invocation_id: string;
   status: 'answered' | 'expired' | 'cancelled';
 }
 
-/** 交互处理器便捷客户端。宿主仍是截止时间、唯一闭合和审批授权的权威。 */
-export function createInteractionHandler(bridge: HostBridge) {
+/** 插件提交给宿主的通用工具结果。 */
+export interface ToolResult {
+  ok: boolean;
+  summary: string;
+  stdout?: string;
+  stderr?: string;
+  exit_code: number;
+}
+
+/** `tool.resolve` 的完整负载。 */
+export interface ToolResolution {
+  invocation_id: string;
+  status?: ToolClosed['status'];
+  result: ToolResult;
+}
+
+/** Desktop TypeScript 工具提供器客户端。 */
+export function createToolProvider(bridge: HostBridge) {
   return {
-    onRequested(handler: (request: InteractionRequest) => void): () => void {
-      return bridge.on('interaction.requested', (payload) => {
-        handler(JSON.parse(payload) as InteractionRequest);
+    onRequested(handler: (invocation: ToolInvocation) => void): () => void {
+      return bridge.on('tool.requested', (payload) => {
+        handler(JSON.parse(payload) as ToolInvocation);
       });
     },
-    onClosed(handler: (closed: InteractionClosed) => void): () => void {
-      return bridge.on('interaction.closed', (payload) => {
-        handler(JSON.parse(payload) as InteractionClosed);
+    onClosed(handler: (closed: ToolClosed) => void): () => void {
+      return bridge.on('tool.closed', (payload) => {
+        handler(JSON.parse(payload) as ToolClosed);
       });
     },
-    async resolve(requestId: string, result: unknown): Promise<void> {
-      await bridge.call('interaction.resolve', JSON.stringify({
-        request_id: requestId,
-        result_json: JSON.stringify(result),
-      }));
+    async resolve(resolution: ToolResolution): Promise<void> {
+      await bridge.call('tool.resolve', JSON.stringify(resolution));
     },
   };
 }
