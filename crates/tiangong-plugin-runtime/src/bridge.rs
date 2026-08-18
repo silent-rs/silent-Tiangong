@@ -72,6 +72,8 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
         "browser.use"
     } else if method.starts_with("sidecar.") {
         "sidecar.invoke"
+    } else if method.starts_with("webview.") {
+        "webview.use"
     } else {
         namespace.permission
     }
@@ -167,6 +169,11 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "tool." if method.starts_with("terminal.") => {
             native_service_call(&TERMINAL_HANDLER, "terminal", plugin_id, method, payload)
         }
+        // webview.*：宿主 webview 容器原语（声明式创建/导航/eval），插件
+        // 在其上构建浏览器类能力；运行时只做权限与路由，引擎在宿主进程。
+        "tool." if method.starts_with("webview.") => {
+            native_service_call(&WEBVIEW_HANDLER, "webview", plugin_id, method, payload)
+        }
         // sidecar.*：TS 插件调用本插件 sidecar（请求-响应；输出流经通知事件）。
         // 仅到达本插件 sidecar，宿主不解析业务负载。
         "tool." if method.starts_with("sidecar.") => {
@@ -207,6 +214,7 @@ pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> +
 
 static TERMINAL_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static BROWSER_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static WEBVIEW_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 
 /// 注入终端原生服务（PTY 会话管理，桌面入口启动时调用）。
 pub fn set_terminal_handler(handler: NativeServiceHandler) {
@@ -216,6 +224,12 @@ pub fn set_terminal_handler(handler: NativeServiceHandler) {
 /// 注入浏览器原生服务（webview 管理，桌面入口启动时调用）。
 pub fn set_browser_handler(handler: NativeServiceHandler) {
     let _ = BROWSER_HANDLER.set(handler);
+}
+
+/// 注入 webview 容器原语服务（第四种声明式容器；通用原语，非浏览器业务——
+/// 方法如 webview.create/navigate/eval/hide/close，事件经通知通道推送）。
+pub fn set_webview_handler(handler: NativeServiceHandler) {
+    let _ = WEBVIEW_HANDLER.set(handler);
 }
 
 fn native_service_call(

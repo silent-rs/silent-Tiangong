@@ -527,7 +527,7 @@ export type SeamKind =
 export type OpenMode = 'singleton' | 'multi';
 
 /** UI 贡献的沙箱级别。 */
-export type SandboxKind = 'shadow' | 'iframe' | 'native';
+export type SandboxKind = 'shadow' | 'iframe' | 'native' | 'webview';
 
 /** manifest `ui.contributions[]` 声明的 UI 贡献。 */
 export interface UiContribution {

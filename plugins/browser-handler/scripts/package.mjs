@@ -1,0 +1,40 @@
+// 开发期打包：构建 UI 并组装可直接「导入本地插件」的插件包目录（release/）。
+// 产物 = plugin.json + dist/（不含源码与 node_modules），走天工正式导入流程
+// （清单校验 → 事务安装 → 注册表加载），用于开发验证的完整闭环。
+import { cpSync, copyFileSync, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const root = dirname(fileURLToPath(import.meta.url));
+const pluginRoot = join(root, '..');
+const release = join(pluginRoot, 'release');
+
+console.log('[package] vite build...');
+execSync('yarn build', { cwd: pluginRoot, stdio: 'inherit' });
+
+console.log('[package] 组装插件包 release/...');
+rmSync(release, { recursive: true, force: true });
+mkdirSync(release, { recursive: true });
+cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
+cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// sidecar 二进制（本平台构建产物）随插件包分发
+const sidecarBinary = join(pluginRoot, 'terminal-handler-sidecar');
+if (existsSync(sidecarBinary)) {
+  copyFileSync(sidecarBinary, join(release, 'terminal-handler-sidecar'));
+}
+
+// 打包即校验：清单与 entry 就位，避免导入时才发现问题
+const manifest = JSON.parse(readFileSync(join(release, 'plugin.json'), 'utf8'));
+const entry = manifest.ui?.contributions?.[0]?.entry;
+if (!entry) throw new Error('plugin.json 缺少 ui.contributions[].entry');
+// 单文件 entry（Vite 产物在 dist/ 下）时复制到 release 根，兼容
+// dist/index.html + entry: index.html 与 dist/ 子目录两种清单布局
+if (!existsSync(join(release, entry)) && existsSync(join(release, 'dist', entry))) {
+  copyFileSync(join(release, 'dist', entry), join(release, entry));
+}
+readFileSync(join(release, entry));
+const fingerprint = `id=${manifest.id} version=${manifest.version} entry=${entry}`;
+writeFileSync(join(release, '.package-info'), `${fingerprint}\n`);
+console.log(`[package] 完成: release/（${fingerprint}）`);
+console.log('[package] 天工「设置 → 插件管理 → 导入本地插件」选择 release 目录');
