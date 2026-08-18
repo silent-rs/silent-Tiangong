@@ -499,6 +499,7 @@ export const SLOT_IDS = [
   'session.turn-node',
   'session.message-item',
   'session.message-action',
+  'session.input-action',
   'session.before-input',
   'session.after-input',
   'session.interaction',

@@ -77,18 +77,30 @@ pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
         .find(|namespace| method.starts_with(namespace.prefix))
 }
 
-/// 权限校验。
+fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'static str {
+    if method.starts_with("session.input.") {
+        "session.write"
+    } else {
+        namespace.permission
+    }
+}
+
+/// 权限校验.
 ///
 /// - `plugin.*`：只到达本插件自身 WASM 逻辑层，等价旧 `plugin_call` 透传通道。
 ///   v1 清单早于桥接权限体系（`bridge.call` 为 v2 新增，v1 插件无从声明），
 ///   对 v1 一律放行，保证现有 WASM 插件零改动；v2 按声明校验。
 /// - 其余宿主能力命名空间：仅 v2 声明对应权限后可达；v1 插件先于该体系，
 ///   一律拒绝，避免未来宿主服务接入时 v1 插件意外获得越权能力。
-fn has_bridge_permission(manifest: &PluginManifest, namespace: &BridgeNamespace) -> bool {
+fn has_bridge_permission(
+    manifest: &PluginManifest,
+    namespace: &BridgeNamespace,
+    permission: &str,
+) -> bool {
     if manifest.schema_version == 1 {
         return namespace.prefix == "plugin.";
     }
-    manifest.has_permission(namespace.permission)
+    manifest.has_permission(permission)
 }
 
 /// 判断事件订阅声明（`capabilities.events`）是否覆盖某 channel。
@@ -124,13 +136,9 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
 
     let manifest = crate::registry::plugin_manifest(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 未加载"))?;
-    if !has_bridge_permission(&manifest, namespace) {
-        tracing::warn!(
-            plugin_id,
-            method,
-            permission = namespace.permission,
-            "bridge.call 权限不足"
-        );
+    let permission = required_bridge_permission(method, namespace);
+    if !has_bridge_permission(&manifest, namespace, permission) {
+        tracing::warn!(plugin_id, method, permission, "bridge.call 权限不足");
         if manifest.schema_version == 1 {
             bail!(
                 "bridge.call 插件 {plugin_id} 为 schema_version 1，宿主能力命名空间 {} 需要升级清单为 schema_version 2 后使用",
@@ -139,7 +147,7 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         }
         bail!(
             "bridge.call 插件 {plugin_id} 未声明权限 {}，无法调用 {}",
-            namespace.permission,
+            permission,
             namespace.prefix
         );
     }
@@ -159,7 +167,10 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "storage." => storage_call(plugin_id, method, payload),
         // interaction.*：由桌面/CLI 宿主注入响应处理器，插件无权自行闭合请求。
         "interaction." => interaction_call(plugin_id, method, payload),
-        // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
+        "session." if method.starts_with("session.input.") => {
+            session_input_call(plugin_id, method, payload)
+        }
+        // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入.
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
             bail!(
@@ -168,6 +179,26 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
             )
         }
     }
+}
+
+/// 输入草稿宿主处理器。
+pub type SessionInputHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
+pub fn set_session_input_handler(handler: SessionInputHandler) {
+    let _ = SESSION_INPUT_HANDLER.set(handler);
+}
+fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    if !matches!(
+        method,
+        "session.input.addAttachment" | "session.input.captureRegion"
+    ) {
+        bail!("未知输入草稿桥接方法 {method}");
+    }
+    SESSION_INPUT_HANDLER
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入输入草稿服务"))?(
+        plugin_id, method, payload,
+    )
 }
 
 /// 交互响应宿主处理器：桌面入口注入后，纯 UI 插件即可提交响应。
@@ -363,8 +394,16 @@ mod tests {
             r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v1_empty, plugin_ns));
-        assert!(!has_bridge_permission(&v1_empty, session_ns));
+        assert!(has_bridge_permission(
+            &v1_empty,
+            plugin_ns,
+            plugin_ns.permission
+        ));
+        assert!(!has_bridge_permission(
+            &v1_empty,
+            session_ns,
+            session_ns.permission
+        ));
 
         // v1 + 声明了其他权限（如 model-config.read）：plugin.* 同样放行。
         // v1 清单早于 bridge 权限体系，不能因声明过其他权限就要求 bridge.call，
@@ -373,23 +412,43 @@ mod tests {
             r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["model-config.read","sidecar.invoke"]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v1_other_permissions, plugin_ns));
-        assert!(!has_bridge_permission(&v1_other_permissions, session_ns));
+        assert!(has_bridge_permission(
+            &v1_other_permissions,
+            plugin_ns,
+            plugin_ns.permission
+        ));
+        assert!(!has_bridge_permission(
+            &v1_other_permissions,
+            session_ns,
+            session_ns.permission
+        ));
 
         // v2：一律按声明校验
         let v2: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(!has_bridge_permission(&v2, plugin_ns));
-        assert!(!has_bridge_permission(&v2, session_ns));
+        assert!(!has_bridge_permission(&v2, plugin_ns, plugin_ns.permission));
+        assert!(!has_bridge_permission(
+            &v2,
+            session_ns,
+            session_ns.permission
+        ));
 
         let v2_declared: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["bridge.call"]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(&v2_declared, plugin_ns));
-        assert!(!has_bridge_permission(&v2_declared, session_ns));
+        assert!(has_bridge_permission(
+            &v2_declared,
+            plugin_ns,
+            plugin_ns.permission
+        ));
+        assert!(!has_bridge_permission(
+            &v2_declared,
+            session_ns,
+            session_ns.permission
+        ));
     }
 }
 

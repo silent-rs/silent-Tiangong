@@ -384,6 +384,14 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 }
 
 fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
+    if installed.manifest.wasm_binary().is_none() {
+        let loaded = load_plugin_record(storage_root, installed.clone());
+        loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+            .insert(installed.manifest.id.clone(), loaded);
+        return Ok(());
+    }
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
     // Command sidecar 等 Core 汇总 exec_env 后再首次启动；其他常驻 sidecar
@@ -1063,7 +1071,7 @@ fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
         installed
             .manifest
             .wasm_binary()
-            .expect("调用方保证 wasm 存在"),
+            .ok_or_else(|| anyhow::anyhow!("纯 UI 插件没有 WASM 制品"))?,
     );
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }

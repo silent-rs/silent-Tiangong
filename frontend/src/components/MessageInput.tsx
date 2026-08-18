@@ -23,6 +23,7 @@ import {
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { formatDuration } from './message/utils';
+import { SessionInputPluginHost } from './SessionInputPluginHost';
 
 interface MentionCandidate {
   value: string;
@@ -1006,6 +1007,7 @@ export function MessageInput() {
               )}
               {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                <SessionInputPluginHost slot="session.input-action" />
                 <Button
                   onClick={handleAttachFiles}
                   disabled={!cacheKey}
