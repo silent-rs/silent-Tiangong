@@ -1,5 +1,9 @@
 # 04 - ReAct 主循环阶段化重构设计
 
+> 历史文档：本文形成于旧版 React Loop 拆分阶段，涉及的目录、阶段和 Sub Agent
+> 收尾流程已不代表当前实现。仅作为 0.10.1 异常修复历史保留；当前架构请以
+> `docs/core-architecture.md` 和 `docs/agent-loop-refactor/design.md` 为准。
+
 ## 目标
 
 为 `ReactEngine::execute_turn` 的后续安全重构产出设计文档和任务边界，降低当前主循环职责过重带来的维护风险。
