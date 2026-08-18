@@ -78,6 +78,8 @@
 | `07cddec7` | feat(plugin): T015 交互接缝——ask_user 工具与 choice/form/confirm 交互 |
 | `f3147276` | feat(plugin): M2 内置插件化——官方 App 进统一目录与 Agent Team 面板 |
 | `d39d3be5` | feat(plugin): T016 三方体验——纯 UI 插件/SDK/脚手架/文档 |
+| `b5ed0357` | fix(plugin): 浏览器改为多实例打开模式（审查前反馈） |
+| `5af7faa6` | fix(plugin): 审查问题修复——iframe 桥接透传/事件订阅与始终允许运行时化 |
 
 （后续文档提交与代码提交分开记录）
 
@@ -192,6 +194,18 @@
   后端 68 项全绿，clippy 零警告。
 - 遗留：@tiangong/plugin-ui-kit 组件库按需迭代；npm 发布渠道待定；示例插件的
   GUI 手动冒烟待用户执行。
+
+### 代码审查修复（2026-08-18，`5af7faa6`）
+
+审查发现 3 项，全部修复：
+1. iframe 桥接强制改写 `plugin.*`（高）：改为按命名空间透传，裸方法名才补前缀
+   （v1 设置页兼容）；双容器桥接行为一致，回归测试 2 项。
+2. iframe 事件订阅空操作（中）：打通 subscribe 消息对接与 bridge_event 回推，
+   SDK/模板 on/off 完整实现。
+3. 始终允许随会话文件永久保存（中）：approved_tools 改 serde(skip) 仅运行期有效，
+   重启恢复审批确认；文案改「本次运行内」；序列化断言。
+- 验证：前端 204 项（新增 2）、Core react 46 项、runtime 68 项全绿；clippy 零警告。
+- 审查另确认：Core 网络集成测试并发串线为 origin/main 既有问题，非本分支引入。
 
 ### T007（2026-08-17，`3cb5dbd9`）
 
