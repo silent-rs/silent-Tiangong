@@ -2023,7 +2023,7 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
                 })
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "忽略无效插件清单");
+                tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "忽略无效插件清单");
                 None
             }
         })

@@ -12,6 +12,18 @@
 - **当前阻塞**：无。
 - **下一步**：由用户在 Desktop 中验证实际交互体验。
 
+## 下一步候选（按优先级）
+
+1. **审批挑战/授权重建**（新模型）：重构删除了 Core 层强制审批——Supervised 下
+   受保护工具直接执行。需按「插件 TS 逻辑判断 + 可信授权」重新设计（或明确
+   接受纯引导模型）。
+2. **ts_tools 自动化测试**：resolve/超时/多插件竞争/插件禁用清理的集成用例
+   （当前仅 SDK 侧 interaction.test.ts）。
+3. **CLI 交互宿主**：终端下的 request_user 处理（文本交互或安全超时）。
+4. **纯 UI 插件 OSS 分发**：客户端目录协议扩展（wasm 可选 + files 清单下载），
+   publish-plugins.yml 纯 UI 插件 job（此前已回退，待重启）。
+5. **三方 CI 打包**：脚手架模板带 GitHub Actions（产出 Release zip）。
+
 ## 任务总览表
 
 | 编号 | 任务 | 里程碑 | 状态 | 分支 | 提交 | 验证 | 遗留 |
@@ -87,6 +99,15 @@
 （后续文档提交与代码提交分开记录）
 
 ## 验证记录
+
+### 交互插件 GUI 验证清单（2026-08-18）
+
+- 完整手动验证脚本：`./interaction-handler-verification.md`（六种交互逐项、
+  超时/竞态/中断、导入校验、已知边界），供后续逐项执行。
+- 自动化已覆盖：manifest 解析（含错误细节链）、Core 89 项、runtime 65 项、
+  前端 204 项全绿；interaction.ts 单测（六 kind 解析/状态）。
+- 导入问题修复：旧包含 `host_handler` 被新版 TsToolDecl 拒绝（deny_unknown_fields），
+  清单解析错误已带 serde 细节；重新 `yarn package` 后新包解析通过。
 
 ### T001-T004（2026-08-17）
 

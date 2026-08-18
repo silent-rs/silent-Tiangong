@@ -176,8 +176,10 @@ impl PluginManifest {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("读取插件清单失败: {}", path.display()))?;
-        let manifest: Self = serde_json::from_str(&content)
-            .with_context(|| format!("解析插件清单失败: {}", path.display()))?;
+        let manifest: Self = serde_json::from_str(&content).map_err(|error| {
+            // 未知字段/类型不匹配等 serde 细节是排障关键，完整保留进错误链
+            anyhow::anyhow!("清单字段不符合 schema（路径 {}）：{error}", path.display())
+        })?;
         manifest.validate()?;
         Ok(manifest)
     }
