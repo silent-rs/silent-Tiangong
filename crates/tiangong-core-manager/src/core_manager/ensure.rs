@@ -128,30 +128,16 @@ impl CoreManager {
             .is_some_and(|core| core.deliver(input).is_ok())
     }
 
-    /// 向指定会话的 core 发送审批响应。
-    pub fn respond_approval_to_core(
+    /// 响应交互请求（request_user 阻塞等待中）：注册表原子闭合后投递等待 turn。
+    pub fn resolve_interaction_to_core(
         &self,
         session_id: &str,
         request_id: String,
-        approved: bool,
-        always_allow: bool,
+        result_json: String,
     ) {
         self.deliver_to_core_if_live(
             session_id,
-            AgentInputKind::approval(request_id, approved, always_allow),
-        );
-    }
-
-    /// 响应交互请求（ask_user 等挂起工具）；result_json=None 表示取消。
-    pub fn respond_interaction_to_core(
-        &self,
-        session_id: &str,
-        interaction_id: String,
-        result_json: Option<String>,
-    ) {
-        self.deliver_to_core_if_live(
-            session_id,
-            AgentInputKind::interaction(interaction_id, result_json),
+            AgentInputKind::resolve_interaction(request_id, result_json),
         );
     }
 

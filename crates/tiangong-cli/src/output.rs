@@ -149,6 +149,7 @@ pub fn tool_result(name: &str, ok: bool, output: &str) {
 }
 
 /// 打印审批请求
+#[allow(dead_code)]
 pub fn approval_needed(tool_name: &str, args_summary: &str) {
     println!("{YELLOW}  🔒 {tool_name} 需要审批{RESET}");
     println!("{DIM}     {args_summary}{RESET}");

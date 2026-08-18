@@ -43,12 +43,13 @@ interface SessionViewCache {
   runSummary: string;
   contextManagementPending: boolean;
   approvalRequestId: string | null;
-  /** 挂起中的交互请求（ask_user）：非空时消息区渲染交互卡片。 */
+  /** 挂起中的交互请求（request_user 阻塞等待）：非空时消息区渲染交互卡片。 */
   pendingInteraction: {
-    interaction_id: string;
+    request_id: string;
     kind: string;
     title: string;
-    schema: string;
+    description: string;
+    payload: string;
   } | null;
   tokenStats: TokenStats | null;
   lastUsage: AppState['lastUsage'];
@@ -670,21 +671,19 @@ function applyEventToSessionView(
         };
       }
       break;
-    case 'approval_needed':
-      runStatus = 'waiting_approval';
-      approvalRequestId = event.request_id || null;
-      runSummary = event.args_summary
-        ? `${event.tool_name || ''}: ${event.args_summary}`
-        : `工具 ${event.tool_name || ''} 需要确认`;
-      break;
-    case 'interaction_needed':
+    case 'interaction_requested':
       runStatus = 'waiting_approval';
       pendingInteraction = {
-        interaction_id: event.interaction_id || '',
-        kind: event.kind || 'confirm',
+        request_id: event.request_id || '',
+        kind: event.kind || 'input',
         title: event.title || '需要您的输入',
-        schema: event.schema || '',
+        description: event.description || '',
+        payload: event.payload || '',
       };
+      runSummary = event.title || runSummary;
+      break;
+    case 'interaction_closed':
+      pendingInteraction = null;
       break;
     case 'retry':
       runStatus = 'executing';
@@ -857,12 +856,13 @@ export interface AppState {
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
   approvalRequestId: string | null;
-  /** 挂起中的交互请求（ask_user）：非空时消息区渲染交互卡片。 */
+  /** 挂起中的交互请求（request_user 阻塞等待）：非空时消息区渲染交互卡片。 */
   pendingInteraction: {
-    interaction_id: string;
+    request_id: string;
     kind: string;
     title: string;
-    schema: string;
+    description: string;
+    payload: string;
   } | null;
   currentPlan: TaskPlan | undefined;
   mcpServers: McpServer[] | null;

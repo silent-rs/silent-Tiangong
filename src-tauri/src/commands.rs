@@ -195,9 +195,10 @@ async fn send_approval_notification_if_background(
     app: AppHandle,
     session_id: String,
     request_id: String,
-    tool_name: String,
-    args_summary: String,
+    kind: String,
+    title: String,
 ) {
+    let _ = &title;
     let is_current_session = app
         .state::<TiangongApp>()
         .with_state_read(|state| Ok(state.active_session_id.as_str() == session_id))
@@ -213,11 +214,7 @@ async fn send_approval_notification_if_background(
     }
 
     let title = "天工 - 需要审批".to_string();
-    let body = if args_summary.trim().is_empty() {
-        format!("工具 {tool_name} 等待同意或拒绝")
-    } else {
-        format!("{tool_name}: {args_summary}")
-    };
+    let body = format!("[{kind}] {title}");
 
     let _ = request_id;
     let _ = show_desktop_notification(&app, title, body, "tiangong-approval-requests");
@@ -1053,18 +1050,19 @@ pub(crate) fn start_stream_consumer(
                 }));
             }
 
-            if let StreamEvent::ApprovalNeeded {
+            if let StreamEvent::InteractionRequested {
                 request_id,
-                tool_name,
-                args_summary,
+                kind,
+                title,
+                ..
             } = &event
             {
                 rt.block_on(send_approval_notification_if_background(
                     app.clone(),
                     sid.clone(),
                     request_id.clone(),
-                    tool_name.clone(),
-                    args_summary.clone(),
+                    kind.clone(),
+                    title.clone(),
                 ));
             }
 
@@ -1445,41 +1443,20 @@ pub async fn append_message(
     Ok(true)
 }
 
-/// 响应工具审批请求；always_allow=true 时同工具本会话后续放行
+/// 响应交互请求（request_user 审批/确认/选择/输入），resultJson 为用户响应 JSON
 #[tauri::command]
-pub async fn respond_approval(
+pub async fn resolve_interaction(
     request_id: String,
-    approved: bool,
-    always_allow: Option<bool>,
+    result_json: String,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
     let session_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
-    state.inner().core_manager.respond_approval_to_core(
-        &session_id,
-        request_id,
-        approved,
-        always_allow.unwrap_or(false),
-    );
-    Ok(true)
-}
-
-/// 响应交互请求（ask_user 选择/填写/确认）；resultJson 为空表示取消
-#[tauri::command]
-pub async fn respond_interaction(
-    interaction_id: String,
-    result_json: Option<String>,
-    state: State<'_, TiangongApp>,
-) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
-    state.inner().core_manager.respond_interaction_to_core(
-        &session_id,
-        interaction_id,
-        result_json,
-    );
+    state
+        .inner()
+        .core_manager
+        .resolve_interaction_to_core(&session_id, request_id, result_json);
     Ok(true)
 }
 
