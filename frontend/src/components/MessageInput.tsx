@@ -23,6 +23,7 @@ import {
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { formatDuration } from './message/utils';
+import { InteractionPluginHost } from './InteractionPluginHost';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 
 interface MentionCandidate {
@@ -796,6 +797,7 @@ export function MessageInput() {
   return (
     <div ref={containerRef} className="p-4 border-t bg-background">
       <div className="max-w-3xl mx-auto">
+        <InteractionPluginHost />
         {voiceMode && hasStt ? (
           // ===== 语音模式 =====
           <div>

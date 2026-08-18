@@ -3,6 +3,8 @@ import type { ToolInvocation } from '@tiangong/plugin-sdk';
 
 import {
   USER_TIMEOUT_MS,
+  approvalOpinion,
+  normalizeHostTokenValue,
   parseInvocation,
   payloadResult,
 } from './interaction';
@@ -19,6 +21,14 @@ function invocation(argumentsValue: Record<string, unknown>): ToolInvocation {
 }
 
 describe('interaction-handler 业务边界', () => {
+  it('仅在插件内部把宿主 HSL 通道转换为可用颜色', () => {
+    expect(normalizeHostTokenValue('213 31% 91%')).toBe('hsl(213 31% 91%)');
+    expect(normalizeHostTokenValue('0 84% 60% / 50%')).toBe('hsl(0 84% 60% / 50%)');
+    expect(normalizeHostTokenValue('#ffffff')).toBe('#ffffff');
+    expect(normalizeHostTokenValue('hsl(213 31% 91%)')).toBe('hsl(213 31% 91%)');
+    expect(normalizeHostTokenValue('0.5rem')).toBe('0.5rem');
+  });
+
   it('由插件按调用创建时间独立计算 15 秒截止时间', () => {
     const request = parseInvocation(invocation({
       kind: 'approval',
@@ -38,7 +48,7 @@ describe('interaction-handler 业务边界', () => {
       request.invocationId,
       request.kind,
       'answered',
-      { result: { decision: 'approve_once' } },
+      { result: approvalOpinion('approve') },
       true,
     );
 
@@ -46,7 +56,7 @@ describe('interaction-handler 业务边界', () => {
       status: 'answered',
       kind: 'approval',
       request_id: 'invocation-1',
-      result: { decision: 'approve_once' },
+      result: { decision: 'approve' },
     });
     expect(result).toEqual({
       ok: true,

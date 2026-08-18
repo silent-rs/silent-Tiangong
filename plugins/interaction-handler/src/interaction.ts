@@ -5,6 +5,7 @@ import type {
 } from '@tiangong/plugin-sdk';
 
 export type InteractionKind = 'approval' | 'confirm' | 'choice' | 'multi_choice' | 'input' | 'form';
+export type ApprovalOpinion = 'approve' | 'reject';
 type RequestStatus = 'pending' | 'submitting' | ToolClosed['status'];
 
 interface FormField {
@@ -34,6 +35,17 @@ export interface InteractionRequest {
 }
 
 export const USER_TIMEOUT_MS = 15_000;
+
+const HSL_CHANNELS = /^-?(?:\d+(?:\.\d+)?)(?:deg|rad|grad|turn)?\s+-?(?:\d+(?:\.\d+)?)%\s+-?(?:\d+(?:\.\d+)?)%(?:\s*\/\s*(?:\d+(?:\.\d+)?%?))?$/;
+
+export function approvalOpinion(decision: ApprovalOpinion) {
+  return { decision } as const;
+}
+
+export function normalizeHostTokenValue(value: string): string {
+  const normalized = value.trim();
+  return HSL_CHANNELS.test(normalized) ? `hsl(${normalized})` : normalized;
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -14,8 +14,8 @@ interface ToolClosedEvent {
 }
 
 /**
- * Desktop 交互插件宿主。iframe 始终挂载以持续接收工具调用，宿主只根据
- * 权威调用所属会话控制容器显隐，不解析 request_user 的任何业务参数。
+ * Desktop 交互插件宿主。容器固定挂在输入框上方，iframe 始终挂载以持续
+ * 接收工具调用；宿主只根据调用所属会话控制显隐，不解析业务参数。
  */
 export function InteractionPluginHost() {
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -164,9 +164,10 @@ export function InteractionPluginHost() {
   return (
     <div
       aria-hidden={!visible}
+      aria-label="用户交互"
       className={visible
-        ? 'h-[220px] w-full max-w-2xl overflow-hidden rounded-md border bg-card'
-        : 'pointer-events-none h-0 w-full max-w-2xl overflow-hidden border-0 opacity-0'}
+        ? 'mb-3 h-[196px] w-full overflow-hidden rounded-md border bg-card opacity-100 shadow-sm transition-[height,margin,opacity] duration-150'
+        : 'pointer-events-none mb-0 h-0 w-full overflow-hidden border-0 opacity-0 transition-[height,margin,opacity] duration-150'}
     >
       {html ? (
         <PluginSandbox

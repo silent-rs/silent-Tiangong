@@ -8,7 +8,9 @@ import {
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
 import {
+  approvalOpinion,
   isRecord,
+  normalizeHostTokenValue,
   parseInvocation,
   payloadResult,
   type InteractionKind,
@@ -90,9 +92,7 @@ async function resolveInvalid(invocation: ToolInvocation, message: string) {
 async function expire(item: InteractionRequest) {
   if (!provider || item.status !== 'pending') return;
   replaceRequest(item.invocationId, { status: 'submitting', error: '' });
-  const message = item.kind === 'approval'
-    ? '用户未在规定时间内响应，操作未获批准'
-    : '用户未在规定时间内响应';
+  const message = '用户未在规定时间内回应本次征询';
   try {
     await provider.resolve({
       invocation_id: item.invocationId,
@@ -223,11 +223,14 @@ function applyHostContext(data: Record<string, unknown>) {
   const tokens = isRecord(data.tokens) ? data.tokens : {};
   for (const [name, value] of Object.entries(tokens)) {
     if (typeof value === 'string' && value) {
-      document.documentElement.style.setProperty(`--${name}`, value);
+      document.documentElement.style.setProperty(`--${name}`, normalizeHostTokenValue(value));
     }
   }
   if (typeof data.fontFamily === 'string' && data.fontFamily) {
     document.body.style.fontFamily = data.fontFamily;
+  }
+  if (data.theme === 'light' || data.theme === 'dark') {
+    document.documentElement.style.colorScheme = data.theme;
   }
   const session = isRecord(data.session) ? data.session : null;
   currentSessionId.value = session && typeof session.id === 'string' ? session.id : null;
@@ -270,15 +273,26 @@ onUnmounted(() => {
   <div class="wrap">
     <section v-if="request">
       <div class="heading">
-        <h3>{{ request.title }}</h3>
-        <span class="deadline" :class="{ overdue: remainingMs <= 0 || request.status === 'expired' }">
+        <div class="heading-copy">
+          <h3>{{ request.title }}</h3>
+          <p v-if="request.description" class="muted">{{ request.description }}</p>
+        </div>
+        <span
+          class="deadline"
+          :class="{ overdue: remainingMs <= 0 || request.status === 'expired' }"
+          aria-live="polite"
+        >
           {{ remainingText }}
         </span>
       </div>
-      <p v-if="request.description" class="muted">{{ request.description }}</p>
 
       <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
-        <label v-for="option in request.options" :key="option" class="option">
+        <label
+          v-for="option in request.options"
+          :key="option"
+          class="option"
+          :class="{ selected: request.selected.includes(option) }"
+        >
           <input
             :type="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
             :checked="request.selected.includes(option)"
@@ -339,22 +353,20 @@ onUnmounted(() => {
 
       <div class="actions">
         <template v-if="request.kind === 'approval'">
-          <button class="primary" :disabled="locked" @click="answer({ decision: 'approve_once' })">
-            仅本次允许
+          <button type="button" class="approve" :disabled="locked" @click="answer(approvalOpinion('approve'))">
+            同意
           </button>
-          <button class="runtime" :disabled="locked" @click="answer({ decision: 'approve_for_runtime' })">
-            本次运行内允许
-          </button>
-          <button class="reject" :disabled="locked" @click="answer({ decision: 'reject' })">
+          <button type="button" class="reject" :disabled="locked" @click="answer(approvalOpinion('reject'))">
             拒绝
           </button>
         </template>
         <template v-else-if="request.kind === 'confirm'">
-          <button class="primary" :disabled="locked" @click="answer(true)">是</button>
-          <button class="reject" :disabled="locked" @click="answer(false)">否</button>
+          <button type="button" class="primary" :disabled="locked" @click="answer(true)">是</button>
+          <button type="button" class="secondary" :disabled="locked" @click="answer(false)">否</button>
         </template>
         <button
           v-else
+          type="button"
           class="primary"
           :disabled="locked || formIncomplete || ((request.kind === 'choice' || request.kind === 'multi_choice') && request.selected.length === 0)"
           @click="resolveKindResult"
@@ -363,7 +375,8 @@ onUnmounted(() => {
         </button>
         <button
           v-if="request.kind !== 'approval' && request.kind !== 'confirm'"
-          class="cancel"
+          type="button"
+          class="secondary"
           :disabled="locked"
           @click="cancelRequest"
         >
@@ -377,55 +390,224 @@ onUnmounted(() => {
   </div>
 </template>
 
+<style>
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+}
+
+body {
+  overflow: hidden;
+}
+</style>
+
 <style scoped>
 .wrap {
   box-sizing: border-box;
-  min-height: 156px;
-  padding: 14px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 14px 16px;
+  overflow-y: auto;
   color: var(--foreground, #222);
   background: var(--card, transparent);
 }
-.heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-h3 { margin: 0 0 6px; font-size: 15px; line-height: 1.35; letter-spacing: 0; }
-.muted { color: var(--muted-foreground, #777); font-size: 12px; margin: 0 0 10px; }
-.deadline { flex: 0 0 auto; font-size: 12px; color: var(--muted-foreground, #888); }
-.deadline.overdue { color: var(--status-error, #dc2626); }
-.content { display: grid; gap: 8px; margin: 4px 0 12px; }
-.question { font-size: 13px; color: var(--foreground, #222); }
-.input-question { font-size: 12px; color: var(--muted-foreground, #777); }
-.option { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 13px; }
-.field { display: grid; grid-template-columns: minmax(80px, 112px) minmax(0, 1fr); align-items: center; gap: 8px; font-size: 13px; }
-.field-label { color: var(--muted-foreground, #777); overflow-wrap: anywhere; }
-.field-label b { margin-left: 2px; color: var(--status-error, #dc2626); }
-input[type='text'], input[type='number'], select {
+
+section {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.heading-copy {
+  min-width: 0;
+}
+
+h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+
+.muted {
+  margin: 4px 0 0;
+  color: var(--muted-foreground, #777);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.deadline {
+  flex: 0 0 auto;
+  color: var(--muted-foreground, #888);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+.deadline.overdue {
+  color: var(--status-error, #dc2626);
+}
+
+.content {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.question {
+  border-left: 2px solid var(--primary, #2563eb);
+  padding-left: 10px;
+  color: var(--foreground, #222);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.input-question {
+  color: var(--muted-foreground, #777);
+  font-size: 12px;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.option.selected {
+  border-color: var(--primary, #2563eb);
+  background: var(--accent, #f1f5f9);
+}
+
+.option input {
+  margin: 0;
+  accent-color: var(--primary, #2563eb);
+}
+
+.field {
+  display: grid;
+  grid-template-columns: minmax(80px, 112px) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.field-label {
+  color: var(--muted-foreground, #777);
+  overflow-wrap: anywhere;
+}
+
+.field-label b {
+  margin-left: 2px;
+  color: var(--status-error, #dc2626);
+}
+
+input[type='text'],
+input[type='number'],
+select {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
   padding: 7px 8px;
-  border: 1px solid var(--border, #8886);
+  border: 1px solid var(--border, #d1d5db);
   border-radius: 6px;
   background: var(--background, transparent);
   color: inherit;
   font: inherit;
+  outline: none;
 }
-.actions { display: flex; flex-wrap: wrap; gap: 7px; }
+
+input[type='text']:focus,
+input[type='number']:focus,
+select:focus {
+  border-color: var(--ring, #2563eb);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring, #2563eb) 20%, transparent);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
 button {
-  min-height: 32px;
-  border: 0;
+  min-width: 72px;
+  min-height: 34px;
+  border: 1px solid transparent;
   border-radius: 6px;
-  padding: 7px 11px;
+  padding: 7px 14px;
   cursor: pointer;
   font: inherit;
   font-size: 13px;
+  font-weight: 500;
   letter-spacing: 0;
+  transition: filter 120ms ease, opacity 120ms ease;
+}
+
+button.primary {
   background: var(--primary, #2563eb);
   color: var(--primary-foreground, white);
 }
-button.runtime { background: var(--status-success, #16803f); color: white; }
-button.reject { background: var(--status-error, #dc2626); color: white; }
-button.cancel { background: var(--muted, #e5e7eb); color: var(--foreground, #222); }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-.error { margin-top: 8px; color: var(--status-error, #dc2626); font-size: 12px; overflow-wrap: anywhere; }
+
+button.approve {
+  background: var(--status-success, #16803f);
+  color: white;
+}
+
+button.reject {
+  border-color: var(--status-error, #dc2626);
+  background: transparent;
+  color: var(--status-error, #dc2626);
+}
+
+button.secondary {
+  border-color: var(--border, #d1d5db);
+  background: var(--muted, #e5e7eb);
+  color: var(--foreground, #222);
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--ring, #2563eb);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.error {
+  margin-top: 8px;
+  color: var(--status-error, #dc2626);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 
 @media (max-width: 420px) {
   .field { grid-template-columns: 1fr; gap: 4px; }

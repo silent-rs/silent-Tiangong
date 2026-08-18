@@ -1,5 +1,4 @@
 import { useStore } from "@/store/useStore";
-import { InteractionPluginHost } from "./InteractionPluginHost";
 import { useSearchStore } from "@/store/useSearchStore";
 import { findSearchMatches } from "@/utils/search";
 import { SearchBar } from "./SearchBar";
@@ -922,8 +921,6 @@ export function MessageList() {
               )}
             </>
           )}
-
-          <InteractionPluginHost />
 
           {/* 滚动锚点 */}
           <div ref={scrollRef} />

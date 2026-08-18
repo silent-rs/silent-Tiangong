@@ -51,6 +51,7 @@ yarn package        # 开发期打包：构建 + 组装 release/ 插件包
 - 订阅 `tool.requested` / `tool.closed`，通过 `tool.resolve` 提交完整工具结果
 - 插件按调用创建时间独立执行 15 秒用户时限，宿主只按 `timeout_ms: 20000` 处理插件失联
 - approval 将用户选择作为普通工具结果返回 Agent，由 Agent 决定后续步骤；Core 不解释或保存该选择
+- 交互界面固定在当前会话输入框上方，不作为消息写入历史记录
 - 插件按宿主注入的当前会话显示请求，并保存其他运行中会话的待处理项
 - 主题跟随：宿主 hostContext 的设计 token 以 CSS 变量注入（如
   `var(--primary)`）
