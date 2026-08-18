@@ -20,21 +20,26 @@ plugins/interaction-handler/
 └── vite.config.ts   # 单文件打包（vite-plugin-singlefile）
 ```
 
-## 开发与构建
+## 开发循环（打包 → 本地导入 → 验证）
 
 ```sh
 yarn install        # 首次
-yarn build          # 构建到 dist/（单文件，自包含）
-yarn dev            # 本地开发服务器（预览 UI；宿主联调仍需 build 后导入）
+yarn dev            # 本地开发服务器（预览 UI 布局与交互）
+yarn package        # 开发期打包：构建 + 组装 release/ 插件包
 ```
 
-修改 `src/App.vue` 后执行 `yarn build`，重新在天工导入本目录（或对已装插件
-执行热加载）查看效果。
+完整开发流程：
 
-## 导入使用
+1. 修改 `src/App.vue` 等源码；
+2. `yarn package`——构建自包含产物并组装 **`release/`**（plugin.json + dist/，
+   不含源码与 node_modules），打包即校验清单与 entry；
+3. 天工「设置 → 插件管理 → 导入本地插件」，选择 **`release/` 目录**——
+   走正式导入流程（清单校验 → 事务安装 → 注册表加载）；
+4. 发起一次审批/征询验证处理器行为；已安装时可在插件管理中热加载或
+   重新导入新版本。
 
-天工「设置 → 插件管理 → 导入本地插件」，选择**本插件目录**（须包含
-`plugin.json` 与 `dist/`）。
+> `yarn build` 仅产出 `dist/`；分发制品（OSS 目录、签名）属于后续发布流程，
+> 开发期不需要。
 
 ## 与宿主的协议
 

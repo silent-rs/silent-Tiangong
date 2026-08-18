@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "package": "node scripts/package.mjs"
   },
   "dependencies": {
     "@tiangong/plugin-sdk": "file:../sdk",
