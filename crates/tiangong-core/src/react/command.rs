@@ -97,11 +97,8 @@ pub(super) async fn handle_command(
         ));
     }
     match deferred_command {
-        Deferred::Command(Command::ResolveInteraction { .. }) => {
-            // 交互等待在工具流水线内部；流水线之外到达的闭合结果一律是
-            // 迟到或不匹配的（等待已由注册表原子闭合），明确忽略。
-            CommandEffect::KeepCurrent
-        }
+        // 交互闭合在声明式插件的工具 Future 内完成（注册表唤醒），
+        // 命令通道不再承载闭合结果。
         Deferred::Command(Command::InjectUserMessage {
             message_id,
             content,

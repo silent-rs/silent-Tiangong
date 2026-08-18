@@ -185,12 +185,16 @@ async fn approval_flow_grants_once_and_executes() {
         ],
     )
     .await;
+    let test_plugins: Vec<std::sync::Arc<dyn crate::core::plugin::Plugin>> = vec![
+        plugin,
+        crate::core::test_support::request_user_test_plugin(),
+    ];
     let (core, mut events) = core_with(
         &env,
         &sid,
         &server.uri(),
         TrustMode::Supervised,
-        vec![plugin],
+        test_plugins,
     );
 
     send_message(&core, "msg-1", "审批后执行 echo");
@@ -271,12 +275,16 @@ async fn approval_rejected_records_result_and_model_explains() {
         ],
     )
     .await;
+    let test_plugins: Vec<std::sync::Arc<dyn crate::core::plugin::Plugin>> = vec![
+        plugin,
+        crate::core::test_support::request_user_test_plugin(),
+    ];
     let (core, mut events) = core_with(
         &env,
         &sid,
         &server.uri(),
         TrustMode::Supervised,
-        vec![plugin],
+        test_plugins,
     );
 
     send_message(&core, "msg-1", "拒绝执行 echo");

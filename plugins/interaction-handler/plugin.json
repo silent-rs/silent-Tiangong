@@ -28,5 +28,59 @@
         ]
       }
     ]
-  }
+  },
+  "tools": [
+    {
+      "name": "request_user",
+      "description": "向用户发起限时审批、确认、选择或输入请求。调用后当前执行暂停，用户响应将作为该工具调用的结果返回。需要用户决策或补充信息时使用；本工具必须独占一个工具调用批次，不要与其他工具同时调用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "confirm",
+              "choice",
+              "multi_choice",
+              "input",
+              "form"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {},
+            "description": "choice/multi_choice 的候选项"
+          },
+          "fields": {
+            "type": "array",
+            "items": {},
+            "description": "form 的字段定义"
+          },
+          "question": {
+            "type": "string",
+            "description": "confirm 的问题文案"
+          },
+          "approval_challenge": {
+            "type": "string",
+            "description": "工具返回 approval_required 时的 challenge_id"
+          }
+        },
+        "required": [
+          "kind",
+          "title"
+        ]
+      },
+      "host_handler": "interaction.request_user"
+    }
+  ],
+  "prompt": [
+    "交互工具使用规范：当需要用户审批（工具返回 approval_required 时）、确认、选择或补充信息时，调用 request_user 工具。审批请求必须携带原工具返回的 approval_challenge。request_user 必须独占一个工具调用批次，不要与其他工具同时调用。用户响应（含超时 expired）会作为该工具调用的结果返回，据此决定继续、换路径或放弃。"
+  ]
 }

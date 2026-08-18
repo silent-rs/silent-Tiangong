@@ -342,6 +342,7 @@ mod tests {
                 "session.after-input",
                 "session.before-input",
                 "session.empty-state",
+                "session.input-action",
                 "session.interaction",
                 "session.message-action",
                 "session.message-item",

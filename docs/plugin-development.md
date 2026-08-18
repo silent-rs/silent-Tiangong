@@ -2,6 +2,64 @@
 
 本文说明当前插件化试开发阶段如何创建、构建和本地导入天工插件。权威宿主接口位于 [`plugin.wit`](../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，Memory 插件是完整参考实现。
 
+## 开发流程总览
+
+插件开发分两个循环：**本地开发循环**（改代码 → 打包 → 导入验证）与后续的
+**分发流程**（CI 打包、OSS 发布）。日常开发只需要本地循环。
+
+```text
+选择形态 → 开发 → 打包 → 本地导入 → 验证 → （迭代） → 分发（后续）
+```
+
+### 1. 选择插件形态
+
+| 形态 | 适用 | 参考工程 |
+| --- | --- | --- |
+| 纯 UI 插件（无逻辑层） | 面板、工具页、交互界面，仅需宿主桥接（storage 等） | `plugins/interaction-handler`（Vue 3 + Vite） |
+| WASM 逻辑层插件（v1/v2） | 工具、提示词、生命周期、sidecar | `plugins/tiangong-plugin-prompt` 等 |
+| v2 混合（逻辑层 + UI 挂载） | 既有 WASM 插件增加拓展区 App / 设置页 | 见「v2 插件形态」章节 |
+
+脚手架：`cargo run -p xtask -- new-plugin <id>` 生成纯 UI 最小骨架
+（不含交互权限，按需在 manifest 声明）。
+
+### 2. 开发
+
+- 纯 UI 插件：标准前端工程（推荐 Vue 3 + Vite，见参考工程结构），
+  桥接与类型用本地 SDK `plugins/sdk`（`@tiangong/plugin-sdk`）。
+- 产物必须**自包含单文件**（JS/CSS 内联，如 `vite-plugin-singlefile`）：
+  宿主 iframe 沙箱以 `srcdoc` 注入，外链资源无法解析。
+- WASM 插件：Rust + WIT，见「实现 WASM Component」。
+
+### 3. 打包（开发期）
+
+统一命令产出可导入的插件包目录（`release/`：plugin.json + 构建产物，
+不含源码与 node_modules），打包即校验清单与入口就位：
+
+```bash
+# 纯 UI 插件（工程目录内）
+yarn package
+
+# WASM 插件（仓库根目录）
+cargo run -p xtask -- build-plugin <id>
+```
+
+### 4. 本地导入与验证
+
+天工「设置 → 插件管理 → 导入本地插件」选择 `release/`（纯 UI）或构建输出
+目录（WASM 插件）——走正式导入流程（清单校验 → 事务安装 → 注册表加载），
+完整验证真实安装链路。验证要点：
+
+- 设置页贡献正常渲染、拓展区 App 可打开；
+- 桥接调用（storage / plugin.*）与主题跟随正常；
+- 修改代码后重新 `yarn package`，对已装插件热加载或重新导入新版本。
+
+### 5. 分发（后续）
+
+CI 打包（GitHub Actions）与 OSS 目录发布属后续发布流程，开发期不涉及；
+三方插件亦可通过 `TIANGONG_PLUGIN_CATALOG_URL` 指向自建静态目录（规划中）。
+
+---
+
 ## 插件组成
 
 一个可安装插件至少包含 WASM Component。未签名的第三方插件只允许使用纯 WASM；原生 sidecar 仅对带有效天工官方签名的发布包开放：

@@ -1193,6 +1193,100 @@ pub fn send_message(core: &TiangongCore, message_id: &str, text: &str) {
 }
 
 /// 等待指定用户消息获得 turn 终态（磁盘 Session 权威）。
+/// 声明 request_user 的测试插件（模拟声明式插件适配器）：
+/// 工具 spec + override handle 调 run_request_user（与 plugin-runtime 的
+/// DeclarativePlugin 同构），供集成测试在不依赖 runtime 的情况下验证交互链路。
+pub fn request_user_test_plugin() -> std::sync::Arc<dyn crate::core::plugin::Plugin> {
+    std::sync::Arc::new(RequestUserTestPlugin {
+        feedback: std::sync::Mutex::new(None),
+    })
+}
+
+struct RequestUserTestPlugin {
+    feedback: std::sync::Mutex<Option<crate::core::plugin::PluginFeedbackTx>>,
+}
+
+impl crate::core::plugin::Plugin for RequestUserTestPlugin {
+    fn id(&self) -> &str {
+        "interaction-test"
+    }
+
+    fn set_feedback_tx(&self, tx: crate::core::plugin::PluginFeedbackTx) {
+        *self.feedback.lock().expect("测试插件反馈锁损坏") = Some(tx);
+    }
+}
+
+impl crate::tool_override::ToolSpecProvider for RequestUserTestPlugin {
+    fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
+        vec![crate::model::ToolSpec {
+            name: "request_user".to_string(),
+            description: "向用户发起限时审批/确认/选择/输入请求".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["approval", "confirm", "choice", "multi_choice", "input", "form"]},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "options": {"type": "array"},
+                    "fields": {"type": "array"},
+                    "question": {"type": "string"},
+                    "approval_challenge": {"type": "string"}
+                },
+                "required": ["kind", "title"]
+            }),
+        }]
+    }
+}
+
+impl crate::tool_override::ToolOverrideHandler for RequestUserTestPlugin {
+    fn is_host_service_tool(&self) -> bool {
+        true
+    }
+
+    fn handle(
+        &self,
+        call: &crate::model::ToolCall,
+        session: &mut crate::session::Session,
+        _actor_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
+    {
+        let arguments = call.arguments.clone();
+        let call_id = call.id.clone();
+        let session_id = session.id.clone();
+        let feedback = self.feedback.lock().expect("测试插件反馈锁损坏").clone();
+        Box::pin(async move {
+            match crate::interaction::run_request_user(
+                &session_id,
+                &call_id,
+                &arguments,
+                feedback.as_ref(),
+            )
+            .await
+            {
+                Ok((payload, ok)) => Some(crate::tool::ToolResult {
+                    ok,
+                    summary: payload,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: if ok { 0 } else { 1 },
+                    execution: None,
+                }),
+                Err(message) => Some(crate::tool::ToolResult {
+                    ok: false,
+                    summary: format!("request_user 参数无效：{message}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 1,
+                    execution: None,
+                }),
+            }
+        })
+    }
+}
+
+impl crate::tool_override::PromptSectionProvider for RequestUserTestPlugin {}
+impl crate::tool_override::MentionCandidateProvider for RequestUserTestPlugin {}
+
 pub async fn wait_turn_status(env: &TestEnv, sid: &str, message_id: &str) -> TurnStatus {
     let deadline = Instant::now() + WAIT;
     loop {

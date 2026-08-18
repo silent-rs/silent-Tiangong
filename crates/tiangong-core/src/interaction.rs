@@ -101,6 +101,46 @@ pub enum ClosedOutcome {
     Cancelled { reason: String },
 }
 
+/// 等待中的 request_user 工具 Future：闭合后经 oneshot 唤醒。
+static REQUEST_WAITERS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::oneshot::Sender<Box<ClosedInteraction>>>,
+    >,
+> = std::sync::OnceLock::new();
+
+fn request_waiters() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, tokio::sync::oneshot::Sender<Box<ClosedInteraction>>>,
+> {
+    REQUEST_WAITERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 注册请求等待者；返回接收端。闭合时经 [`InteractionRegistry`] 的通知链唤醒。
+pub fn register_request_waiter(
+    request_id: &str,
+) -> tokio::sync::oneshot::Receiver<Box<ClosedInteraction>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    request_waiters()
+        .lock()
+        .expect("交互等待表锁损坏")
+        .insert(request_id.to_string(), tx);
+    rx
+}
+
+/// 等待表的内部访问器（shared_runtime 闭合通知链使用）。
+pub(crate) fn request_waiters_private() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, tokio::sync::oneshot::Sender<Box<ClosedInteraction>>>,
+> {
+    request_waiters()
+}
+
+/// 取消注册（等待 Future 被 drop 时调用，避免残留发送端）。
+pub fn drop_request_waiter(request_id: &str) {
+    request_waiters()
+        .lock()
+        .expect("交互等待表锁损坏")
+        .remove(request_id);
+}
+
 /// 闭合通知：由宿主注入处理（写 Tool Result、按会话状态续跑、发事件）。
 pub type InteractionCloseHandler = Arc<dyn Fn(ClosedInteraction) + Send + Sync + 'static>;
 
@@ -780,4 +820,195 @@ mod redesign_acceptance_tests {
         // 二次消费为空（一次性）
         assert!(challenges.take(&challenge.challenge_id).is_none());
     }
+}
+
+// ── request_user 工具编排（声明式插件经标准工具流水线调用）──
+
+/// 解析后的 request_user 请求。
+pub struct ParsedRequestUser {
+    pub kind: InteractionRequestKind,
+    pub title: String,
+    pub description: String,
+    pub payload: String,
+    pub approval_challenge_id: Option<String>,
+}
+
+/// 解析 request_user 工具参数（六 kind；approval 需挑战 ID）。
+pub fn parse_request_user(
+    value: &serde_json::Value,
+) -> std::result::Result<ParsedRequestUser, String> {
+    let kind = value
+        .get("kind")
+        .and_then(|item| item.as_str())
+        .ok_or("缺少 kind")?;
+    let kind = match kind {
+        "approval" => InteractionRequestKind::Approval,
+        "confirm" => InteractionRequestKind::Confirm,
+        "choice" => InteractionRequestKind::Choice,
+        "multi_choice" => InteractionRequestKind::MultiChoice,
+        "input" => InteractionRequestKind::Input,
+        "form" => InteractionRequestKind::Form,
+        other => return Err(format!("非法 kind：{other}")),
+    };
+    let title = value
+        .get("title")
+        .and_then(|item| item.as_str())
+        .unwrap_or("需要您的输入")
+        .to_string();
+    let description = value
+        .get("description")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+    let payload_field = match kind {
+        InteractionRequestKind::Choice | InteractionRequestKind::MultiChoice => "options",
+        InteractionRequestKind::Form => "fields",
+        _ => "question",
+    };
+    let payload = value
+        .get(payload_field)
+        .cloned()
+        .map(|item| item.to_string())
+        .unwrap_or_else(|| "null".to_string());
+    let approval_challenge_id = value
+        .get("approval_challenge")
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+    Ok(ParsedRequestUser {
+        kind,
+        title,
+        description,
+        payload,
+        approval_challenge_id,
+    })
+}
+
+/// 执行一次 request_user：解析 → approval 消费挑战 → 创建请求 → 发事件 →
+/// 等待闭合（响应/超时唯一胜者）→ 审批授权生成 → 渲染 Tool Result 负载。
+///
+/// 与等待 LLM 同为工具执行的外部 IO：由声明式插件的 override handler 在标准
+/// 工具流水线内调用。`emit` 用于发送 InteractionRequested 事件（反馈通道由
+/// 调用方注入）。返回 (tool_result_payload, ok)。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_request_user(
+    session_id: &str,
+    tool_call_id: &str,
+    arguments: &serde_json::Value,
+    feedback: Option<&crate::core::plugin::PluginFeedbackTx>,
+) -> std::result::Result<(String, bool), String> {
+    let emit = |event: tiangong_types::StreamEvent| {
+        if let Some(feedback) = feedback {
+            feedback.send_stream_event(event);
+        }
+    };
+    use crate::shared_runtime::interactions;
+
+    let parsed = parse_request_user(arguments)?;
+
+    // approval：从挑战表消费真实审批目标（显式 ID；测试容错见 tools 侧调用方）
+    let approval_challenge = if parsed.kind == InteractionRequestKind::Approval {
+        let taken = match parsed.approval_challenge_id {
+            Some(id) => interactions().challenges.take(&id),
+            None => interactions().challenges.take_latest_of_session(session_id),
+        };
+        match taken {
+            Some(challenge) if challenge.session_id == session_id => Some(challenge),
+            Some(_) => return Err("审批挑战不属于当前会话".to_string()),
+            None => {
+                return Err(
+                    "审批挑战无效或已过期：请先调用原工具获取 approval_required 报文中的 challenge_id 后重试"
+                        .to_string(),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let request = interactions().registry.create(InteractionRequest {
+        request_id: scru128::new().to_string(),
+        session_id: session_id.to_string(),
+        source_message_id: None,
+        tool_call_id: tool_call_id.to_string(),
+        kind: parsed.kind,
+        title: parsed.title.clone(),
+        description: parsed.description.clone(),
+        payload: parsed.payload.clone(),
+        approval_challenge: None,
+        status: InteractionStatus::Pending,
+        created_at: now(),
+        deadline: now(),
+    });
+
+    emit(tiangong_types::StreamEvent::InteractionRequested {
+        request_id: request.request_id.clone(),
+        session_id: request.session_id.clone(),
+        tool_call_id: request.tool_call_id.clone(),
+        kind: request.kind.as_str().to_string(),
+        title: parsed.title,
+        description: parsed.description,
+        payload: parsed.payload,
+        created_at: request.created_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        deadline: request.deadline.format("%Y-%m-%dT%H:%M:%S").to_string(),
+    });
+
+    // 等待闭合：响应经唤醒链；超时按绝对 deadline fail-closed（原子闭合）
+    let mut waiter = register_request_waiter(&request.request_id);
+    let remaining = (request.deadline - now())
+        .to_std()
+        .unwrap_or(std::time::Duration::from_millis(1));
+    let closed = match tokio::time::timeout(remaining, &mut waiter).await {
+        Ok(Ok(closed)) => closed,
+        Ok(Err(_)) => {
+            drop_request_waiter(&request.request_id);
+            return Err("交互等待通道关闭".to_string());
+        }
+        Err(_) => {
+            drop_request_waiter(&request.request_id);
+            // 绝对截止已到：注册表原子闭合（响应竞态时唯一胜者）
+            match interactions().registry.expire(&request.request_id) {
+                CloseOutcome::Won(closed) => closed,
+                // 已被响应闭合：等待表中的唤醒应已送达，兜底再收一次
+                _ => match waiter.await {
+                    Ok(closed) => closed,
+                    Err(_) => return Err("交互闭合结果丢失".to_string()),
+                },
+            }
+        }
+    };
+    let closed = *closed;
+
+    // 审批响应：按挑战真实目标生成授权（拒绝/超时不产生授权）
+    if let (Some(challenge), ClosedOutcome::Answered { result }) =
+        (&approval_challenge, &closed.outcome)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(result)
+        && let Some(decision) = value.get("decision").and_then(|d| d.as_str())
+    {
+        match decision {
+            "approve_once" => interactions().grants.grant_once(
+                &challenge.session_id,
+                &challenge.plugin_id,
+                &challenge.tool_name,
+                challenge.arguments_hash.clone(),
+            ),
+            "approve_for_runtime" => interactions().grants.grant_runtime(
+                &challenge.session_id,
+                &challenge.plugin_id,
+                &challenge.tool_name,
+            ),
+            _ => {}
+        }
+    }
+
+    emit(tiangong_types::StreamEvent::InteractionClosed {
+        request_id: closed.request.request_id.clone(),
+        status: match closed.outcome {
+            ClosedOutcome::Answered { .. } => "answered",
+            ClosedOutcome::Expired => "expired",
+            ClosedOutcome::Cancelled { .. } => "cancelled",
+        }
+        .to_string(),
+    });
+    let (payload, ok) = render_closed_tool_result(&closed);
+    Ok((payload, ok))
 }

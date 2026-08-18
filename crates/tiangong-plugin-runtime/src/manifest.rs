@@ -47,6 +47,13 @@ pub struct PluginManifest {
     /// UI 贡献声明（schema v2 新增）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<UiManifest>,
+    /// 宿主服务工具声明（schema v2 新增）：spec 归插件，执行经 host_handler
+    /// 白名单路由到宿主服务（声明与执行分离）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<HostToolDecl>>,
+    /// 系统提示注入段落（schema v2 新增）：引导模型使用本插件声明的工具。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Vec<String>>,
 }
 
 /// 能力声明（schema v2 的 `capabilities` 字段）。
@@ -71,6 +78,18 @@ pub struct CapabilitiesManifest {
     /// 订阅的事件命名空间（如 `session.*`、`tool.*`）。
     #[serde(default)]
     pub events: Vec<String>,
+}
+
+/// 宿主服务工具声明（manifest v2 的 `tools[]`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostToolDecl {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema（必须为 object 形态）。
+    pub input_schema: serde_json::Value,
+    /// 宿主服务路由键（白名单校验）。
+    pub host_handler: String,
 }
 
 /// UI 贡献声明（schema v2 的 `ui` 字段）。
@@ -272,8 +291,15 @@ impl PluginManifest {
                     self.id
                 );
             }
+            if self.tools.is_some() || self.prompt.is_some() {
+                bail!(
+                    "插件 {} 使用 schema_version 1 但声明了 tools/prompt 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
+                    self.id
+                );
+            }
         } else {
             self.validate_v2()?;
+            self.validate_host_tools()?;
         }
         Ok(())
     }
@@ -368,6 +394,44 @@ impl PluginManifest {
                 sandbox: decl.sandbox.unwrap_or(default_sandbox),
             })
             .collect()
+    }
+
+    /// 宿主服务工具声明校验：白名单路由、合法工具名、object schema。
+    fn validate_host_tools(&self) -> Result<()> {
+        for tool in self.tools.iter().flatten() {
+            if !matches!(tool.host_handler.as_str(), "interaction.request_user") {
+                bail!(
+                    "插件 {} 工具 {} 的 host_handler {0} 不在宿主白名单（当前仅 interaction.request_user）",
+                    self.id,
+                    tool.name
+                );
+            }
+            if tool.name.trim().is_empty()
+                || !tool
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!(
+                    "插件 {} 工具名 {} 无效（字母数字与 - _）",
+                    self.id,
+                    tool.name
+                );
+            }
+            if tool.input_schema.get("type").and_then(|v| v.as_str()) != Some("object") {
+                bail!(
+                    "插件 {} 工具 {} 的 input_schema 必须为 object 形态",
+                    self.id,
+                    tool.name
+                );
+            }
+        }
+        for section in self.prompt.iter().flatten() {
+            if section.trim().is_empty() {
+                bail!("插件 {} prompt 段落不能为空", self.id);
+            }
+        }
+        Ok(())
     }
 
     /// v2 UI 贡献的 `native` 沙箱仅对携带有效官方签名的插件开放。

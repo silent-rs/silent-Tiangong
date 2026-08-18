@@ -57,11 +57,29 @@ pub struct InteractionHub {
 static INTERACTION_HUB: OnceLock<InteractionHub> = OnceLock::new();
 
 /// 进程级交互设施单例。
+///
+/// 初始化即挂闭合通知链：请求闭合（响应/超时/取消，唯一胜者）后唤醒等待中的
+/// request_user 工具 Future——声明式插件经标准工具流水线等待，无需感知命令通道。
 pub fn interactions() -> &'static InteractionHub {
-    INTERACTION_HUB.get_or_init(|| InteractionHub {
-        registry: InteractionRegistry::new(),
-        grants: ApprovalGrants::new(),
-        challenges: ApprovalChallenges::new(),
+    INTERACTION_HUB.get_or_init(|| {
+        let hub = InteractionHub {
+            registry: InteractionRegistry::new(),
+            grants: ApprovalGrants::new(),
+            challenges: ApprovalChallenges::new(),
+        };
+        hub.registry.set_close_handler(std::sync::Arc::new(
+            |closed: crate::interaction::ClosedInteraction| {
+                if let Some(sender) = crate::interaction::request_waiters_private()
+                    .lock()
+                    .ok()
+                    .and_then(|mut waiters| waiters.remove(&closed.request.request_id))
+                {
+                    // 接收端已 drop（工具 Future 被中断）时忽略，请求由取消/超时路径闭合
+                    let _ = sender.send(Box::new(closed));
+                }
+            },
+        ));
+        hub
     })
 }
 

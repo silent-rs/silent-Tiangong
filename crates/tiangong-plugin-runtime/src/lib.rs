@@ -16,6 +16,7 @@ pub mod artifacts;
 pub mod bindings;
 pub mod bridge;
 pub mod config;
+pub mod declarative;
 mod execution;
 pub mod host_state;
 pub mod interaction;

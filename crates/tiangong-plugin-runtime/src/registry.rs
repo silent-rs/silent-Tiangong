@@ -382,14 +382,18 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 }
 
 fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
+    // 纯 UI 插件没有 WASM 逻辑层和 Core 实例。重新读取清单与 UI 贡献后直接
+    // 替换注册表记录，不能进入仅适用于 WASM 插件的热替换流程。
     if installed.manifest.wasm_binary().is_none() {
         let loaded = load_plugin_record(storage_root, installed.clone());
         loaded_plugins()
             .lock()
             .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
             .insert(installed.manifest.id.clone(), loaded);
+        tracing::info!(plugin_id = %installed.manifest.id, "纯 UI 插件已重新加载");
         return Ok(());
     }
+
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
     // Command sidecar 等 Core 汇总 exec_env 后再首次启动；其他常驻 sidecar
@@ -496,6 +500,25 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     let plugins = loaded_plugins().lock().ok()?;
     let loaded = plugins.get(plugin_id)?;
     loaded.enabled.then(|| loaded.directory.clone())
+}
+
+/// 收集启用插件的宿主服务工具声明与 prompt 段落（声明式插件注入源）。
+pub fn declared_tools_and_prompts() -> Option<Vec<crate::declarative::DeclaredPlugin>> {
+    let plugins = loaded_plugins().lock().ok()?;
+    Some(
+        plugins
+            .values()
+            .filter(|loaded| loaded.enabled)
+            .filter_map(|loaded| {
+                let tools = loaded.manifest.tools.clone()?;
+                Some(crate::declarative::DeclaredPlugin {
+                    plugin_id: loaded.manifest.id.clone(),
+                    tools,
+                    prompts: loaded.manifest.prompt.clone().unwrap_or_default(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// 取已启用插件的 manifest 快照（供桥接层做权限校验）。
@@ -1065,12 +1088,13 @@ fn instantiate_from_compiled(
 }
 
 fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
-    let path = installed.directory.join(
-        installed
-            .manifest
-            .wasm_binary()
-            .ok_or_else(|| anyhow::anyhow!("纯 UI 插件没有 WASM 制品"))?,
-    );
+    let wasm_binary = installed.manifest.wasm_binary().ok_or_else(|| {
+        anyhow::anyhow!(
+            "插件 {} 是纯 UI 插件，没有 WASM 制品",
+            installed.manifest.id
+        )
+    })?;
+    let path = installed.directory.join(wasm_binary);
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
@@ -1082,9 +1106,6 @@ fn set_last_error(plugin_id: &str, error: String) {
     }
 }
 
-/// 使用同一套规则计算全量列表与单插件操作的状态。
-///
-/// `ui_plugin` 仅代表 WASM UI 实例；纯 UI 插件没有该实例，不能因此判为加载失败。
 fn plugin_state(
     manifest: &PluginManifest,
     enabled: bool,

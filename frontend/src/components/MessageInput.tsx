@@ -377,7 +377,10 @@ export function MessageInput() {
       if (disposed) stop();
       else unlisten = stop;
     }).catch((error) => console.warn('监听插件输入附件失败:', error));
-    return () => { disposed = true; unlisten?.(); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [addAttachments, cacheKey]);
 
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
@@ -913,6 +916,7 @@ export function MessageInput() {
                 </select>
               </div>
             </div>
+            <SessionInputPluginHost slot="session.before-input" />
             <div
               ref={inputAreaRef}
               className="relative"
@@ -1076,7 +1080,9 @@ export function MessageInput() {
                 </Button>
               </div>
             </div>
-            <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <SessionInputPluginHost slot="session.after-input" />
+              <div className="ml-auto flex flex-1 items-center justify-between text-xs text-muted-foreground">
               <div className="flex items-center gap-3 min-w-0">
                 <button
                   onClick={handleChangeCwd}
@@ -1139,6 +1145,7 @@ export function MessageInput() {
                   )}
                 </button>
                 <span>Enter 发送 · Shift+Enter 换行</span>
+              </div>
               </div>
             </div>
           </div>

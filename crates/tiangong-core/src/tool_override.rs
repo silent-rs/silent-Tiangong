@@ -10,6 +10,14 @@ use crate::tool::ToolResult;
 /// 当 Agent 调用指定工具时，优先使用注册的处理器替代默认行为。
 /// Plugin 通过此机制注入浏览器获取能力，替代硬编码的工具名拦截。
 pub trait ToolOverrideHandler: Send + Sync + 'static {
+    /// 是否为宿主服务工具（声明式插件经 host_handler 白名单声明）。
+    ///
+    /// 此类工具的执行本身就是受控的用户交互/宿主服务（如 request_user），
+    /// 不进入审批挑战驱动；普通插件工具返回 false，照常受审批约束。
+    fn is_host_service_tool(&self) -> bool {
+        false
+    }
+
     /// 处理工具调用。返回 None 表示不拦截，由默认逻辑处理。
     ///
     /// `session` 为当前对话的可变引用：插件可读取 `session.id` 用于按对话路由

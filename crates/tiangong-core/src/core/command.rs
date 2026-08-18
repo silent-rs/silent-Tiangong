@@ -4,11 +4,6 @@
 pub enum Command {
     /// 取消当前执行
     Cancel,
-    /// 交互闭合结果（request_user 阻塞等待的响应/超时/取消）：
-    /// 闭合判定已在 InteractionRegistry 原子完成，命令只携带胜出产物。
-    ResolveInteraction {
-        request: Box<crate::interaction::ClosedInteraction>,
-    },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
@@ -48,7 +43,6 @@ impl Command {
     pub(crate) fn kind_name(&self) -> &'static str {
         match self {
             Self::Cancel => "Cancel",
-            Self::ResolveInteraction { .. } => "ResolveInteraction",
             Self::SetTrustMode(_) => "SetTrustMode",
             Self::SetReasoningEffort(_) => "SetReasoningEffort",
             Self::SetTitle { .. } => "SetTitle",

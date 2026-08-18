@@ -85,7 +85,7 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
     }
 }
 
-/// 权限校验.
+/// 权限校验。
 ///
 /// - `plugin.*`：只到达本插件自身 WASM 逻辑层，等价旧 `plugin_call` 透传通道。
 ///   v1 清单早于桥接权限体系（`bridge.call` 为 v2 新增，v1 插件无从声明），
@@ -146,8 +146,7 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
             );
         }
         bail!(
-            "bridge.call 插件 {plugin_id} 未声明权限 {}，无法调用 {}",
-            permission,
+            "bridge.call 插件 {plugin_id} 未声明权限 {permission}，无法调用 {}",
             namespace.prefix
         );
     }
@@ -167,10 +166,11 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "storage." => storage_call(plugin_id, method, payload),
         // interaction.*：由桌面/CLI 宿主注入响应处理器，插件无权自行闭合请求。
         "interaction." => interaction_call(plugin_id, method, payload),
+        // session.input.*：由桌面宿主注入输入草稿处理器，运行时仅负责权限与路由。
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
         }
-        // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入.
+        // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
             bail!(
@@ -181,12 +181,14 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
     }
 }
 
-/// 输入草稿宿主处理器。
+/// 输入草稿宿主处理器：桌面入口注入后，UI 插件可提交经宿主校验的输入附件。
 pub type SessionInputHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
 static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
+
 pub fn set_session_input_handler(handler: SessionInputHandler) {
     let _ = SESSION_INPUT_HANDLER.set(handler);
 }
+
 fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     if !matches!(
         method,
@@ -194,11 +196,10 @@ fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<St
     ) {
         bail!("未知输入草稿桥接方法 {method}");
     }
-    SESSION_INPUT_HANDLER
+    let handler = SESSION_INPUT_HANDLER
         .get()
-        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入输入草稿服务"))?(
-        plugin_id, method, payload,
-    )
+        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入输入草稿服务"))?;
+    handler(plugin_id, method, payload)
 }
 
 /// 交互响应宿主处理器：桌面入口注入后，纯 UI 插件即可提交响应。
@@ -394,15 +395,11 @@ mod tests {
             r#"{"schema_version":1,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(has_bridge_permission(
-            &v1_empty,
-            plugin_ns,
-            plugin_ns.permission
-        ));
+        assert!(has_bridge_permission(&v1_empty, plugin_ns, "bridge.call"));
         assert!(!has_bridge_permission(
             &v1_empty,
             session_ns,
-            session_ns.permission
+            "session.read"
         ));
 
         // v1 + 声明了其他权限（如 model-config.read）：plugin.* 同样放行。
@@ -415,12 +412,12 @@ mod tests {
         assert!(has_bridge_permission(
             &v1_other_permissions,
             plugin_ns,
-            plugin_ns.permission
+            "bridge.call"
         ));
         assert!(!has_bridge_permission(
             &v1_other_permissions,
             session_ns,
-            session_ns.permission
+            "session.read"
         ));
 
         // v2：一律按声明校验
@@ -428,12 +425,8 @@ mod tests {
             r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":[]}"#,
         )
         .unwrap();
-        assert!(!has_bridge_permission(&v2, plugin_ns, plugin_ns.permission));
-        assert!(!has_bridge_permission(
-            &v2,
-            session_ns,
-            session_ns.permission
-        ));
+        assert!(!has_bridge_permission(&v2, plugin_ns, "bridge.call"));
+        assert!(!has_bridge_permission(&v2, session_ns, "session.read"));
 
         let v2_declared: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"a","version":"1.0.0","wasm":{"binary":"p.wasm"},"permissions":["bridge.call"]}"#,
@@ -442,12 +435,12 @@ mod tests {
         assert!(has_bridge_permission(
             &v2_declared,
             plugin_ns,
-            plugin_ns.permission
+            "bridge.call"
         ));
         assert!(!has_bridge_permission(
             &v2_declared,
             session_ns,
-            session_ns.permission
+            "session.read"
         ));
     }
 }

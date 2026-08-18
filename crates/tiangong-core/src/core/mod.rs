@@ -261,14 +261,8 @@ impl TiangongCore {
         let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
-        // 内置交互工具（ask_user）：模型可调用，经交互接缝挂起等待用户响应。
-        let mut turn_tools = prepared_plugins.tools;
-        if !turn_tools
-            .iter()
-            .any(|spec| spec.name == crate::react::tools::REQUEST_USER_TOOL)
-        {
-            turn_tools.push(crate::react::tools::request_user_tool_spec());
-        }
+        // 工具规格与 prompt 段落全部来自 Plugin trait（含声明式插件适配器）。
+        let turn_tools = prepared_plugins.tools;
 
         Ok(TurnContext::builder()
             .client(client)
@@ -383,8 +377,9 @@ impl TiangongCore {
         }
     }
 
-    /// 交互响应入口：先核对请求确实属于当前 Core，再由注册表原子闭合；
-    /// 胜出后将闭合产物投递给异步等待 request_user Tool Result 的 turn task。
+    /// 交互响应入口：先核对请求确实属于当前 Core，再由注册表原子闭合。
+    /// 闭合后由 hub 通知链唤醒等待中的 request_user 工具 Future（标准工具
+    /// 流水线内），闭合事件由等待方经反馈通道发送——无需命令投递。
     pub fn resolve_interaction(&self, request_id: &str, result_json: String) -> bool {
         if crate::shared_runtime::interactions()
             .registry
@@ -399,28 +394,7 @@ impl TiangongCore {
             .registry
             .respond(request_id, result_json)
         {
-            crate::interaction::CloseOutcome::Won(closed) => {
-                let closed = *closed;
-                let _ = self.stream_tx.send(StreamEvent::InteractionClosed {
-                    request_id: closed.request.request_id.clone(),
-                    status: match closed.outcome {
-                        crate::interaction::ClosedOutcome::Answered { .. } => "answered",
-                        crate::interaction::ClosedOutcome::Expired => "expired",
-                        crate::interaction::ClosedOutcome::Cancelled { .. } => "cancelled",
-                    }
-                    .to_string(),
-                });
-                if !crate::shared_runtime::send_command(
-                    &self.session_id,
-                    Command::ResolveInteraction {
-                        request: Box::new(closed),
-                    },
-                ) {
-                    tracing::warn!(request_id, %self.session_id, "交互闭合投递失败（等待 turn 可能已结束）");
-                    return false;
-                }
-                true
-            }
+            crate::interaction::CloseOutcome::Won(_) => true,
             crate::interaction::CloseOutcome::AlreadyClosed(status) => {
                 tracing::warn!(request_id, ?status, "交互响应迟到，请求已闭合");
                 false
