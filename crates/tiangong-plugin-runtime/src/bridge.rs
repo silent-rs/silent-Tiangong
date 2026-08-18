@@ -69,6 +69,8 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
         "terminal.use"
     } else if method.starts_with("browser.") {
         "browser.use"
+    } else if method.starts_with("sidecar.") {
+        "sidecar.invoke"
     } else {
         namespace.permission
     }
@@ -163,6 +165,22 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         // 对应权限后经此通道调用；运行时仅做权限与路由，不感知命令语义。
         "tool." if method.starts_with("terminal.") => {
             native_service_call(&TERMINAL_HANDLER, "terminal", plugin_id, method, payload)
+        }
+        // sidecar.*：TS 插件调用本插件 sidecar（请求-响应；输出流经通知事件）。
+        // 仅到达本插件 sidecar，宿主不解析业务负载。
+        "tool." if method.starts_with("sidecar.") => {
+            let request: serde_json::Value = serde_json::from_str(payload)
+                .with_context(|| "sidecar 请求负载必须是 JSON 对象")?;
+            let operation = method.strip_prefix("sidecar.").unwrap_or_default();
+            if operation.is_empty() {
+                bail!("sidecar 方法缺少操作名（如 sidecar.terminalSpawn）");
+            }
+            let storage_root = crate::registry::plugin_install_directory(plugin_id)
+                .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
+                .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
+                .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+            let result = crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
+            serde_json::to_string(&result).with_context(|| "序列化 sidecar 结果失败")
         }
         "tool." if method.starts_with("browser.") => {
             native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
