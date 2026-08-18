@@ -23,16 +23,37 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
 
   useEffect(() => {
     let disposed = false;
-    const reload = () => {
+    const reloadAll = () => {
       void refresh().catch((error) => {
         if (!disposed) console.warn(`[session-input-plugin] 加载 ${slot} 失败`, error);
       });
     };
-    reload();
-    window.addEventListener('tiangong:plugins-changed', reload);
+    const reloadPlugin = (event: Event) => {
+      const { pluginId } = (event as CustomEvent<{ pluginId: string }>).detail;
+      void api.listSlotContributions(slot).then(async (contributions) => {
+        if (disposed) return;
+        const target = contributions.filter((item) => item.plugin_id === pluginId);
+        const loaded = await Promise.all(target.map(async (item) => ({
+          ...item,
+          html: item.source === 'manifest'
+            ? await api.pluginOpenEntry(item.plugin_id, item.contribution_id)
+            : await api.pluginOpenView(item.plugin_id, item.contribution_id),
+        })));
+        if (!disposed) {
+          setItems((current) => [
+            ...current.filter((item) => item.plugin_id !== pluginId),
+            ...loaded,
+          ]);
+        }
+      }).catch((error) => {
+        if (!disposed) console.warn(`[session-input-plugin] 刷新 ${pluginId} 失败`, error);
+      });
+    };
+    reloadAll();
+    window.addEventListener('tiangong:plugin-changed', reloadPlugin);
     return () => {
       disposed = true;
-      window.removeEventListener('tiangong:plugins-changed', reload);
+      window.removeEventListener('tiangong:plugin-changed', reloadPlugin);
     };
   }, [refresh, slot]);
 

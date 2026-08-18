@@ -178,21 +178,33 @@ export function PluginManagerSettings({
       : installable.filter((plugin) => matches(plugin.name) || matches(plugin.description));
   }, [available, normalizedQuery]);
 
-  const finishOperation = async () => {
-    // 先刷新本地真实状态与 UI Slot；远程插件目录不应阻塞启停反馈。
-    const [installedResult, contributionsResult] = await Promise.allSettled([
-      api.listPlugins(),
-      refreshContributions(),
-    ]);
-    if (installedResult.status === 'fulfilled') {
-      setPlugins(installedResult.value);
-    } else {
-      showError('读取失败', String(installedResult.reason));
+  const finishOperation = async (
+    pluginId: string,
+    operation: Operation,
+    result: unknown,
+  ) => {
+    // 操作是插件级的：只更新目标行，不重读或重置其他插件。
+    if (operation === 'uninstall') {
+      setPlugins((current) => current.filter((plugin) => plugin.id !== pluginId));
+    } else if (result && typeof result === 'object' && 'id' in result) {
+      const status = result as PluginStatus;
+      setPlugins((current) => {
+        const exists = current.some((plugin) => plugin.id === status.id);
+        return exists
+          ? current.map((plugin) => plugin.id === status.id ? status : plugin)
+          : [...current, status].sort((left, right) => left.id.localeCompare(right.id));
+      });
     }
-    if (contributionsResult.status === 'rejected') {
-      showError('插件页面刷新失败', String(contributionsResult.reason));
-    }
-    window.dispatchEvent(new CustomEvent('tiangong:plugins-changed'));
+
+    // Slot 也只接收目标插件变更，由各宿主增删该插件贡献。
+    window.dispatchEvent(new CustomEvent('tiangong:plugin-changed', {
+      detail: { pluginId, operation },
+    }));
+
+    // 设置页贡献数量少，刷新它不会触碰其他插件运行状态。
+    await refreshContributions().catch((error) => {
+      showError('插件页面刷新失败', String(error));
+    });
   };
 
   const runOperation = async (
@@ -204,8 +216,8 @@ export function PluginManagerSettings({
   ) => {
     setActiveOperation({ pluginId, operation });
     try {
-      await action();
-      await finishOperation();
+      const result = await action();
+      await finishOperation(pluginId, operation, result);
       showSuccess(successTitle, successMessage);
       return true;
     } catch (error) {
@@ -271,7 +283,7 @@ export function PluginManagerSettings({
     setActiveOperation({ pluginId: 'local', operation: 'import' });
     try {
       const plugin = await api.importLocalPlugin(selected);
-      await finishOperation();
+      await finishOperation(plugin.id, 'import', plugin);
       showSuccess('插件已导入', `${plugin.name} ${plugin.manifest_version}`);
     } catch (error) {
       showError('导入失败', String(error));
