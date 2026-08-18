@@ -22,7 +22,7 @@
         "id": "interaction-handler",
         "title": "交互处理器",
         "description": "默认交互处理器：审批、确认、选择、输入与表单",
-        "entry": "app/index.html",
+        "entry": "dist/index.html",
         "context": [
           "session"
         ]

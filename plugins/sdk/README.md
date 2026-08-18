@@ -69,7 +69,7 @@ interaction.onRequested((request) => console.log(request, request.deadline));
 await interaction.resolve(requestId, { decision: 'reject' });
 ```
 
-默认交互处理器实现见 `plugins/interaction-handler`（真实使用，可作参考）。插件只提交用户选择，宿主保持
+默认交互处理器见 `plugins/interaction-handler`（Vue 3 + Vite 工程，含完整六种请求实现）。插件只提交用户选择，宿主保持
 截止时间、唯一闭合、会话路由、审批挑战和授权的最终控制。
 
 ## 主题

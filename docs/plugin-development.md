@@ -391,8 +391,9 @@ await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
 声明了 `interaction.handle` 权限与 `capabilities.interaction=true` 的插件可注册为
 处理器接管展示与响应（宿主保留闭合判定、授权与超时权威）。
 
-默认交互处理器插件见 **`plugins/interaction-handler`**（零构建、可直接导入的
-iframe 插件：六种请求渲染、倒计时、提交锁、闭合状态），真实用于审批与征询；
-第三方可仿照它开发自己的处理器并替换。
+默认交互处理器插件见 **`plugins/interaction-handler`**（Vue 3 + Vite 工程：
+`src/App.vue` 实现六种请求渲染、倒计时、提交锁、闭合状态，`yarn build`
+产出自包含单文件），真实用于审批与征询；第三方可仿照该工程开发自己的
+处理器并替换。
 SDK 封装（`createInteractionHandler`：onRequested/onClosed/resolve）见
 `plugins/sdk`。通用插件脚手架（`new-plugin`）不含交互权限，需按需自行声明。
