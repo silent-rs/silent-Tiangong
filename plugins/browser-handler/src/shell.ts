@@ -15,6 +15,13 @@ const TOOL_METHOD: Record<string, string> = {
   browser_open: 'webview.create',
   browser_navigate: 'webview.navigate',
   browser_eval: 'webview.eval',
+  // 协作工具（策略在 TS，引擎经协作原语）：
+  web_fetch: 'webview.fetch',
+  web_query_dom: 'webview.queryDom',
+  web_click: 'webview.click',
+  web_form_fill: 'webview.formFill',
+  web_form_extract: 'webview.formExtract',
+  web_locate_element: 'webview.locate',
 };
 
 async function main() {
@@ -40,10 +47,24 @@ async function main() {
           active_tab_id?: string | null;
           result?: string | null;
         };
-        // 真实结果摘要：导航/创建返回 tab 快照；eval 返回 JS 结果
+        // 真实结果摘要：按工具类别格式化（策略层职责）
         let summary: string;
         if (invocation.name === 'browser_eval') {
           summary = parsed.result ?? '(无返回值)';
+        } else if (invocation.name === 'web_fetch') {
+          const content = (parsed as { content?: string }).content ?? '';
+          summary = content.slice(0, 2_000_000) || '(空内容)';
+        } else if (
+          invocation.name === 'web_query_dom' ||
+          invocation.name === 'web_form_extract' ||
+          invocation.name === 'web_locate_element'
+        ) {
+          summary = JSON.stringify(parsed).slice(0, 100_000);
+        } else if (
+          invocation.name === 'web_click' ||
+          invocation.name === 'web_form_fill'
+        ) {
+          summary = JSON.stringify(parsed).slice(0, 10_000);
         } else {
           const tabs = parsed.tabs ?? [];
           const active = tabs.find((tab) => tab.id === parsed.active_tab_id) ?? tabs[0];

@@ -100,10 +100,12 @@ export function createTerminalView(
     }),
   );
 
-  // 容器尺寸自适应
-  const observer = new ResizeObserver(() => fit.fit());
-  observer.observe(host);
-  disposers.push(() => observer.disconnect());
+  // 容器尺寸自适应（环境不支持 ResizeObserver 时跳过，如测试环境）
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => fit.fit());
+    observer.observe(host);
+    disposers.push(() => observer.disconnect());
+  }
 
   return handle;
 }
