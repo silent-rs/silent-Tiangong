@@ -7,6 +7,7 @@ pub mod context;
 pub mod core;
 pub mod core_config;
 pub(crate) mod formatting;
+pub mod interaction;
 pub mod media;
 pub mod model;
 pub mod models_config;
