@@ -3,12 +3,13 @@ import {
   createToolProvider,
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
+import { tabsModel } from './tabs-model';
 
 /**
- * 浏览器插件 TS 壳（阶段 4 完全体雏形）：
- * - 工具执行路由到宿主 webview 容器原语（bridge webview.*）；
- * - webview 实例创建/导航/生命周期策略在本插件；
- * - 管理界面（地址栏/工具栏，shadow DOM）与容器声明见 App.vue。
+ * 浏览器插件 TS 壳：
+ * - 打开/导航经共享标签模型（tabs-model，与面板同源）；
+ * - 求值与页面协作路由到宿主 webview 容器原语（bridge webview.*）；
+ * - 管理界面（地址栏/工具栏，shadow DOM）见 App.vue。
  */
 
 const TOOL_METHOD: Record<string, string> = {
@@ -40,6 +41,30 @@ async function main() {
         return;
       }
       try {
+        // 打开/导航经共享标签模型（与面板同源，阶段 3 标签语义在插件）；
+        // 发起会话与面板当前会话一致时走模型，否则退回原语直调（后台会话）。
+        if (
+          (invocation.name === 'browser_open' || invocation.name === 'browser_navigate') &&
+          tabsModel.scope === invocation.session_id &&
+          typeof (invocation.arguments as { url?: unknown })?.url === 'string'
+        ) {
+          const target = (invocation.arguments as { url: string }).url;
+          if (invocation.name === 'browser_open' || tabsModel.tabs.length === 0) {
+            await tabsModel.newTab(target);
+          } else {
+            await tabsModel.navigate(target);
+          }
+          const summary =
+            invocation.name === 'browser_open'
+              ? `已在浏览器面板新标签打开：${target}`
+              : `已导航到：${target}`;
+          await tools.resolve({
+            invocation_id: invocation.invocation_id,
+            status: 'answered',
+            result: { ok: true, summary, exit_code: 0 },
+          });
+          return;
+        }
         // 会话绑定（对齐终端插件）：Agent 打开/操作的页面归属发起对话，
         // 与该对话的浏览器面板是同一实例（插件×会话双维度隔离）。
         const raw = await bridge.call(

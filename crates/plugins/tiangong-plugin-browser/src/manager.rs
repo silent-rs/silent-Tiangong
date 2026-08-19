@@ -1779,6 +1779,7 @@ impl BrowserManager {
             BrowserTabSource::Agent,
             Some(agent_domain),
             rect_override,
+            None,
         )?;
         self.start_url_poll(app, url);
         self.start_event_poll(app);
@@ -2360,7 +2361,17 @@ impl BrowserManager {
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
-        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None)
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, None)
+    }
+
+    /// 以插件自带编号新建标签（阶段 3：标签模型上移插件后由插件主导标识）。
+    pub fn tab_new_with_id(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+        tab_id: &str,
+    ) -> Result<String, String> {
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, Some(tab_id))
     }
 
     fn tab_new_with_source(
@@ -2370,8 +2381,12 @@ impl BrowserManager {
         source: BrowserTabSource,
         agent_domain: Option<String>,
         rect_override: Option<(f64, f64, f64, f64)>,
+        external_id: Option<&str>,
     ) -> Result<String, String> {
-        let tab_id = scru128::new().to_string();
+        // 插件可自带标签编号（阶段 3 标签模型上移后由插件主导标识）
+        let tab_id = external_id
+            .map(str::to_string)
+            .unwrap_or_else(|| scru128::new().to_string());
         let is_blank = url == "about:blank";
 
         let rect = {
@@ -2420,6 +2435,53 @@ impl BrowserManager {
         }
         self.persist_session_tabs();
         Ok(tab_id)
+    }
+
+    /// 实例直达原语：把指定标签的 webview 显示到给定矩形并置为活跃
+    /// （阶段 2 插件编排用——显示语义天然互斥，切换时隐藏原活跃实例）。
+    pub fn show_tab_at(&self, tab_id: &str, rect: (f64, f64, f64, f64)) -> Result<(), String> {
+        let is_active = {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state
+                .tabs
+                .iter()
+                .find(|t| t.id == tab_id)
+                .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
+            state.browser_rect = rect;
+            let is_active = state.active_tab_id.as_deref() == Some(tab_id);
+            if is_active {
+                if let Some(wv) = state.webviews.get(tab_id) {
+                    let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
+                    let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
+                }
+                state
+                    .visible
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            is_active
+        };
+        if !is_active {
+            // tab_switch 读最新 browser_rect：隐藏原活跃并摆放到目标矩形
+            self.tab_switch(tab_id)?;
+        }
+        Ok(())
+    }
+
+    /// 实例直达原语：把指定标签的 webview 挪出可视区（不改变活跃标签）。
+    pub fn hide_tab(&self, tab_id: &str) -> Result<(), String> {
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        let wv = state
+            .webviews
+            .get(tab_id)
+            .ok_or_else(|| format!("标签 {tab_id} 不存在或尚未加载 webview"))?;
+        let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
+        Ok(())
+    }
+
+    /// 实例直达原语：对指定标签执行脚本并等待结果（与活跃标签 eval 同
+    /// 回执机制），阶段 3 协作策略上移插件的基础。
+    pub fn eval_tab_result_text(&self, tab_id: &str, js: &str) -> Option<String> {
+        self.eval_tab_with_result_timeout(tab_id, js, Duration::from_secs(15))
     }
 
     pub fn tab_switch(&self, tab_id: &str) -> Result<(), String> {

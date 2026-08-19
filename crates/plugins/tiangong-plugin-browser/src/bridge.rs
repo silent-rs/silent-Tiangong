@@ -132,9 +132,16 @@ pub fn handle_webview_primitive(
                 .get("url")
                 .and_then(|v| v.as_str())
                 .unwrap_or("about:blank");
-            let tab_id = manager
-                .tab_new(app, url)
-                .map_err(|error| anyhow::anyhow!("新建标签失败：{error}"))?;
+            // 插件可自带标签编号（阶段 3 标签模型上移后由插件主导标识）
+            let external_id = request.get("tab_id").and_then(|v| v.as_str());
+            let tab_id = match external_id {
+                Some(id) => manager
+                    .tab_new_with_id(app, url, id)
+                    .map_err(|error| anyhow::anyhow!("新建标签失败：{error}"))?,
+                None => manager
+                    .tab_new(app, url)
+                    .map_err(|error| anyhow::anyhow!("新建标签失败：{error}"))?,
+            };
             manager.persist_session_tabs();
             let snapshot = manager.snapshot_tabs();
             serde_json::json!({
@@ -191,6 +198,52 @@ pub fn handle_webview_primitive(
                 .reload(app)
                 .map_err(|error| anyhow::anyhow!("刷新失败：{error}"))?;
             serde_json::json!({ "view_id": scope })
+        }
+        // ── 实例直达原语（阶段 2）：插件按标签编号编排显示与求值 ──
+        "webview.instanceShow" => {
+            let tab_id = request
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.instanceShow 缺少 tab_id 参数"))?;
+            let rect = (
+                request.get("x").and_then(|v| v.as_f64()).unwrap_or(60.0),
+                request.get("y").and_then(|v| v.as_f64()).unwrap_or(60.0),
+                request
+                    .get("width")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1024.0),
+                request
+                    .get("height")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(720.0),
+            );
+            manager
+                .show_tab_at(tab_id, rect)
+                .map_err(|error| anyhow::anyhow!("显示实例失败：{error}"))?;
+            serde_json::json!({ "view_id": scope, "tab_id": tab_id })
+        }
+        "webview.instanceHide" => {
+            let tab_id = request
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.instanceHide 缺少 tab_id 参数"))?;
+            manager
+                .hide_tab(tab_id)
+                .map_err(|error| anyhow::anyhow!("隐藏实例失败：{error}"))?;
+            serde_json::json!({ "view_id": scope, "tab_id": tab_id })
+        }
+        "webview.instanceEval" => {
+            let tab_id = request
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.instanceEval 缺少 tab_id 参数"))?;
+            let code = request
+                .get("js")
+                .or_else(|| request.get("code"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.instanceEval 缺少 js 参数"))?;
+            let result = manager.eval_tab_result_text(tab_id, code);
+            serde_json::json!({ "view_id": scope, "tab_id": tab_id, "result": result })
         }
         "webview.close" => {
             manager

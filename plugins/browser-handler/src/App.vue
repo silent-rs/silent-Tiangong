@@ -1,72 +1,48 @@
 <script setup lang="ts">
 /**
- * 浏览器插件管理界面（shadow 容器）：
- * 页面本体是宿主原生 webview 实例（经 webview.* 容器原语管理），
- * 本界面承载地址栏/导航/标签条，并把 webview 位置持续对齐到内容区
- * （窗口逻辑坐标，与内置浏览器同一同步通道）。
- *
- * 会话隔离（对齐终端插件）：每个对话一套独立的多标签浏览器，切换
- * 对话自动跟随——旧会话页面隐藏（实例保留），新会话按需恢复/新建。
+ * 浏览器插件管理界面（shadow 容器，阶段 3 模型驱动）：
+ * 标签模型（tabs-model）是唯一状态源——UI 与 Agent 工具壳共用；宿主只
+ * 按模型指令调整 webview 实例（显示/隐藏/导航）。本组件负责渲染与把
+ * webview 位置持续对齐到内容区（窗口逻辑坐标）。
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { createTiangongBridge, getShadowHostRuntime, type HostBridge } from '@tiangong/plugin-sdk';
-
-interface TabInfo {
-  id: string;
-  url: string;
-  title: string;
-}
-
-/** 无活跃会话时的全局作用域。 */
-const GLOBAL_SCOPE = '__global__';
-/** 当前跟随的会话作用域。 */
-const scope = ref(GLOBAL_SCOPE);
+import { tabsModel, type BrowserTab } from './tabs-model';
 
 const bridge = ref<HostBridge | null>(null);
 const ready = ref(false);
 const url = ref('');
-const tabs = ref<TabInfo[]>([]);
+const tabs = ref<BrowserTab[]>([]);
 const activeTabId = ref<string | null>(null);
 const status = ref('初始化…');
 
 const contentRef = ref<HTMLElement | null>(null);
 let observer: ResizeObserver | null = null;
 let syncTimer = 0;
-/** 会话切换防抖序号：异步切换中会话再变时丢弃过期结果。 */
-let switchTicket = 0;
 
-async function call<T>(
-  method: string,
-  payload: Record<string, unknown>,
-  scopeOverride?: string,
-): Promise<T> {
-  const raw = await bridge.value!.call(
-    method,
-    JSON.stringify({ session_id: scopeOverride ?? scope.value, ...payload }),
-  );
-  return JSON.parse(raw) as T;
+/** 模型状态同步到界面。 */
+function modelToUi(): void {
+  tabs.value = [...tabsModel.tabs];
+  activeTabId.value = tabsModel.activeTabId;
+  const active = tabsModel.tabs.find((tab) => tab.id === tabsModel.activeTabId);
+  url.value = active?.url ?? '';
 }
 
-/** 把原生 webview 显示并对齐到内容区矩形（窗口逻辑坐标）。 */
+/** 显示当前活跃标签并对齐内容区矩形。 */
 async function syncPosition(): Promise<void> {
   const host = contentRef.value;
-  if (!host || !bridge.value) return;
+  if (!host || !bridge.value || !tabsModel.activeTabId) return;
   const rect = host.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
-  await call('webview.show', {
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
-  }).catch(() => {});
-}
-
-async function refreshTabs(): Promise<void> {
-  const snapshot = await call<{ tabs?: TabInfo[]; active_tab_id?: string | null }>('webview.tabs', {});
-  tabs.value = snapshot.tabs ?? [];
-  activeTabId.value = snapshot.active_tab_id ?? null;
-  const active = tabs.value.find((tab) => tab.id === activeTabId.value);
-  url.value = active?.url ?? '';
+  await tabsModel
+    .showTab(tabsModel.activeTabId, {
+      x: rect.x,
+      y: rect.y,
+      width: rect.width,
+      height: rect.height,
+    })
+    .catch(() => {});
+  modelToUi();
 }
 
 function scheduleSync(): void {
@@ -88,19 +64,23 @@ async function navigateTo(raw: string): Promise<void> {
   if (!target) return;
   status.value = '导航中…';
   try {
-    await call('webview.navigate', { url: target });
-    await refreshTabs();
-    status.value = '已导航';
+    // 无标签时导航即建首个标签
+    if (tabsModel.tabs.length === 0) {
+      await tabsModel.newTab(target);
+    } else {
+      await tabsModel.navigate(target);
+    }
+    status.value = '就绪';
+    modelToUi();
   } catch (error) {
     status.value = `导航失败：${String(error)}`;
   }
   scheduleSync();
 }
 
-async function action(method: string): Promise<void> {
+async function action(method: 'webview.back' | 'webview.forward' | 'webview.reload'): Promise<void> {
   try {
-    await call(method, {});
-    await refreshTabs();
+    await tabsModel.call(method, {});
   } catch (error) {
     status.value = String(error);
   }
@@ -109,14 +89,9 @@ async function action(method: string): Promise<void> {
 
 async function newTab(): Promise<void> {
   try {
-    // 无实例时 create（含默认标签）；有实例则新增标签
-    const method = tabs.value.length === 0 ? 'webview.create' : 'webview.tabNew';
-    const snapshot = await call<{ tabs?: TabInfo[]; active_tab_id?: string | null }>(method, {
-      url: 'about:blank',
-    });
-    tabs.value = snapshot.tabs ?? [];
-    activeTabId.value = snapshot.active_tab_id ?? null;
-    url.value = '';
+    await tabsModel.newTab('about:blank');
+    modelToUi();
+    status.value = '新标签页';
   } catch (error) {
     status.value = String(error);
   }
@@ -124,30 +99,29 @@ async function newTab(): Promise<void> {
 }
 
 async function switchTab(tabId: string): Promise<void> {
-  if (tabId === activeTabId.value) return;
+  if (tabId === tabsModel.activeTabId) return;
+  const host = contentRef.value;
+  const rect = host?.getBoundingClientRect();
   try {
-    const snapshot = await call<{ tabs?: TabInfo[]; active_tab_id?: string | null }>(
-      'webview.tabSwitch',
-      { tab_id: tabId },
-    );
-    tabs.value = snapshot.tabs ?? [];
-    activeTabId.value = snapshot.active_tab_id ?? null;
-    const active = tabs.value.find((tab) => tab.id === activeTabId.value);
-    url.value = active?.url ?? '';
+    if (rect && rect.width > 0) {
+      await tabsModel.showTab(tabId, {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      });
+    }
+    modelToUi();
   } catch (error) {
     status.value = String(error);
   }
-  scheduleSync();
 }
 
 async function closeTab(tabId: string): Promise<void> {
   try {
-    const snapshot = await call<{ tabs?: TabInfo[]; active_tab_id?: string | null }>(
-      'webview.tabClose',
-      { tab_id: tabId },
-    );
-    tabs.value = snapshot.tabs ?? [];
-    activeTabId.value = snapshot.active_tab_id ?? null;
+    await tabsModel.closeTab(tabId);
+    modelToUi();
+    if (tabsModel.tabs.length === 0) status.value = '当前会话还没有页面，点 + 或输入网址开始';
   } catch (error) {
     status.value = String(error);
   }
@@ -155,69 +129,37 @@ async function closeTab(tabId: string): Promise<void> {
 }
 
 async function hide(): Promise<void> {
-  await call('webview.hide', {}).catch(() => {});
+  await tabsModel.hideCurrent().catch(() => {});
   status.value = '已隐藏（页面仍在后台）';
-}
-
-/** 跟随会话切换标签集：旧会话页面隐藏（实例保留），新会话恢复/空态。 */
-async function switchScope(next: string): Promise<void> {
-  if (!bridge.value || next === scope.value) return;
-  const ticket = ++switchTicket;
-  const previous = scope.value;
-  scope.value = next;
-  tabs.value = [];
-  activeTabId.value = null;
-  url.value = '';
-  status.value = '切换会话…';
-  // 旧会话页面隐藏（webview 实例与标签保留，切回即恢复）
-  if (ready.value) {
-    await call('webview.hide', {}, previous).catch(() => {});
-  }
-  try {
-    const existing = await call<{ tabs?: TabInfo[] }>('webview.tabs', {});
-    if (ticket !== switchTicket) return;
-    tabs.value = existing.tabs ?? [];
-    ready.value = true;
-    if (tabs.value.length > 0) {
-      await refreshTabs();
-      status.value = '就绪';
-      scheduleSync();
-    } else {
-      status.value = '当前会话还没有页面，点 + 或输入网址开始';
-    }
-  } catch (error) {
-    status.value = `切换失败：${String(error)}`;
-  }
 }
 
 onMounted(async () => {
   try {
     bridge.value = await createTiangongBridge();
-    // 初始作用域：当前对话（无活跃会话时全局共享）
+    await tabsModel.attach(bridge.value);
     const runtime = getShadowHostRuntime();
-    const initial = runtime?.context.session?.id ?? GLOBAL_SCOPE;
-    scope.value = initial;
-    // 已有会话则复用（create 会把现有标签导航走，仅在无实例时创建）；
-    // 无标签保持空态，等用户或 Agent 打开第一个页面
-    const existing = await call<{ tabs?: TabInfo[] }>('webview.tabs', {});
-    if (existing.tabs?.length) {
-      await refreshTabs();
-      status.value = '就绪';
-    } else {
-      status.value = '当前会话还没有页面，点 + 或输入网址开始';
-    }
+    tabsModel.scope = runtime?.context.session?.id ?? '__global__';
+    await tabsModel.restore();
+    modelToUi();
     ready.value = true;
-    scheduleSync();
+    status.value = tabsModel.tabs.length > 0 ? '就绪' : '当前会话还没有页面，点 + 或输入网址开始';
+    if (tabsModel.activeTabId) scheduleSync();
 
-    // 会话上下文变化 → 浏览器跟随切换（对齐终端插件行为）
+    // 会话上下文变化 → 浏览器跟随切换（旧会话隐藏保留，新会话恢复）
     runtime?.onContextChange((context) => {
-      const next = context.session?.id ?? GLOBAL_SCOPE;
-      void switchScope(next);
+      const next = context.session?.id ?? '__global__';
+      void (async () => {
+        status.value = '切换会话…';
+        const changed = await tabsModel.switchScope(next);
+        if (!changed) return;
+        modelToUi();
+        status.value =
+          tabsModel.tabs.length > 0 ? '就绪' : '当前会话还没有页面，点 + 或输入网址开始';
+        if (tabsModel.activeTabId) scheduleSync();
+      })();
     });
 
-    // 页面事件通道（宿主定向推送）：加载完成/失败时实时刷新标签状态，
-    // 不再依赖操作后主动查询（SPA 内跳转、页面标题变化都能跟上）。
-    let refreshTimer = 0;
+    // 页面事件通道：标题/地址变化实时回填模型与界面
     bridge.value.on('webview.event', (raw) => {
       try {
         const event = JSON.parse(raw) as {
@@ -225,25 +167,22 @@ onMounted(async () => {
           scope?: string;
           payload?: { tab_id?: string; url?: string; title?: string };
         };
-        // 仅响应当前会话作用域的事件
-        const expected = scope.value === GLOBAL_SCOPE
-          ? 'webview:browser-handler'
-          : `webview:browser-handler:${scope.value}`;
+        const expected =
+          tabsModel.scope === '__global__'
+            ? 'webview:browser-handler'
+            : `webview:browser-handler:${tabsModel.scope}`;
         if (event.scope !== expected || !event.payload) return;
         if (event.event === 'navigation_failed') {
           status.value = '页面加载失败';
           return;
         }
-        if (event.event === 'page_loaded') {
-          // 增量更新当前标签标题/地址，合并短时多次事件
-          const active = tabs.value.find((tab) => tab.id === event.payload?.tab_id);
-          if (active && event.payload) {
-            if (event.payload.title) active.title = event.payload.title;
-            if (event.payload.url) active.url = event.payload.url;
-            if (active.id === activeTabId.value) url.value = active.url;
-          }
-          window.clearTimeout(refreshTimer);
-          refreshTimer = window.setTimeout(() => void refreshTabs().catch(() => {}), 200);
+        if (event.event === 'page_loaded' && event.payload.tab_id) {
+          tabsModel.applyPageLoaded(
+            event.payload.tab_id,
+            event.payload.url,
+            event.payload.title,
+          );
+          modelToUi();
         }
       } catch {
         /* 忽略坏帧 */
@@ -265,20 +204,15 @@ onBeforeUnmount(() => {
   window.removeEventListener('scroll', scheduleSync, true);
   observer?.disconnect();
   observer = null;
-  // 容器卸载时隐藏当前会话页面（webview 进程与标签保留，切回恢复）
-  void bridge.value
-    ?.call('webview.hide', JSON.stringify({ session_id: scope.value }))
-    .catch(() => {});
+  void tabsModel.suspend();
 });
 
-// shadow 容器卸载回调（面板关闭/重建）同样隐藏当前会话页面
+// shadow 容器卸载回调（面板关闭/重建）同样隐藏并落盘
 getShadowHostRuntime()?.registerCleanup(() => {
-  void bridge.value
-    ?.call('webview.hide', JSON.stringify({ session_id: scope.value }))
-    .catch(() => {});
+  void tabsModel.suspend();
 });
 
-function tabLabel(tab: TabInfo): string {
+function tabLabel(tab: BrowserTab): string {
   if (tab.title) return tab.title;
   try {
     return new URL(tab.url).hostname;
@@ -323,7 +257,9 @@ function tabLabel(tab: TabInfo): string {
 
     <!-- 内容区：原生 webview 叠放在此区域之上，仅作占位与位置锚点 -->
     <div ref="contentRef" class="content">
-      <div v-if="!ready" class="placeholder">{{ status }}</div>
+      <div v-if="!ready || tabs.length === 0" class="placeholder">
+        {{ ready ? '当前会话还没有页面，点 + 或输入网址开始' : status }}
+      </div>
     </div>
   </div>
 </template>
