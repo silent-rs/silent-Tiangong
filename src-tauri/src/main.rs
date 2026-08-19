@@ -356,6 +356,46 @@ fn run_gui() {
                 ));
             }
 
+            // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
+            // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
+            // 终端等流式界面将收不到任何输出。
+            tiangong_plugin_runtime::set_sidecar_notification_forwarder(Arc::new(
+                |plugin_id: &str, channel: &str, payload: &str| {
+                    let wrapped = serde_json::json!({
+                        "channel": channel,
+                        "payload": payload,
+                    })
+                    .to_string();
+                    tiangong_plugin_runtime::bridge::bridge_emit_to(
+                        plugin_id,
+                        "sidecar.event",
+                        &wrapped,
+                    );
+                },
+            ));
+
+            // webview 容器原语（第四种声明式容器）：插件经 bridge webview.*
+            // 创建/导航/eval 真实 webview 实例；实例按插件隔离
+            // （view_id = webview:<plugin_id>），引擎复用 browser 基础设施。
+            {
+                use tauri::Manager;
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_webview_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| {
+                        let state = app_handle
+                            .try_state::<tiangong_plugin_browser::BrowserPluginState>()
+                            .ok_or_else(|| anyhow::anyhow!("webview 引擎未初始化"))?;
+                        tiangong_plugin_browser::bridge::handle_webview_primitive(
+                            &state,
+                            &app_handle,
+                            plugin_id,
+                            method,
+                            payload,
+                        )
+                    },
+                ));
+            }
+
             // 输入草稿桥接：插件提交图片 data URL；宿主验证格式和大小后，
             // 通过定向事件交给当前输入框加入草稿，不自动发送。
             {

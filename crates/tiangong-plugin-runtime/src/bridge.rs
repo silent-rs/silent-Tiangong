@@ -48,10 +48,31 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         permission: "storage.private",
         description: "读写插件私有数据",
     },
+    BridgeNamespace {
+        prefix: "terminal.",
+        permission: "terminal.use",
+        description: "终端原生服务（宿主注入）",
+    },
+    BridgeNamespace {
+        prefix: "browser.",
+        permission: "browser.use",
+        description: "浏览器原生服务（宿主注入）",
+    },
+    BridgeNamespace {
+        prefix: "webview.",
+        permission: "webview.use",
+        description: "webview 容器原语",
+    },
+    BridgeNamespace {
+        prefix: "sidecar.",
+        permission: "sidecar.invoke",
+        description: "本插件 sidecar 原生逻辑层",
+    },
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
-pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &["session.", "tool.", "lifecycle.", "config."];
+pub const EVENT_NAMESPACE_PREFIXES: &[&str] =
+    &["session.", "tool.", "lifecycle.", "config.", "sidecar."];
 
 /// 查找 method 所属的桥接命名空间。
 pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {
@@ -65,6 +86,14 @@ fn required_bridge_permission(method: &str, namespace: &BridgeNamespace) -> &'st
         "session.write"
     } else if method == "tool.resolve" {
         "tool.provide"
+    } else if method.starts_with("terminal.") {
+        "terminal.use"
+    } else if method.starts_with("browser.") {
+        "browser.use"
+    } else if method.starts_with("sidecar.") {
+        "sidecar.invoke"
+    } else if method.starts_with("webview.") {
+        "webview.use"
     } else {
         namespace.permission
     }
@@ -154,6 +183,35 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "session." if method.starts_with("session.input.") => {
             session_input_call(plugin_id, method, payload)
         }
+        // terminal.*：宿主注入的原生服务（PTY 等）
+        "terminal." => {
+            native_service_call(&TERMINAL_HANDLER, "terminal", plugin_id, method, payload)
+        }
+        // browser.*：宿主注入的浏览器原生服务
+        "browser." => native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload),
+        // webview.*：宿主 webview 容器原语（声明式创建/导航/eval），插件
+        // 在其上构建浏览器类能力；运行时只做权限与路由，引擎在宿主进程。
+        "webview." => native_service_call(&WEBVIEW_HANDLER, "webview", plugin_id, method, payload),
+        // sidecar.*：TS 插件调用本插件 sidecar（请求-响应；输出流经通知事件）。
+        // 仅到达本插件 sidecar，宿主不解析业务负载。
+        "sidecar." => {
+            let request: serde_json::Value = serde_json::from_str(payload)
+                .with_context(|| "sidecar 请求负载必须是 JSON 对象")?;
+            let operation = method.strip_prefix("sidecar.").unwrap_or_default();
+            if operation.is_empty() {
+                bail!("sidecar 方法缺少操作名（如 sidecar.terminalSpawn）");
+            }
+            let storage_root = crate::registry::plugin_install_directory(plugin_id)
+                .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
+                .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
+                .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
+            let result =
+                crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
+            serde_json::to_string(&result).with_context(|| "序列化 sidecar 结果失败")
+        }
+        "tool." if method.starts_with("browser.") => {
+            native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
+        }
         // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
@@ -168,6 +226,42 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
 /// 输入草稿宿主处理器：桌面入口注入后，UI 插件可提交经宿主校验的输入附件。
 pub type SessionInputHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
 static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
+
+/// 原生能力宿主服务处理器：`(plugin_id, method, payload) -> 结果 JSON`。
+pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
+
+static TERMINAL_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static BROWSER_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static WEBVIEW_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+
+/// 注入终端原生服务（PTY 会话管理，桌面入口启动时调用）。
+pub fn set_terminal_handler(handler: NativeServiceHandler) {
+    let _ = TERMINAL_HANDLER.set(handler);
+}
+
+/// 注入浏览器原生服务（webview 管理，桌面入口启动时调用）。
+pub fn set_browser_handler(handler: NativeServiceHandler) {
+    let _ = BROWSER_HANDLER.set(handler);
+}
+
+/// 注入 webview 容器原语服务（第四种声明式容器；通用原语，非浏览器业务——
+/// 方法如 webview.create/navigate/eval/hide/close，事件经通知通道推送）。
+pub fn set_webview_handler(handler: NativeServiceHandler) {
+    let _ = WEBVIEW_HANDLER.set(handler);
+}
+
+fn native_service_call(
+    handler: &OnceLock<NativeServiceHandler>,
+    service: &str,
+    plugin_id: &str,
+    method: &str,
+    payload: &str,
+) -> Result<String> {
+    let handler = handler
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("宿主尚未接入 {service} 原生服务"))?;
+    handler(plugin_id, method, payload)
+}
 
 pub fn set_session_input_handler(handler: SessionInputHandler) {
     let _ = SESSION_INPUT_HANDLER.set(handler);

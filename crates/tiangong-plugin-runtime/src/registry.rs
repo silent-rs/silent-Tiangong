@@ -749,14 +749,12 @@ pub enum ContributionSource {
 }
 
 /// 拓展区 App 元数据：声明 `extension.tab` 贡献的插件即可作为 App 打开
-/// （设计文档 6.6）。供能力矩阵与实例管理消费。
+/// （设计文档 6.6）。目录完全由已安装插件的贡献驱动，不在代码里写死；
+/// 官方内置能力（浏览器/终端/Agent Team）后续以插件形态注册，装上即出现。
 #[derive(Debug, Clone, Serialize)]
 pub struct ExtensionApp {
     pub plugin_id: String,
     pub contribution_id: String,
-    /// 官方内置 App（浏览器/终端/Agent Team）：native 容器，非插件清单声明。
-    #[serde(default)]
-    pub official: bool,
     /// 插件 descriptor 名称（矩阵主标题）。
     pub name: String,
     /// 贡献标题（缺省回落 plugin_id）。
@@ -768,51 +766,9 @@ pub struct ExtensionApp {
     pub sandbox: crate::slots::SandboxKind,
 }
 
-/// 官方内置 App 目录（设计文档 8.1-8.3）：以官方插件身份进入统一 App 注册表，
-/// native 容器（仅官方签名语义），与三方 App 同构展示。
-/// plugin_id 统一为 `__builtin__`，contribution_id 即官方 App 标识。
-pub fn official_apps() -> Vec<ExtensionApp> {
-    vec![
-        ExtensionApp {
-            plugin_id: "__builtin__".to_string(),
-            contribution_id: "browser".to_string(),
-            official: true,
-            name: "浏览器".to_string(),
-            title: "浏览器".to_string(),
-            description: "嵌入式浏览器，支持多标签与会话隔离".to_string(),
-            icon: "globe".to_string(),
-            open_mode: crate::slots::OpenMode::Multi,
-            sandbox: crate::slots::SandboxKind::Native,
-        },
-        ExtensionApp {
-            plugin_id: "__builtin__".to_string(),
-            contribution_id: "terminal".to_string(),
-            official: true,
-            name: "终端".to_string(),
-            title: "终端".to_string(),
-            description: "嵌入式终端，支持多标签与会话隔离".to_string(),
-            icon: "terminal".to_string(),
-            open_mode: crate::slots::OpenMode::Multi,
-            sandbox: crate::slots::SandboxKind::Native,
-        },
-        ExtensionApp {
-            plugin_id: "__builtin__".to_string(),
-            contribution_id: "agent-team".to_string(),
-            official: true,
-            name: "Agent Team".to_string(),
-            title: "Agent Team".to_string(),
-            description: "子 Agent 协作状态面板".to_string(),
-            icon: "bot".to_string(),
-            open_mode: crate::slots::OpenMode::Singleton,
-            sandbox: crate::slots::SandboxKind::Native,
-        },
-    ]
-}
-
 /// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
 /// `extension.tab` 的贡献与插件 descriptor 名称。v1 插件无 manifest UI
-/// 贡献，不进入 App 列表；官方内置能力（浏览器/终端）在插件化迁移后
-/// 以同一形态并入。
+/// 贡献，不进入 App 列表。
 pub fn list_extension_apps() -> Vec<ExtensionApp> {
     let mut apps = Vec::new();
     let Ok(plugins) = loaded_plugins().lock() else {
@@ -832,7 +788,6 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
                 continue;
             }
             apps.push(ExtensionApp {
-                official: false,
                 plugin_id: plugin_id.clone(),
                 contribution_id: contribution.id.clone(),
                 name: plugin_name.clone(),
@@ -844,17 +799,12 @@ pub fn list_extension_apps() -> Vec<ExtensionApp> {
             });
         }
     }
-    let mut all = official_apps();
-    all.extend(apps);
-    // 官方 App 置顶，其余按 (plugin_id, contribution_id) 排序
-    all.sort_by(|left, right| {
-        right.official.cmp(&left.official).then_with(|| {
-            left.plugin_id
-                .cmp(&right.plugin_id)
-                .then(left.contribution_id.cmp(&right.contribution_id))
-        })
+    apps.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then(left.contribution_id.cmp(&right.contribution_id))
     });
-    all
+    apps
 }
 
 /// 打开插件页面，返回入口 HTML。
@@ -1221,18 +1171,53 @@ fn install_staged_plugin_inner(
         .into_iter()
         .find(|installed| installed.manifest.id == staged.manifest.id);
 
-    if let Some(current) = current {
+    let status = if let Some(current) = current {
         if current.directory != destination {
             bail!(
                 "插件 {} 安装目录与 ID 不一致: {}",
-                current.manifest.id,
+                staged.manifest.id,
                 current.directory.display()
             );
         }
         ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
-        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest)
+        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
     } else {
-        install_new_plugin(storage_root, staged_path, staged.manifest)
+        install_new_plugin(storage_root, staged_path, staged.manifest.clone())
+    };
+    // sidecar 二进制是新落盘文件：macOS 首次执行有一次性的安全评估
+    // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
+    // 业务调用（打开终端 / 首次工具执行）上。
+    if status.is_ok() {
+        prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
+    }
+    status
+}
+
+/// 后台预热插件 sidecar：拉起进程并完成握手（幂等，已运行则即时返回）。
+/// 失败不影响使用——首个业务调用会按原路径重试启动。
+pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
+    let storage_root = storage_root.to_path_buf();
+    let plugin_id = plugin_id.to_string();
+    let spawned = std::thread::Builder::new()
+        .name(format!("prewarm-sidecar-{plugin_id}"))
+        .spawn(move || {
+            let Ok(installed) = find_installed_plugin(&storage_root, &plugin_id) else {
+                return;
+            };
+            if !installed.enabled || installed.manifest.sidecar.is_none() {
+                return;
+            }
+            match sidecar_connection(&storage_root, &installed, false)
+                .and_then(|connection| connection.ensure_running())
+            {
+                Ok(()) => tracing::info!(plugin_id, "插件 sidecar 预热完成"),
+                Err(error) => {
+                    tracing::debug!(plugin_id, %error, "插件 sidecar 预热失败（使用时重试）")
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::debug!(%error, "创建 sidecar 预热线程失败");
     }
 }
 

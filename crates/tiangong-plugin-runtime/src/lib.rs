@@ -30,8 +30,9 @@ mod ts_tools;
 
 pub use adapter::WasmPluginAdapter;
 pub use bridge::{
-    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, bridge_call, bridge_emit, bridge_subscribe,
-    bridge_unsubscribe, set_event_emitter, set_session_input_handler,
+    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call, bridge_emit,
+    bridge_subscribe, bridge_unsubscribe, set_browser_handler, set_event_emitter,
+    set_session_input_handler, set_terminal_handler, set_webview_handler,
 };
 pub use config::PluginRuntimeConfig;
 pub use loader::{
@@ -39,7 +40,10 @@ pub use loader::{
     WasmPluginLoader,
 };
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
-pub use sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+pub use sidecar::{
+    ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
+    set_sidecar_notification_forwarder,
+};
 pub use slots::{
     BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
     SlotInstances, SlotRegistry, UiContribution,

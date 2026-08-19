@@ -185,7 +185,8 @@ describe('拓展区三态状态机（T008）', () => {
     const tabs = container!.querySelector('[data-testid="tabs-container"]');
     expect(tabs, '应进入 App 态渲染 TabsContainer').toBeTruthy();
     expect(tabs!.getAttribute('data-mode')).toBe('app');
-    expect(tabs!.getAttribute('data-kind')).toBe('terminal');
+    // 终端已迁移为插件贡献（terminal-handler），打开的 tab kind 为 plugin
+    expect(tabs!.getAttribute('data-kind')).toBe('plugin');
   });
 
   it('App 态点启动台回矩阵态（tab 栏保留），再点拓展按钮收起面板', async () => {

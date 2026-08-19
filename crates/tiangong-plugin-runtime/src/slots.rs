@@ -288,6 +288,9 @@ pub enum SandboxKind {
     Iframe,
     /// 原生容器（仅官方签名插件）。
     Native,
+    /// webview 容器原语：宿主提供的声明式 webview 实例（创建/导航/eval/
+    /// 事件），插件在其上构建浏览器类能力（通用原语，非浏览器业务）。
+    Webview,
 }
 
 /// `open_mode` 仅生效的 Slot。

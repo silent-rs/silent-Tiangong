@@ -15,7 +15,8 @@ pub const SIGNED_RELEASE_FILE: &str = "release.json";
 pub const SIGNATURE_FILE: &str = "release.json.sig";
 pub const SIGNED_RELEASE_SCHEMA_VERSION: u32 = 1;
 
-/// 插件专用 minisign 公钥。私钥只保存在官方发布环境。
+/// 插件专用 minisign 公钥。私钥只保存在官方发布环境（CI secret 与
+/// 官方开发者本机，打包时经 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 提供）。
 const OFFICIAL_PLUGIN_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +28,9 @@ pub struct SignedPluginRelease {
     #[serde(default)]
     pub permissions: Vec<String>,
     pub manifest: SignedArtifact,
-    pub wasm: SignedArtifact,
+    /// 纯 TS/sidecar 插件无 wasm 制品，签名清单省略 wasm 条目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ui: Vec<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,9 +105,11 @@ impl SignedPluginRelease {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
-        match plugin_manifest.wasm_binary() {
-            Some(wasm_binary) => self.wasm.verify(directory, wasm_binary)?,
-            None => bail!("签名插件必须包含 wasm 制品（纯 UI 插件无需签名发布）"),
+        // wasm 条目与 plugin.json 声明一致才校验；纯 TS/sidecar 插件两边都缺省。
+        match (&self.wasm, plugin_manifest.wasm_binary()) {
+            (Some(signed_wasm), Some(wasm_binary)) => signed_wasm.verify(directory, wasm_binary)?,
+            (None, None) => {}
+            _ => bail!("插件签名清单与 plugin.json 的 wasm 声明不一致"),
         }
         let expected_ui = plugin_manifest
             .ui_contributions()
@@ -159,8 +164,11 @@ fn permission_set(permissions: &[String]) -> Result<BTreeSet<&str>> {
 }
 
 fn verify_minisign(content: &[u8], signature_b64: &str) -> Result<()> {
+    // 公钥可被环境变量覆盖（CI/本地端到端验证用；不改变内置官方公钥）
+    let pubkey_b64 = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
+        .unwrap_or_else(|_| OFFICIAL_PLUGIN_PUBKEY_B64.to_string());
     let public_text = base64::engine::general_purpose::STANDARD
-        .decode(OFFICIAL_PLUGIN_PUBKEY_B64)
+        .decode(pubkey_b64)
         .context("解析内置插件公钥失败")?;
     let public_text = String::from_utf8(public_text).context("内置插件公钥非 UTF-8")?;
     let public_key = PublicKey::decode(&public_text).context("解析插件公钥失败")?;

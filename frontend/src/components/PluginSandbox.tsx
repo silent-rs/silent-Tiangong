@@ -23,6 +23,8 @@ export interface PluginSandboxProps {
   html: string;
   className?: string;
   sessionId?: string | null;
+  /** 当前会话工作目录（无活跃会话时为全局工作区）。 */
+  workspace?: string | null;
 }
 
 export function PluginSandbox({
@@ -32,6 +34,7 @@ export function PluginSandbox({
   html,
   className,
   sessionId,
+  workspace,
 }: PluginSandboxProps) {
   if (sandbox === 'shadow') {
     return (
@@ -41,6 +44,7 @@ export function PluginSandbox({
         html={html}
         className={className}
         sessionId={sessionId}
+        workspace={workspace}
       />
     );
   }
@@ -51,7 +55,7 @@ export function PluginSandbox({
       </div>
     );
   }
-  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} />;
+  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} workspace={workspace} />;
 }
 
 /** 宿主注入插件脚本的桥接对象（设计文档 6.3 的 Shadow 容器子集）。 */
@@ -83,23 +87,34 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
   let disposed = false;
   const channelHandlers = new Map<string, Set<(payload: string) => void>>();
   const subscribedChannels = new Set<string>();
+  const pendingSubscriptions = new Set<Promise<void>>();
   let unlistenEvent: (() => void) | null = null;
+  let eventListeningTask: Promise<void> | null = null;
 
-  const ensureEventListening = async () => {
-    if (unlistenEvent || disposed) return;
-    const stop = await api.onBridgeEvent((event) => {
+  const ensureEventListening = () => {
+    if (unlistenEvent || disposed) return Promise.resolve();
+    if (eventListeningTask) return eventListeningTask;
+    eventListeningTask = api.onBridgeEvent((event) => {
       if (event.plugin_id !== pluginId) return;
       channelHandlers.get(event.channel)?.forEach((handler) => handler(event.payload));
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlistenEvent = stop;
+      }
+    }).finally(() => {
+      eventListeningTask = null;
     });
-    if (disposed) {
-      stop();
-    } else {
-      unlistenEvent = stop;
-    }
+    return eventListeningTask;
   };
 
   return {
     async call(method, payload) {
+      if (disposed) throw new Error('bridge 已随容器卸载');
+      // 插件常在 bridge.on 后立即启动会产生通知的 sidecar。先等宿主订阅
+      // 真正生效，避免首批输出在 invoke 与 subscribe 的竞态中丢失。
+      await Promise.all([...pendingSubscriptions]);
       if (disposed) throw new Error('bridge 已随容器卸载');
       return api.bridgeCall(pluginId, method, payload);
     },
@@ -112,10 +127,16 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
       handlers.add(handler);
       if (!subscribedChannels.has(channel)) {
         subscribedChannels.add(channel);
-        api.bridgeSubscribe(pluginId, channel).catch((error) => {
-          console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
-        });
-        void ensureEventListening();
+        const subscription = Promise.all([
+          api.bridgeSubscribe(pluginId, channel),
+          ensureEventListening(),
+        ])
+          .catch((error) => {
+            console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
+          })
+          .then(() => undefined)
+          .finally(() => pendingSubscriptions.delete(subscription));
+        pendingSubscriptions.add(subscription);
       }
       return () => {
         handlers?.delete(handler);
@@ -129,6 +150,7 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
     dispose() {
       disposed = true;
       channelHandlers.clear();
+      pendingSubscriptions.clear();
       for (const channel of subscribedChannels) {
         api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
       }
@@ -146,6 +168,7 @@ function ShadowContainer({
   html,
   className,
   sessionId,
+  workspace,
 }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ShadowRuntimeState | null>(null);
@@ -161,6 +184,7 @@ function ShadowContainer({
       currentRootTheme(),
       `shadow:${pluginId}:${contributionId}`,
       sessionId,
+      workspace,
     );
     const contextHandlers = new Set<HostContextHandler>();
     const cleanups: ShadowCleanup[] = [];
@@ -190,9 +214,10 @@ function ShadowContainer({
 
     const runtime: ShadowRuntimeState = {
       updateContext(context) {
-        const sessionChanged = currentContext.session?.id !== context.session?.id;
+        const contextChanged = currentContext.session?.id !== context.session?.id
+          || currentContext.session?.workspace !== context.session?.workspace;
         currentContext = context;
-        if (!sessionChanged) return;
+        if (!contextChanged) return;
         contextHandlers.forEach((handler) => handler(context));
       },
     };
@@ -225,9 +250,9 @@ function ShadowContainer({
   // 会话切换时刷新运行时上下文；主题样式由 CSS 继承自动更新。
   useEffect(() => {
     runtimeRef.current?.updateContext(
-      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId),
+      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId, workspace),
     );
-  }, [contributionId, pluginId, sessionId]);
+  }, [contributionId, pluginId, sessionId, workspace]);
 
   return (
     <div

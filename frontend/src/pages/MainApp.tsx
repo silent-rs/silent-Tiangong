@@ -283,20 +283,6 @@ export function MainApp() {
     }
   }, [lockResize, refreshAgentActiveMarkers, setSidebarOpenByLayout, unlockResize]);
 
-  // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
-  // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
-  // 避免依赖 TabsContainer 的隐式激活 effect（首次挂载时被 hydration 短路）。
-
-  const handleToggleBrowser = useCallback(async () => {
-    // 矩阵入口只表达"打开 browser 意图"——Tab 的查找/切换/创建统一由
-    // TabsContainer.activateOrCreateTab 执行
-    await openWorkspacePanel('browser');
-  }, [openWorkspacePanel]);
-
-  const handleToggleTerminal = useCallback(() => {
-    void openWorkspacePanel('terminal');
-  }, [openWorkspacePanel]);
-
   /// 拓展区按钮（三态切换，设计文档 6.7.2）：
   /// 面板展开 → 收起；面板收起且有已打开 tab → 回到上次 App 态；否则进入矩阵态。
   const handleToggleExtension = useCallback(() => {
@@ -742,29 +728,10 @@ export function MainApp() {
                     mode={workspaceMode}
                     matrix={
                       <ExtensionMatrix
-                        onOpenApp={(kind) => {
-                          if (kind === 'browser') {
-                            void handleToggleBrowser();
-                          } else {
-                            handleToggleTerminal();
-                          }
-                        }}
-                        runningKinds={[
-                          ...(sessionBrowserTabs ? (['browser'] as TabKind[]) : []),
-                          ...(sessionTerminalTabs ? (['terminal'] as TabKind[]) : []),
-                        ]}
                         runningPluginApps={runningPluginApps}
-                        onNewAppTab={(kind) => {
-                          // 切换 App 态 + 下发新建命令（TabsContainer 执行 handleNewTab）
-                          setAppTabCommand({ kind, action: 'new', version: Date.now() });
-                          void openWorkspacePanel(kind);
-                        }}
-                        onCloseApp={(kind) => {
-                          setAppTabCommand({ kind, action: 'close-all', version: Date.now() });
-                        }}
                         onOpenPluginApp={(app) => {
-                          // 官方 plugin 形态 App（agent-team）与三方 App 同一命令通道：
-                          // 按 open_mode 分派（单例聚焦/多例新建），native 由官方容器渲染。
+                          // App 统一走插件命令通道：按 open_mode 分派
+                          // （单例聚焦/多例新建），native 容器由官方签名插件声明。
                           setAppTabCommand({
                             kind: 'plugin',
                             action: 'open-plugin',

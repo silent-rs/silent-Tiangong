@@ -527,7 +527,7 @@ export type SeamKind =
 export type OpenMode = 'singleton' | 'multi';
 
 /** UI 贡献的沙箱级别。 */
-export type SandboxKind = 'shadow' | 'iframe' | 'native';
+export type SandboxKind = 'shadow' | 'iframe' | 'native' | 'webview';
 
 /** manifest `ui.contributions[]` 声明的 UI 贡献。 */
 export interface UiContribution {
@@ -551,12 +551,10 @@ export interface PluginCapabilities {
   events: string[];
 }
 
-/** 拓展区 App 元数据（三方 extension.tab 贡献 + 官方内置 App）。 */
+/** 拓展区 App 元数据（插件的 extension.tab 贡献）。 */
 export interface AppEntry {
   plugin_id: string;
   contribution_id: string;
-  /** 官方内置 App（浏览器/终端/Agent Team）：native 容器。 */
-  official: boolean;
   /** 插件名（矩阵主标题）。 */
   name: string;
   title: string;
@@ -942,6 +940,10 @@ export const api = {
 
   onPluginInstallProgress: (callback: (progress: PluginInstallProgress) => void) =>
     listen<PluginInstallProgress>('plugin_install_progress', (event) => callback(event.payload)),
+
+  /** 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播（拓展区刷新数据源）。 */
+  onPluginsChanged: (callback: () => void) =>
+    listen('plugins_changed', () => callback()),
 
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),

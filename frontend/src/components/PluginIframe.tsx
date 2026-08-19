@@ -28,10 +28,12 @@ export function PluginIframe({
   pluginId,
   html,
   sessionId,
+  workspace,
 }: {
   pluginId: string;
   html: string;
   sessionId?: string | null;
+  workspace?: string | null;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const theme = useResolvedTheme();
@@ -39,8 +41,11 @@ export function PluginIframe({
   const maskColor = usePluginMask(iframeRef, channel);
 
   const sendHostContext = useCallback(() => {
-    iframeRef.current?.contentWindow?.postMessage(hostContext(theme, channel, sessionId), '*');
-  }, [channel, sessionId, theme]);
+    iframeRef.current?.contentWindow?.postMessage(
+      hostContext(theme, channel, sessionId, workspace),
+      '*',
+    );
+  }, [channel, sessionId, theme, workspace]);
 
   useEffect(() => {
     sendHostContext();

@@ -4554,6 +4554,11 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
     .map_err(|error| format!("写入首次启动标记任务失败: {error}"))?
 }
 
+/// 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播，拓展区等消费方刷新。
+fn notify_plugins_changed(app: &AppHandle) {
+    let _ = app.emit("plugins_changed", &());
+}
+
 async fn download_and_install_plugin(
     storage_root: std::path::PathBuf,
     plugin_id: String,
@@ -4587,12 +4592,13 @@ async fn download_and_install_plugin(
 #[tauri::command]
 pub async fn import_local_plugin(
     path: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         let staged = tiangong_plugin_runtime::artifacts::stage_local_plugin(
             &storage_root,
             std::path::Path::new(&path),
@@ -4602,7 +4608,9 @@ pub async fn import_local_plugin(
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("导入本地插件任务失败: {error}"))?
+    .map_err(|error| format!("导入本地插件任务失败: {error}"))??;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 从 OSS 下载并安装插件。
@@ -4615,7 +4623,9 @@ pub async fn install_plugin(
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    download_and_install_plugin(storage_root, plugin_id, app).await
+    let status = download_and_install_plugin(storage_root, plugin_id, app.clone()).await?;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 从 OSS 下载并升级插件，运行时负责失败恢复和本地回滚版本保留。
@@ -4628,7 +4638,9 @@ pub async fn upgrade_plugin(
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    download_and_install_plugin(storage_root, plugin_id, app).await
+    let status = download_and_install_plugin(storage_root, plugin_id, app.clone()).await?;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 启用或停用已安装插件。
@@ -4636,34 +4648,40 @@ pub async fn upgrade_plugin(
 pub async fn set_plugin_enabled(
     plugin_id: String,
     enabled: bool,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         tiangong_plugin_runtime::registry::set_plugin_enabled(&storage_root, &plugin_id, enabled)
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("切换插件状态任务失败: {error}"))?
+    .map_err(|error| format!("切换插件状态任务失败: {error}"))??;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 回滚到本地保留的上一个插件版本。
 #[tauri::command]
 pub async fn rollback_plugin(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         tiangong_plugin_runtime::registry::rollback_plugin(&storage_root, &plugin_id)
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("回滚插件任务失败: {error}"))?
+    .map_err(|error| format!("回滚插件任务失败: {error}"))??;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 卸载插件，可选择保留插件数据。
@@ -4671,6 +4689,7 @@ pub async fn rollback_plugin(
 pub async fn uninstall_plugin(
     plugin_id: String,
     keep_data: bool,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let storage_root = state
@@ -4681,24 +4700,29 @@ pub async fn uninstall_plugin(
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("卸载插件任务失败: {error}"))?
+    .map_err(|error| format!("卸载插件任务失败: {error}"))??;
+    notify_plugins_changed(&app);
+    Ok(())
 }
 
 /// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
 #[tauri::command]
 pub async fn reload_plugin(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         tiangong_plugin_runtime::registry::reload_plugin(&storage_root, &plugin_id)
             .map_err(|error| error.to_string())
     })
     .await
-    .map_err(|error| format!("热加载插件失败: {error}"))?
+    .map_err(|error| format!("重载插件任务失败: {error}"))??;
+    notify_plugins_changed(&app);
+    Ok(status)
 }
 
 /// 按需获取插件页面 HTML（用户点击进入时才调用）。
