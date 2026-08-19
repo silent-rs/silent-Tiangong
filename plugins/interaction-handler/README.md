@@ -80,9 +80,9 @@ yarn package        # 开发期打包：构建 + 组装 release/ 插件包
 - approval 将用户选择作为普通工具结果返回 Agent，由 Agent 决定后续步骤；Core 不解释或保存该选择
 - 交互界面作为会话区域独立 Shadow 弹层覆盖并锁定输入区，高度随内容增长、最高 520px；超长文本、选项或表单仅滚动中间内容区，关闭界面会向 Agent 返回明确的取消原因
 - 插件按宿主注入的当前会话显示请求，并保存其他运行中会话的待处理项
-- 会话和主题变化通过 Shadow 上下文订阅推送，不重建 Vue 实例；插件更新、禁用或卸载时由宿主调用登记的卸载函数
-- 主题跟随：宿主 hostContext 的设计 token 以 CSS 变量注入（如
-  `var(--primary)`）
+- 会话变化通过 Shadow 上下文推送且不重建 Vue 实例；插件更新、禁用或卸载时由宿主调用登记的卸载函数
+- 主题跟随：Shadow 直接继承 App 根节点的设计变量，样式通过
+  `hsl(var(--primary))` 等写法消费，不订阅主题变化
 
 工程化依赖：`@tiangong/plugin-sdk`（本地路径引用 `../sdk`）提供
 `createToolProvider()`（onRequested/onClosed/resolve）与通用工具桥类型。

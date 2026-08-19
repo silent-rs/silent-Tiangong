@@ -286,7 +286,7 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 
 - 宿主在 Slot 位置渲染 `<tg-slot>` 自定义元素，内部 `attachShadow({ mode: "open" })`。
 - 插件提供的入口 HTML、CSS、JS 资源注入 shadow root。
-- 样式用 Shadow DOM 天然隔离，不污染主界面；主界面的样式 token 经桥接注入（见 6.4）。
+- 样式用 Shadow DOM 天然隔离，不污染主界面；主界面的样式 token 通过 CSS 变量从 App 根节点自然继承（见 6.4）。
 - JS 与宿主共享同一个 JavaScript 环境。宿主对桥接调用继续做权限校验，但 Shadow 本身不隔离 `window` / `document`，因此只适用于用户信任的插件。
 - 宿主动态注入 `bridge`、`pluginRoot`、初始/变化上下文和卸载登记；旧脚本只读取 `bridge` 时保持兼容。
 - 优势：**真正挂载到主 DOM 树**，可参与布局、随 Slot 卸载/恢复、与 React 树共存；框架无关。
@@ -355,7 +355,11 @@ interface ShadowHostRuntime {
 
 ### 6.4 主题与设计 Token
 
-Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主在挂载及主题、会话切换时推送 **hostContext**；iframe 使用 `postMessage`，Shadow 使用初始参数与 `onContextChange`，同时把设计 token 写入 `:host` CSS 变量：
+Shadow 容器天然隔离选择器，但 CSS 自定义属性会跨 Shadow 边界继承。为让插件 UI
+与宿主视觉一致，Shadow 直接使用 App 根节点的设计 token，主题切换由浏览器自动
+重算，不需要上下文订阅。iframe 是独立文档，仍由宿主在挂载及主题、会话切换时
+通过 `postMessage` 推送 **hostContext**。Shadow 的初始上下文和
+`onContextChange` 仅承担会话等非样式信息：
 
 ```jsonc
 {
@@ -363,19 +367,21 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
   "theme": "dark",
   "locale": "zh-CN",
   "tokens": {
-    "background": "#0a0a0a",
-    "foreground": "#ededed",
-    "primary": "#7c3aed",
-    "muted": "#a1a1aa",
-    "border": "#27272a",
+    "background": "224 71% 4%",
+    "foreground": "213 31% 91%",
+    "primary": "210 40% 98%",
+    "muted": "217.2 32.6% 17.5%",
+    "border": "216 34% 17%",
     "radius": "0.5rem",
-    "status-success": "#22c55e",
-    "status-error": "#ef4444"
+    "status-success": "142 76% 36%",
+    "status-error": "0 84% 60%"
   }
 }
 ```
 
-插件 UI 可直接用 CSS 变量消费这些 token（宿主把它们同时注入到 shadow root 的 `:host` 上）。天工另提供一份可选的前端组件库（`@tiangong/plugin-ui-kit`），基于 token 提供与主界面同源的按钮/表单/卡片等组件，降低三方 UI 开发成本。
+颜色 token 是 HSL 通道，插件 UI 使用 `hsl(var(--foreground))` 等写法消费；
+`--radius` 是可直接使用的长度。iframe 插件把消息中的 token 写入自己的组件根节点，
+Shadow 插件无需复制。后续可在这些 token 之上提供前端组件库，降低三方 UI 开发成本。
 
 ### 6.5 会话区扩展
 

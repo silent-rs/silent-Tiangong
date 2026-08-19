@@ -4,28 +4,28 @@
   <meta charset="utf-8" />
   <title>看板</title>
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--background, #fff);
-      color: var(--foreground, #111);
+    * { box-sizing: border-box; }
+    .app {
+      min-height: 100%;
+      font-family: inherit;
+      background: hsl(var(--background, 0 0% 100%));
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
       font-size: 13px;
     }
     .wrap { padding: 12px; }
     h2 { margin: 0 0 8px; font-size: 14px; }
-    input { flex: 1; padding: 6px 8px; border: 1px solid var(--border, #ccc); border-radius: 6px; background: transparent; color: inherit; }
+    input { flex: 1; padding: 6px 8px; border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: var(--radius, 0.5rem); background: transparent; color: inherit; }
     .row { display: flex; gap: 6px; margin-bottom: 12px; }
-    button { padding: 6px 12px; border: none; border-radius: 6px; background: var(--primary, #7c3aed); color: #fff; cursor: pointer; }
+    button { padding: 6px 12px; border: none; border-radius: var(--radius, 0.5rem); background: hsl(var(--primary, 222.2 47.4% 11.2%)); color: hsl(var(--primary-foreground, 210 40% 98%)); cursor: pointer; }
     ul { list-style: none; padding: 0; margin: 0; }
-    li { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--border, #eee); border-radius: 8px; margin-bottom: 6px; }
+    li { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: var(--radius, 0.5rem); margin-bottom: 6px; }
     li.done span { text-decoration: line-through; opacity: .55; }
-    .del { margin-left: auto; background: transparent; color: var(--muted-foreground, #888); font-size: 15px; padding: 2px 6px; }
-    .hint { color: var(--muted-foreground, #888); font-size: 11px; margin-top: 10px; }
+    .del { margin-left: auto; background: transparent; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 15px; padding: 2px 6px; }
+    .hint { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 11px; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="app wrap">
     <h2>📋 看板</h2>
     <div class="row">
       <input id="task-input" placeholder="添加任务，回车提交" />
@@ -36,6 +36,9 @@
   </div>
 
   <script>
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const byId = (id) => uiRoot.getElementById(id);
+
     // ── 天工插件桥接（无构建版内联封装；工程化开发可用 @tiangong/plugin-sdk）──
     // Shadow 容器：宿主以 bridge 参数注入（受限执行作用域内直接可见）；
     // iframe 容器：postMessage 协议。
@@ -113,7 +116,7 @@
     let hostBridge = null;
     let tasks = [];
 
-    function setStatus(text) { document.getElementById('status').textContent = text; }
+    function setStatus(text) { byId('status').textContent = text; }
 
     async function loadTasks() {
       const raw = await hostBridge.call('storage.get', JSON.stringify({ key: STORAGE_KEY }));
@@ -129,7 +132,7 @@
     }
 
     function render() {
-      const list = document.getElementById('list');
+      const list = byId('list');
       list.innerHTML = '';
       tasks.forEach((task, index) => {
         const li = document.createElement('li');
@@ -158,7 +161,7 @@
     }
 
     async function addTask() {
-      const input = document.getElementById('task-input');
+      const input = byId('task-input');
       const text = input.value.trim();
       if (!text) return;
       tasks.push({ text, done: false });
@@ -167,8 +170,8 @@
       render();
     }
 
-    document.getElementById('add-btn').onclick = addTask;
-    document.getElementById('task-input').addEventListener('keydown', (event) => {
+    byId('add-btn').onclick = addTask;
+    byId('task-input').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') addTask();
     });
 

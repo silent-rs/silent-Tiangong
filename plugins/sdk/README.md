@@ -6,7 +6,7 @@
 
 ```sh
 # 本地开发（仓库内引用）
-yarn add @tiangong/plugin-sdk --registry file:../plugins/sdk
+yarn add @tiangong/plugin-sdk@file:../plugins/sdk
 # 或直接把 src/index.ts 复制进工程
 ```
 
@@ -31,6 +31,9 @@ const off = bridge.on('session.updated', (payload) => console.log(payload));
 ```
 
 ## 容器适配
+
+Vue/React 的虚拟 DOM 是插件内部渲染方式，Shadow/iframe 是宿主容器，两者互不替代。
+例如 Vue 插件通常仍声明 `sandbox: "shadow"`。
 
 | 容器 | manifest 声明 | 通道 |
 | --- | --- | --- |
