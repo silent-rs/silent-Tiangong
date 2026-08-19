@@ -356,6 +356,24 @@ fn run_gui() {
                 ));
             }
 
+            // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
+            // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
+            // 终端等流式界面将收不到任何输出。
+            tiangong_plugin_runtime::set_sidecar_notification_forwarder(Arc::new(
+                |plugin_id: &str, channel: &str, payload: &str| {
+                    let wrapped = serde_json::json!({
+                        "channel": channel,
+                        "payload": payload,
+                    })
+                    .to_string();
+                    tiangong_plugin_runtime::bridge::bridge_emit_to(
+                        plugin_id,
+                        "sidecar.event",
+                        &wrapped,
+                    );
+                },
+            ));
+
             // webview 容器原语（第四种声明式容器）：插件经 bridge webview.*
             // 创建/导航/eval 真实 webview 实例；实例按插件隔离
             // （view_id = webview:<plugin_id>），引擎复用 browser 基础设施。
