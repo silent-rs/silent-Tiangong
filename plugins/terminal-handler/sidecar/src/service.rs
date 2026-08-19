@@ -60,8 +60,34 @@ struct SpawnRequest {
     rows: u16,
 }
 
-fn default_cols() -> u16 {
-    80
+/// 用户默认交互 shell（SHELL 环境变量，缺省回退 sh/cmd）。
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "cmd".to_string()
+        } else {
+            "sh".to_string()
+        }
+    })
+}
+
+/// 登录 shell 启动参数（对齐原版终端：bash/zsh 用 --login，sh 用 -l）。
+fn login_shell_args(shell: &str) -> Vec<&'static str> {
+    if cfg!(target_os = "windows") {
+        return Vec::new();
+    }
+    let basename = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell);
+    match basename {
+        "bash" | "zsh" => vec!["--login"],
+        "sh" => vec!["-l"],
+        _ => Vec::new(),
+    }
+}
+
+fn default_cols() -> u16 {    80
 }
 fn default_rows() -> u16 {
     24
@@ -125,28 +151,27 @@ impl TerminalService {
 
         // 脚本走 shell -c；命令直接执行
         let mut command = if let Some(script) = request.script.as_deref() {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-                if cfg!(windows) {
-                    "cmd".to_string()
-                } else {
-                    "sh".to_string()
-                }
-            });
+            let shell = default_shell();
             let mut builder = CommandBuilder::new(shell);
             builder.arg("-c");
             builder.arg(script);
             builder
         } else if request.cmd.is_empty() {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-                if cfg!(windows) {
-                    "cmd".to_string()
-                } else {
-                    "sh".to_string()
-                }
-            });
-            CommandBuilder::new(shell)
+            // 登录 shell 启动（对齐原版终端与 Terminal.app 行为）：source
+            // /etc/profile 与 ~/.zprofile 等，拿到用户真实 PATH；并设置
+            // TERM 让 zsh/zle 以全功能终端运行（否则语法高亮/补全降级错乱）。
+            let shell = default_shell();
+            let mut builder = CommandBuilder::new(&shell);
+            for arg in login_shell_args(&shell) {
+                builder.arg(arg);
+            }
+            builder.env("TERM", "xterm-256color");
+            builder.env("COLORTERM", "truecolor");
+            builder
         } else {
-            CommandBuilder::new(&request.cmd)
+            let mut builder = CommandBuilder::new(&request.cmd);
+            builder.env("TERM", "xterm-256color");
+            builder
         };
         for arg in &request.args {
             command.arg(arg);

@@ -18,6 +18,8 @@ export interface TerminalViewHandle {
   dispose(): void;
   /** 写入输入到指定 PTY 会话。 */
   attach(sessionId: string): void;
+  /** 当前网格尺寸（启动 PTY 会话时传入，避免首绘按错误宽度换行）。 */
+  size(): { cols: number; rows: number };
 }
 
 export function createTerminalView(
@@ -25,12 +27,17 @@ export function createTerminalView(
   bridge: TerminalViewBridge,
 ): TerminalViewHandle {
   const terminal = new Terminal({
-    fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
+    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 13,
     cursorBlink: true,
-    convertEol: true,
+    // PTY 输出已含 \r\n，转换会叠加多余回车导致行错位
+    convertEol: false,
+    scrollback: 10000,
     theme: {
-      background: 'transparent',
+      background: '#1e1e2e',
+      foreground: '#cdd6f4',
+      cursor: '#f5e0dc',
+      selectionBackground: '#585b7066',
     },
   });
   const fit = new FitAddon();
@@ -60,6 +67,9 @@ export function createTerminalView(
       terminal.focus();
       fit.fit();
       syncSize();
+    },
+    size() {
+      return { cols: terminal.cols, rows: terminal.rows };
     },
     dispose() {
       disposers.forEach((stop) => stop());

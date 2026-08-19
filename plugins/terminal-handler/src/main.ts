@@ -11,6 +11,28 @@ import { sidecarCall, terminalSessions } from './shell';
 let bridgeRef: HostBridge | null = null;
 let terminalView: TerminalViewHandle | null = null;
 
+/** 等容器完成布局（有实际尺寸）再启动会话；容器异常时最多等 500ms。 */
+function waitSized(host: HTMLElement): Promise<void> {
+  return new Promise((resolve) => {
+    if (host.clientWidth > 0 && host.clientHeight > 0) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      resolve();
+    }, 500);
+    const observer = new ResizeObserver(() => {
+      if (host.clientWidth > 0 && host.clientHeight > 0) {
+        clearTimeout(timer);
+        observer.disconnect();
+        resolve();
+      }
+    });
+    observer.observe(host);
+  });
+}
+
 async function bootstrap() {
   const bridge = await createTiangongBridge();
   bridgeRef = bridge;
@@ -28,7 +50,14 @@ async function bootstrap() {
     return;
   }
   try {
-    const spawned = (await sidecarCall(bridge, 'terminalSpawn', {})) as {
+    // 等容器布局完成后按真实尺寸启动：shell 首次绘制（提示符/宽度计算）
+    // 依赖正确的 cols/rows，错误宽度会导致换行错乱、光标被顶到底部。
+    await waitSized(host);
+    const size = terminalView.size();
+    const spawned = (await sidecarCall(bridge, 'terminalSpawn', {
+      cols: size.cols,
+      rows: size.rows,
+    })) as {
       session_id?: string;
     };
     if (spawned.session_id) {
