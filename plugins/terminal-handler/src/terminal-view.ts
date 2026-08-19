@@ -43,7 +43,19 @@ export function createTerminalView(
   const fit = new FitAddon();
   terminal.loadAddon(fit);
   terminal.open(host);
-  fit.fit();
+  // 容器 0 尺寸（未布局/隐藏）时 fit 抛错；忽略等 ResizeObserver 首次回调再算
+  try { fit.fit(); } catch { /* 尚未布局 */ }
+
+  // 诊断角标：实测 cols/rows 与容器尺寸（调试显示异常时直接可见）
+  const diag = document.createElement('div');
+  diag.setAttribute('data-terminal-diag', '');
+  diag.style.cssText = 'position:absolute;right:8px;bottom:6px;color:#585b70;font-size:11px;font-family:ui-monospace,monospace;pointer-events:none;z-index:9;';
+  const updateDiag = () => {
+    diag.textContent = `cols=${terminal.cols} rows=${terminal.rows} host=${host.clientWidth}x${host.clientHeight}`;
+  };
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  host.appendChild(diag);
+  updateDiag();
 
   let attached: string | null = null;
   let disposers: Array<() => void> = [];
@@ -70,9 +82,21 @@ export function createTerminalView(
       attached = sessionId;
       terminal.reset();
       terminal.focus();
-      fit.fit();
+      try { fit.fit(); } catch { /* 尚未布局 */ }
       syncSize();
-      // shadow 容器内视口刷新是异步的，初始可能停留在缓冲顶部
+      updateDiag();
+      // shadow 容器内字体/布局测量可能晚一拍才稳定：延迟复测兜底，
+      // 避免会话以默认 80 列启动后不再修正（ls 列数异常的根源）。
+      setTimeout(() => {
+        try { fit.fit(); } catch { return; }
+        syncSize();
+        updateDiag();
+      }, 120);
+      setTimeout(() => {
+        try { fit.fit(); } catch { return; }
+        syncSize();
+        updateDiag();
+      }, 400);
       scrollToBottomSoon();
     },
     size() {
@@ -134,8 +158,9 @@ export function createTerminalView(
   // 容器尺寸自适应（环境不支持 ResizeObserver 时跳过，如测试环境）
   if (typeof ResizeObserver !== 'undefined') {
     const observer = new ResizeObserver(() => {
-      fit.fit();
+      try { fit.fit(); } catch { return; }
       syncSize();
+      updateDiag();
       scrollToBottomSoon();
     });
     observer.observe(host);
