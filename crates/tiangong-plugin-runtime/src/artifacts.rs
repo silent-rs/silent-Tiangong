@@ -152,12 +152,23 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         &staged.path.join(MANIFEST_FILE),
         "插件清单",
     )?;
-    copy_local_artifact(source, manifest.wasm_binary(), &staged.path, "WASM 制品")?;
+    if let Some(wasm_binary) = manifest.wasm_binary() {
+        copy_local_artifact(source, wasm_binary, &staged.path, "WASM 制品")?;
+    }
 
     if let Some(sidecar) = &manifest.sidecar {
         let binary = with_executable_suffix(&sidecar.binary)?;
         let destination = copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
         set_executable(&destination)?;
+    }
+
+    for contribution in manifest.ui_contributions() {
+        copy_local_artifact(
+            source,
+            Path::new(&contribution.entry),
+            &staged.path,
+            "UI 入口",
+        )?;
     }
 
     for file in ["release.json", "release.json.sig"] {
@@ -319,15 +330,16 @@ impl PluginRepository {
             }))
         };
 
-        let wasm_path = staged.path.join(manifest.wasm_binary());
-        let wasm_name = manifest
-            .wasm_binary()
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
-        validate_artifact_file_name(&release.wasm.url, wasm_name)?;
-        self.download_file(&release.wasm, &wasm_path, make_file_progress(0))
-            .await?;
+        if let Some(wasm_binary) = manifest.wasm_binary() {
+            let wasm_path = staged.path.join(wasm_binary);
+            let wasm_name = wasm_binary
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
+            validate_artifact_file_name(&release.wasm.url, wasm_name)?;
+            self.download_file(&release.wasm, &wasm_path, make_file_progress(0))
+                .await?;
+        }
 
         if has_sidecar {
             let artifact = release

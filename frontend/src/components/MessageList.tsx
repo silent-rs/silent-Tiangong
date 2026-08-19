@@ -6,8 +6,6 @@ import { ScrollArea } from "./ui/scroll-area";
 import {
   Loader2,
   Cpu,
-  ShieldCheck,
-  ShieldX,
   ArrowUp,
   ArrowDown,
   ArrowDownToLine,
@@ -62,7 +60,6 @@ export function MessageList() {
   const selectedAgentTab = useStore(s => s.selectedAgentTab);
   const agents = useStore(s => s.agents);
   const voiceMessages = useStore(s => s.voiceMessages);
-  const approvalRequestId = useStore(s => s.approvalRequestId);
   const editAndResend = useStore(s => s.editAndResend);
   const activeSessionId = useStore(s => s.activeSessionId);
 
@@ -900,7 +897,7 @@ export function MessageList() {
               )}
 
               {/* 无流式但有思考中 */}
-              {!streamingGroup && isThinking && runStatus !== "waiting_approval" && (
+              {!streamingGroup && isThinking && (
                 isContextCompressing ||
                 (!streamingMessageId && !streamingContent &&
                   !(messages.length > 0 && messages[messages.length - 1].role === "assistant"))
@@ -923,42 +920,6 @@ export function MessageList() {
                 </div>
               )}
             </>
-          )}
-
-          {/* 审批请求 */}
-          {runStatus === "waiting_approval" && (
-            <div className="flex justify-start">
-              <div className="text-foreground max-w-[100%]">
-                <div className="text-sm font-medium mb-2">需要您的确认</div>
-                <div className="text-xs text-muted-foreground mb-3">
-                  {runSummary}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-green-600 hover:bg-green-700 text-white text-xs transition-colors"
-                    onClick={() => {
-                      if (approvalRequestId) {
-                        api.respondApproval(approvalRequestId, true).catch(console.error);
-                      }
-                    }}
-                  >
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    允许
-                  </button>
-                  <button
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-md bg-destructive hover:bg-destructive/90 text-destructive-foreground text-xs transition-colors"
-                    onClick={() => {
-                      if (approvalRequestId) {
-                        api.respondApproval(approvalRequestId, false).catch(console.error);
-                      }
-                    }}
-                  >
-                    <ShieldX className="w-3.5 h-3.5" />
-                    拒绝
-                  </button>
-                </div>
-              </div>
-            </div>
           )}
 
           {/* 滚动锚点 */}

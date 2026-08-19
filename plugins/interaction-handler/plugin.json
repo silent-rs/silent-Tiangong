@@ -1,0 +1,127 @@
+{
+  "schema_version": 2,
+  "id": "interaction-handler",
+  "version": "0.3.1",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "interaction": true,
+    "events": [
+      "tool.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "session.interaction",
+        "id": "interaction-handler",
+        "title": "交互处理器",
+        "description": "默认交互处理器：审批、确认、选择、输入与表单",
+        "entry": "dist/index.html",
+        "context": [
+          "session"
+        ]
+      }
+    ]
+  },
+  "tools": [
+    {
+      "name": "request_user",
+      "description": "向用户发起限时审批、确认、选择或输入请求。调用后当前执行暂停，用户响应将作为该工具调用的结果返回。需要用户决策或补充信息时使用；本工具必须独占一个工具调用批次，不要与其他工具同时调用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "confirm",
+              "choice",
+              "multi_choice",
+              "input",
+              "form"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "choice/multi_choice 的候选项"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "label": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "select"
+                  ]
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "placeholder": {
+                  "type": "string"
+                },
+                "required": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "type"
+              ]
+            },
+            "minItems": 1,
+            "description": "form 的字段定义"
+          },
+          "question": {
+            "type": "string",
+            "description": "approval/confirm/input 的问题文案"
+          }
+        },
+        "required": [
+          "kind",
+          "title"
+        ]
+      },
+      "timeout_ms": 20000
+    }
+  ],
+  "prompt": [
+    "交互工具使用规范：审批与普通征询统一调用 request_user；审批时将 kind 设为 approval，需要确认、选择或补充信息时使用对应 kind。choice/multi_choice 必须提供非空 options；form 必须提供 fields。request_user 必须独占一个工具调用批次，不要与其他工具同时调用。插件会在 15 秒内返回用户响应、取消或超时结果；approval 返回的是用户意见，由你结合任务自行决定后续步骤。"
+  ]
+}

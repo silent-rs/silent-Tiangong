@@ -90,12 +90,6 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
     },
-    /// 需要用户审批
-    ApprovalNeeded {
-        request_id: String,
-        tool_name: String,
-        args_summary: String,
-    },
     /// 本轮完成
     Done {
         /// 本轮累计 token 用量

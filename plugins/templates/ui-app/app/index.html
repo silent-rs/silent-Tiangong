@@ -1,0 +1,188 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>看板</title>
+  <style>
+    * { box-sizing: border-box; }
+    .app {
+      min-height: 100%;
+      font-family: inherit;
+      background: hsl(var(--background, 0 0% 100%));
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+      font-size: 13px;
+    }
+    .wrap { padding: 12px; }
+    h2 { margin: 0 0 8px; font-size: 14px; }
+    input { flex: 1; padding: 6px 8px; border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: var(--radius, 0.5rem); background: transparent; color: inherit; }
+    .row { display: flex; gap: 6px; margin-bottom: 12px; }
+    button { padding: 6px 12px; border: none; border-radius: var(--radius, 0.5rem); background: hsl(var(--primary, 222.2 47.4% 11.2%)); color: hsl(var(--primary-foreground, 210 40% 98%)); cursor: pointer; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; align-items: center; gap: 8px; padding: 8px; border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: var(--radius, 0.5rem); margin-bottom: 6px; }
+    li.done span { text-decoration: line-through; opacity: .55; }
+    .del { margin-left: auto; background: transparent; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 15px; padding: 2px 6px; }
+    .hint { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 11px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="app wrap">
+    <h2>📋 看板</h2>
+    <div class="row">
+      <input id="task-input" placeholder="添加任务，回车提交" />
+      <button id="add-btn">添加</button>
+    </div>
+    <ul id="list"></ul>
+    <div class="hint" id="status">正在连接宿主桥接…</div>
+  </div>
+
+  <script>
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const byId = (id) => uiRoot.getElementById(id);
+
+    // ── 天工插件桥接（无构建版内联封装；工程化开发可用 @tiangong/plugin-sdk）──
+    // Shadow 容器：宿主以 bridge 参数注入（受限执行作用域内直接可见）；
+    // iframe 容器：postMessage 协议。
+    async function detectBridge() {
+      // eslint-disable-next-line no-undef
+      if (typeof bridge !== 'undefined' && bridge) {
+        setStatus('已连接（Shadow 容器）');
+        return bridge;
+      }
+      if (window.parent !== window) {
+        return createIframeBridge();
+      }
+      throw new Error('未检测到天工容器');
+    }
+
+    function createIframeBridge() {
+      let channel = null;
+      let callId = 0;
+      const pending = new Map();
+      window.addEventListener('message', (event) => {
+        const data = event.data;
+        if (!data) return;
+        if (data.type === 'tiangong_host_context') {
+          channel = data.channel;
+          applyTokens(data);
+          setStatus('已连接（iframe 容器）');
+          return;
+        }
+        if (data.id && pending.has(data.id)) {
+          const waiter = pending.get(data.id);
+          pending.delete(data.id);
+          data.error ? waiter.reject(new Error(data.error)) : waiter.resolve(data.result);
+        }
+      });
+      return {
+        async call(method, payload) {
+          while (!channel) await new Promise((r) => setTimeout(r, 30));
+          return new Promise((resolve, reject) => {
+            const id = 'b-' + (++callId);
+            pending.set(id, { resolve, reject });
+            window.parent.postMessage({ type: 'plugin_call', channel, id, method, payload }, '*');
+          });
+        },
+        on(eventChannel, handler) {
+          const subscribe = () => window.parent.postMessage(
+            { type: 'plugin_subscribe', channel, event: eventChannel }, '*');
+          // hostContext 通常挂载即送达；未就绪时短暂轮询重试
+          if (channel) subscribe();
+          else { let tries = 0; const timer = setInterval(() => (channel || ++tries > 50) && (clearInterval(timer), subscribe()), 100); }
+          const listener = (event) => {
+            const data = event.data;
+            if (data && data.type === 'bridge_event' && data.channel === eventChannel) {
+              handler(data.payload);
+            }
+          };
+          window.addEventListener('message', listener);
+          return () => {
+            window.removeEventListener('message', listener);
+            window.parent.postMessage({ type: 'plugin_unsubscribe', channel, event: eventChannel }, '*');
+          };
+        },
+      };
+    }
+
+    function applyTokens(ctx) {
+      const root = document.documentElement;
+      Object.entries(ctx.tokens || {}).forEach(([name, value]) => {
+        if (value) root.style.setProperty('--' + name, value);
+      });
+      if (ctx.fontFamily) document.body.style.fontFamily = ctx.fontFamily;
+    }
+
+    // ── 业务：任务看板（经 storage.* 持久化到插件私有数据目录）──
+    const STORAGE_KEY = 'board_tasks';
+    let hostBridge = null;
+    let tasks = [];
+
+    function setStatus(text) { byId('status').textContent = text; }
+
+    async function loadTasks() {
+      const raw = await hostBridge.call('storage.get', JSON.stringify({ key: STORAGE_KEY }));
+      tasks = raw === 'null' ? [] : (JSON.parse(raw) || []);
+      render();
+    }
+
+    async function saveTasks() {
+      await hostBridge.call(
+        'storage.set',
+        JSON.stringify({ key: STORAGE_KEY, value: JSON.stringify(tasks) }),
+      );
+    }
+
+    function render() {
+      const list = byId('list');
+      list.innerHTML = '';
+      tasks.forEach((task, index) => {
+        const li = document.createElement('li');
+        if (task.done) li.className = 'done';
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = task.done;
+        check.onchange = async () => {
+          tasks[index].done = check.checked;
+          await saveTasks();
+          render();
+        };
+        const span = document.createElement('span');
+        span.textContent = task.text;
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.textContent = '×';
+        del.onclick = async () => {
+          tasks.splice(index, 1);
+          await saveTasks();
+          render();
+        };
+        li.append(check, span, del);
+        list.appendChild(li);
+      });
+    }
+
+    async function addTask() {
+      const input = byId('task-input');
+      const text = input.value.trim();
+      if (!text) return;
+      tasks.push({ text, done: false });
+      input.value = '';
+      await saveTasks();
+      render();
+    }
+
+    byId('add-btn').onclick = addTask;
+    byId('task-input').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') addTask();
+    });
+
+    (async () => {
+      try {
+        hostBridge = await detectBridge();
+        await loadTasks();
+      } catch (error) {
+        setStatus('桥接连线失败：' + error.message);
+      }
+    })();
+  </script>
+</body>
+</html>

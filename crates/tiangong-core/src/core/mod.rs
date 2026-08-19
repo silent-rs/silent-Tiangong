@@ -2,7 +2,7 @@
 //!
 //! 输入经 [`AgentInput::deliver`] 进入：空闲起轮（Core 直接构建 TurnContext 并
 //! spawn turn task）、运行中投通道（命令进入活跃 turn 的命令通道，由 turn 内
-//! 部仲裁：引导/审批/取消）。每个 turn 从最新磁盘 Session 构建上下文（ALR-201/204）。
+//! 部仲裁：引导/取消）。每个 turn 从最新磁盘 Session 构建上下文（ALR-201/204）。
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::sync::Arc;
@@ -261,6 +261,8 @@ impl TiangongCore {
         let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
+        // 工具规格与 prompt 段落全部来自 Plugin trait（含声明式插件适配器）。
+        let turn_tools = prepared_plugins.tools;
 
         Ok(TurnContext::builder()
             .client(client)
@@ -278,7 +280,7 @@ impl TiangongCore {
             .trust_mode(trust_mode)
             .observer(crate::observe::Observer::new(self.storage_root.clone()))
             .tool_overrides(prepared_plugins.tool_overrides)
-            .tools(prepared_plugins.tools)
+            .tools(turn_tools)
             .build())
     }
 
@@ -521,7 +523,7 @@ impl TiangongCore {
 
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
-        use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
+        use crate::agent_input::{AgentInputKind, CommandInput, MessageInput};
 
         match input {
             // 空闲起轮、运行中投通道：运行中的用户消息由活跃 turn 作为引导处理
@@ -552,16 +554,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     payload: tool.render(),
                 },
                 "InjectTool",
-            ),
-            AgentInputKind::Approval(ApprovalInput::Response {
-                request_id,
-                approved,
-            }) => self.deliver_to_turn(
-                Command::Approval {
-                    request_id,
-                    approved,
-                },
-                "ApprovalResponse",
             ),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {

@@ -47,8 +47,23 @@ export interface LoadedSession {
   reasoning_effort: string;
 }
 
-export type TabKind = 'browser' | 'terminal';
+export type TabKind = 'browser' | 'terminal' | 'plugin';
 export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
+
+/** 内置 App 的打开模式：浏览器与终端均为多实例（每次新建标签页）；
+ *  plugin（三方 App）按贡献声明的 open_mode。 */
+export const BUILTIN_TAB_KIND_MULTI: Record<TabKind, boolean> = {
+  browser: true,
+  terminal: true,
+  plugin: false,
+};
+
+/** 内置 App 展示名。 */
+export const TAB_KIND_NAME: Record<TabKind, string> = {
+  browser: '浏览器',
+  terminal: '终端',
+  plugin: '应用',
+};
 
 export interface TabState {
   id: string;
@@ -57,6 +72,12 @@ export interface TabState {
   url: string;
   created_at: string;
   phase?: TerminalPhase;
+  /** plugin tab 专属：贡献来源插件（三方 App 实例）。 */
+  plugin_id?: string;
+  /** plugin tab 专属：extension.tab 贡献 ID。 */
+  contribution_id?: string;
+  /** plugin tab 专属：沙箱级别（shadow/iframe）。 */
+  sandbox?: SandboxKind;
 }
 
 export interface SessionTabs {
@@ -250,8 +271,6 @@ export interface StreamEvent {
   role?: string;
   agent_label?: string;
   messages?: Message[];
-  request_id?: string;
-  tool_name?: string;
   args_summary?: string;
   attempt?: number;
   max_attempts?: number;
@@ -462,6 +481,133 @@ export interface PluginInstallProgress {
   total: number;
 }
 
+// ============================================================================
+// 插件 Harness（Slot / Seam / UI 贡献）
+// ============================================================================
+
+/** 首版 Slot 目录（与后端 BUILTIN_SLOTS 对齐，字段 snake_case）。 */
+export const SLOT_IDS = [
+  'session.turn-node',
+  'session.message-item',
+  'session.message-action',
+  'session.input-action',
+  'session.before-input',
+  'session.after-input',
+  'session.interaction',
+  'session.empty-state',
+  'extension.tab',
+  'extension.side',
+  'sidebar.nav-item',
+  'sidebar.panel',
+  'sidebar.bottom',
+  'settings.plugin-page',
+  'global.status-item',
+  'global.command',
+  'global.toast-action',
+] as const;
+
+/** 挂载点稳定 ID。 */
+export type SlotId = (typeof SLOT_IDS)[number];
+
+/** Slot 可注入的上下文键。 */
+export type SlotContextKey = 'session' | 'turn' | 'message' | 'workspace';
+
+/** 接缝类别（与后端 SeamKind 对齐）。 */
+export type SeamKind =
+  | 'tool'
+  | 'prompt'
+  | 'lifecycle'
+  | 'ui'
+  | 'approval'
+  | 'interaction'
+  | 'event'
+  | 'storage';
+
+/** App 打开模式，仅对 `extension.tab` 生效。 */
+export type OpenMode = 'singleton' | 'multi';
+
+/** UI 贡献的沙箱级别。 */
+export type SandboxKind = 'shadow' | 'iframe' | 'native';
+
+/** manifest `ui.contributions[]` 声明的 UI 贡献。 */
+export interface UiContribution {
+  slot: SlotId;
+  id: string;
+  title: string;
+  icon: string;
+  entry: string;
+  open_mode: OpenMode;
+  context: string[];
+  sandbox: SandboxKind;
+}
+
+/** manifest v2 `capabilities` 能力声明。 */
+export interface PluginCapabilities {
+  tools: boolean;
+  prompt: boolean;
+  lifecycle: boolean;
+  approval: boolean;
+  interaction: boolean;
+  events: string[];
+}
+
+/** 拓展区 App 元数据（三方 extension.tab 贡献 + 官方内置 App）。 */
+export interface AppEntry {
+  plugin_id: string;
+  contribution_id: string;
+  /** 官方内置 App（浏览器/终端/Agent Team）：native 容器。 */
+  official: boolean;
+  /** 插件名（矩阵主标题）。 */
+  name: string;
+  title: string;
+  description: string;
+  icon: string;
+  open_mode: OpenMode;
+  sandbox: SandboxKind;
+}
+
+/** Slot 元数据（来自后端 SlotDescriptor）。 */
+export interface SlotDescriptorInfo {
+  id: SlotId;
+  instances: 'singleton' | 'multiple';
+  context: SlotContextKey[];
+  description: string;
+}
+
+/** 宿主桥接事件推送（bridge_event）。 */
+export interface BridgeEventPayload {
+  plugin_id: string;
+  channel: string;
+  payload: string;
+}
+
+/** 按挂载点查询得到的统一 UI 贡献项（对应后端 SlotContribution）。 */
+export interface SlotContributionEntry {
+  plugin_id: string;
+  contribution_id: string;
+  slot: SlotId;
+  title: string;
+  description: string;
+  icon: string;
+  group: string;
+  has_view: boolean;
+  open_mode: OpenMode;
+  sandbox: SandboxKind;
+  /** 贡献来源：wasm（v1 运行时声明）或 manifest（v2 清单声明）。 */
+  source: 'wasm' | 'manifest';
+}
+
+export interface SessionInputAttachmentPayload {
+  plugin_id: string;
+  attachment: RawAttachment;
+}
+
+/** 插件入口资源响应（字节数组 + MIME）。 */
+export interface PluginEntryResource {
+  data: number[];
+  mime: string;
+}
+
 export type ProvisionStatus =
   | { status: 'pending'; retry_after?: number }
   | { status: 'success' }
@@ -653,9 +799,6 @@ export const api = {
       revision,
       baseContent,
     }),
-
-  respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
-    invoke('respond_approval', { requestId, approved }),
 
   getTrustMode: (sessionId?: string): Promise<string> =>
     invoke('get_trust_mode', { sessionId }),
@@ -1198,6 +1341,44 @@ export const api = {
   /// 通用桥接：转发到 WASM 的 handle-view-message。
   pluginCall: (pluginId: string, method: string, payload: string): Promise<string> =>
     invoke('plugin_call', { pluginId, method, payload }),
+
+  /// 按挂载点列出 UI 贡献（v1 WASM 设置页 + v2 manifest 声明合并）。
+  listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
+    invoke('list_slot_contributions', { slot }),
+
+  /// 列出拓展区 App（声明 extension.tab 贡献的插件，能力矩阵数据源）。
+  listExtensionApps: (): Promise<AppEntry[]> =>
+    invoke('list_extension_apps'),
+
+  /// 读取 v2 manifest UI 贡献的入口 HTML。
+  pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>
+    invoke('plugin_open_entry', { pluginId, contributionId }),
+
+  /// 读取 v2 manifest UI 贡献的相对资源（沙箱容器加载外链脚本/样式）。
+  pluginReadEntryResource: (
+    pluginId: string,
+    contributionId: string,
+    path: string,
+  ): Promise<PluginEntryResource> =>
+    invoke('plugin_read_entry_resource', { pluginId, contributionId, path }),
+
+  // ── 宿主桥接（Host Bridge）：插件 UI ↔ 宿主统一通道 ──
+  // method 按命名空间路由：plugin.* 转发到本插件 WASM，其余命名空间按接缝任务接入。
+
+  bridgeCall: (pluginId: string, method: string, payload: string): Promise<string> =>
+    invoke('bridge_call', { pluginId, method, payload }),
+
+  bridgeSubscribe: (pluginId: string, channel: string): Promise<void> =>
+    invoke('bridge_subscribe', { pluginId, channel }),
+
+  bridgeUnsubscribe: (pluginId: string, channel: string): Promise<void> =>
+    invoke('bridge_unsubscribe', { pluginId, channel }),
+
+  onSessionInputAttachment: (callback: (event: SessionInputAttachmentPayload) => void) =>
+    listen<SessionInputAttachmentPayload>('session_input_attachment', (event) => callback(event.payload)),
+
+  onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
+    listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),
 };
 
 /// 插件设置页贡献项。

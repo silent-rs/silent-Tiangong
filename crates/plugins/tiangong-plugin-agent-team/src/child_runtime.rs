@@ -862,22 +862,6 @@ fn handle_child_event(
                 forward_agent_output(&feedback, descriptor, vec![message]);
             }
         }
-        StreamEvent::ApprovalNeeded {
-            request_id,
-            tool_name,
-            args_summary,
-        } => {
-            if let Some(feedback) = feedback_for_event(active_turn, base_feedback) {
-                forward_event(
-                    &feedback,
-                    StreamEvent::ApprovalNeeded {
-                        request_id,
-                        tool_name,
-                        args_summary,
-                    },
-                );
-            }
-        }
         StreamEvent::UserMessage { message_id, .. } => {
             let feedback = if let Ok(mut active) = active_turn.lock() {
                 if let Some(turn) = active.as_mut() {

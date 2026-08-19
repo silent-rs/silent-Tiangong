@@ -19,6 +19,7 @@ use crate::loader::{
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
 use crate::signature::{SignedPluginRelease, verify_signed_release};
+use crate::ts_plugin::TsPluginAdapter;
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
@@ -181,6 +182,7 @@ struct LoadedPlugin {
     descriptor: Option<Descriptor>,
     generation: u64,
     instances: Vec<Weak<WasmPluginAdapter>>,
+    ts_instances: Vec<Weak<TsPluginAdapter>>,
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     last_error: Option<String>,
     enabled: bool,
@@ -218,6 +220,7 @@ fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<ProcessSidecarCo
 /// sidecar 经 `setsid()` 脱离进程组独立运行，不会随宿主自动退出。
 /// 宿主必须在退出前调用本函数主动终止它们，否则会残留孤儿进程占用端口与资源。
 pub fn shutdown_all_sidecars() {
+    crate::ts_tools::cancel_all_calls();
     let connections = sidecar_connections()
         .lock()
         .map(|connections| connections.values().cloned().collect::<Vec<_>>())
@@ -302,7 +305,7 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
 
     plugin_ids
         .into_iter()
-        .filter_map(|plugin_id| load_core_plugin(&plugin_id))
+        .filter_map(|plugin_id| load_core_plugin(&plugin_id, runtime))
         .collect()
 }
 
@@ -322,15 +325,13 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 .sidecar
                 .as_ref()
                 .is_some_and(|connection| connection.has_runtime_endpoint());
-            let state = if !loaded.enabled {
-                "disabled"
-            } else if loaded.ui_plugin.is_none() {
-                "error"
-            } else if loaded.last_error.is_some() {
-                "degraded"
-            } else {
-                "loaded"
-            };
+            let state = plugin_state(
+                manifest,
+                loaded.enabled,
+                loaded.ui_plugin.is_some(),
+                sidecar_running,
+                loaded.last_error.as_deref(),
+            );
             PluginStatus {
                 unavailable_reason: if loaded.enabled {
                     check_plugin_availability(manifest, runtime, &configured)
@@ -384,6 +385,35 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 }
 
 fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
+    // 无 WASM 插件可能仅提供 UI，也可能通过 Desktop TS 工具适配器接入 Core。
+    // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
+    if installed.manifest.wasm_binary().is_none() {
+        crate::ts_tools::cancel_plugin_calls(&installed.manifest.id);
+        let ts_instances = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+            .get(&installed.manifest.id)
+            .map(|loaded| {
+                loaded
+                    .ts_instances
+                    .iter()
+                    .filter_map(Weak::upgrade)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for adapter in &ts_instances {
+            adapter.reconfigure(&installed.manifest, installed.enabled);
+        }
+        let mut loaded = load_plugin_record(storage_root, installed.clone());
+        loaded.ts_instances = ts_instances.iter().map(Arc::downgrade).collect();
+        loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+            .insert(installed.manifest.id.clone(), loaded);
+        tracing::info!(plugin_id = %installed.manifest.id, "无 WASM 插件已重新加载");
+        return Ok(());
+    }
+
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
     // Command sidecar 等 Core 汇总 exec_env 后再首次启动；其他常驻 sidecar
@@ -421,8 +451,9 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 
     let mut replacements = Vec::with_capacity(instances.len());
     for adapter in &instances {
+        let component = component.clone().expect("热加载替换仅适用于带逻辑层的插件");
         let plugin = instantiate_from_compiled(
-            component.clone(),
+            component,
             sidecar.clone(),
             adapter.runtime_config(),
             installed.manifest.id.clone(),
@@ -450,9 +481,9 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.directory = installed.directory.clone();
     loaded.manifest = installed.manifest.clone();
     loaded.wasm_bytes = Some(wasm_bytes);
-    loaded.component = Some(component);
-    loaded.ui_plugin = Some(Arc::new(Mutex::new(ui_plugin)));
-    loaded.descriptor = Some(descriptor);
+    loaded.component = component;
+    loaded.ui_plugin = ui_plugin.map(|plugin| Arc::new(Mutex::new(plugin)));
+    loaded.descriptor = descriptor;
     loaded.generation = next_generation;
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
@@ -484,6 +515,20 @@ pub fn invoke_sidecar(
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
+/// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
+pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(plugin_id)?;
+    loaded.enabled.then(|| loaded.directory.clone())
+}
+
+/// 取已启用插件的 manifest 快照（供桥接层做权限校验）。
+pub fn plugin_manifest(plugin_id: &str) -> Option<PluginManifest> {
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(plugin_id)?;
+    loaded.enabled.then(|| loaded.manifest.clone())
+}
+
 /// 收集所有已加载 WASM 插件的设置页贡献及其加载代次。
 pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
     let entries = {
@@ -511,6 +556,306 @@ pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
                 .map(|contributions| (id, generation, contributions))
         })
         .collect()
+}
+
+/// 按 Slot 列出 UI 贡献（宿主 UI 接缝的统一查询入口）。
+///
+/// - v1 插件：WASM 运行时声明的设置页贡献整体映射到 `settings.plugin-page`，
+///   零改动兼容（设计文档 11）。
+/// - v2 插件：manifest `ui.contributions` 中 slot 匹配的项。
+pub fn list_slot_contributions(slot: &str) -> Vec<SlotContribution> {
+    let mut result = Vec::new();
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return result;
+    };
+    for (plugin_id, loaded) in plugins.iter() {
+        if !loaded.enabled {
+            continue;
+        }
+        // v2：manifest 声明的贡献
+        for contribution in loaded.manifest.ui_contributions() {
+            if contribution.slot == slot {
+                result.push(SlotContribution {
+                    plugin_id: plugin_id.clone(),
+                    contribution_id: contribution.id.clone(),
+                    slot: contribution.slot.clone(),
+                    title: contribution.title.clone(),
+                    description: contribution.description.clone(),
+                    icon: contribution.icon.clone(),
+                    group: String::new(),
+                    has_view: true,
+                    open_mode: contribution.open_mode,
+                    sandbox: contribution.sandbox,
+                    source: ContributionSource::Manifest,
+                });
+            }
+        }
+        // v1：WASM 设置页贡献映射到 settings.plugin-page
+        if loaded.manifest.schema_version == 1
+            && slot == "settings.plugin-page"
+            && let Some(ui_plugin) = &loaded.ui_plugin
+            && let Ok(contributions) =
+                call_wasm_off_runtime(ui_plugin.clone(), WasmPlugin::contributions)
+        {
+            for contribution in contributions {
+                result.push(SlotContribution {
+                    plugin_id: plugin_id.clone(),
+                    contribution_id: contribution.id.clone(),
+                    slot: slot.to_string(),
+                    title: contribution.title.clone(),
+                    description: contribution.description.clone(),
+                    icon: contribution.icon.clone(),
+                    group: contribution.group.clone(),
+                    has_view: contribution.has_view,
+                    open_mode: crate::slots::OpenMode::Singleton,
+                    sandbox: crate::slots::SandboxKind::Iframe,
+                    source: ContributionSource::Wasm,
+                });
+            }
+        }
+    }
+    result.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then(left.contribution_id.cmp(&right.contribution_id))
+    });
+    result
+}
+
+/// 读取 v2 manifest UI 贡献声明的入口 HTML 文件。
+///
+/// v1 贡献的页面由 WASM `open-view` 提供（见 [`open_view`]），本函数只服务
+/// manifest 声明的 `entry`。
+pub fn open_manifest_view(plugin_id: &str, contribution_id: &str) -> Result<String> {
+    let (directory, entry) = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let contribution = loaded
+            .manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|item| item.id == contribution_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("插件 {plugin_id} 无 manifest 贡献 {contribution_id}")
+            })?;
+        (loaded.directory.clone(), contribution.entry)
+    };
+    let path = directory.join(&entry);
+    std::fs::read_to_string(&path).with_context(|| format!("读取插件页面失败: {}", path.display()))
+}
+
+/// 读取 v2 manifest UI 贡献的相对资源文件（以 entry 所在目录为根）。
+///
+/// 供 Shadow/iframe 容器加载入口 HTML 引用的脚本与样式：路径按 Web 相对语义
+/// 解析（`./`、子目录），规范化后不得逃出插件安装目录。MIME 按扩展名推断。
+pub fn read_manifest_resource(
+    plugin_id: &str,
+    contribution_id: &str,
+    path: &str,
+) -> Result<(Vec<u8>, String)> {
+    let (directory, entry) = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let contribution = loaded
+            .manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|item| item.id == contribution_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("插件 {plugin_id} 无 manifest 贡献 {contribution_id}")
+            })?;
+        (loaded.directory.clone(), contribution.entry)
+    };
+
+    let base_dir = directory
+        .join(&entry)
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| directory.clone());
+    let resource = base_dir.join(path);
+    // 规范化后必须仍在插件目录内，拒绝 `../` 逃逸。
+    let resolved = resource
+        .canonicalize()
+        .with_context(|| format!("资源路径无效: {path}"))?;
+    let plugin_root = directory
+        .canonicalize()
+        .with_context(|| format!("插件目录无效: {}", directory.display()))?;
+    if !resolved.starts_with(&plugin_root) {
+        bail!("插件 {plugin_id} 资源路径 {path} 逃出插件目录，已拒绝");
+    }
+    let bytes = std::fs::read(&resolved)
+        .with_context(|| format!("读取插件资源失败: {}", resolved.display()))?;
+    Ok((bytes, mime_of(&resolved)))
+}
+
+/// 按扩展名推断资源 MIME（容器加载脚本/样式用，未知类型按二进制流返回）。
+fn mime_of(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// 按 Slot 查询得到的统一 UI 贡献项。
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotContribution {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub slot: String,
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    pub group: String,
+    /// 是否有可渲染页面（v1 由 WASM 声明；v2 manifest 贡献恒有）。
+    pub has_view: bool,
+    pub open_mode: crate::slots::OpenMode,
+    pub sandbox: crate::slots::SandboxKind,
+    /// 贡献来源：WASM 运行时声明（v1）或 manifest 声明（v2）。
+    pub source: ContributionSource,
+}
+
+/// UI 贡献的声明来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributionSource {
+    /// v1：WASM `contributions()` 运行时声明。
+    Wasm,
+    /// v2：manifest `ui.contributions` 声明。
+    Manifest,
+}
+
+/// 拓展区 App 元数据：声明 `extension.tab` 贡献的插件即可作为 App 打开
+/// （设计文档 6.6）。供能力矩阵与实例管理消费。
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtensionApp {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    /// 官方内置 App（浏览器/终端/Agent Team）：native 容器，非插件清单声明。
+    #[serde(default)]
+    pub official: bool,
+    /// 插件 descriptor 名称（矩阵主标题）。
+    pub name: String,
+    /// 贡献标题（缺省回落 plugin_id）。
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    /// singleton：全局至多一个 tab，重复打开聚焦；multi：每次打开新建。
+    pub open_mode: crate::slots::OpenMode,
+    pub sandbox: crate::slots::SandboxKind,
+}
+
+/// 官方内置 App 目录（设计文档 8.1-8.3）：以官方插件身份进入统一 App 注册表，
+/// native 容器（仅官方签名语义），与三方 App 同构展示。
+/// plugin_id 统一为 `__builtin__`，contribution_id 即官方 App 标识。
+pub fn official_apps() -> Vec<ExtensionApp> {
+    vec![
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "browser".to_string(),
+            official: true,
+            name: "浏览器".to_string(),
+            title: "浏览器".to_string(),
+            description: "嵌入式浏览器，支持多标签与会话隔离".to_string(),
+            icon: "globe".to_string(),
+            open_mode: crate::slots::OpenMode::Multi,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "terminal".to_string(),
+            official: true,
+            name: "终端".to_string(),
+            title: "终端".to_string(),
+            description: "嵌入式终端，支持多标签与会话隔离".to_string(),
+            icon: "terminal".to_string(),
+            open_mode: crate::slots::OpenMode::Multi,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+        ExtensionApp {
+            plugin_id: "__builtin__".to_string(),
+            contribution_id: "agent-team".to_string(),
+            official: true,
+            name: "Agent Team".to_string(),
+            title: "Agent Team".to_string(),
+            description: "子 Agent 协作状态面板".to_string(),
+            icon: "bot".to_string(),
+            open_mode: crate::slots::OpenMode::Singleton,
+            sandbox: crate::slots::SandboxKind::Native,
+        },
+    ]
+}
+
+/// 列出全部可打开的拓展区 App：聚合已启用插件 manifest 中 slot 为
+/// `extension.tab` 的贡献与插件 descriptor 名称。v1 插件无 manifest UI
+/// 贡献，不进入 App 列表；官方内置能力（浏览器/终端）在插件化迁移后
+/// 以同一形态并入。
+pub fn list_extension_apps() -> Vec<ExtensionApp> {
+    let mut apps = Vec::new();
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return apps;
+    };
+    for (plugin_id, loaded) in plugins.iter() {
+        if !loaded.enabled {
+            continue;
+        }
+        let plugin_name = loaded
+            .descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.name.clone())
+            .unwrap_or_else(|| plugin_id.clone());
+        for contribution in loaded.manifest.ui_contributions() {
+            if contribution.slot != "extension.tab" {
+                continue;
+            }
+            apps.push(ExtensionApp {
+                official: false,
+                plugin_id: plugin_id.clone(),
+                contribution_id: contribution.id.clone(),
+                name: plugin_name.clone(),
+                title: contribution.title.clone(),
+                description: contribution.description.clone(),
+                icon: contribution.icon.clone(),
+                open_mode: contribution.open_mode,
+                sandbox: contribution.sandbox,
+            });
+        }
+    }
+    let mut all = official_apps();
+    all.extend(apps);
+    // 官方 App 置顶，其余按 (plugin_id, contribution_id) 排序
+    all.sort_by(|left, right| {
+        right.official.cmp(&left.official).then_with(|| {
+            left.plugin_id
+                .cmp(&right.plugin_id)
+                .then(left.contribution_id.cmp(&right.contribution_id))
+        })
+    });
+    all
 }
 
 /// 打开插件页面，返回入口 HTML。
@@ -582,16 +927,23 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
         last_error = Some(error.to_string());
     }
-    let load_result = read_wasm_bytes(&installed).and_then(|bytes| {
-        let bytes = Arc::new(bytes);
-        compile_plugin(
-            bytes.clone(),
-            &installed.manifest,
-            sidecar.clone(),
-            PluginRuntimeConfig::default(),
-        )
-        .map(|(component, plugin, descriptor)| (bytes, component, plugin, descriptor))
-    });
+    // 纯 UI 插件（wasm 省略）：无逻辑层，直接构造已加载记录
+    let load_result = if installed.manifest.wasm_binary().is_some() {
+        read_wasm_bytes(&installed)
+            .map(|bytes| {
+                let bytes = Arc::new(bytes);
+                compile_plugin(
+                    bytes.clone(),
+                    &installed.manifest,
+                    sidecar.clone(),
+                    PluginRuntimeConfig::default(),
+                )
+                .map(|(component, plugin, descriptor)| (Some(bytes), component, plugin, descriptor))
+            })
+            .and_then(|result| result)
+    } else {
+        Ok((None, None, None, None))
+    };
 
     match load_result {
         Ok((bytes, component, plugin, descriptor)) => {
@@ -599,12 +951,13 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
             LoadedPlugin {
                 directory: installed.directory,
                 manifest: installed.manifest,
-                wasm_bytes: Some(bytes),
-                component: Some(component),
-                ui_plugin: Some(Arc::new(Mutex::new(plugin))),
-                descriptor: Some(descriptor),
+                wasm_bytes: bytes,
+                component,
+                ui_plugin: plugin.map(|plugin| Arc::new(Mutex::new(plugin))),
+                descriptor,
                 generation: 1,
                 instances: Vec::new(),
+                ts_instances: Vec::new(),
                 sidecar,
                 last_error,
                 enabled: installed.enabled,
@@ -621,6 +974,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 descriptor: None,
                 generation: 0,
                 instances: Vec::new(),
+                ts_instances: Vec::new(),
                 sidecar,
                 last_error: Some(error.to_string()),
                 enabled: installed.enabled,
@@ -629,12 +983,13 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
     }
 }
 
-fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
-    let (component, descriptor_id, sidecar, enabled, storage_access) = {
+fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
+    let (manifest, component, descriptor_id, sidecar, enabled, storage_access) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
-            loaded.component.clone()?,
+            loaded.manifest.clone(),
+            loaded.component.clone(),
             loaded
                 .descriptor
                 .as_ref()
@@ -645,6 +1000,29 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
             loaded.manifest.storage_access,
         )
     };
+
+    let has_ts_contributions = manifest
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty())
+        || manifest
+            .prompt
+            .as_ref()
+            .is_some_and(|prompts| !prompts.is_empty());
+    if runtime == RuntimeKind::Desktop && has_ts_contributions {
+        let adapter = Arc::new(TsPluginAdapter::from_manifest(&manifest, enabled));
+        if let Ok(mut plugins) = loaded_plugins().lock()
+            && let Some(loaded) = plugins.get_mut(plugin_id)
+        {
+            loaded
+                .ts_instances
+                .retain(|instance| instance.strong_count() > 0);
+            loaded.ts_instances.push(Arc::downgrade(&adapter));
+        }
+        return Some(adapter);
+    }
+
+    let component = component?;
     let plugin = match instantiate_from_compiled(
         component,
         sidecar.clone(),
@@ -677,12 +1055,23 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
     Some(adapter)
 }
 
+/// 编译产物：纯 UI 插件（无 wasm）三项均为 None。
+type CompiledPlugin = (
+    Option<Arc<wasmtime::component::Component>>,
+    Option<WasmPlugin>,
+    Option<Descriptor>,
+);
+
 fn compile_plugin(
     bytes: Arc<Vec<u8>>,
     manifest: &PluginManifest,
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     config: PluginRuntimeConfig,
-) -> Result<(Arc<wasmtime::component::Component>, WasmPlugin, Descriptor)> {
+) -> Result<CompiledPlugin> {
+    // 纯 UI 插件（wasm 省略）：无逻辑层，返回空三元组
+    if manifest.wasm_binary().is_none() {
+        return Ok((None, None, None));
+    }
     let plugin_id = manifest.id.clone();
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
@@ -708,7 +1097,7 @@ fn compile_plugin(
                 descriptor.version
             );
         }
-        Ok((component, plugin, descriptor))
+        Ok((Some(component), Some(plugin), Some(descriptor)))
     })
 }
 
@@ -726,7 +1115,13 @@ fn instantiate_from_compiled(
 }
 
 fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
-    let path = installed.directory.join(installed.manifest.wasm_binary());
+    let wasm_binary = installed.manifest.wasm_binary().ok_or_else(|| {
+        anyhow::anyhow!(
+            "插件 {} 是纯 UI 插件，没有 WASM 制品",
+            installed.manifest.id
+        )
+    })?;
+    let path = installed.directory.join(wasm_binary);
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
@@ -735,6 +1130,24 @@ fn set_last_error(plugin_id: &str, error: String) {
         && let Some(plugin) = plugins.get_mut(plugin_id)
     {
         plugin.last_error = Some(error);
+    }
+}
+
+fn plugin_state(
+    manifest: &PluginManifest,
+    enabled: bool,
+    has_wasm_ui: bool,
+    sidecar_running: bool,
+    last_error: Option<&str>,
+) -> &'static str {
+    if !enabled {
+        "disabled"
+    } else if !has_wasm_ui && manifest.wasm_binary().is_some() {
+        "error"
+    } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
+        "degraded"
+    } else {
+        "loaded"
     }
 }
 
@@ -755,15 +1168,13 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     let sidecar_running = sidecar
         .as_ref()
         .is_some_and(|connection| connection.has_runtime_endpoint());
-    let state = if !enabled {
-        "disabled"
-    } else if !has_ui {
-        "error"
-    } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
-        "degraded"
-    } else {
-        "loaded"
-    };
+    let state = plugin_state(
+        manifest,
+        enabled,
+        has_ui,
+        sidecar_running,
+        last_error.as_deref(),
+    );
     let configured = configured_model_capabilities();
     Some(PluginStatus {
         unavailable_reason: if enabled {
@@ -843,6 +1254,37 @@ pub fn set_plugin_enabled(
     }
 
     let marker = installed.directory.join(DISABLED_MARKER);
+
+    // 无 WASM/sidecar 插件的启停只需更新标记、注册表与存活 TS 适配器。
+    if installed.manifest.wasm_binary().is_none() && installed.manifest.sidecar.is_none() {
+        if enabled {
+            remove_file_if_exists(&marker)?;
+        } else {
+            create_disabled_marker(&marker)?;
+            crate::ts_tools::cancel_plugin_calls(plugin_id);
+            crate::bridge::clear_plugin_subscriptions(plugin_id);
+        }
+        let mut plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get_mut(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
+        let ts_instances = loaded
+            .ts_instances
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        loaded.enabled = enabled;
+        loaded.last_error = None;
+        drop(plugins);
+        for adapter in ts_instances {
+            adapter.set_enabled(enabled);
+        }
+        return list_plugin_status_without_preload(&installed.manifest)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"));
+    }
+
     if enabled {
         remove_file_if_exists(&marker)?;
         let mut enabled_plugin = installed.clone();
@@ -854,7 +1296,7 @@ pub fn set_plugin_enabled(
         }
     } else {
         create_disabled_marker(&marker)?;
-        let (instances, sidecar) = {
+        let (instances, ts_instances, sidecar) = {
             let mut plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
@@ -868,15 +1310,28 @@ pub fn set_plugin_enabled(
                 .iter()
                 .filter_map(Weak::upgrade)
                 .collect::<Vec<_>>();
-            (instances, loaded.sidecar.clone())
+            let ts_instances = loaded
+                .ts_instances
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            (instances, ts_instances, loaded.sidecar.clone())
         };
         for adapter in &instances {
             adapter.set_enabled(false);
         }
+        for adapter in &ts_instances {
+            adapter.set_enabled(false);
+        }
+        crate::ts_tools::cancel_plugin_calls(plugin_id);
+        crate::bridge::clear_plugin_subscriptions(plugin_id);
         if let Some(connection) = sidecar
             && let Err(error) = connection.stop()
         {
             for adapter in &instances {
+                adapter.set_enabled(true);
+            }
+            for adapter in &ts_instances {
                 adapter.set_enabled(true);
             }
             if let Ok(mut plugins) = loaded_plugins().lock()
@@ -908,6 +1363,7 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
     }
 
     stop_loaded_sidecar(plugin_id)?;
+    crate::ts_tools::cancel_plugin_calls(plugin_id);
     let transaction = transaction_directory(storage_root, "rollback")?;
     swap_with_rollback(&current.directory, &rollback, &transaction, current.enabled)?;
 
@@ -947,6 +1403,8 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
         );
     }
     stop_loaded_sidecar(plugin_id)?;
+    crate::ts_tools::cancel_plugin_calls(plugin_id);
+    crate::bridge::clear_plugin_subscriptions(plugin_id);
     // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
@@ -988,6 +1446,13 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
         {
             adapter.set_enabled(false);
         }
+        for adapter in loaded
+            .ts_instances
+            .into_iter()
+            .filter_map(|item| item.upgrade())
+        {
+            adapter.set_enabled(false);
+        }
     }
     Ok(())
 }
@@ -1000,6 +1465,7 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
     ensure_directory(staged_path)?;
     let manifest = PluginManifest::load(&staged_path.join(MANIFEST_FILE))?;
     let signed_release = verify_signed_release(staged_path, &manifest)?;
+    manifest.validate_ui_native_sandbox(signed_release.is_some())?;
     let installed = InstalledPlugin {
         directory: staged_path.to_path_buf(),
         manifest,
@@ -1007,7 +1473,10 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
         signed_release,
     };
     let result = (|| {
-        let wasm_bytes = Arc::new(read_wasm_bytes(&installed)?);
+        let wasm_bytes = match installed.manifest.wasm_binary() {
+            Some(_) => Some(Arc::new(read_wasm_bytes(&installed)?)),
+            None => None,
+        };
         let sidecar = resolve_sidecar(storage_root, &installed, true)?;
         if let Some(sidecar_manifest) = &installed.manifest.sidecar {
             let binary = sidecar_binary_path(staged_path, &sidecar_manifest.binary)?;
@@ -1016,11 +1485,12 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
             }
         }
         compile_plugin(
-            wasm_bytes,
+            wasm_bytes.clone().unwrap_or_else(|| Arc::new(Vec::new())),
             &installed.manifest,
             sidecar,
             PluginRuntimeConfig::default(),
         )?;
+        let _ = wasm_bytes;
         Ok(())
     })();
     remove_sidecar_connection(staged_path);
@@ -1062,7 +1532,9 @@ fn install_new_plugin(
         signed_release: verify_signed_release(&destination, &manifest)?,
     };
     let loaded = load_plugin_record(storage_root, installed);
-    if loaded.ui_plugin.is_none() || loaded.last_error.is_some() {
+    if (loaded.ui_plugin.is_none() && manifest.wasm_binary().is_some())
+        || loaded.last_error.is_some()
+    {
         let error = loaded
             .last_error
             .unwrap_or_else(|| "WASM 插件加载失败".to_string());
@@ -1098,6 +1570,7 @@ fn replace_installed_plugin(
     // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
     stop_connection_for_directory(&current.directory)?;
     kill_sidecar_orphans(current);
+    crate::ts_tools::cancel_plugin_calls(&current.manifest.id);
     unload_plugin_wasm(&current.manifest.id);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
@@ -1538,6 +2011,10 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
                         return None;
                     }
                 };
+                if let Err(error) = manifest.validate_ui_native_sandbox(signed_release.is_some()) {
+                    tracing::warn!(path = %path.display(), %error, "忽略沙箱声明越权的插件");
+                    return None;
+                }
                 Some(InstalledPlugin {
                     enabled: !directory.join(DISABLED_MARKER).is_file(),
                     directory,
@@ -1546,7 +2023,7 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
                 })
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "忽略无效插件清单");
+                tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "忽略无效插件清单");
                 None
             }
         })
@@ -1554,10 +2031,44 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
 }
 
 fn find_installed_plugin(storage_root: &Path, plugin_id: &str) -> Result<InstalledPlugin> {
-    discover_installed_plugins(storage_root)
-        .into_iter()
-        .find(|installed| installed.manifest.id == plugin_id)
-        .ok_or_else(|| anyhow::anyhow!("插件未安装: {plugin_id}"))
+    if plugin_id.is_empty()
+        || !plugin_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || plugin_id == "."
+        || plugin_id == ".."
+    {
+        bail!("插件 ID 无效: {plugin_id}");
+    }
+
+    // 单插件操作直接读取目标目录，不能扫描并验签全部插件。
+    let directory = plugin_directory(storage_root, plugin_id);
+    let directory_metadata = std::fs::symlink_metadata(&directory)
+        .with_context(|| format!("插件未安装: {plugin_id}"))?;
+    if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+        bail!("插件安装路径必须是实际目录: {}", directory.display());
+    }
+    let manifest_path = directory.join(MANIFEST_FILE);
+    let manifest_metadata = std::fs::symlink_metadata(&manifest_path)
+        .with_context(|| format!("插件未安装: {plugin_id}"))?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        bail!("插件清单必须是实际文件: {}", manifest_path.display());
+    }
+    let manifest = PluginManifest::load(&manifest_path)?;
+    if manifest.id != plugin_id {
+        bail!(
+            "插件安装目录与清单 ID 不一致: expected={plugin_id}, actual={}",
+            manifest.id
+        );
+    }
+    let signed_release = verify_signed_release(&directory, &manifest)?;
+    manifest.validate_ui_native_sandbox(signed_release.is_some())?;
+    Ok(InstalledPlugin {
+        enabled: !directory.join(DISABLED_MARKER).is_file(),
+        directory,
+        manifest,
+        signed_release,
+    })
 }
 
 fn resolve_sidecar(
@@ -1651,18 +2162,28 @@ fn sidecar_connection(
 }
 
 fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
-    let bytes = read_wasm_bytes(installed)?;
+    // 纯 UI/TS 插件无 WASM 字节可比较，完整清单也必须参与判断，
+    // 否则工具、提示词或 UI 贡献变化不会触发热更新。
+    let bytes = installed
+        .manifest
+        .wasm_binary()
+        .map(|_| read_wasm_bytes(installed))
+        .transpose()?;
     let plugins = loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
     let Some(loaded) = plugins.get(&installed.manifest.id) else {
         return Ok(false);
     };
+    let bytes_match = match (&loaded.wasm_bytes, &bytes) {
+        (Some(loaded_bytes), Some(bytes)) => loaded_bytes.as_slice() == bytes.as_slice(),
+        (None, None) => true,
+        _ => false,
+    };
+    let manifest_match =
+        serde_json::to_value(&loaded.manifest)? == serde_json::to_value(&installed.manifest)?;
     Ok(loaded.directory == installed.directory
-        && loaded.manifest.version == installed.manifest.version
-        && loaded.manifest.permissions == installed.manifest.permissions
-        && loaded
-            .wasm_bytes
-            .as_ref()
-            .is_some_and(|loaded_bytes| loaded_bytes.as_slice() == bytes.as_slice()))
+        && loaded.enabled == installed.enabled
+        && manifest_match
+        && bytes_match)
 }

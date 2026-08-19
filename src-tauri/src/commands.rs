@@ -185,44 +185,6 @@ fn show_desktop_notification(
         .map_err(|err| err.to_string())
 }
 
-fn main_window_is_focused(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
-        .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false)
-}
-
-async fn send_approval_notification_if_background(
-    app: AppHandle,
-    session_id: String,
-    request_id: String,
-    tool_name: String,
-    args_summary: String,
-) {
-    let is_current_session = app
-        .state::<TiangongApp>()
-        .with_state_read(|state| Ok(state.active_session_id.as_str() == session_id))
-        .await
-        .unwrap_or(false);
-    if is_current_session && main_window_is_focused(&app) {
-        return;
-    }
-
-    let permission = app.notification().request_permission();
-    if !matches!(permission, Ok(PermissionState::Granted)) {
-        return;
-    }
-
-    let title = "天工 - 需要审批".to_string();
-    let body = if args_summary.trim().is_empty() {
-        format!("工具 {tool_name} 等待同意或拒绝")
-    } else {
-        format!("{tool_name}: {args_summary}")
-    };
-
-    let _ = request_id;
-    let _ = show_desktop_notification(&app, title, body, "tiangong-approval-requests");
-}
-
 fn parse_model_capability(
     capability: &str,
 ) -> Result<tiangong_llm::models_config::ModelCapability, String> {
@@ -307,6 +269,9 @@ pub async fn get_session_tabs(
                 title: tab.title.clone(),
                 url: tab.url.clone(),
                 created_at: String::new(),
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             })
             .collect();
         let terminal =
@@ -323,13 +288,24 @@ pub async fn get_session_tabs(
                 title: tab.title,
                 url: String::new(),
                 created_at: tab.created_at,
+                plugin_id: None,
+                contribution_id: None,
+                sandbox: None,
             })
             .collect();
+        let layout = crate::workspace_tabs::load_layout(&session_id);
         let available = terminal_tabs
             .into_iter()
             .chain(browser_tabs)
+            // 三方 App 实例元数据由布局层持有（无插件侧存储）
+            .chain(layout.plugin_tabs.iter().filter_map(|tab| {
+                if tab.kind == crate::workspace_tabs::WorkspaceTabKind::Plugin {
+                    Some(tab.clone())
+                } else {
+                    None
+                }
+            }))
             .collect::<Vec<_>>();
-        let layout = crate::workspace_tabs::load_layout(&session_id);
         let fallback_active = browser_active
             .map(|id| WorkspaceTabRef {
                 kind: TabKind::Browser,
@@ -1039,21 +1015,6 @@ pub(crate) fn start_stream_consumer(
                 }));
             }
 
-            if let StreamEvent::ApprovalNeeded {
-                request_id,
-                tool_name,
-                args_summary,
-            } = &event
-            {
-                rt.block_on(send_approval_notification_if_background(
-                    app.clone(),
-                    sid.clone(),
-                    request_id.clone(),
-                    tool_name.clone(),
-                    args_summary.clone(),
-                ));
-            }
-
             if is_done || is_error {
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
@@ -1428,23 +1389,6 @@ pub async fn append_message(
         state.inner(),
     )
     .await?;
-    Ok(true)
-}
-
-/// 响应工具审批请求
-#[tauri::command]
-pub async fn respond_approval(
-    request_id: String,
-    approved: bool,
-    state: State<'_, TiangongApp>,
-) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
-    state
-        .inner()
-        .core_manager
-        .respond_approval_to_core(&session_id, request_id, approved);
     Ok(true)
 }
 
@@ -4451,6 +4395,60 @@ pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>,
         .collect())
 }
 
+/// 按挂载点列出 UI 贡献（UI 接缝统一入口）。
+///
+/// v1 插件的 WASM 设置页贡献映射到 `settings.plugin-page`（零改动兼容）；
+/// v2 插件取 manifest `ui.contributions` 中 slot 匹配的项。
+#[tauri::command]
+pub async fn list_slot_contributions(
+    slot: String,
+) -> Result<Vec<tiangong_plugin_runtime::registry::SlotContribution>, String> {
+    Ok(tiangong_plugin_runtime::registry::list_slot_contributions(
+        &slot,
+    ))
+}
+
+/// 列出拓展区 App：声明 `extension.tab` 贡献的已启用插件（能力矩阵数据源）。
+#[tauri::command]
+pub async fn list_extension_apps(
+) -> Result<Vec<tiangong_plugin_runtime::registry::ExtensionApp>, String> {
+    Ok(tiangong_plugin_runtime::registry::list_extension_apps())
+}
+
+/// 读取 v2 manifest UI 贡献的入口 HTML（entry 相对插件目录）。
+#[tauri::command]
+pub async fn plugin_open_entry(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::open_manifest_view(&plugin_id, &contribution_id)
+        .map_err(|error| error.to_string())
+}
+
+/// 读取 v2 manifest UI 贡献的相对资源（以 entry 所在目录为根，沙箱容器加载
+/// 外链脚本/样式用；路径逃出插件目录会被拒绝）。
+#[tauri::command]
+pub async fn plugin_read_entry_resource(
+    plugin_id: String,
+    contribution_id: String,
+    path: String,
+) -> Result<PluginEntryResource, String> {
+    let (data, mime) = tiangong_plugin_runtime::registry::read_manifest_resource(
+        &plugin_id,
+        &contribution_id,
+        &path,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(PluginEntryResource { data, mime })
+}
+
+/// 插件入口资源响应（字节数组 + MIME）。
+#[derive(serde::Serialize)]
+pub struct PluginEntryResource {
+    pub data: Vec<u8>,
+    pub mime: String,
+}
+
 /// 列出已安装插件、当前加载版本和 sidecar 状态。
 #[tauri::command]
 pub async fn list_plugins(
@@ -4724,6 +4722,37 @@ pub async fn plugin_call(
 ) -> Result<String, String> {
     tiangong_plugin_runtime::registry::handle_view_message(&plugin_id, &method, &payload)
         .ok_or_else(|| format!("插件 {plugin_id} 未加载或处理消息失败"))
+}
+
+// ── 宿主桥接（Host Bridge）──
+//
+// 统一插件 UI ↔ 宿主通信管道：命名空间白名单 + 权限校验 + 负载透传。
+// - bridge_call：调用宿主能力（plugin.* 转发到 WASM，其余命名空间按接缝任务接入）
+// - bridge_subscribe / bridge_unsubscribe：事件订阅骨架（事件源在事件接缝接入）
+
+/// 桥接调用：`method` 按命名空间路由（如 `plugin.getConfig` → WASM）。
+#[tauri::command]
+pub async fn bridge_call(
+    plugin_id: String,
+    method: String,
+    payload: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
+        .map_err(|error| error.to_string())
+}
+
+/// 订阅宿主事件通道（按 capabilities.events 授权放行）。
+#[tauri::command]
+pub async fn bridge_subscribe(plugin_id: String, channel: String) -> Result<(), String> {
+    tiangong_plugin_runtime::bridge_subscribe(&plugin_id, &channel)
+        .map_err(|error| error.to_string())
+}
+
+/// 取消订阅宿主事件通道。
+#[tauri::command]
+pub async fn bridge_unsubscribe(plugin_id: String, channel: String) -> Result<(), String> {
+    tiangong_plugin_runtime::bridge_unsubscribe(&plugin_id, &channel)
+        .map_err(|error| error.to_string())
 }
 
 /// 插件设置页贡献项（传给前端）。

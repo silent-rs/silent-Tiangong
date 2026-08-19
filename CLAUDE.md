@@ -44,68 +44,29 @@ cargo run --release              # 桌面 UI 模式（默认）
 cargo run --release -- cli       # CLI 模式
 ```
 
-## 核心架构（5 层设计）
+## 当前 Core 架构
 
-当前 `src/core` 采用分层架构，从内到外分为：
+现行说明见 `docs/core-architecture.md` 与 `docs/agent-loop-refactor/design.md`。
 
-### 1. 配置与状态层（`app_state/`）
-应用状态的 façade 层，负责状态切片、持久化、服务协调：
+当前 `crates/tiangong-core` 的执行模型是：
 
-- `store/` - 内存状态容器（Session/Provider/Agent/Runtime/UiState）
-- `repository/` - 持久化层（文件读写、锁文件管理）
-- `services/` - 业务服务层（Turn/Skill/Mcp 服务）
-- `facade/` - 对外统一入口（TiangongState）
+- `TiangongCore` 接收用户消息和控制输入；
+- 空闲用户消息通过 `start_user_turn` 从最新 Session 构建 `TurnContext`，随后创建一个 turn task；
+- 运行中的用户消息通过当前 task 自有命令通道发送 `Command::InjectUserMessage`，在该 turn 内中断活动、保存新消息并重新分析；
+- `shared_runtime` 只管理共享 Tokio runtime 和活跃 turn task 注册表；
+- 每个 turn task 持有自己的上下文和命令接收端，结束后通道随之失效；
+- 当前代码不存在常驻 Agent Driver 或 Agent Inbox。
 
-### 2. 智能体层（`agents/`）
-负责各类 LLM 智能体的推理与决策：
+核心模块：
 
-- `planning_agent.rs` - 规划智能体
-- `response_agent.rs` - 响应生成智能体
-- `skill_convert_agent.rs` - 外部 skill 转换智能体
-- `execution_prompt_agent.rs` - 执行阶段 prompt 构造
-- `execution_completion_agent.rs` - 步骤完成判定
-- `execution_tool_agent.rs` - 本地函数工具定义与转换
-- `execution_mcp_agent.rs` - MCP 函数工具暴露与路由
+- `crates/tiangong-core/src/core/`：Core 对外入口、插件装配和输入协调；
+- `crates/tiangong-core/src/shared_runtime.rs`：共享 runtime 与 turn task 生命周期；
+- `crates/tiangong-core/src/react/`：单轮 Agent Loop、命令、工具、压缩和收尾；
+- `crates/tiangong-core/src/turn_context.rs`：单轮执行上下文；
+- `crates/tiangong-core/src/session.rs`：会话消息和持久化状态；
+- `crates/tiangong-core/src/model.rs`：模型客户端抽象。
 
-### 3. 执行器层（`execution/`）
-承接 plan 执行推进、结果归一化与验证逻辑：
-
-- `plan_runner.rs` - 推进 plan item 和 execution step
-- `step_executor.rs` - 单个 step 的多轮执行主控
-- `result_analyzer.rs` - 提取成功业务结果、聚合 LLM 输出
-- `verify.rs` - 推荐并执行验证命令
-- `types.rs` / `message.rs` - 执行器领域共享类型与消息构造
-
-### 4. 能力层
-- `tool/` + `tool.rs` - 本地工具能力（文件读写、目录遍历、命令执行、代码搜索等）
-- `mcp/` - MCP client、配置、上下文、能力缓存
-- `skill/` - Skill 分析、上下文、初始化、打包相关逻辑
-
-### 5. 运行时装配层
-- `runtime.rs` - `RuntimeEngine` 对外统一入口，装配 `planning -> execution -> response`
-- `model.rs` - 模型客户端抽象
-- `agent_config.rs` - 模型/MCP/Skill 配置结构
-- `planner.rs` - 计划结构与状态模型
-- `session.rs` - 会话数据结构
-
-## 执行流程主链路
-
-```
-app_state::TiangongState
-  -> RuntimeEngine::execute_turn_with_streaming
-    -> planning_agent::build_plan_with_agent_with_trace
-    -> execution::execute_plan_with_execution_agent
-      -> execution::plan_runner（推进 plan items）
-        -> execution::step_executor（多轮执行单个 step）
-          -> execution_prompt_agent（构造 prompt）
-          -> model::complete_with_functions（LLM 推理）
-            -> execution_mcp_agent（MCP 工具路由）或 execution_tool_agent（本地工具）
-          -> execution_completion_agent（完成判定）
-    -> execution::verify（推荐并执行验证命令）
-    -> response_agent::build_grounded_response_prompt（生成最终响应）
-```
-
-详细时序图参见：`docs/core-architecture.md`
+审查或设计 Core 功能时必须以当前代码和上述两份现行文档为准，不得使用已经删除的 Driver/Inbox 迁移方案。
 
 ## 代码风格约定
 
@@ -153,19 +114,19 @@ fn load_session(&self, id: &str) -> Result<Session> {
 }
 ```
 
-## 当前开发阶段（RFC 0004 - 全栈平台重构）
+## 当前开发阶段
 
-**当前主线**：`docs/rfc/0004-full-stack-agent-platform.md`
+当前分支聚焦统一插件形态（Plugin Harness）。Agent Core 的现行架构以以下文档为准：
 
-核心目标：将天工从单 crate 桌面应用重构为 Workspace 多 crate 全栈平台，支持 GUI + CLI + Server + Connector 多模式运行。
+- `PLAN.md` - 项目总体规划和当前里程碑
+- `TODO.md` - 当前任务列表
+- `docs/requirements.md` - 需求边界与非目标
+- `docs/core-architecture.md` - 当前 Core 执行模型与消息路由
+- `docs/agent-loop-refactor/design.md` - 当前 Agent Core 专题说明
+- `docs/plugin-harness/requirements.md` - Plugin Harness 需求
+- `docs/plugin-harness-design.md` - Plugin Harness 设计
 
-关键文档：
-- `PLAN.md` - 项目总体规划和里程碑
-- `TODO.md` - 基于 PLAN 的当前阶段任务列表
-- `docs/requirements.md` - 需求边界与 Must/Should/非目标
-- `docs/rfc/0004-full-stack-agent-platform.md` - 全栈平台架构 RFC
-- `docs/core-architecture.md` - 核心架构详细说明
-- `docs/archive/app-state-redesign.md` - app_state 重构历史设计稿
+`docs/rfc/` 与 `docs/archive/` 中的历史方案仅用于追溯，不自动代表当前实现。
 
 ## 关键依赖
 

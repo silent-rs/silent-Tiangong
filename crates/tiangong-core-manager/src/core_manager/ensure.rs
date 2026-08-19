@@ -128,11 +128,6 @@ impl CoreManager {
             .is_some_and(|core| core.deliver(input).is_ok())
     }
 
-    /// 向指定会话的 core 发送审批响应。
-    pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
-        self.deliver_to_core_if_live(session_id, AgentInputKind::approval(request_id, approved));
-    }
-
     /// 设置指定会话 core 的信任模式（实时生效）。
     pub fn set_core_trust_mode(&self, session_id: &str, mode: tiangong_types::TrustMode) {
         let registry = self.registry();

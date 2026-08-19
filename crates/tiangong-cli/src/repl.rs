@@ -131,7 +131,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 处理响应流
-        handle_response(&stream_rx, &state.core_manager, &session_id);
+        handle_response(&stream_rx);
 
         output::separator();
     }
@@ -187,11 +187,7 @@ fn build_cli_plugins(
 }
 
 /// 处理完整的响应流
-fn handle_response(
-    rx: &mpsc::Receiver<StreamEvent>,
-    core_manager: &tiangong_app_state::app_state::CoreManager,
-    session_id: &str,
-) {
+fn handle_response(rx: &mpsc::Receiver<StreamEvent>) {
     let mut state = ResponseState::new();
     let mut last_event_at = Instant::now();
     let timeout = Duration::from_secs(300);
@@ -205,7 +201,7 @@ fn handle_response(
                 Ok(session_event) => {
                     had_event = true;
                     last_event_at = Instant::now();
-                    if state.process(&session_event, core_manager, session_id) {
+                    if state.process(&session_event) {
                         return;
                     }
                 }
@@ -251,12 +247,7 @@ impl ResponseState {
     }
 
     /// 处理单个事件，返回 true 表示本轮结束
-    fn process(
-        &mut self,
-        event: &StreamEvent,
-        core_manager: &tiangong_app_state::app_state::CoreManager,
-        session_id: &str,
-    ) -> bool {
+    fn process(&mut self, event: &StreamEvent) -> bool {
         match event {
             StreamEvent::TurnBoundary { .. } => {}
             StreamEvent::UserMessage { .. } => {
@@ -317,41 +308,6 @@ impl ResponseState {
             }
 
             StreamEvent::TokenUsage { .. } => {}
-
-            StreamEvent::ApprovalNeeded {
-                request_id,
-                tool_name,
-                args_summary,
-            } => {
-                self.end_active_stream();
-                output::approval_needed(tool_name, args_summary);
-                // 等待用户输入 y/n
-                let approved = loop {
-                    eprint!("\x1b[1;33m  允许执行？(y/n): \x1b[0m");
-                    let mut buf = String::new();
-                    if std::io::stdin().read_line(&mut buf).is_err() {
-                        break false;
-                    }
-                    match buf.trim().to_lowercase().as_str() {
-                        "y" | "yes" => break true,
-                        "n" | "no" => break false,
-                        _ => {
-                            eprintln!("  请输入 y 或 n");
-                        }
-                    }
-                };
-                if !core_manager.deliver_to_core_if_live(
-                    session_id,
-                    AgentInputKind::approval(request_id.clone(), approved),
-                ) {
-                    tracing::warn!(%session_id, "审批响应投递失败（Core 可能已停止）");
-                }
-                if approved {
-                    output::status("已允许");
-                } else {
-                    output::warn("已拒绝");
-                }
-            }
 
             StreamEvent::Done { .. } => {
                 self.finish();

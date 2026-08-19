@@ -19,7 +19,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import {
   api,
   type AvailablePlugin,
-  type PluginContributionEntry,
+  type SlotContributionEntry,
   type PluginStatus,
 } from '@/api/tauri';
 import { Badge } from './ui/badge';
@@ -41,7 +41,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/t
 import { useToast } from './Toast';
 
 type Props = {
-  onContributionsChanged: (entries: PluginContributionEntry[]) => void;
+  onContributionsChanged: (entries: SlotContributionEntry[]) => void;
   initialPlugins: PluginStatus[];
   initialAvailable: AvailablePlugin[];
   initialCatalogError: string | null;
@@ -124,7 +124,7 @@ export function PluginManagerSettings({
   }, [initialAvailable, initialCatalogError, initialPlugins]);
 
   const refreshContributions = useCallback(async () => {
-    const contributions = await api.listPluginContributions();
+    const contributions = await api.listSlotContributions('settings.plugin-page');
     onContributionsChanged(contributions.filter((entry) => entry.has_view));
   }, [onContributionsChanged]);
 
@@ -178,14 +178,33 @@ export function PluginManagerSettings({
       : installable.filter((plugin) => matches(plugin.name) || matches(plugin.description));
   }, [available, normalizedQuery]);
 
-  const finishOperation = async () => {
-    const [, contributionsResult] = await Promise.allSettled([
-      refresh(),
-      refreshContributions(),
-    ]);
-    if (contributionsResult.status === 'rejected') {
-      showError('插件页面刷新失败', String(contributionsResult.reason));
+  const finishOperation = async (
+    pluginId: string,
+    operation: Operation,
+    result: unknown,
+  ) => {
+    // 操作是插件级的：只更新目标行，不重读或重置其他插件。
+    if (operation === 'uninstall') {
+      setPlugins((current) => current.filter((plugin) => plugin.id !== pluginId));
+    } else if (result && typeof result === 'object' && 'id' in result) {
+      const status = result as PluginStatus;
+      setPlugins((current) => {
+        const exists = current.some((plugin) => plugin.id === status.id);
+        return exists
+          ? current.map((plugin) => plugin.id === status.id ? status : plugin)
+          : [...current, status].sort((left, right) => left.id.localeCompare(right.id));
+      });
     }
+
+    // Slot 也只接收目标插件变更，由各宿主增删该插件贡献。
+    window.dispatchEvent(new CustomEvent('tiangong:plugin-changed', {
+      detail: { pluginId, operation },
+    }));
+
+    // 设置页贡献数量少，刷新它不会触碰其他插件运行状态。
+    await refreshContributions().catch((error) => {
+      showError('插件页面刷新失败', String(error));
+    });
   };
 
   const runOperation = async (
@@ -197,13 +216,14 @@ export function PluginManagerSettings({
   ) => {
     setActiveOperation({ pluginId, operation });
     try {
-      await action();
-      await finishOperation();
+      const result = await action();
+      await finishOperation(pluginId, operation, result);
       showSuccess(successTitle, successMessage);
       return true;
     } catch (error) {
       showError(`${operationLabel(operation)}失败`, String(error));
-      await refresh();
+      const current = await api.listPlugins().catch(() => null);
+      if (current) setPlugins(current);
       return false;
     } finally {
       setActiveOperation(null);
@@ -263,7 +283,7 @@ export function PluginManagerSettings({
     setActiveOperation({ pluginId: 'local', operation: 'import' });
     try {
       const plugin = await api.importLocalPlugin(selected);
-      await finishOperation();
+      await finishOperation(plugin.id, 'import', plugin);
       showSuccess('插件已导入', `${plugin.name} ${plugin.manifest_version}`);
     } catch (error) {
       showError('导入失败', String(error));

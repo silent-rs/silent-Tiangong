@@ -445,6 +445,9 @@ fn test_session_with_user_message() -> Session {
         created_at: "2026-08-01T00:00:00".to_string(),
         elapsed_ms: None,
         turn_status: None,
+        reasoning_elapsed_ms: None,
+        text_elapsed_ms: None,
+        duration_ms: None,
     });
     session
 }

@@ -1,21 +1,29 @@
 //! 已安装 WASM 插件的制品清单。
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::PROTOCOL_VERSION;
+use crate::slots::{OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry, UiContribution};
 
 pub const MANIFEST_FILE: &str = "plugin.json";
+/// schema v1：现有清单，无 `ui`/`capabilities`，设置页贡献由 WASM 运行时声明。
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+/// schema v2：新增 `capabilities` 与 `ui.contributions`（Slot/沙箱/打开模式）。
+pub const MANIFEST_SCHEMA_VERSION_V2: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub id: String,
     pub version: String,
-    pub wasm: WasmManifest,
+    /// 逻辑层 WASM 制品。schema v2 可省略——纯 UI 插件（无工具/生命周期等
+    /// 逻辑能力）经宿主桥接（storage.* 等）即可工作，见设计文档 9.1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<WasmManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SidecarManifest>,
     #[serde(default)]
@@ -33,6 +41,99 @@ pub struct PluginManifest {
     /// 插件是否需要访问天工存储根目录（~/.tiangong）。
     #[serde(default)]
     pub storage_access: bool,
+    /// 能力声明（schema v2 新增）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CapabilitiesManifest>,
+    /// UI 贡献声明（schema v2 新增）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiManifest>,
+    /// Desktop 纯 TypeScript 插件声明的工具规格。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<TsToolDecl>>,
+    /// 系统提示注入段落。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Vec<String>>,
+}
+
+/// 能力声明（schema v2 的 `capabilities` 字段）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesManifest {
+    /// 实现工具接缝（WASM 内 tool-specs/handle-tool）。
+    #[serde(default)]
+    pub tools: bool,
+    /// 实现提示词接缝。
+    #[serde(default)]
+    pub prompt: bool,
+    /// 实现生命周期接缝。
+    #[serde(default)]
+    pub lifecycle: bool,
+    /// 处理交互接缝（表单/选择/填写）。
+    #[serde(default)]
+    pub interaction: bool,
+    /// 订阅的事件命名空间（如 `session.*`、`tool.*`）。
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+fn default_ts_tool_timeout_ms() -> u64 {
+    20_000
+}
+
+/// Desktop 纯 TypeScript 插件工具声明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TsToolDecl {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    /// 前端插件崩溃或未响应时的宿主兜底上限。
+    #[serde(default = "default_ts_tool_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+/// UI 贡献声明（schema v2 的 `ui` 字段）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiManifest {
+    /// 全部贡献的默认沙箱级别，缺省 `shadow`；贡献级声明优先。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxKind>,
+    #[serde(default)]
+    pub contributions: Vec<UiContributionDecl>,
+}
+
+/// manifest 中声明的单个 UI 贡献（`ui.contributions[]`）。
+///
+/// `sandbox`/`open_mode` 保留「未声明」语义以便校验，归一化结果见
+/// [`PluginManifest::ui_contributions`]。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiContributionDecl {
+    /// 目标挂载点，必须是 Slot Registry 登记的合法 ID。
+    pub slot: String,
+    /// 贡献 ID，插件内唯一。
+    pub id: String,
+    /// 展示标题，缺省用 `id`。
+    #[serde(default)]
+    pub title: String,
+    /// 用途说明（矩阵卡片等展示位）。
+    #[serde(default)]
+    pub description: String,
+    /// 图标名或内联 SVG。
+    #[serde(default)]
+    pub icon: String,
+    /// 入口 HTML（相对插件目录）。
+    pub entry: String,
+    /// 打开模式，仅对 `extension.tab` 生效，缺省 `singleton`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_mode: Option<OpenMode>,
+    /// 需要注入的上下文键，必须是目标 Slot 声明支持的键。
+    #[serde(default)]
+    pub context: Vec<String>,
+    /// 沙箱级别，缺省落到 `ui.sandbox`，再缺省 `shadow`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxKind>,
 }
 
 /// 单项模型能力需求。
@@ -75,16 +176,21 @@ impl PluginManifest {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("读取插件清单失败: {}", path.display()))?;
-        let manifest: Self = serde_json::from_str(&content)
-            .with_context(|| format!("解析插件清单失败: {}", path.display()))?;
+        let manifest: Self = serde_json::from_str(&content).map_err(|error| {
+            // 未知字段/类型不匹配等 serde 细节是排障关键，完整保留进错误链
+            anyhow::anyhow!("清单字段不符合 schema（路径 {}）：{error}", path.display())
+        })?;
         manifest.validate()?;
         Ok(manifest)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != MANIFEST_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            MANIFEST_SCHEMA_VERSION | MANIFEST_SCHEMA_VERSION_V2
+        ) {
             bail!(
-                "插件 {} 清单版本不支持: expected={MANIFEST_SCHEMA_VERSION}, actual={}",
+                "插件 {} 清单版本不支持: expected={MANIFEST_SCHEMA_VERSION}|{MANIFEST_SCHEMA_VERSION_V2}, actual={}",
                 self.id,
                 self.schema_version
             );
@@ -100,7 +206,24 @@ impl PluginManifest {
         if self.version.trim().is_empty() {
             bail!("插件 {} 清单版本为空", self.id);
         }
-        validate_relative_path(self.wasm_binary(), "wasm.binary")?;
+        match self.wasm_binary() {
+            Some(binary) => validate_relative_path(binary, "wasm.binary")?,
+            None => {
+                // 纯 UI 插件：无逻辑层时必须有界面贡献，且仅 v2 支持
+                if self.schema_version != MANIFEST_SCHEMA_VERSION_V2 {
+                    bail!(
+                        "插件 {} 未声明 wasm（仅 schema_version 2 支持纯 UI 插件）",
+                        self.id
+                    );
+                }
+                if self.ui_contributions().is_empty() {
+                    bail!(
+                        "插件 {} 未声明 wasm 时必须至少声明一条 ui.contributions",
+                        self.id
+                    );
+                }
+            }
+        }
         if let Some(sidecar) = &self.sidecar {
             validate_relative_path(&sidecar.binary, "sidecar.binary")?;
             if sidecar.transport_protocol.trim().is_empty() {
@@ -113,10 +236,7 @@ impl PluginManifest {
         if self.permissions.iter().any(|item| item.trim().is_empty()) {
             bail!("插件 {} permissions 不能包含空值", self.id);
         }
-        let unique_permissions = self
-            .permissions
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>();
+        let unique_permissions = self.permissions.iter().collect::<BTreeSet<_>>();
         if unique_permissions.len() != self.permissions.len() {
             bail!("插件 {} permissions 不能包含重复值", self.id);
         }
@@ -159,12 +279,237 @@ impl PluginManifest {
                 }
             }
         }
+        // v1 清单不允许 v2 字段；v2 清单校验新增字段
+        if self.schema_version == MANIFEST_SCHEMA_VERSION {
+            if self.capabilities.is_some() {
+                bail!(
+                    "插件 {} 使用 schema_version 1 但声明了 capabilities 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
+                    self.id
+                );
+            }
+            if self.ui.is_some() {
+                bail!(
+                    "插件 {} 使用 schema_version 1 但声明了 ui 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
+                    self.id
+                );
+            }
+            if self.tools.is_some() || self.prompt.is_some() {
+                bail!(
+                    "插件 {} 使用 schema_version 1 但声明了 tools/prompt 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
+                    self.id
+                );
+            }
+        } else {
+            self.validate_v2()?;
+            self.validate_ts_tools()?;
+        }
         Ok(())
     }
 
-    pub fn wasm_binary(&self) -> &Path {
+    /// schema v2 新增字段校验：capabilities 事件命名空间与 ui.contributions。
+    fn validate_v2(&self) -> Result<()> {
+        if let Some(capabilities) = &self.capabilities {
+            for namespace in &capabilities.events {
+                if namespace.trim().is_empty() || !namespace.contains('.') {
+                    bail!(
+                        "插件 {} capabilities.events 含非法命名空间 {namespace}（应为点分层级如 session.*）",
+                        self.id
+                    );
+                }
+            }
+        }
+
+        let Some(ui) = &self.ui else {
+            return Ok(());
+        };
+        let registry = SlotRegistry::builtin();
+        let mut seen_ids = BTreeSet::new();
+        for decl in &ui.contributions {
+            if decl.id.trim().is_empty() {
+                bail!("插件 {} ui.contributions 包含空 id", self.id);
+            }
+            if !seen_ids.insert(decl.id.as_str()) {
+                bail!("插件 {} ui.contributions 的 id {} 重复", self.id, decl.id);
+            }
+            if decl.entry.trim().is_empty() {
+                bail!("插件 {} 贡献 {} 缺少 entry（入口 HTML）", self.id, decl.id);
+            }
+            validate_relative_path(
+                Path::new(&decl.entry),
+                &format!("ui.contributions[{}].entry", decl.id),
+            )?;
+            let slot = registry
+                .validate(&decl.slot)
+                .with_context(|| format!("插件 {} 贡献 {} 的 slot 无效", self.id, decl.id))?;
+            if decl.open_mode.is_some() && decl.slot != OPEN_MODE_SLOT {
+                bail!(
+                    "插件 {} 贡献 {} 的 open_mode 仅对 {OPEN_MODE_SLOT} 生效，{} 不支持",
+                    self.id,
+                    decl.id,
+                    decl.slot
+                );
+            }
+            for key in &decl.context {
+                let supported = slot.context.iter().any(|ctx| ctx.as_str() == key);
+                if !supported {
+                    bail!(
+                        "插件 {} 贡献 {} 声明的上下文 {key} 不被 slot {} 支持（允许：{}）",
+                        self.id,
+                        decl.id,
+                        decl.slot,
+                        slot.context
+                            .iter()
+                            .map(|ctx| ctx.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ts_tools(&self) -> Result<()> {
+        let tools = self.tools.as_deref().unwrap_or_default();
+        let prompts = self.prompt.as_deref().unwrap_or_default();
+        if !tools.is_empty() || !prompts.is_empty() {
+            if self.wasm_binary().is_some() {
+                bail!(
+                    "插件 {} 不能同时声明 WASM 与纯 TypeScript tools/prompt",
+                    self.id
+                );
+            }
+            if !self
+                .entrypoints
+                .as_ref()
+                .is_some_and(|items| items.len() == 1 && items[0] == "desktop")
+            {
+                bail!("纯 TypeScript 工具插件 {} 只能声明 desktop 入口", self.id);
+            }
+        }
+        if !tools.is_empty() {
+            if !self.has_permission("tool.provide") {
+                bail!("插件 {} 声明 tools 时必须声明 tool.provide 权限", self.id);
+            }
+            if !self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.tools)
+            {
+                bail!("插件 {} 声明 tools 时必须启用 capabilities.tools", self.id);
+            }
+        }
+
+        let mut names = BTreeSet::new();
+        for tool in tools {
+            if tool.name.trim().is_empty()
+                || !tool
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                bail!(
+                    "插件 {} 工具名 {} 无效（字母数字与 - _）",
+                    self.id,
+                    tool.name
+                );
+            }
+            if !names.insert(tool.name.as_str()) {
+                bail!("插件 {} 包含重复工具名 {}", self.id, tool.name);
+            }
+            if tool
+                .input_schema
+                .get("type")
+                .and_then(|value| value.as_str())
+                != Some("object")
+            {
+                bail!(
+                    "插件 {} 工具 {} 的 input_schema 必须为 object",
+                    self.id,
+                    tool.name
+                );
+            }
+            if !(1_000..=300_000).contains(&tool.timeout_ms) {
+                bail!(
+                    "插件 {} 工具 {} 的 timeout_ms 必须在 1000 到 300000 之间",
+                    self.id,
+                    tool.name
+                );
+            }
+        }
+
+        if !prompts.is_empty() {
+            if !self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.prompt)
+            {
+                bail!(
+                    "插件 {} 声明 prompt 时必须启用 capabilities.prompt",
+                    self.id
+                );
+            }
+            if prompts.iter().any(|section| section.trim().is_empty()) {
+                bail!("插件 {} prompt 段落不能为空", self.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// 归一化后的 UI 贡献列表（schema v2）。
+    ///
+    /// 沙箱级别逐级取值：贡献级 `sandbox` → `ui.sandbox` → `shadow`；
+    /// 打开模式缺省 `singleton`。v1 清单返回空（设置页贡献由 WASM 运行时声明）。
+    pub fn ui_contributions(&self) -> Vec<UiContribution> {
+        let Some(ui) = &self.ui else {
+            return Vec::new();
+        };
+        let default_sandbox = ui.sandbox.unwrap_or_default();
+        ui.contributions
+            .iter()
+            .map(|decl| UiContribution {
+                slot: decl.slot.clone(),
+                title: if decl.title.trim().is_empty() {
+                    decl.id.clone()
+                } else {
+                    decl.title.clone()
+                },
+                description: decl.description.clone(),
+                id: decl.id.clone(),
+                icon: decl.icon.clone(),
+                entry: decl.entry.clone(),
+                open_mode: decl.open_mode.unwrap_or_default(),
+                context: decl.context.clone(),
+                sandbox: decl.sandbox.unwrap_or(default_sandbox),
+            })
+            .collect()
+    }
+
+    /// v2 UI 贡献的 `native` 沙箱仅对携带有效官方签名的插件开放。
+    ///
+    /// 签名验证（`verify_signed_release`）完成后调用；结构校验见 [`Self::validate`]。
+    pub fn validate_ui_native_sandbox(&self, official_signed: bool) -> Result<()> {
+        if official_signed {
+            return Ok(());
+        }
+        for contribution in self.ui_contributions() {
+            if contribution.sandbox == SandboxKind::Native {
+                bail!(
+                    "插件 {} 的 UI 贡献 {} 声明 native 沙箱，仅官方签名插件可用",
+                    self.id,
+                    contribution.id
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn wasm_binary(&self) -> Option<&Path> {
         match &self.wasm {
-            WasmManifest::Detailed { binary } | WasmManifest::Legacy(binary) => binary,
+            Some(WasmManifest::Detailed { binary }) | Some(WasmManifest::Legacy(binary)) => {
+                Some(binary)
+            }
+            None => None,
         }
     }
 
@@ -226,4 +571,268 @@ fn validate_relative_path(path: &Path, field: &str) -> Result<()> {
         bail!("插件清单字段 {field} 必须是安全的相对路径");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v1 基线清单（无 ui/capabilities），等价旧规则。
+    fn v1_json() -> String {
+        r#"{
+            "schema_version": 1,
+            "id": "com.example.legacy",
+            "version": "1.0.0",
+            "wasm": { "binary": "plugin.wasm" },
+            "permissions": []
+        }"#
+        .to_string()
+    }
+
+    /// v2 完整清单：capabilities + ui.contributions（extension.tab 多实例）。
+    fn v2_json() -> String {
+        r#"{
+            "schema_version": 2,
+            "id": "com.example.board",
+            "version": "1.0.0",
+            "wasm": { "binary": "plugin.wasm" },
+            "permissions": ["bridge.call"],
+            "capabilities": {
+                "tools": true,
+                "prompt": true,
+                "lifecycle": true,
+                "interaction": true,
+                "events": ["session.*", "tool.*"]
+            },
+            "ui": {
+                "sandbox": "shadow",
+                "contributions": [
+                    {
+                        "slot": "extension.tab",
+                        "id": "board-tab",
+                        "title": "看板",
+                        "icon": "board",
+                        "entry": "index.html",
+                        "open_mode": "multi",
+                        "context": ["session", "workspace"]
+                    },
+                    {
+                        "slot": "settings.plugin-page",
+                        "id": "board-settings",
+                        "entry": "settings.html"
+                    }
+                ]
+            }
+        }"#
+        .to_string()
+    }
+
+    fn parse(json: &str) -> Result<PluginManifest> {
+        let manifest: PluginManifest = serde_json::from_str(json)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    #[test]
+    fn v1_清单按旧规则解析() {
+        let manifest = parse(&v1_json()).expect("v1 应兼容解析");
+        assert!(manifest.capabilities.is_none());
+        assert!(manifest.ui.is_none());
+        assert!(manifest.ui_contributions().is_empty());
+    }
+
+    #[test]
+    fn v1_清单携带_v2_字段被拒绝() {
+        for field in ["capabilities", "ui"] {
+            let json = v1_json().replace(
+                "\"permissions\": []",
+                &format!("\"permissions\": [], \"{field}\": {{}}"),
+            );
+            let error = parse(&json).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(field), "应指出非法字段 {field}: {message}");
+            assert!(message.contains("schema_version 为 2"));
+        }
+    }
+
+    #[test]
+    fn v2_清单解析出完整贡献() {
+        let manifest = parse(&v2_json()).expect("v2 应解析通过");
+        let capabilities = manifest.capabilities.as_ref().unwrap();
+        assert!(capabilities.tools);
+        assert_eq!(capabilities.events, vec!["session.*", "tool.*"]);
+
+        let contributions = manifest.ui_contributions();
+        assert_eq!(contributions.len(), 2);
+
+        let tab = &contributions[0];
+        assert_eq!(tab.slot, "extension.tab");
+        assert_eq!(tab.id, "board-tab");
+        assert_eq!(tab.entry, "index.html");
+        assert_eq!(tab.open_mode, OpenMode::Multi);
+        assert_eq!(tab.sandbox, SandboxKind::Shadow);
+        assert_eq!(tab.context, vec!["session", "workspace"]);
+
+        // 未声明 open_mode/sandbox/context 时取缺省值
+        let settings = &contributions[1];
+        assert_eq!(settings.open_mode, OpenMode::Singleton);
+        assert_eq!(settings.sandbox, SandboxKind::Shadow);
+        assert!(settings.context.is_empty());
+        assert_eq!(settings.title, "board-settings");
+    }
+
+    #[test]
+    fn v2_非法_slot_被拒绝() {
+        let json = v2_json().replace("\"extension.tab\"", "\"extension.unknown\"");
+        let error = parse(&json).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("未知挂载点"));
+        assert!(message.contains("extension.unknown"));
+        assert!(message.contains("slot 无效"));
+    }
+
+    #[test]
+    fn v2_open_mode_仅对_extension_tab_生效() {
+        let json = v2_json().replace(
+            "\"slot\": \"settings.plugin-page\",\n                        \"id\": \"board-settings\",\n                        \"entry\": \"settings.html\"",
+            "\"slot\": \"settings.plugin-page\",\n                        \"id\": \"board-settings\",\n                        \"entry\": \"settings.html\",\n                        \"open_mode\": \"multi\"",
+        );
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("open_mode"));
+        assert!(error.to_string().contains("extension.tab"));
+    }
+
+    #[test]
+    fn v2_非法_open_mode_取值被拒绝() {
+        let json = v2_json().replace("\"open_mode\": \"multi\"", "\"open_mode\": \"always\"");
+        let error = serde_json::from_str::<PluginManifest>(&json).unwrap_err();
+        assert!(error.to_string().contains("always"));
+    }
+
+    #[test]
+    fn v2_贡献级_sandbox_覆盖_默认级() {
+        let json = v2_json().replace(
+            "\"slot\": \"settings.plugin-page\"",
+            "\"slot\": \"settings.plugin-page\",\n                        \"sandbox\": \"iframe\"",
+        );
+        let manifest = parse(&json).unwrap();
+        let contributions = manifest.ui_contributions();
+        assert_eq!(contributions[0].sandbox, SandboxKind::Shadow);
+        assert_eq!(contributions[1].sandbox, SandboxKind::Iframe);
+    }
+
+    #[test]
+    fn v2_ui_sandbox_默认级生效() {
+        let json = v2_json().replace("\"sandbox\": \"shadow\"", "\"sandbox\": \"iframe\"");
+        let manifest = parse(&json).unwrap();
+        assert!(
+            manifest
+                .ui_contributions()
+                .iter()
+                .all(|item| item.sandbox == SandboxKind::Iframe)
+        );
+    }
+
+    #[test]
+    fn v2_native_沙箱需官方签名() {
+        let manifest = parse(&v2_json()).unwrap();
+        // 未签名：native 被拒
+        let unsigned = v2_json().replace(
+            "\"slot\": \"settings.plugin-page\"",
+            "\"slot\": \"settings.plugin-page\",\n                        \"sandbox\": \"native\"",
+        );
+        let unsigned = parse(&unsigned).unwrap();
+        let error = unsigned.validate_ui_native_sandbox(false).unwrap_err();
+        assert!(error.to_string().contains("native"));
+        assert!(error.to_string().contains("官方签名"));
+
+        // 签名插件：native 放行
+        assert!(manifest.validate_ui_native_sandbox(true).is_ok());
+
+        // 非 native 沙箱不受签名影响
+        assert!(unsigned.validate_ui_native_sandbox(true).is_ok());
+    }
+
+    #[test]
+    fn v2_不支持的目标_slot_上下文被拒绝() {
+        let json = v2_json().replace(
+            "\"context\": [\"session\", \"workspace\"]",
+            "\"context\": [\"session\", \"message\"]",
+        );
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("message"));
+        assert!(error.to_string().contains("不被"));
+    }
+
+    #[test]
+    fn v2_未知字段被拒绝() {
+        let json = v2_json().replace(
+            "\"entry\": \"index.html\"",
+            "\"entry\": \"index.html\", \"panel\": true",
+        );
+        let error = serde_json::from_str::<PluginManifest>(&json).unwrap_err();
+        assert!(error.to_string().contains("panel"));
+    }
+
+    #[test]
+    fn v2_贡献_id_重复被拒绝() {
+        let json = v2_json().replace("\"id\": \"board-settings\"", "\"id\": \"board-tab\"");
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("重复"));
+    }
+
+    #[test]
+    fn v2_entry_必须是安全相对路径() {
+        for entry in ["../escape.html", "/abs.html"] {
+            let json = v2_json().replace(
+                "\"entry\": \"index.html\"",
+                &format!("\"entry\": \"{entry}\""),
+            );
+            let error = parse(&json).unwrap_err();
+            assert!(error.to_string().contains("安全的相对路径"));
+        }
+    }
+
+    #[test]
+    fn 不支持的_schema_版本被拒绝() {
+        let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 3");
+        let error = parse(&json).unwrap_err();
+        assert!(error.to_string().contains("清单版本不支持"));
+    }
+
+    #[test]
+    fn 纯_ui_插件_wasm_可省略但须有贡献() {
+        // v2 + ui 贡献：wasm 可省略
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.board","version":"1.0.0","permissions":["bridge.call"],"ui":{"contributions":[{"slot":"extension.tab","id":"board","entry":"index.html"}]}}"#,
+        )
+        .unwrap();
+        manifest.validate().expect("纯 UI 插件应通过校验");
+        assert!(manifest.wasm_binary().is_none());
+        assert_eq!(manifest.ui_contributions().len(), 1);
+
+        // v2 + 无 wasm + 无 ui 贡献：拒绝
+        let bare: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.bare","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let error = bare.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("ui.contributions"));
+
+        // v1 + 无 wasm：拒绝（纯 UI 仅 v2 支持）
+        let v1_bare: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":1,"id":"a","version":"1.0.0","ui":{"contributions":[{"slot":"settings.plugin-page","id":"s","entry":"i.html"}]}}"#,
+        )
+        .unwrap();
+        let error = v1_bare.validate().unwrap_err();
+        // v1 携带 ui 字段先被 v2 字段校验拒绝（提示升级 schema_version）
+        assert!(format!("{error:#}").contains("schema_version"));
+    }
+
+    #[test]
+    fn v2_缺省_ui_等价无_ui_贡献() {
+        let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 2");
+        let manifest = parse(&json).unwrap();
+        assert!(manifest.ui_contributions().is_empty());
+    }
 }

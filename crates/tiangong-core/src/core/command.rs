@@ -4,9 +4,6 @@
 pub enum Command {
     /// 取消当前执行
     Cancel,
-    /// 审批响应
-    #[allow(dead_code)]
-    Approval { request_id: String, approved: bool },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
@@ -46,7 +43,6 @@ impl Command {
     pub(crate) fn kind_name(&self) -> &'static str {
         match self {
             Self::Cancel => "Cancel",
-            Self::Approval { .. } => "ApprovalResponse",
             Self::SetTrustMode(_) => "SetTrustMode",
             Self::SetReasoningEffort(_) => "SetReasoningEffort",
             Self::SetTitle { .. } => "SetTitle",

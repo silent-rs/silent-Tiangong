@@ -1,12 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Globe, Plus, TerminalSquare, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Globe, Grid3x3, Puzzle, TerminalSquare, X } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
-import type { TabKind, TabState } from '@/api/tauri';
+import { BUILTIN_TAB_KIND_MULTI, TAB_KIND_NAME } from '@/api/tauri';
+import type { SandboxKind, TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
+import { AgentTeamPanel } from './AgentTeamPanel';
 import { BrowserTabContent } from './BrowserTabContent';
+import { PluginAppTabContent } from './PluginAppTabContent';
 import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from './ui/context-menu';
 
 interface TabsContainerProps {
   initialTabKind: TabKind;
@@ -15,12 +25,39 @@ interface TabsContainerProps {
   requestedTerminalTabId?: string | null;
   terminalSyncVersion?: number;
   onClose: () => void;
+  /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
+  onShowMatrix?: () => void;
+  /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
+   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。
+   *  第二参量为已打开的三方/官方 plugin App 键（`plugin_id:contribution_id`）。 */
+  onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
+  /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
+  appCommand?: AppTabCommand | null;
+  /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
+  mode?: 'app' | 'matrix';
+  /** 矩阵态渲染到内容区的视图（由宿主注入，保持容器与矩阵解耦）。 */
+  matrix?: ReactNode;
   onActiveKindChange?: (kind: TabKind | null) => void;
 }
 
 const DEFAULT_BROWSER_URL = 'about:blank';
 const TABS_PERSIST_DEBOUNCE_MS = 500;
 const BUSY_TERMINAL_PHASES = new Set(['UserActive', 'Running', 'Interactive']);
+
+/** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
+export interface AppTabCommand {
+  kind: TabKind;
+  action: 'new' | 'close-all' | 'open-plugin';
+  version: number;
+  /** open-plugin 携带的三方 App 元数据。 */
+  app?: {
+    pluginId: string;
+    contributionId: string;
+    title: string;
+    sandbox: SandboxKind;
+    multi: boolean;
+  };
+}
 
 function nowText(): string {
   return new Date().toISOString();
@@ -71,6 +108,11 @@ export function TabsContainer({
   requestedTerminalTabId,
   terminalSyncVersion = 0,
   onClose,
+  onShowMatrix,
+  onTabKindsChanged,
+  appCommand,
+  mode = 'app',
+  matrix,
   onActiveKindChange,
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -100,6 +142,25 @@ export function TabsContainer({
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
+  const onTabKindsChangedRef = useRef(onTabKindsChanged);
+  onTabKindsChangedRef.current = onTabKindsChanged;
+  const lastTabKindsRef = useRef<string>('');
+  useEffect(() => {
+    const kinds = Array.from(new Set(tabs.map((tab) => tab.kind)));
+    const pluginApps = Array.from(
+      new Set(
+        tabs
+          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
+          .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
+      ),
+    );
+    const key = `${kinds.join(',')}|${pluginApps.join(',')}`;
+    if (key === lastTabKindsRef.current) return;
+    lastTabKindsRef.current = key;
+    onTabKindsChangedRef.current?.(kinds, pluginApps);
+  }, [tabs]);
 
   useEffect(() => {
     onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);
@@ -439,6 +500,16 @@ export function TabsContainer({
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
     if (!sessionId) return;
+    // plugin（三方 App）实例的创建/聚焦统一走宿主命令通道（open-plugin），
+    // 此处聚焦已有实例即可。
+    if (kind === 'plugin') {
+      const existing = tabsRef.current.find((tab) => tab.kind === 'plugin');
+      if (existing) {
+        activeTabIdRef.current = existing.id;
+        setActiveTabId(existing.id);
+      }
+      return;
+    }
 
     const currentTabs = tabsRef.current;
     const currentActiveId = activeTabIdRef.current;
@@ -564,9 +635,10 @@ export function TabsContainer({
     const closingTab = currentTabs[closedIndex];
     if (closingTab.kind === 'browser') {
       void api.browserTabClose(terminalSessionId, tabId).catch(console.error);
-    } else {
+    } else if (closingTab.kind === 'terminal') {
       void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
     }
+    // plugin（三方 App）实例无后端运行时，仅移除前端状态与持久化引用
 
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     const currentActiveId = activeTabIdRef.current;
@@ -586,7 +658,13 @@ export function TabsContainer({
       // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
       void api.browserHide(terminalSessionId).catch(console.error);
       void api.browserSwitchSession(terminalSessionId, null).catch(console.error);
-      onClose();
+      // 拓展区三态：全部 tab 关闭后回到 App 矩阵态（面板保持展开）；
+      // 未提供矩阵回调时沿用旧行为直接收起。
+      if (onShowMatrix) {
+        onShowMatrix();
+      } else {
+        onClose();
+      }
       return;
     }
 
@@ -596,12 +674,63 @@ export function TabsContainer({
         void api.browserHide(terminalSessionId).catch(console.error);
       }
     }
-  }, [onClose, terminalSessionId]);
+  }, [onClose, onShowMatrix, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
     void api.browserHide(terminalSessionId).catch(console.error);
     onClose();
   }, [onClose]);
+
+  // 宿主（矩阵右键菜单）下发的实例命令：新建走既有 handleNewTab（宿主并行
+  // 切换 App 态）；关闭全部按 id 快照逐个走 handleCloseTab（末 tab 关闭会
+  // 触发回矩阵/收起的既有逻辑，处于矩阵态时 onShowMatrix 幂等）；
+  // open-plugin 按 open_mode 分派——单例聚焦已有实例，多例每次新建。
+  const lastAppCommandVersionRef = useRef(0);
+  useEffect(() => {
+    if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
+    lastAppCommandVersionRef.current = appCommand.version;
+    if (appCommand.action === 'new') {
+      void handleNewTab(appCommand.kind);
+      return;
+    }
+    if (appCommand.action === 'open-plugin' && appCommand.app) {
+      const { pluginId, contributionId, title, sandbox, multi } = appCommand.app;
+      const existing = multi
+        ? null
+        : tabsRef.current.find(
+          (tab) => tab.kind === 'plugin'
+            && tab.plugin_id === pluginId
+            && tab.contribution_id === contributionId,
+        );
+      if (existing) {
+        activeTabIdRef.current = existing.id;
+        setActiveTabId(existing.id);
+        return;
+      }
+      const nextTab: TabState = {
+        id: `plugin-${crypto.randomUUID()}`,
+        kind: 'plugin',
+        title,
+        url: '',
+        created_at: new Date().toISOString(),
+        plugin_id: pluginId,
+        contribution_id: contributionId,
+        sandbox,
+      };
+      const nextTabs = [...tabsRef.current, nextTab];
+      tabsRef.current = nextTabs;
+      activeTabIdRef.current = nextTab.id;
+      setTabs(nextTabs);
+      setActiveTabId(nextTab.id);
+      return;
+    }
+    const targetIds = tabsRef.current
+      .filter((tab) => tab.kind === appCommand.kind)
+      .map((tab) => tab.id);
+    for (const tabId of targetIds) {
+      handleCloseTab(tabId);
+    }
+  }, [appCommand, handleCloseTab, handleNewTab]);
 
   const handleBrowserMetadataChange = useCallback((
     tabId: string,
@@ -662,71 +791,93 @@ export function TabsContainer({
     <div className="flex h-full flex-1 flex-col bg-background">
       <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {onShowMatrix && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className={`h-7 w-7 shrink-0 p-0 ${
+                mode === 'matrix'
+                  ? 'bg-muted text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={onShowMatrix}
+              title="启动台（回到拓展区矩阵）"
+              aria-label="启动台"
+            >
+              <Grid3x3 className="h-3.5 w-3.5" />
+            </Button>
+          )}
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
-            const Icon = tab.kind === 'browser' ? Globe : TerminalSquare;
+            const Icon = tab.kind === 'browser' ? Globe : tab.kind === 'plugin' ? Puzzle : TerminalSquare;
             const busy = tab.kind === 'terminal'
               && Boolean(tab.phase && BUSY_TERMINAL_PHASES.has(tab.phase));
             return (
-              <div
-                key={tab.id}
-                className={`group flex h-7 min-w-28 max-w-44 shrink-0 items-center gap-1.5 rounded px-2 text-xs transition-colors ${
-                  active
-                    ? 'bg-muted text-foreground'
-                    : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-                }`}
-                title={tab.title}
-              >
-                <button
-                  type="button"
-                  className="flex min-w-0 flex-1 items-center gap-1.5"
-                  onClick={() => handleSwitchTab(tab.id)}
-                >
-                  <Icon className="h-3.5 w-3.5 shrink-0" />
-                  {busy && (
-                    <span
-                      className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 ring-1 ring-yellow-600/40"
-                      title="终端繁忙"
-                      aria-label="终端繁忙"
-                    />
+              <ContextMenu key={tab.id}>
+                <ContextMenuTrigger asChild>
+                  <div
+                    className={`group flex h-7 min-w-28 max-w-44 shrink-0 cursor-default items-center gap-1.5 rounded px-2 text-xs transition-colors ${
+                      active
+                        ? 'bg-muted text-foreground'
+                        : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                    }`}
+                    title={tab.title}
+                  >
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-1.5"
+                      onClick={() => handleSwitchTab(tab.id)}
+                    >
+                      <Icon className="h-3.5 w-3.5 shrink-0" />
+                      {busy && (
+                        <span
+                          className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 ring-1 ring-yellow-600/40"
+                          title="终端繁忙"
+                          aria-label="终端繁忙"
+                        />
+                      )}
+                      <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleCloseTab(tab.id);
+                      }}
+                      title="关闭"
+                      aria-label="关闭标签页"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  {/* 多实例 App 才提供新建；单实例（浏览器）重复打开聚焦已有，不支持多开 */}
+                  {BUILTIN_TAB_KIND_MULTI[tab.kind] && (
+                    <ContextMenuItem onClick={() => void handleNewTab(tab.kind)}>
+                      新建{TAB_KIND_NAME[tab.kind]}标签页
+                    </ContextMenuItem>
                   )}
-                  <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
-                </button>
-                <button
-                  type="button"
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    handleCloseTab(tab.id);
-                  }}
-                  title="关闭"
-                  aria-label="关闭标签页"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
+                  {tabs.length > 1 && BUILTIN_TAB_KIND_MULTI[tab.kind] && (
+                    <ContextMenuItem
+                      onClick={() => {
+                        for (const other of tabsRef.current.filter((item) => item.id !== tab.id)) {
+                          handleCloseTab(other.id);
+                        }
+                      }}
+                    >
+                      关闭其他标签页
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuSeparator className="my-1" />
+                  <ContextMenuItem onClick={() => handleCloseTab(tab.id)}>
+                    关闭标签页
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             );
           })}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 w-7 shrink-0 p-0"
-            onClick={() => handleNewTab('terminal')}
-            title="新建终端"
-            aria-label="新建终端标签页"
-          >
-            <TerminalSquare className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-7 w-7 shrink-0 p-0"
-            onClick={() => handleNewTab('browser')}
-            title="新建浏览器"
-            aria-label="新建浏览器标签页"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </Button>
         </div>
 
         <Button
@@ -741,27 +892,57 @@ export function TabsContainer({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1">
+      {/* App 实例内容：矩阵态隐藏保活（切换矩阵不销毁浏览器/终端实例） */}
+      <div className={mode === 'matrix' ? 'hidden' : 'min-h-0 flex-1'}>
         {tabs.map((tab) => (
           tab.kind === 'terminal' ? (
             <TerminalTabContent
               key={`${terminalSessionId}:${tab.id}`}
               sessionId={terminalSessionId}
               tabId={tab.id}
-              isActive={isVisible && tab.id === activeTab?.id}
+              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
             />
+          ) : tab.kind === 'plugin' ? (
+            tab.sandbox === 'native' && tab.plugin_id === '__builtin__' ? (
+              // 官方内置 App 的 native 容器（设计 6.2 ③，仅官方）：按贡献分派组件
+              <div
+                key={`${terminalSessionId}:${tab.id}`}
+                className={
+                  isVisible && mode === 'app' && tab.id === activeTab?.id
+                    ? 'flex h-full min-h-0 w-full flex-1 flex-col'
+                    : 'hidden'
+                }
+              >
+                {tab.contribution_id === 'agent-team' ? (
+                  <AgentTeamPanel />
+                ) : (
+                  <div className="p-4 text-sm text-muted-foreground">
+                    该官方 App 内容组件未注册。
+                  </div>
+                )}
+              </div>
+            ) : (
+              <PluginAppTabContent
+                key={`${terminalSessionId}:${tab.id}`}
+                tab={tab}
+                isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
+              />
+            )
           ) : (
             <BrowserTabContent
               key={`${terminalSessionId}:${tab.id}`}
               sessionId={terminalSessionId}
               tabId={tab.id}
               initialUrl={tab.url}
-              isActive={isVisible && tab.id === activeTab?.id}
+              isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
               onMetadataChange={handleBrowserMetadataChange}
             />
           )
         ))}
       </div>
+      {mode === 'matrix' && matrix && (
+        <div className="min-h-0 flex-1">{matrix}</div>
+      )}
     </div>
   );
 }

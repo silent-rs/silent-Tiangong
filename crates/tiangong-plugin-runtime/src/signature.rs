@@ -100,7 +100,10 @@ impl SignedPluginRelease {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
-        self.wasm.verify(directory, plugin_manifest.wasm_binary())?;
+        match plugin_manifest.wasm_binary() {
+            Some(wasm_binary) => self.wasm.verify(directory, wasm_binary)?,
+            None => bail!("签名插件必须包含 wasm 制品（纯 UI 插件无需签名发布）"),
+        }
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {
                 if !self.has_permission("sidecar.invoke") {

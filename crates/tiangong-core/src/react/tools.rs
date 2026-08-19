@@ -1,11 +1,9 @@
 //! 工具执行流水线（ALR-301/302，任务 17）。
 //!
 //! 模型响应中的工具调用整批交给 [`execute_tool_batch`]：规范化与参数校验
-//! （去重/无效调用上下文）→ 权限判断 → 必要时等待审批 → 有界并行执行 →
-//! 顺序提交结果并更新 [`TaskContract`](super::contract::TaskContract) → 闭合
-//! Provider 工具协议。审批是流水线内部的异步等待，与工具共享同一命令通道：
-//! 取消/引导到达时批次收敛闭合后把命令交还执行驱动，Loop 不再拥有
-//! `PreparingTools` / `WaitingTools` / `WaitingApproval` 顶层阶段。
+//! （去重/无效调用上下文）→ 有界并行执行 → 顺序提交结果并更新
+//! [`TaskContract`](super::contract::TaskContract) → 闭合 Provider 工具协议。
+//! 取消/引导到达时批次收敛闭合后把命令交还执行驱动。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,8 +22,7 @@ use super::compression::observed_total_tokens;
 use super::execute::{
     AgentLoopState, CompletedToolCall, ToolInjectionBuffer, ToolPreflightOutcome,
     append_failure_recovery_prompt, append_invalid_tool_calls_context, prepare_tool_call,
-    record_completed_tool_call, record_parallel_duplicate_tool_call, record_rejected_tool_call,
-    set_runtime_trust_mode,
+    record_completed_tool_call, record_parallel_duplicate_tool_call, set_runtime_trust_mode,
 };
 use super::helpers::record_plugin_usage;
 use super::message::append_tool_result_message;
@@ -46,14 +43,6 @@ pub(super) enum ToolBatchOutcome {
     Interrupted(Deferred),
 }
 
-/// 待审批工具的审批结论。
-enum ApprovalDecision {
-    Approved,
-    Rejected,
-    /// 审批等待被中断类命令打断（待审批工具已按拒绝闭合）。
-    Interrupted(Deferred),
-}
-
 /// 已就绪待执行的单个工具调用（自 phase.rs 迁入，随流水线归属 tools.rs）。
 pub(super) struct RunningToolCall {
     pub(super) tool: PreparedToolCall,
@@ -66,7 +55,7 @@ pub(super) struct ToolTaskOutput {
     pub(super) duration_ms: u64,
 }
 
-/// 执行一个完整的工具批次（准备 → 审批 → 并行执行 → 收尾）。
+/// 执行一个完整的工具批次（准备 → 并行执行 → 收尾）。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_batch(
     ctx: &mut TurnContext,
@@ -87,7 +76,7 @@ pub(super) async fn execute_tool_batch(
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
 
     'pipeline: loop {
-        // ── 准备：逐个弹出待处理调用（校验/去重/权限分流）──
+        // ── 准备：逐个弹出待处理调用（校验/去重）──
         while let Some((index, call)) = batch.calls.pop_front() {
             match prepare_tool_call(ctx, &call, &mut state.tool_history) {
                 ToolPreflightOutcome::Skip { needs_recovery } => {
@@ -108,65 +97,7 @@ pub(super) async fn execute_tool_batch(
                         args_summary,
                         dedupe_key,
                     };
-                    let trust_mode_label = format!("{trust_mode:?}");
-                    if *trust_mode == TrustMode::FullTrust {
-                        ctx.observer.audit_permission(
-                            &ctx.session.id,
-                            &tool.call.name,
-                            "approved",
-                            &trust_mode_label,
-                            (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                        );
-                        batch.ready_tools.push(tool);
-                        continue;
-                    }
-                    // 需要审批：流水线内部等待（与工具共享同一命令通道，ALR-302）。
-                    let request_id = scru128::new().to_string();
-                    ctx.observer.audit_permission(
-                        &ctx.session.id,
-                        &tool.call.name,
-                        "needs_approval",
-                        &trust_mode_label,
-                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                    );
-                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                        request_id: request_id.clone(),
-                        tool_name: tool.call.name.clone(),
-                        args_summary: tool.args_summary.clone(),
-                    });
-                    match wait_approval(
-                        ctx,
-                        state,
-                        injections,
-                        trust_mode,
-                        plugins,
-                        stream_tx,
-                        context_limit,
-                        cmd_rx,
-                        &request_id,
-                        &tool,
-                    )
-                    .await
-                    {
-                        ApprovalDecision::Approved => {
-                            start_tool_execution(ctx, tool, &mut tasks, &mut running);
-                        }
-                        ApprovalDecision::Rejected => {
-                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            // 拒绝结果已写入会话：回到 NeedModel 让模型看到拒绝并
-                            // 决定（解释结束 / 换路径 / 重试）。是否允许完成由完成
-                            // 门控判定——必需义务被拒不会虚假成功（ALR-307）。
-                            injections.commit(ctx);
-                            close_pending_calls(ctx, stream_tx, "工具调用因审批被拒绝而未执行。");
-                            return ToolBatchOutcome::Completed;
-                        }
-                        ApprovalDecision::Interrupted(deferred_command) => {
-                            // 待审批工具按拒绝闭合，剩余调用一并闭合。
-                            record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
-                            return ToolBatchOutcome::Interrupted(deferred_command);
-                        }
-                    }
+                    batch.ready_tools.push(tool);
                 }
             }
         }
@@ -275,63 +206,6 @@ pub(super) async fn execute_tool_batch(
     ToolBatchOutcome::Completed
 }
 
-/// 等待审批结论：审批/FullTrust 解锁/中断三类出口；其余命令就地消化。
-#[allow(clippy::too_many_arguments)]
-async fn wait_approval(
-    ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    injections: &mut ToolInjectionBuffer,
-    trust_mode: &mut TrustMode,
-    plugins: &[Arc<dyn Plugin>],
-    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
-    context_limit: usize,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    request_id: &str,
-    tool: &PreparedToolCall,
-) -> ApprovalDecision {
-    let _ = tool;
-    loop {
-        let command = match cmd_rx.recv().await {
-            Some(command) => command,
-            None => return ApprovalDecision::Interrupted(Deferred::Closed),
-        };
-        match command {
-            Command::Approval {
-                request_id: responded,
-                approved,
-            } if responded == request_id => {
-                return if approved {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Rejected
-                };
-            }
-            Command::SetTrustMode(mode) => {
-                set_runtime_trust_mode(trust_mode, plugins, mode);
-                if *trust_mode == TrustMode::FullTrust {
-                    // FullTrust 解锁待审批工具：直接就绪（原 WaitingApproval 迁移）。
-                    return ApprovalDecision::Approved;
-                }
-            }
-            command if is_interrupting(&command) => {
-                return ApprovalDecision::Interrupted(Deferred::Command(command));
-            }
-            command => {
-                handle_ambient_command(
-                    ctx,
-                    state,
-                    injections,
-                    trust_mode,
-                    plugins,
-                    stream_tx,
-                    context_limit,
-                    command,
-                );
-            }
-        }
-    }
-}
-
 /// 中断类命令：取消/关闭/引导消息——批次收敛闭合后交还执行驱动。
 fn is_interrupting(command: &Command) -> bool {
     matches!(
@@ -393,8 +267,7 @@ fn handle_ambient_command(
         Command::CompressContext | Command::ResetContext => {
             // Driver 在 turn 结束后的空闲边界执行维护命令。
         }
-        // 迟到或不匹配的审批：明确忽略。
-        Command::Approval { .. } | Command::Cancel | Command::Shutdown => {}
+        Command::Cancel | Command::Shutdown => {}
         Command::InjectUserMessage { .. } => unreachable!("中断类命令已在上方分流"),
     }
 }

@@ -299,27 +299,6 @@ impl EventLog {
         );
     }
 
-    /// 等待审批请求并返回 request_id。
-    pub fn wait_approval_needed(&mut self) -> String {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            self.pump();
-            if let Some(StreamEvent::ApprovalNeeded { request_id, .. }) = self
-                .seen
-                .iter()
-                .find(|e| matches!(e, StreamEvent::ApprovalNeeded { .. }))
-            {
-                return request_id.clone();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "等待审批事件超时；已收到：{}",
-                self.summarize()
-            );
-            std::thread::sleep(POLL);
-        }
-    }
-
     /// 等待指定动作的压缩完成事件，返回事件中的边界与剩余消息数
     ///（供与磁盘最终状态核对一致）。
     pub fn wait_context_compressed(
@@ -469,7 +448,6 @@ fn name_of(event: &StreamEvent) -> &'static str {
         StreamEvent::Done { .. } => "Done",
         StreamEvent::Error { .. } => "Error",
         StreamEvent::UserMessage { .. } => "UserMessage",
-        StreamEvent::ApprovalNeeded { .. } => "ApprovalNeeded",
         StreamEvent::ToolStart { .. } => "ToolStart",
         StreamEvent::ToolResult { .. } => "ToolResult",
         StreamEvent::ContextCompressing { .. } => "ContextCompressing",

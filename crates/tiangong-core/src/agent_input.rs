@@ -1,12 +1,11 @@
 //! 外部与 Agent 交互的统一通道。
 //!
-//! 所有外部输入（用户消息、审批响应、终端操作、浏览器注入等）都经此 trait 投递。
+//! 所有外部输入（用户消息、终端操作、浏览器注入等）都经此 trait 投递。
 //! `TiangongCore` 实现此 trait，内部转为 `Command` 发送到 worker 通道。
 //!
-//! 按与 Agent 交互的语义分为四层：
+//! 按与 Agent 交互的语义分为三层：
 //! - [`AgentInputKind::Message`]：对话消息（触发 turn）
 //! - [`AgentInputKind::Tool`]：工具类输入（伪造 tool result 注入对话，不触发 turn）
-//! - [`AgentInputKind::Approval`]：审批响应（解锁阻塞等待的 turn）
 //! - [`AgentInputKind::Command`]：控制指令
 
 /// 外部与 Agent 交互的统一通道。
@@ -19,7 +18,7 @@ pub trait AgentInput: Send + Sync {
     fn deliver(&self, input: AgentInputKind) -> Result<(), crate::core::CoreError>;
 }
 
-/// 外部输入的顶层分类，按交互语义分四层。
+/// 外部输入的顶层分类，按交互语义分三层。
 pub enum AgentInputKind {
     /// 对话消息层：用户消息等，会触发 Agent 执行一轮 turn。
     Message(MessageInput),
@@ -28,8 +27,6 @@ pub enum AgentInputKind {
     /// 也可通过 `AgentInputKind::tool(name, json)` 匿名注入。
     /// 渲染由 core 的 render_tool_output 统一处理。
     Tool(Box<dyn ToolInput>),
-    /// 审批层：审批响应，解锁阻塞等待审批的 turn。
-    Approval(ApprovalInput),
     /// 控制层：控制指令。
     Command(CommandInput),
 }
@@ -85,14 +82,6 @@ impl AgentInputKind {
         })
     }
 
-    /// 便捷构造：审批响应。
-    pub fn approval(request_id: impl Into<String>, approved: bool) -> Self {
-        AgentInputKind::Approval(ApprovalInput::Response {
-            request_id: request_id.into(),
-            approved,
-        })
-    }
-
     /// 便捷构造：取消当前执行（cancel_flag 由 deliver 内部设置）。
     pub fn cancel() -> Self {
         AgentInputKind::Command(CommandInput::Cancel)
@@ -119,14 +108,6 @@ pub enum MessageInput {
         /// 前端预生成的消息 ID（用于流式复用），None 则由后端生成。
         message_id: Option<String>,
     },
-}
-
-// ===== Approval 层 =====
-
-/// 审批层输入。
-pub enum ApprovalInput {
-    /// 审批响应（解锁当前阻塞等待审批的 turn）。
-    Response { request_id: String, approved: bool },
 }
 
 // ===== Command 层 =====

@@ -1,335 +1,172 @@
-# Core 架构图
+# Core 架构
 
-## 1. 当前分层
+> 本文描述当前 `crates/tiangong-core`。旧 `src/core` planning/execution 分层、常驻
+> Driver、Agent Inbox 和统一常驻命令通道均不是现行架构。
 
-当前 `src/core` 可以分为 5 个层次：
-
-1. 配置与状态层
-2. 智能体层
-3. 执行器层
-4. 能力层
-5. 运行时装配层
+## 1. 总览
 
 ```mermaid
 flowchart TD
-    A["app_state<br/>应用状态与持久化入口"] --> B["runtime<br/>运行时装配与 turn 闭环"]
-    C["agent_config<br/>模型/MCP/Skill 配置"] --> A
-    C --> B
-
-    B --> D["planning_agent<br/>规划智能体"]
-    B --> E["execution<br/>执行器领域"]
-    B --> F["response_agent<br/>响应智能体"]
-
-    E --> G["plan_runner<br/>计划推进"]
-    E --> H["step_executor<br/>step 执行主控"]
-    E --> I["result_analyzer<br/>结果归一化"]
-    E --> J["verify<br/>验证命令执行"]
-    E --> K["types/message<br/>执行共享类型/消息"]
-
-    H --> L["execution_prompt_agent<br/>执行提示词智能体"]
-    H --> M["execution_completion_agent<br/>完成判定智能体"]
-    H --> N["execution_tool_agent<br/>本地工具调用智能体"]
-    H --> O["execution_mcp_agent<br/>MCP 调用智能体"]
-
-    N --> P["tool<br/>本地工具能力"]
-    O --> Q["mcp<br/>MCP 客户端/能力缓存"]
-    D --> R["planner<br/>计划数据结构"]
-    F --> R
-
-    B --> S["model<br/>模型客户端"]
-    H --> S
-    D --> S
-    F --> S
-
-    A --> T["session<br/>会话模型"]
-    B --> T
-    L --> U["skill<br/>skill 上下文/解析"]
+    A[GUI / CLI / Server / 插件] --> B[AgentInput]
+    B --> C[TiangongCore]
+    C --> D{会话是否有活跃 turn task}
+    D -->|否：用户消息| E[start_user_turn]
+    E --> F[加载最新 Session]
+    F --> G[构建 TurnContext]
+    G --> H[保存并确认用户消息]
+    H --> I[shared_runtime::spawn_turn]
+    I --> J[react::turn::run_turn]
+    D -->|是：用户消息| K[send_command InjectUserMessage]
+    K --> L[当前 turn 中断、保存消息、重新分析]
+    D -->|是：其他活动期输入| M[send_command 到当前 turn]
+    J --> N[react::execute Agent Loop]
+    N --> O[模型请求]
+    O --> P{有工具调用?}
+    P -->|是| Q[react::tools 执行并记录结果]
+    Q --> O
+    P -->|否| R[候选结果与 turn 收尾]
+    R --> S[持久化 Session / 发布终态 / task 结束]
 ```
 
-## 2. 核心目录职责
+当前执行模型不是常驻 Agent 进程：
 
-### 2.1 运行时装配层
+- 一个会话同时至多登记一个活跃 turn task；
+- task 只覆盖当前 turn 或手动压缩任务；
+- task 持有自己的 `TurnContext` 和命令接收端；
+- task 结束后注册表条目与命令通道失效；
+- 下一条空闲用户消息从最新 Session 创建新 task。
 
-- `src/core/runtime.rs`
-  - `RuntimeEngine` 对外统一入口
-  - 装配 `planning -> execution -> response`
-  - 对外暴露 `RunSnapshot`、`TurnExecution`、`LlmOutputRecord`
+## 2. 核心模块
 
-### 2.2 执行器层
+### `core/mod.rs`
 
-- `src/core/execution/mod.rs`
-  - `execution` 领域导出入口
+`TiangongCore` 是对外协调入口：
 
-- `src/core/execution/plan_runner.rs`
-  - 推进 plan item 和 execution step
-  - 管理动态 step 插入
-  - 聚合 step report 和 plan execution summary
+- 接收 `AgentInputKind`；
+- 加载 Session 和配置；
+- 构建每轮 `TurnContext`；
+- 空闲时通过 `start_user_turn` 创建 turn；
+- 运行中通过 `shared_runtime::send_command` 投递输入；
+- 处理标题、配置、压缩、清空和关闭等会话操作。
 
-- `src/core/execution/step_executor.rs`
-  - 单个 step 的多轮执行主控
-  - 驱动 execution 相关子 agent
-  - 路由本地工具与 MCP 工具
-  - 收敛完成信号并产出 `ExecutionStepResult`
+### `shared_runtime.rs`
 
-- `src/core/execution/result_analyzer.rs`
-  - 提取成功业务结果
-  - 聚合 LLM 输出
-  - 规范工具反馈与失败摘要
+提供：
 
-- `src/core/execution/verify.rs`
-  - 推荐验证命令
-  - 执行验证命令
-  - 返回 `VerifyExecutionRecord`
+- 进程级 multi-thread Tokio runtime；
+- `session_id → TurnTask` 活跃任务注册表；
+- `spawn_turn`、`send_command`、`is_running`、`cancel_and_join`；
+- task 代际检查，防止旧任务结束时误删新任务。
 
-- `src/core/execution/types.rs`
-  - 执行器领域共享类型：
-    - `ExecutionLlmOutput`
-    - `ExecutionStepReport`
-    - `ExecutionStepResult`
-    - `DynamicPlanStep`
-    - `LlmOutputRecord`
+它不是常驻 Driver，也不保存 Agent Inbox。
 
-- `src/core/execution/message.rs`
-  - `runtime_message`
-  - 负责 execution 领域内部运行时消息构造
+### `turn_context.rs`
 
-### 2.3 智能体层
+`TurnContext` 是单个 turn 的执行材料：
 
-- `src/core/agents/planning_agent.rs`
-  - 规划智能体
+- 当前 Session；
+- 模型客户端；
+- 插件与工具；
+- 信任模式和 Agent 配置；
+- StreamEvent 发送端；
+- 上下文和观测能力。
 
-- `src/core/agents/response_agent.rs`
-  - 响应生成智能体
+后续 turn 会重新构建上下文，不复用未来 Session 快照。
 
-- `src/core/agents/skill_convert_agent.rs`
-  - 外部 skill 转换智能体
+### `react/turn.rs`
 
-- `src/core/agents/execution_prompt_agent.rs`
-  - 执行阶段 prompt 构造
-  - 包括首轮 prompt 和 follow-up prompt
+负责单轮外围生命周期：
 
-- `src/core/agents/execution_completion_agent.rs`
-  - 步骤完成判定
-  - 自动继续执行的复核判定
+- 插件 turn 开始/结束通知；
+- 调用 Agent Loop；
+- 提交成功、失败或取消状态；
+- 最终持久化和终态事件。
 
-- `src/core/agents/execution_tool_agent.rs`
-  - 本地函数工具定义
-  - 函数调用到本地 `ToolCall` 的转换
+### `react/execute.rs`
 
-- `src/core/agents/execution_mcp_agent.rs`
-  - MCP 函数工具暴露
-  - MCP tool 路由与调用
+负责当前 turn 内的 Agent Loop：
 
-### 2.4 能力层
+1. 构建并发送模型请求；
+2. 处理流式输出与用量；
+3. 记录 assistant 文本或工具调用；
+4. 执行工具批次并写入结果；
+5. 根据结果继续请求模型或结束本轮；
+6. 在活动阶段接收并处理当前 turn 的命令。
 
-- `src/core/tool.rs` + `src/core/tool/*`
-  - 本地工具能力
-  - 包括文件读取、目录遍历、命令执行、补丁应用、代码搜索等
+### `react/command.rs`
 
-- `src/core/mcp/*`
-  - MCP client、配置、上下文、能力缓存
+集中处理当前 turn 的命令效果。
 
-- `src/core/skill/*`
-  - Skill 分析、上下文、初始化、打包相关逻辑
-
-### 2.5 模型与状态层
-
-- `src/core/model.rs`
-  - 模型客户端抽象
-
-- `src/core/planner.rs`
-  - 计划结构与状态模型
-
-- `src/core/session.rs`
-  - 会话数据结构
-
-- `src/core/agent_config.rs`
-  - 模型/MCP/Skill 配置结构
-
-- `src/core/app_state/*`
-  - 应用状态 façade
-  - 状态切片、持久化、service、repository
-  - 面向 UI/TUI 的状态协调层
-
-## 3. 当前调用主链路
+用户引导消息的关键路径是：
 
 ```text
-app_state
-  -> runtime.execute_turn_with_streaming
-    -> planning_agent
-    -> execution.plan_runner
-      -> execution.step_executor
-        -> execution_*_agent
-        -> tool / mcp
-    -> execution.verify
-    -> response_agent
+Command::InjectUserMessage
+  → interrupt_active_work
+  → save_user_message_and_restart
+  → ExecutionPhase::NeedModel
 ```
 
-## 4. 执行时序图
+这里的“restart”是当前 turn 内从新意图重新分析，不是恢复某个常驻 Driver。
 
-下面的时序图对应一次典型的用户输入执行流程。
+### `react/tools.rs`
 
-### 4.1 简化流程图
+负责：
 
-```mermaid
-flowchart TD
-    A["user prompt"] --> B["append plan<br/>规划时按实际情况调整待执行的 plan"]
-    B --> C["loop run plan"]
+- 工具调用校验和去重；
+- 权限与当前审批等待；
+- 工具并行执行和顺序提交；
+- 工具结果消息与 Provider 协议闭合；
+- 工具执行期间命令处理。
 
-    C --> D["running plan"]
-    D --> E["run first step and record"]
-    E --> F{"while not finish"}
+审批/交互插件化仍在演进，当前实现不应被推导为最终架构。
 
-    F -->|finish| I["finish and summary plan"]
-    I --> C
+### `session.rs`
 
-    F --> G["analysis next step"]
-    G --> H["run step and record"]
-    H --> F
+定义会话消息与持久化格式。Session 是跨 turn 的权威状态；运行时 task、命令通道和插件 UI 订阅不属于 Session 持久化内容。
+
+## 3. 用户消息路由
+
+### 空闲用户消息
+
+```text
+AgentInputKind::Message
+  → TiangongCore::start_user_turn
+  → load_session / build_turn_context
+  → 保存消息并发布 UserMessage
+  → shared_runtime::spawn_turn
+  → run_turn
 ```
 
-### 4.2 Run Step 展开图
+### 运行中用户消息
 
-```mermaid
-flowchart TD
-    A["run step"] --> B["build prompt<br/>首轮或 follow-up"]
-    B --> C["model complete_with_functions"]
-    C --> D{"has tool calls?"}
-
-    D -->|no| Z1["fail step<br/>未提交函数调用"]
-    D -->|yes| E["loop tool calls"]
-
-    E --> F{"mark_step_completed?"}
-    F -->|yes| G["parse completion signal"]
-    F -->|no| H{"MCP tool?"}
-
-    H -->|yes| I["route MCP call"]
-    H -->|no| J["route local tool call"]
-
-    I --> K["execute and record tool result"]
-    J --> K
-    K --> L["collect executed tools / round feedback"]
-
-    L --> M{"tool failed?"}
-    M -->|yes and no success result| N["append blocking error"]
-    M -->|yes but success result exists| O["ignore extra failed tool"]
-    M -->|no| P["extract successful business result"]
-
-    N --> E
-    O --> E
-    P --> E
-    G --> Q["build completed step result"]
-
-    E --> R{"has blocking errors?"}
-    R -->|yes and rounds remain| S["append runtime feedback message"]
-    R -->|yes and reach max rounds| Z2["fail step"]
-    R -->|no| T{"explicit completion signal?"}
-
-    S --> B
-    T -->|yes| Q
-    T -->|no| U{"has successful result?"}
-
-    U -->|no and no feedback| Z3["fail step"]
-    U -->|no but has feedback| V["continue next round"]
-    U -->|yes| W["completion agent infer/review"]
-
-    W --> X{"continue execution?"}
-    X -->|yes| Y["return next dynamic step"]
-    X -->|no| Q
-
-    V --> B
-    Y --> Q
+```text
+AgentInputKind::Message
+  → shared_runtime::send_command(Command::InjectUserMessage)
+  → 当前 turn 中断活动工作
+  → 保存新消息
+  → 从新意图继续模型分析
 ```
 
-```mermaid
-sequenceDiagram
-    participant UI as "app_state / UI"
-    participant RT as "RuntimeEngine"
-    participant PA as "planning_agent"
-    participant PR as "execution.plan_runner"
-    participant SE as "execution.step_executor"
-    participant PGA as "execution_prompt_agent"
-    participant CA as "execution_completion_agent"
-    participant TA as "execution_tool_agent"
-    participant MA as "execution_mcp_agent"
-    participant TOOL as "tool"
-    participant MCP as "mcp"
-    participant VA as "execution.verify"
-    participant RA as "response_agent"
-    participant MODEL as "model"
+### 收尾期间到达的消息
 
-    UI->>RT: execute_turn_with_streaming(session, user_input)
-    RT->>PA: build_plan_with_agent_with_trace(...)
-    PA->>MODEL: complete(...)
-    MODEL-->>PA: planning output + TaskPlan
-    PA-->>RT: TaskPlan
+如果本轮收尾时命令通道仍有未处理的用户消息，task wrapper 会排空并保存；最后一条可接续创建新 turn，避免已经确认的输入静默丢失。
 
-    RT->>PR: execute_plan_with_execution_agent(...)
-    loop 遍历每个 pending plan item
-        PR->>SE: execute_single_plan_step_with_execution_agent(...)
-        loop 单个 step 多轮执行
-            SE->>PGA: build_step_execution_prompt / build_step_followup_prompt
-            PGA-->>SE: prompt
-            SE->>MODEL: complete_with_functions(...)
-            MODEL-->>SE: tool calls / reasoning / text
+## 4. 其他输入
 
-            alt MCP 函数调用
-                SE->>MA: route + execute MCP tool
-                MA->>MCP: call_tool(...)
-                MCP-->>MA: MCP result
-                MA-->>SE: ToolResult
-            else 本地函数工具
-                SE->>TA: build_tool_call_from_function(...)
-                TA-->>SE: ToolCall
-                SE->>TOOL: execute(...)
-                TOOL-->>SE: ToolResult
-            end
+- **工具注入**：活动时进入当前 turn；空闲时写入 Session 延迟队列。
+- **审批/交互响应**：当前版本仍通过活动 turn 命令处理；后续插件化设计应以真实用户消息路由为基础。
+- **手动压缩**：空闲时创建独立 task；用户消息可中断压缩并开始新 turn。
+- **取消/关闭**：向当前 task 发送命令，并在关闭路径等待 task 结束。
+- **插件反馈**：发送端绑定当前 turn，通道关闭后迟到反馈失败。
 
-            SE->>CA: infer/review completion signal
-            CA->>MODEL: complete(...)
-            MODEL-->>CA: completion decision
-            CA-->>SE: continue/complete
-        end
-        SE-->>PR: ExecutionStepResult
-        PR-->>RT: plan 状态更新 / llm output / tool results
-    end
+## 5. 审查准则
 
-    RT->>VA: recommend_verify_commands(user_input)
-    VA-->>RT: verify command list
-    RT->>VA: run_verify_commands(...)
-    VA-->>RT: VerifyExecutionRecord[]
+讨论或审查 Agent Core 时：
 
-    RT->>RA: build_grounded_response_prompt(...)
-    RA->>MODEL: complete / stream complete
-    MODEL-->>RA: final response
-    RA-->>RT: assistant message
+1. 不得假设存在 Agent Inbox 或常驻 Driver。
+2. 必须区分空闲起轮与活动 turn 命令处理。
+3. 必须以 `TiangongCore::deliver`、`start_user_turn`、`shared_runtime` 和 `react` 当前代码为准。
+4. “复用引导消息逻辑”应具体说明复用 `AgentInputKind::Message`、`Command::InjectUserMessage` 和空闲 `start_user_turn` 的哪一部分。
+5. 历史迁移方案不作为现行行为合同。
 
-    RT-->>UI: TurnExecution
-```
-
-## 5. 当前架构特点
-
-### 5.1 优点
-
-- `agents` 与 `execution` 已经形成初步分层
-- `runtime` 不再直接承载大量执行细节
-- execution 相关结果模型已经统一收敛
-- 为后续“智能体配置化”留出了边界
-
-### 5.2 当前仍可继续优化
-
-- `runtime.rs` 仍然是单文件 façade，后续可目录化
-- `agents` 还没有统一的 agent descriptor / trait
-- 部分 `execution_*_agent` 实际上更像策略模块，而不完全是 LLM agent
-- `app_state` 仍然依赖 `runtime` 作为总装配入口，未来可继续解耦成更明确的 factory / orchestrator
-
-## 6. 下一步建议
-
-1. 将 `runtime.rs` 目录化，拆成 turn 执行、响应收尾、流式输出装配几个子模块
-2. 给 `agents` 定义统一描述结构：
-   - `agent_id`
-   - `agent_role`
-   - `prompt_source`
-   - `enabled`
-   - `tool_scope`
-3. 基于配置文件实现 execution 子 agent 的可装配化
+专题说明见：`docs/agent-loop-refactor/design.md`。

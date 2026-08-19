@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "id": "com.example.board",
+  "version": "0.1.0",
+  "permissions": ["bridge.call", "storage.private"],
+  "ui": {
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "board",
+        "title": "看板",
+        "description": "任务看板示例插件",
+        "icon": "board",
+        "entry": "app/index.html",
+        "open_mode": "multi"
+      },
+      {
+        "slot": "settings.plugin-page",
+        "id": "board-settings",
+        "entry": "app/index.html"
+      }
+    ]
+  }
+}

@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
 use tauri::Emitter;
 use tauri::Manager;
 use tracing::{debug, info, warn};
@@ -337,6 +339,126 @@ fn run_gui() {
             // 定时任务的 cron 调度已下沉到 scheduler sidecar 进程，本进程不再恢复
             // cron job 或启动 silent scheduler 循环。
 
+            // 宿主桥接事件推送：runtime 订阅表命中时经 Tauri event 送达前端。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_event_emitter(Arc::new(
+                    move |plugin_id: &str, channel: &str, payload: &str| {
+                        let _ = app_handle.emit(
+                            "bridge_event",
+                            serde_json::json!({
+                                "plugin_id": plugin_id,
+                                "channel": channel,
+                                "payload": payload,
+                            }),
+                        );
+                    },
+                ));
+            }
+
+            // 输入草稿桥接：插件只能提交图片 data URL；宿主验证格式和大小后，
+            // 通过定向事件交给当前输入框加入草稿，不自动发送。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_session_input_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| {
+                        if method == "session.input.captureRegion" {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let capture_dir = std::env::temp_dir().join("tiangong-captures");
+                                std::fs::create_dir_all(&capture_dir).map_err(|error| {
+                                    anyhow::anyhow!("创建截图临时目录失败：{error}")
+                                })?;
+                                let file_name = format!("screenshot-{}.png", scru128::new());
+                                let path = capture_dir.join(&file_name);
+                                let status = std::process::Command::new("/usr/sbin/screencapture")
+                                    .arg("-i")
+                                    .arg("-o")
+                                    .arg(&path)
+                                    .status()
+                                    .map_err(|error| anyhow::anyhow!("启动系统截图失败：{error}"))?;
+                                if !status.success() || !path.is_file() {
+                                    return Ok(serde_json::json!({ "cancelled": true }).to_string());
+                                }
+                                let bytes = std::fs::read(&path)
+                                    .map_err(|error| anyhow::anyhow!("读取截图失败：{error}"))?;
+                                let _ = std::fs::remove_file(&path);
+                                let encoded = base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    bytes,
+                                );
+                                if encoded.len() as u64 > 50 * 1024 * 1024 {
+                                    anyhow::bail!("截图超过 50MB 限制");
+                                }
+                                app_handle
+                                    .emit(
+                                        "session_input_attachment",
+                                        serde_json::json!({
+                                            "plugin_id": plugin_id,
+                                            "attachment": {
+                                                "kind": "image",
+                                                "source": format!("data:image/png;base64,{encoded}"),
+                                                "original_name": file_name,
+                                                "mime_type": "image/png"
+                                            }
+                                        }),
+                                    )
+                                    .map_err(|error| anyhow::anyhow!("推送截图失败：{error}"))?;
+                                return Ok(serde_json::json!({ "cancelled": false }).to_string());
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            anyhow::bail!("当前平台暂不支持交互式区域截图");
+                        }
+                        if method != "session.input.addAttachment" {
+                            anyhow::bail!("未知输入草稿方法 {method}");
+                        }
+                        #[derive(serde::Deserialize)]
+                        struct InputAttachment {
+                            source: String,
+                            #[serde(default)]
+                            original_name: String,
+                            #[serde(default)]
+                            mime_type: String,
+                        }
+                        let attachment: InputAttachment = serde_json::from_str(payload)
+                            .map_err(|error| anyhow::anyhow!("输入附件格式无效：{error}"))?;
+                        if attachment.mime_type != "image/png"
+                            || !attachment.source.starts_with("data:image/png;base64,")
+                        {
+                            anyhow::bail!("截图插件只能添加 PNG 图片附件");
+                        }
+                        let base64 = attachment
+                            .source
+                            .split_once(',')
+                            .map(|(_, value)| value)
+                            .unwrap_or_default();
+                        if base64.is_empty() || base64.len() as u64 > 50 * 1024 * 1024 {
+                            anyhow::bail!("截图内容为空或超过 50MB 限制");
+                        }
+                        let title = if attachment.original_name.trim().is_empty() {
+                            "screenshot.png".to_string()
+                        } else {
+                            attachment.original_name
+                        };
+                        app_handle
+                            .emit(
+                                "session_input_attachment",
+                                serde_json::json!({
+                                    "plugin_id": plugin_id,
+                                    "attachment": {
+                                        "kind": "image",
+                                        "source": attachment.source,
+                                        "original_name": title,
+                                        "mime_type": "image/png"
+                                    }
+                                }),
+                            )
+                            .map_err(|error| anyhow::anyhow!("推送输入附件失败：{error}"))?;
+                        Ok("true".to_string())
+                    },
+                ));
+            }
+
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
 
@@ -413,7 +535,6 @@ fn run_gui() {
             tiangong_app::commands::probe_embedding_dimension,
             tiangong_app::commands::append_message,
             tiangong_app::commands::edit_and_resend,
-            tiangong_app::commands::respond_approval,
             tiangong_app::commands::list_plugin_contributions,
             tiangong_app::commands::list_plugins,
             tiangong_app::commands::list_available_plugins,
@@ -426,6 +547,13 @@ fn run_gui() {
             tiangong_app::commands::reload_plugin,
             tiangong_app::commands::plugin_open_view,
             tiangong_app::commands::plugin_call,
+            tiangong_app::commands::list_slot_contributions,
+            tiangong_app::commands::list_extension_apps,
+            tiangong_app::commands::plugin_open_entry,
+            tiangong_app::commands::plugin_read_entry_resource,
+            tiangong_app::commands::bridge_call,
+            tiangong_app::commands::bridge_subscribe,
+            tiangong_app::commands::bridge_unsubscribe,
             tiangong_app::commands::check_default_plugins,
             tiangong_app::commands::complete_first_launch,
             tiangong_app::commands::get_trust_mode,

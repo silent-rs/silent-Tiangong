@@ -1,10 +1,75 @@
-# 天工 WASM 插件开发指南
+# 天工插件开发指南
 
-本文说明当前插件化试开发阶段如何创建、构建和本地导入天工插件。权威宿主接口位于 [`plugin.wit`](../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，Memory 插件是完整参考实现。
+本文说明当前插件化试开发阶段如何创建、构建和本地导入 UI、TypeScript 与
+WASM 插件。WASM 宿主接口位于
+[`plugin.wit`](../crates/tiangong-plugin-runtime/wit/tiangong/plugin.wit)，UI 运行时
+类型位于 [`plugins/sdk`](../plugins/sdk)。
+
+## 开发流程总览
+
+插件开发分两个循环：**本地开发循环**（改代码 → 打包 → 导入验证）与后续的
+**分发流程**（CI 打包、OSS 发布）。日常开发只需要本地循环。
+
+```text
+选择形态 → 开发 → 打包 → 本地导入 → 验证 → （迭代） → 分发（后续）
+```
+
+### 1. 选择插件形态
+
+| 形态 | 适用 | 参考工程 |
+| --- | --- | --- |
+| 纯 UI 插件（无 WASM） | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/screenshot-input`（Vue 3 + Vite） |
+| Desktop TypeScript 工具插件 | 带 UI 的工具提供器、审批与用户征询 | `plugins/interaction-handler`（Vue 3 + Vite） |
+| WASM 逻辑层插件（v1/v2） | 工具、提示词、生命周期、sidecar | `plugins/tiangong-plugin-prompt` 等 |
+| v2 混合（逻辑层 + UI 挂载） | 既有 WASM 插件增加拓展区 App / 设置页 | 见「v2 插件形态」章节 |
+
+脚手架：`cargo run -p xtask -- new-plugin <id>` 生成纯 UI 最小骨架
+（不含交互权限，按需在 manifest 声明）。
+
+### 2. 开发
+
+- 纯 UI 插件：标准前端工程（推荐 Vue 3 + Vite，见参考工程结构），
+  桥接与类型用本地 SDK `plugins/sdk`（`@tiangong/plugin-sdk`）。
+- 当前本地导入流程按清单复制 UI 入口，工程化插件应产出**自包含单文件**
+  （JS/CSS 内联，如 `vite-plugin-singlefile`），避免安装后缺少关联资源；iframe
+  的 `srcdoc` 入口同样不能依赖原开发服务器路径。
+- WASM 插件：Rust + WIT，见「实现 WASM Component」。
+
+### 3. 打包（开发期）
+
+统一命令产出可导入的插件包目录（`release/`：plugin.json + 构建产物，
+不含源码与 node_modules），打包即校验清单与入口就位：
+
+```bash
+# 纯 UI 插件（工程目录内）
+yarn package
+
+# WASM 插件（仓库根目录）
+cargo run -p xtask -- build-plugin <id>
+```
+
+### 4. 本地导入与验证
+
+天工「设置 → 插件管理 → 导入本地插件」选择 `release/`（纯 UI）或构建输出
+目录（WASM 插件）——走正式导入流程（清单校验 → 事务安装 → 注册表加载），
+完整验证真实安装链路。验证要点：
+
+- 设置页贡献正常渲染、拓展区 App 可打开；
+- 桥接调用（storage / plugin.*）与主题跟随正常；
+- 修改代码后重新 `yarn package`，对已装插件热加载或重新导入新版本。
+
+### 5. 分发（后续）
+
+CI 打包（GitHub Actions）与 OSS 目录发布属后续发布流程，开发期不涉及；
+三方插件亦可通过 `TIANGONG_PLUGIN_CATALOG_URL` 指向自建静态目录（规划中）。
+
+---
 
 ## 插件组成
 
-一个可安装插件至少包含 WASM Component。未签名的第三方插件只允许使用纯 WASM；原生 sidecar 仅对带有效天工官方签名的发布包开放：
+一个可安装插件至少包含 `plugin.json` 及清单引用的运行制品。schema v2 纯 UI
+插件可以不含 WASM；WASM、sidecar 和 UI 也可按需要组合。原生 sidecar 仅对带
+有效天工官方签名的发布包开放：
 
 ```text
 WASM Component
@@ -16,7 +81,8 @@ WASM Component
 可选 sidecar
 ```
 
-- WASM 负责工具、提示词注入、生命周期和设置页面。
+- UI 入口负责界面与 Desktop TypeScript 行为，可通过宿主桥接访问获准能力。
+- WASM 负责跨入口工具、提示词注入和生命周期等逻辑能力。
 - sidecar 负责数据库、文件系统、原生库或长时间运行的业务。
 - 天工只负责加载、资源限制、sidecar 进程管理和消息转发，不理解插件业务负载。
 - WASM 与 sidecar 之间的私有业务协议由插件自己维护。
@@ -70,6 +136,16 @@ yarn --cwd frontend dev
 建议把同一插件的源码放在一个目录中：
 
 ```text
+plugins/ui-example/
+├── plugin.json
+├── package.json
+├── index.html
+├── src/
+│   ├── main.ts
+│   └── App.vue
+├── scripts/package.mjs
+└── vite.config.ts
+
 plugins/tiangong-plugin-example/
 ├── plugin.json
 ├── protocol/          # 可选，WASM 与 sidecar 共用的私有协议
@@ -77,7 +153,16 @@ plugins/tiangong-plugin-example/
 └── sidecar/           # 可选
 ```
 
-最终导入的是构建后的完整目录，不是源码目录。纯 WASM 插件无需签名；官方 sidecar 插件还必须包含签名清单：
+最终导入的是构建后的完整目录，不是源码目录。纯 UI 插件的发布目录通常为：
+
+```text
+release/
+├── plugin.json
+└── dist/
+    └── index.html
+```
+
+纯 WASM 插件无需签名；官方 sidecar 插件还必须包含签名清单：
 
 ```text
 example-plugin/
@@ -115,7 +200,7 @@ example-plugin/
 
 约束如下：
 
-- `schema_version` 当前必须为 `1`。
+- `schema_version: 1` 用于既有 WASM 插件；声明 UI Slot 或纯 UI 形态时使用 `2`。
 - `id` 只能包含 ASCII 字母、数字、点、下划线和连字符。
 - `version` 必须是语义版本，例如 `0.1.0`。
 - `wasm.binary` 和 `sidecar.binary` 必须是插件目录内的安全相对路径。
@@ -316,3 +401,210 @@ cargo run -p xtask -- merge-plugin-catalog \
 ```bash
 cargo run -p xtask -- validate-plugin-catalog catalog.json
 ```
+
+## v2 插件形态（Plugin Harness）：纯 UI 插件与界面挂载
+
+> 关联设计：`docs/plugin-harness-design.md`；SDK：`plugins/sdk/README.md`。
+
+`schema_version: 2` 在 v1（WASM 逻辑层）之上新增两类能力：
+
+1. **纯 UI 插件**：`wasm` 字段可省略——只要 HTML/CSS/JS 就能做出现在拓展区矩阵的
+   App（无工具/生命周期等逻辑能力，经宿主桥接 `storage.*` 持久化数据）。
+2. **界面挂载声明**：`ui.contributions` 把界面挂到宿主 Slot（拓展区标签页、设置页
+   等），不再局限于设置页。
+
+### 先区分虚拟 DOM 与渲染容器
+
+两者可以同时使用，不是互斥的插件模式：
+
+| 概念 | 决定内容 | 选择方式 |
+| --- | --- | --- |
+| Vue/React 虚拟 DOM | 插件内部如何根据状态更新界面 | 插件自己的前端技术选型 |
+| Shadow DOM | 插件如何嵌入 App，样式隔离但共享 JavaScript 环境 | `sandbox: "shadow"`（默认） |
+| iframe | 插件运行在独立文档，脚本隔离更强 | `sandbox: "iframe"` |
+
+官方轻量 UI 插件推荐 **Vue 3 虚拟 DOM + Shadow DOM 容器**。需要加载不可信页面
+或要求脚本强隔离时使用 iframe；是否使用 Vue 不影响容器选择。
+
+### 最小零构建示例
+
+```sh
+# 1. 生成骨架（仓库根目录执行）
+cargo run -p xtask -- new-plugin com.example.myboard
+
+# 2. 编辑 dist/plugins/com.example.myboard/app/index.html 实现界面
+
+# 3. 天工「设置 → 插件管理 → 导入本地插件」选择该目录
+#    拓展区矩阵中出现「看板」，打开即用
+```
+
+脚手架适合直接编写 HTML/CSS/JS。需要响应式状态、组件或工程化构建时，再按下文
+改为 Vue 工程。两种写法使用同一份 schema v2 清单。
+
+### Vue 3 + Vite 工程结构
+
+可直接参考 `plugins/screenshot-input`：
+
+```text
+my-plugin/
+├── plugin.json
+├── package.json
+├── yarn.lock
+├── index.html
+├── src/
+│   ├── main.ts       # 读取 Shadow 运行时、挂载和卸载 Vue
+│   └── App.vue       # 虚拟 DOM 界面与 scoped 样式
+├── scripts/
+│   └── package.mjs   # 组装 release/
+├── tsconfig.json
+└── vite.config.ts    # Vue + 单文件内联构建
+```
+
+清单将 UI 声明为 Shadow 贡献，并指向构建产物：
+
+```jsonc
+{
+  "schema_version": 2,
+  "id": "com.example.myboard",
+  "version": "0.1.0",
+  "entrypoints": ["desktop"],
+  "permissions": ["storage.private"],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      { "slot": "extension.tab", "id": "board", "title": "看板",
+        "entry": "dist/index.html", "open_mode": "multi" }
+    ]
+  }
+}
+```
+
+字段约束：`slot` 必须是宿主登记的合法挂载点（非法值导入即拒）；
+`open_mode` 仅对 `extension.tab` 生效（`singleton` 聚焦已有 / `multi` 每次新建，
+缺省 `singleton`）；`sandbox` 缺省 `shadow`（挂载主 DOM 树），`iframe` 强隔离，
+`native` 仅官方签名。
+
+Vue 入口必须从 SDK 取得实际插件根节点。Shadow 模式不能使用
+`document.querySelector('#app')` 代替 `runtime.root`，否则会误查宿主页面：
+
+```ts
+import { createApp } from 'vue';
+import { getShadowHostRuntime } from '@tiangong/plugin-sdk';
+import App from './App.vue';
+
+const runtime = getShadowHostRuntime();
+const target = (runtime?.root ?? document).querySelector('#app');
+if (!(target instanceof HTMLElement)) throw new Error('缺少 #app 挂载节点');
+
+Object.assign(target.style, {
+  boxSizing: 'border-box',
+  width: '100%',
+  height: '100%',
+  margin: '0',
+});
+
+const app = createApp(App);
+app.mount(target);
+runtime?.registerCleanup(() => app.unmount());
+```
+
+`registerCleanup` 不可省略。插件更新、禁用、卸载或 Slot 销毁时，宿主会调用登记的
+清理函数；事件订阅和定时器也应在 Vue 卸载阶段一并释放。
+
+### 样式与主题
+
+Vue 组件统一使用 `<style scoped>`。Shadow 会隔离插件选择器，而 App 根节点的 CSS
+变量、字体和 `color-scheme` 会自然继承进 Shadow，不需要订阅主题或复制颜色：
+
+```vue
+<style scoped>
+.panel {
+  border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%));
+  border-radius: var(--radius, 0.5rem);
+  background: hsl(var(--background, 0 0% 100%));
+  color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+}
+</style>
+```
+
+注意事项：
+
+- 颜色 token 保存的是 HSL 通道，使用时写成 `hsl(var(--foreground))`，不要把通道值
+  当成完整 CSS 颜色。
+- `scoped` 只约束组件样式，不能设置 Shadow 宿主尺寸；固定尺寸的 Slot 应在
+  `main.ts` 设置 `#app`，外层尺寸由宿主 Slot 决定。
+- Shadow 入口解析后只注入 `head`/`body` 的子节点，不要依赖插件样式中的
+  `html`、`body`、`:root` 选择器。iframe 兼容路径可在 `main.ts` 中只对自己的文档
+  做页面重置。
+- `onContextChange` 用于会话等非样式信息。若脚本必须判断当前明暗主题，可读取 App
+  根节点 class 或计算后的 CSS 变量；纯样式适配不应建立主题订阅。
+
+### 宿主桥接
+
+插件 UI 内经统一桥接访问宿主（两种容器自动适配，见 `plugins/sdk`）：
+
+```ts
+import { createTiangongBridge, pluginStorage } from '@tiangong/plugin-sdk';
+const bridge = await createTiangongBridge();
+await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
+```
+
+- `storage.get/set/delete/list`：私有数据，落盘在插件 `data/` 目录，需声明
+  `storage.private` 权限。
+- `plugin.*`：转发到本插件 WASM 逻辑层（带逻辑层的 v2 插件与 v1 插件通用）。
+- `session.*`、`tool.*` 等宿主能力按清单权限开放，负载使用 JSON 字符串。
+- iframe 通过 `tiangong_host_context` 接收主题 token；Shadow 直接继承 App 根变量。
+
+不要在插件中调用 Tauri API 或宿主内部函数；所有跨边界行为都应走 SDK 桥接，宿主
+会按 `plugin.json` 的权限校验。
+
+### 构建、打包与本地导入
+
+Vite 使用 `vite-plugin-singlefile` 内联脚本和样式：
+
+```ts
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+import { viteSingleFile } from 'vite-plugin-singlefile';
+
+export default defineConfig({
+  base: './',
+  plugins: [vue(), viteSingleFile()],
+});
+```
+
+开发循环：
+
+```sh
+yarn install
+yarn typecheck
+yarn package
+```
+
+`yarn package` 应先构建，再组装仅包含 `plugin.json` 与 `dist/` 的 `release/`，并校验
+清单入口存在。不要导入源码目录，也不要把 `node_modules`、`dist` 或 `release` 提交
+到 Git。具体脚本参考 `plugins/screenshot-input/scripts/package.mjs`。
+
+最后在天工「设置 → 插件管理 → 导入本地插件」选择 `release/`。修改已安装插件时
+同步提升 `plugin.json` 和 `package.json` 的版本，再重新打包导入。
+
+### 带逻辑层的 v2 插件
+
+在 v1 清单基础上补 `schema_version: 2` 与 `ui`/`capabilities` 即可：WASM 侧
+（工具/提示词/生命周期）零改动，界面从「仅设置页」升级为可挂拓展区矩阵。
+
+## 交互处理器插件（审批与用户征询）
+
+Desktop 可安装纯 TypeScript 工具插件，不需要 WASM，也不修改 `plugin.wit`。
+插件在 manifest 的 `tools` 与 `prompt` 中声明工具规格和提示词，使用
+`tool.provide` 权限接收 `tool.requested`，再通过 `tool.resolve` 提交完整工具结果。
+
+默认交互处理器插件见 **`plugins/interaction-handler`**（Vue 3 + Vite 工程：
+`plugin.json` 声明 `request_user`，`src/App.vue` 完成六类参数解析、界面、
+15 秒倒计时和 answered/expired/cancelled 结果生成。宿主只转发不透明工具调用，
+并保留会话归属和 20 秒通用兜底时限，不解释审批结果。审批结果返回 Agent 后，
+由 Agent 自行决定后续步骤。
+
+SDK 的通用封装是 `createToolProvider`（onRequested/onClosed/resolve），见
+`plugins/sdk`。同一机制可供其他 Desktop TS 工具使用，运行时不识别
+`request_user` 或任何征询类型。
