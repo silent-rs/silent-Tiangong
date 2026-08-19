@@ -873,13 +873,18 @@ pub fn get_view_resource(plugin_id: &str, path: &str) -> Option<(Vec<u8>, String
 
 /// 处理插件页面消息（iframe 与插件双向通信）。
 pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Option<String> {
-    let plugin = ui_plugin(plugin_id)?;
+    handle_view_message_result(plugin_id, method, payload).ok()
+}
+
+/// 处理插件页面消息并保留 WASM/sidecar 返回的具体错误。
+pub fn handle_view_message_result(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    let plugin = ui_plugin(plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载、未启用或没有逻辑层"))?;
     let method = method.to_string();
     let payload = payload.to_string();
     call_wasm_off_runtime(plugin, move |plugin| {
         plugin.handle_view_message(method, payload)
     })
-    .ok()
 }
 
 fn ui_plugin(plugin_id: &str) -> Option<Arc<Mutex<WasmPlugin>>> {

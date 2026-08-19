@@ -28,6 +28,8 @@ pub struct SignedPluginRelease {
     pub permissions: Vec<String>,
     pub manifest: SignedArtifact,
     pub wasm: SignedArtifact,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui: Vec<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SignedArtifact>,
 }
@@ -103,6 +105,22 @@ impl SignedPluginRelease {
         match plugin_manifest.wasm_binary() {
             Some(wasm_binary) => self.wasm.verify(directory, wasm_binary)?,
             None => bail!("签名插件必须包含 wasm 制品（纯 UI 插件无需签名发布）"),
+        }
+        let expected_ui = plugin_manifest
+            .ui_contributions()
+            .into_iter()
+            .map(|contribution| PathBuf::from(contribution.entry))
+            .collect::<BTreeSet<_>>();
+        let signed_ui = self
+            .ui
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<BTreeSet<_>>();
+        if signed_ui.len() != self.ui.len() || signed_ui != expected_ui {
+            bail!("插件签名清单与 plugin.json 的 UI 入口声明不一致");
+        }
+        for artifact in &self.ui {
+            artifact.verify(directory, &artifact.path)?;
         }
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {

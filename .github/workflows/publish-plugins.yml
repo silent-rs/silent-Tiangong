@@ -53,6 +53,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip2
+      - name: Setup Node for screenshot UI
+        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build shared screenshot UI
+        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn --cwd plugins/screenshot-input install --frozen-lockfile
+          yarn --cwd plugins/screenshot-input build
+          mkdir -p target/shared-ui/dist
+          cp plugins/screenshot-input/dist/index.html target/shared-ui/dist/index.html
       - name: Build deterministic shared WASM
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -62,6 +76,14 @@ jobs:
         with:
           name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
           path: target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload shared screenshot UI
+        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-ui-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-ui/
           if-no-files-found: error
           retention-days: 7
   build-plugin:
@@ -129,6 +151,12 @@ jobs:
         with:
           name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
           path: target/shared-wasm
+      - name: Download shared screenshot UI
+        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-ui-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-ui
       - name: Validate plugin from repository configuration
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -159,6 +187,7 @@ jobs:
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
           TIANGONG_PLUGIN_PREBUILT_WASM: ${{ github.workspace }}/target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
+          TIANGONG_PLUGIN_PREBUILT_UI: ${{ github.workspace }}/target/shared-ui/dist/index.html
         run: |
           if [[ "$(uname -s)" == MINGW* ]]; then
             # Git Bash 每个 step 会重排 PATH，使 MSYS2 自带 perl 优先于 Strawberry；

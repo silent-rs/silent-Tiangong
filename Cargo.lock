@@ -11496,6 +11496,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-screenshot-input-protocol"
+version = "0.3.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "tiangong-plugin-screenshot-input-sidecar"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "scru128",
+ "serde_json",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-screenshot-input-protocol",
+ "tiangong-plugin-sidecar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-screenshot-input-wasm"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-screenshot-input-protocol",
+ "wit-bindgen 0.46.0",
+]
+
+[[package]]
 name = "tiangong-plugin-sidecar"
 version = "0.14.4"
 dependencies = [

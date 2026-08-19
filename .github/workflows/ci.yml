@@ -43,6 +43,8 @@ jobs:
           filters: |
             frontend:
               - 'frontend/**'
+              - 'plugins/screenshot-input/**'
+              - 'plugins/sdk/**'
               - '.github/workflows/**'
             rust_any:
               - 'crates/**'
@@ -149,6 +151,9 @@ jobs:
               "tiangong-plugin-speech-to-text-protocol": "plugins/tiangong-plugin-speech-to-text/protocol/",
               "tiangong-plugin-speech-to-text-sidecar":  "plugins/tiangong-plugin-speech-to-text/sidecar/",
               "tiangong-plugin-speech-to-text-wasm":     "plugins/tiangong-plugin-speech-to-text/wasm/",
+              "tiangong-plugin-screenshot-input-protocol": "plugins/screenshot-input/protocol/",
+              "tiangong-plugin-screenshot-input-sidecar":  "plugins/screenshot-input/sidecar/",
+              "tiangong-plugin-screenshot-input-wasm":     "plugins/screenshot-input/wasm/",
               "tiangong-plugin-memory-protocol": "plugins/tiangong-plugin-memory/protocol/",
               "tiangong-plugin-memory-sidecar":  "plugins/tiangong-plugin-memory/sidecar/",
               "tiangong-plugin-memory-wasm":     "plugins/tiangong-plugin-memory/wasm/",
@@ -434,7 +439,9 @@ jobs:
         with:
           node-version: "22"
           cache: yarn
-          cache-dependency-path: frontend/yarn.lock
+          cache-dependency-path: |
+            frontend/yarn.lock
+            plugins/screenshot-input/yarn.lock
 
       - name: Enable Corepack
         run: corepack enable
@@ -447,3 +454,9 @@ jobs:
 
       - name: Build frontend
         run: yarn --cwd frontend build
+
+      - name: Install screenshot plugin dependencies
+        run: yarn --cwd plugins/screenshot-input install --frozen-lockfile
+
+      - name: Build screenshot plugin UI
+        run: yarn --cwd plugins/screenshot-input build
