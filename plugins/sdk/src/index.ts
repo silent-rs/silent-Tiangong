@@ -55,7 +55,7 @@ export interface PluginCapabilities {
   events: string[];
 }
 
-/** 宿主主题上下文（iframe 容器经 postMessage 收到）。 */
+/** 宿主主题与会话上下文（iframe 经 postMessage，Shadow 经运行时参数收到）。 */
 export interface HostContext {
   type: 'tiangong_host_context';
   channel: string;
@@ -69,8 +69,20 @@ export interface HostContext {
 
 // ── 运行时 ──
 
-/** Shadow 容器注入的桥接参数（受限执行作用域内可见）。 */
+/** Shadow 容器注入的桥接与运行参数（宿主执行作用域内可见）。 */
 declare const bridge: HostBridge | undefined;
+declare const pluginRoot: ShadowRoot | undefined;
+declare const hostContext: HostContext | undefined;
+declare const onHostContextChange: ((handler: (context: HostContext) => void) => () => void) | undefined;
+declare const registerCleanup: ((cleanup: () => void) => void) | undefined;
+
+/** Shadow 脚本由宿主动态注入的 DOM、上下文与生命周期能力。 */
+export interface ShadowHostRuntime {
+  root: ShadowRoot;
+  context: HostContext;
+  onContextChange(handler: (context: HostContext) => void): () => void;
+  registerCleanup(cleanup: () => void): void;
+}
 
 /** 容器类型。 */
 export type TiangongContainer = 'shadow' | 'iframe' | 'unknown';
@@ -86,6 +98,32 @@ export function detectContainer(): TiangongContainer {
   // iframe 容器：srcdoc 沙箱，window.parent 可达（沙箱 allow-scripts）
   if (typeof window !== 'undefined' && window.parent !== window) return 'iframe';
   return 'unknown';
+}
+
+/**
+ * 获取 Shadow 容器运行时。iframe 或普通网页中返回 null，便于同一入口兼容两种容器。
+ */
+export function getShadowHostRuntime(): ShadowHostRuntime | null {
+  try {
+    if (
+      typeof pluginRoot === 'undefined'
+      || !pluginRoot
+      || typeof hostContext === 'undefined'
+      || !hostContext
+      || typeof onHostContextChange !== 'function'
+      || typeof registerCleanup !== 'function'
+    ) {
+      return null;
+    }
+    return {
+      root: pluginRoot,
+      context: hostContext,
+      onContextChange: onHostContextChange,
+      registerCleanup,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** iframe 容器的 postMessage 桥接实现。 */

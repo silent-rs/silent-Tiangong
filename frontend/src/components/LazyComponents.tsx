@@ -33,10 +33,12 @@ export function LazyMessageList() {
   );
 }
 
-export function LazyMessageInput() {
+type MessageInputProps = React.ComponentProps<typeof MessageInputComponent>;
+
+export function LazyMessageInput(props: MessageInputProps) {
   return (
     <Suspense fallback={<ComponentLoader />}>
-      <MessageInput />
+      <MessageInput {...props} />
     </Suspense>
   );
 }

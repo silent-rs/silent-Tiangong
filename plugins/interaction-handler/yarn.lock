@@ -423,7 +423,7 @@
   integrity sha512-zD6NdeWEByGE9QF9vCrlJ5YQB4oq9q91kPZS37Jwj5hOkvR1lTBSpsKhKDw4IJtbQ35LsTS1HD9DZYGKIshU1Q==
 
 "@tiangong/plugin-sdk@file:../sdk":
-  version "0.2.0"
+  version "0.3.0"
 
 "@types/chai@^5.2.2":
   version "5.2.3"

@@ -78,6 +78,9 @@ vi.mock('@/components/AppSidebar', () => ({ AppSidebar: () => null }));
 vi.mock('@/components/DefaultPluginOnboarding', () => ({
   DefaultPluginOnboarding: () => null,
 }));
+vi.mock('@/components/InteractionPluginHost', () => ({
+  InteractionPluginHost: () => null,
+}));
 // StatusPanel 桩：渲染拓展按钮转发 onToggleExtension（不依赖真实图标布局）
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageInput: () => null,

@@ -14,6 +14,7 @@ import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { TabsContainer, type AppTabCommand } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
+import { InteractionPluginHost } from '@/components/InteractionPluginHost';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -112,6 +113,8 @@ export function MainApp() {
   const activeSessionId = useStore((state) => state.activeSessionId);
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
+  const [interactionVisible, setInteractionVisible] = useState(false);
+  const [messageInputHeight, setMessageInputHeight] = useState(0);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
   const [workspaceTabKind, setWorkspaceTabKind] = useState<TabKind>('browser');
   // 拓展区三态（设计文档 6.7.2）：面板展开时区分矩阵态（App 矩阵）与 App 态
@@ -704,14 +707,21 @@ export function MainApp() {
           <main className="flex flex-1 flex-col min-w-0 bg-background">
             <div className="flex flex-1 min-h-0">
               <div
-                className={`flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
+                className={`relative isolate flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
                 style={showWorkspacePanel ? { width: chatPanelWidth } : undefined}
               >
                 <div className="flex-1 overflow-hidden">
                   <LazyMessageList />
                 </div>
 
-                <LazyMessageInput />
+                <LazyMessageInput
+                  interactionVisible={interactionVisible}
+                  onHeightChange={setMessageInputHeight}
+                />
+                <InteractionPluginHost
+                  inputHeight={messageInputHeight}
+                  onVisibilityChange={setInteractionVisible}
+                />
               </div>
 
               {workspacePanelMounted && showWorkspacePanel && (

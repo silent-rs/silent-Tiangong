@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import {
   createTiangongBridge,
   createToolProvider,
+  type HostContext,
   type HostBridge,
   type ToolClosed,
   type ToolInvocation,
@@ -18,6 +19,18 @@ import {
   type InteractionRequest,
 } from './interaction';
 
+interface Props {
+  initialHostContext?: HostContext;
+  subscribeHostContext?: (handler: (context: HostContext) => void) => () => void;
+  shadowContainer?: boolean;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  initialHostContext: undefined,
+  subscribeHostContext: undefined,
+  shadowContainer: false,
+});
+
 const requests = ref<InteractionRequest[]>([]);
 const currentSessionId = ref<string | null>(null);
 const nowMs = ref(Date.now());
@@ -27,6 +40,7 @@ let bridge: HostBridge | null = null;
 let provider: ReturnType<typeof createToolProvider> | null = null;
 let stopRequested: (() => void) | null = null;
 let stopClosed: (() => void) | null = null;
+let stopHostContext: (() => void) | null = null;
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
 
 const request = computed(() => {
@@ -220,18 +234,21 @@ function onClosed(closed: ToolClosed) {
   }, 1600);
 }
 
-function applyHostContext(data: Record<string, unknown>) {
-  const tokens = isRecord(data.tokens) ? data.tokens : {};
-  for (const [name, value] of Object.entries(tokens)) {
-    if (typeof value === 'string' && value) {
-      document.documentElement.style.setProperty(`--${name}`, normalizeHostTokenValue(value));
+function applyHostContext(data: unknown) {
+  if (!isRecord(data)) return;
+  if (!props.shadowContainer) {
+    const tokens = isRecord(data.tokens) ? data.tokens : {};
+    for (const [name, value] of Object.entries(tokens)) {
+      if (typeof value === 'string' && value) {
+        document.documentElement.style.setProperty(`--${name}`, normalizeHostTokenValue(value));
+      }
     }
-  }
-  if (typeof data.fontFamily === 'string' && data.fontFamily) {
-    document.body.style.fontFamily = data.fontFamily;
-  }
-  if (data.theme === 'light' || data.theme === 'dark') {
-    document.documentElement.style.colorScheme = data.theme;
+    if (typeof data.fontFamily === 'string' && data.fontFamily) {
+      document.body.style.fontFamily = data.fontFamily;
+    }
+    if (data.theme === 'light' || data.theme === 'dark') {
+      document.documentElement.style.colorScheme = data.theme;
+    }
   }
   const session = isRecord(data.session) ? data.session : null;
   currentSessionId.value = session && typeof session.id === 'string' ? session.id : null;
@@ -243,7 +260,12 @@ function onHostMessage(event: MessageEvent) {
 }
 
 onMounted(async () => {
-  window.addEventListener('message', onHostMessage);
+  if (props.initialHostContext) applyHostContext(props.initialHostContext);
+  if (props.subscribeHostContext) {
+    stopHostContext = props.subscribeHostContext(applyHostContext);
+  } else {
+    window.addEventListener('message', onHostMessage);
+  }
   countdownTimer = window.setInterval(() => {
     nowMs.value = Date.now();
     for (const item of requests.value) {
@@ -263,6 +285,7 @@ onMounted(async () => {
 onUnmounted(() => {
   stopRequested?.();
   stopClosed?.();
+  stopHostContext?.();
   if (countdownTimer) window.clearInterval(countdownTimer);
   window.removeEventListener('message', onHostMessage);
   bridge = null;
@@ -276,7 +299,6 @@ onUnmounted(() => {
       <div class="heading">
         <div class="heading-copy">
           <h3>{{ request.title }}</h3>
-          <p v-if="request.description" class="muted">{{ request.description }}</p>
         </div>
         <div class="heading-actions">
           <span
@@ -299,69 +321,78 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
-        <label
-          v-for="option in request.options"
-          :key="option"
-          class="option"
-          :class="{ selected: request.selected.includes(option) }"
-        >
-          <input
-            :type="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
-            :checked="request.selected.includes(option)"
-            :disabled="locked"
-            @change="toggleChoice(option)"
-          />
-          <span>{{ option }}</span>
-        </label>
-      </div>
+      <div class="request-body">
+        <p v-if="request.description" class="muted">{{ request.description }}</p>
 
-      <div v-else-if="request.kind === 'confirm'" class="content question">
-        {{ request.question || request.description || '是否继续？' }}
-      </div>
-
-      <div v-else-if="request.kind === 'approval' && request.question" class="content question">
-        {{ request.question }}
-      </div>
-
-      <div v-else-if="request.kind === 'input'" class="content">
-        <label v-if="request.question" class="input-question">{{ request.question }}</label>
-        <input
-          v-model="request.values.input"
-          type="text"
-          placeholder="请输入"
-          :disabled="locked"
-          @keydown.enter.prevent="answer(String(request.values.input ?? ''))"
-        />
-      </div>
-
-      <div v-else-if="request.kind === 'form'" class="content">
-        <label v-for="field in request.fields" :key="field.key" class="field">
-          <span class="field-label">{{ field.label }}<b v-if="field.required">*</b></span>
-          <input
-            v-if="field.type === 'boolean'"
-            v-model="request.values[field.key]"
-            type="checkbox"
-            :disabled="locked"
-          />
-          <select
-            v-else-if="field.type === 'select'"
-            v-model="request.values[field.key]"
-            :disabled="locked"
+        <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
+          <label
+            v-for="option in request.options"
+            :key="option"
+            class="option"
+            :class="{ selected: request.selected.includes(option) }"
           >
-            <option value="" disabled>请选择</option>
-            <option v-for="option in field.options ?? []" :key="option" :value="option">
-              {{ option }}
-            </option>
-          </select>
+            <input
+              :type="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
+              :checked="request.selected.includes(option)"
+              :disabled="locked"
+              @change="toggleChoice(option)"
+            />
+            <span>{{ option }}</span>
+          </label>
+        </div>
+
+        <div
+          v-else-if="request.kind === 'confirm' && (request.question || !request.description)"
+          class="content question"
+        >
+          {{ request.question || '是否继续？' }}
+        </div>
+
+        <div v-else-if="request.kind === 'approval' && request.question" class="content question">
+          {{ request.question }}
+        </div>
+
+        <div v-else-if="request.kind === 'input'" class="content">
+          <label v-if="request.question" class="input-question">{{ request.question }}</label>
           <input
-            v-else
-            v-model="request.values[field.key]"
-            :type="field.type === 'number' ? 'number' : 'text'"
-            :placeholder="field.placeholder"
+            v-model="request.values.input"
+            type="text"
+            placeholder="请输入"
             :disabled="locked"
+            @keydown.enter.prevent="answer(String(request.values.input ?? ''))"
           />
-        </label>
+        </div>
+
+        <div v-else-if="request.kind === 'form'" class="content">
+          <label v-for="field in request.fields" :key="field.key" class="field">
+            <span class="field-label">{{ field.label }}<b v-if="field.required">*</b></span>
+            <input
+              v-if="field.type === 'boolean'"
+              v-model="request.values[field.key]"
+              type="checkbox"
+              :disabled="locked"
+            />
+            <select
+              v-else-if="field.type === 'select'"
+              v-model="request.values[field.key]"
+              :disabled="locked"
+            >
+              <option value="" disabled>请选择</option>
+              <option v-for="option in field.options ?? []" :key="option" :value="option">
+                {{ option }}
+              </option>
+            </select>
+            <input
+              v-else
+              v-model="request.values[field.key]"
+              :type="field.type === 'number' ? 'number' : 'text'"
+              :placeholder="field.placeholder"
+              :disabled="locked"
+            />
+          </label>
+        </div>
+
+        <div v-if="request.error" class="error">{{ request.error }}</div>
       </div>
 
       <div class="actions">
@@ -396,8 +427,6 @@ onUnmounted(() => {
           取消
         </button>
       </div>
-
-      <div v-if="request.error" class="error">{{ request.error }}</div>
     </section>
     <div v-else-if="connectionError" class="error">{{ connectionError }}</div>
   </div>
@@ -408,13 +437,31 @@ html,
 body,
 #app {
   width: 100%;
-  height: 100%;
   margin: 0;
   background: transparent;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   overflow: hidden;
+}
+
+:host {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-height: inherit;
+  overflow: hidden;
+}
+
+#app {
+  box-sizing: border-box;
+  height: 100%;
+  max-height: inherit;
 }
 </style>
 
@@ -423,21 +470,25 @@ body {
   box-sizing: border-box;
   width: 100%;
   height: 100%;
+  max-height: inherit;
   min-height: 0;
   padding: 14px 16px;
-  overflow-y: auto;
+  overflow: hidden;
   color: var(--foreground, #222);
   background: var(--card, transparent);
 }
 
 section {
   display: flex;
-  min-height: 100%;
+  height: 100%;
+  max-height: inherit;
+  min-height: 0;
   flex-direction: column;
 }
 
 .heading {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -445,6 +496,10 @@ section {
 
 .heading-copy {
   min-width: 0;
+  max-height: 64px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .heading-actions {
@@ -468,6 +523,14 @@ h3 {
   color: var(--muted-foreground, #777);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.request-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .deadline {
@@ -566,6 +629,7 @@ select:focus {
 
 .actions {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: auto;

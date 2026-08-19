@@ -77,6 +77,11 @@ afterEach(() => {
   vi.clearAllMocks();
   mocks.resources.clear();
   mocks.onBridgeEventHandlers.clear();
+  delete (window as unknown as { __received?: string[] }).__received;
+  delete (window as unknown as { __shadowBoots?: number }).__shadowBoots;
+  delete (window as unknown as { __shadowContexts?: string[] }).__shadowContexts;
+  delete (window as unknown as { __shadowCleanup?: number }).__shadowCleanup;
+  delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
 /** 脚本内以 bridge 参数回传调用记录（Shadow 容器执行插件的出口）。 */
@@ -84,6 +89,7 @@ const BRIDGE_CALL_LOG: Array<{ method: string; payload: string }> = [];
 
 beforeEach(() => {
   BRIDGE_CALL_LOG.length = 0;
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 const shadowHost = () => container?.querySelector<HTMLDivElement>('[data-plugin-shadow-host]');
@@ -119,6 +125,49 @@ describe('PluginSandbox 沙箱容器', () => {
     expect(style).toBeTruthy();
     expect(style!.textContent).toContain(':host');
     expect(style!.textContent).toContain('--host-theme: dark');
+  });
+
+  it('shadow 模式注入插件根节点并在会话变化时推送上下文且不重建脚本', async () => {
+    const html = `<body><div id="session"></div><script>
+      window.__shadowBoots = (window.__shadowBoots || 0) + 1;
+      const sessionNode = pluginRoot.querySelector('#session');
+      sessionNode.textContent = hostContext.session?.id || '';
+      window.__shadowContexts = [];
+      onHostContextChange((context) => {
+        const sessionId = context.session?.id || '';
+        sessionNode.textContent = sessionId;
+        window.__shadowContexts.push(sessionId);
+      });
+    </script></body>`;
+    await render(
+      <PluginSandbox
+        pluginId="context-plugin"
+        contributionId="main"
+        sandbox="shadow"
+        html={html}
+        sessionId="session-a"
+      />,
+    );
+
+    expect(shadowHost()!.shadowRoot!.querySelector('#session')?.textContent).toBe('session-a');
+    expect((window as unknown as { __shadowBoots: number }).__shadowBoots).toBe(1);
+
+    await act(async () => {
+      root!.render(
+        <PluginSandbox
+          pluginId="context-plugin"
+          contributionId="main"
+          sandbox="shadow"
+          html={html}
+          sessionId="session-b"
+        />,
+      );
+    });
+
+    expect(shadowHost()!.shadowRoot!.querySelector('#session')?.textContent).toBe('session-b');
+    expect((window as unknown as { __shadowBoots: number }).__shadowBoots).toBe(1);
+    expect((window as unknown as { __shadowContexts: string[] }).__shadowContexts)
+      .toEqual(['session-a', 'session-b']);
   });
 
   it('外链脚本与样式经宿主按插件目录读取后注入执行', async () => {
@@ -160,6 +209,7 @@ describe('PluginSandbox 沙箱容器', () => {
     const subscribeHtml = `<body><div>y</div><script>
       bridge.on('session.updated', () => {});
       bridge.call('plugin.sub', '{}');
+      registerCleanup(() => { window.__shadowCleanup = (window.__shadowCleanup || 0) + 1; });
     </script></body>`;
     await render(
       <PluginSandbox pluginId="p4" contributionId="c4" sandbox="shadow" html={subscribeHtml} />,
@@ -168,7 +218,9 @@ describe('PluginSandbox 沙箱容器', () => {
 
     act(() => root!.unmount());
     expect(mocks.bridgeUnsubscribe).toHaveBeenCalledWith('p4', 'session.updated');
+    expect((window as unknown as { __shadowCleanup: number }).__shadowCleanup).toBe(1);
     expect(shadowHost()).toBeNull();
+    root = null;
   });
 
   it('bridge.on 的事件按 plugin_id 分发给对应容器', async () => {

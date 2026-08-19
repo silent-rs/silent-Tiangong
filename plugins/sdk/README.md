@@ -34,7 +34,7 @@ const off = bridge.on('session.updated', (payload) => console.log(payload));
 
 | 容器 | manifest 声明 | 通道 |
 | --- | --- | --- |
-| shadow（默认） | `"sandbox": "shadow"` 或缺省 | 宿主注入 `bridge` 参数（受限执行） |
+| shadow（默认） | `"sandbox": "shadow"` 或缺省 | 宿主动态注入桥接、插件根节点、上下文与清理登记 |
 | iframe | `"sandbox": "iframe"` | `postMessage` 协议 |
 | native | 仅官方签名插件 | 官方 React 组件 |
 
@@ -46,6 +46,29 @@ interface HostBridge {
   on(channel: string, handler: (payload: string) => void): () => void;
 }
 ```
+
+Shadow 插件可用 `getShadowHostRuntime()` 挂载前端框架，并在宿主动态更新或卸载插件时释放实例：
+
+```ts
+import { createTiangongBridge, getShadowHostRuntime } from '@tiangong/plugin-sdk';
+
+const runtime = getShadowHostRuntime();
+const root = runtime?.root ?? document;
+const target = root.querySelector('#app');
+
+const stopContext = runtime?.onContextChange((context) => {
+  console.log(context.session?.id, context.theme);
+});
+runtime?.registerCleanup(() => {
+  stopContext?.();
+  // 在这里卸载 Vue/React 等框架实例
+});
+
+const bridge = await createTiangongBridge();
+```
+
+已有只使用 `bridge` 的 Shadow 脚本无需修改。Shadow 只隔离样式，与宿主共享
+JavaScript 环境；不可信插件应声明 `iframe`。
 
 ## 桥接方法命名空间
 
@@ -89,6 +112,6 @@ Desktop TS 工具插件。
 
 ## 主题
 
-宿主在挂载与主题切换时推送设计 token：iframe 容器经 `tiangong_host_context`
-postMessage；Shadow 容器将同名 token 写入 `:host` CSS 变量。插件 UI 直接用
-`var(--background)` 等 CSS 变量即可跟随主题。
+宿主在挂载及主题、会话切换时推送上下文：iframe 容器经
+`tiangong_host_context` postMessage；Shadow 容器经 `onContextChange` 推送，并将
+设计 token 写入 `:host` CSS 变量。插件 UI 直接用 `var(--background)` 等变量即可跟随主题。

@@ -23,7 +23,6 @@ import {
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { formatDuration } from './message/utils';
-import { InteractionPluginHost } from './InteractionPluginHost';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 
 interface MentionCandidate {
@@ -48,7 +47,15 @@ const SLASH_COMMANDS: MentionCandidate[] = [
   },
 ];
 
-export function MessageInput() {
+export interface MessageInputProps {
+  interactionVisible?: boolean;
+  onHeightChange?: (height: number) => void;
+}
+
+export function MessageInput({
+  interactionVisible = false,
+  onHeightChange,
+}: MessageInputProps) {
   const cacheKey = useStore(selectCurrentInputCacheKey);
   const inputCache = useStore(selectCurrentInputCache);
   const inputContent = inputCache.text;
@@ -97,7 +104,6 @@ export function MessageInput() {
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const [interactionVisible, setInteractionVisible] = useState(false);
 
   useLayoutEffect(() => {
     const content = interactionContentRef.current;
@@ -812,15 +818,19 @@ export function MessageInput() {
     if (!el) return;
     const observer = new ResizeObserver(() => {
       setCompact(el.clientWidth < 500);
+      onHeightChange?.(el.offsetHeight);
     });
     observer.observe(el);
     setCompact(el.clientWidth < 500);
-    return () => observer.disconnect();
-  }, []);
+    onHeightChange?.(el.offsetHeight);
+    return () => {
+      observer.disconnect();
+      onHeightChange?.(0);
+    };
+  }, [onHeightChange]);
 
   return (
     <div ref={containerRef} className="relative isolate border-t bg-background p-4">
-      <InteractionPluginHost onVisibilityChange={setInteractionVisible} />
       <div
         ref={interactionContentRef}
         aria-hidden={interactionVisible}

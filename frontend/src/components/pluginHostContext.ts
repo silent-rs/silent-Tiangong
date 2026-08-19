@@ -51,6 +51,9 @@ export function hostContext(theme: HostTheme, channel: string, sessionId?: strin
   };
 }
 
+/** iframe 与 Shadow 容器共享的宿主上下文负载。 */
+export type PluginHostContext = ReturnType<typeof hostContext>;
+
 /** 把主题 token 写入 shadow root 的 `:host` CSS 变量。 */
 export function applyShadowThemeTokens(shadow: ShadowRoot, theme: HostTheme) {
   const tokens = collectHostTokens();

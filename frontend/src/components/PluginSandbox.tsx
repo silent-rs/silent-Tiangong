@@ -2,7 +2,11 @@ import { useEffect, useRef } from 'react';
 import { api, type SandboxKind } from '../api/tauri';
 import { useResolvedTheme } from '../hooks/useTheme';
 import { PluginIframe } from './PluginIframe';
-import { applyShadowThemeTokens } from './pluginHostContext';
+import {
+  applyShadowThemeTokens,
+  hostContext,
+  type PluginHostContext,
+} from './pluginHostContext';
 
 /**
  * 标准 Slot 沙箱容器：按贡献声明的 sandbox 级别分发渲染。
@@ -32,7 +36,15 @@ export function PluginSandbox({
   sessionId,
 }: PluginSandboxProps) {
   if (sandbox === 'shadow') {
-    return <ShadowContainer pluginId={pluginId} contributionId={contributionId} html={html} className={className} />;
+    return (
+      <ShadowContainer
+        pluginId={pluginId}
+        contributionId={contributionId}
+        html={html}
+        className={className}
+        sessionId={sessionId}
+      />
+    );
   }
   if (sandbox === 'native') {
     return (
@@ -52,6 +64,13 @@ export interface HostBridge {
 
 interface DisposableHostBridge extends HostBridge {
   dispose(): void;
+}
+
+type ShadowCleanup = () => void;
+type HostContextHandler = (context: PluginHostContext) => void;
+
+interface ShadowRuntimeState {
+  updateContext(context: PluginHostContext): void;
 }
 
 /**
@@ -119,8 +138,15 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
 }
 
 /** Shadow DOM 沙箱容器：入口 HTML 注入 shadow root，脚本受控执行。 */
-function ShadowContainer({ pluginId, contributionId, html, className }: Omit<PluginSandboxProps, 'sandbox'>) {
+function ShadowContainer({
+  pluginId,
+  contributionId,
+  html,
+  className,
+  sessionId,
+}: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const runtimeRef = useRef<ShadowRuntimeState | null>(null);
   const theme = useResolvedTheme();
 
   // 挂载/重建：解析 HTML → 取回外链资源 → 注入 shadow root → 按序执行脚本。
@@ -130,12 +156,66 @@ function ShadowContainer({ pluginId, contributionId, html, className }: Omit<Plu
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
     const bridge = createHostBridge(pluginId);
     let cancelled = false;
+    let currentContext = hostContext(theme, `shadow:${pluginId}:${contributionId}`, sessionId);
+    const contextHandlers = new Set<HostContextHandler>();
+    const cleanups: ShadowCleanup[] = [];
+
+    const runCleanup = (cleanup: ShadowCleanup) => {
+      try {
+        cleanup();
+      } catch (error) {
+        console.warn('[plugin-sandbox] 插件卸载回调执行失败:', error);
+      }
+    };
+
+    const registerCleanup = (cleanup: ShadowCleanup) => {
+      if (cancelled) {
+        runCleanup(cleanup);
+        return;
+      }
+      cleanups.push(cleanup);
+    };
+
+    const onHostContextChange = (handler: HostContextHandler) => {
+      if (cancelled) return () => {};
+      contextHandlers.add(handler);
+      handler(currentContext);
+      return () => contextHandlers.delete(handler);
+    };
+
+    const runtime: ShadowRuntimeState = {
+      updateContext(context) {
+        if (
+          currentContext.theme === context.theme
+          && currentContext.session?.id === context.session?.id
+        ) {
+          currentContext = context;
+          return;
+        }
+        currentContext = context;
+        contextHandlers.forEach((handler) => handler(context));
+      },
+    };
+    runtimeRef.current = runtime;
 
     applyShadowThemeTokens(shadow, theme);
-    void mountShadowContent(shadow, html, pluginId, contributionId, bridge, () => cancelled);
+    void mountShadowContent(
+      shadow,
+      html,
+      pluginId,
+      contributionId,
+      bridge,
+      () => currentContext,
+      onHostContextChange,
+      registerCleanup,
+      () => cancelled,
+    );
 
     return () => {
       cancelled = true;
+      if (runtimeRef.current === runtime) runtimeRef.current = null;
+      for (const cleanup of cleanups.reverse()) runCleanup(cleanup);
+      contextHandlers.clear();
       bridge.dispose();
       shadow.innerHTML = '';
     };
@@ -143,11 +223,15 @@ function ShadowContainer({ pluginId, contributionId, html, className }: Omit<Plu
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pluginId, contributionId, html]);
 
-  // 主题切换：仅刷新 :host CSS 变量，不重建内容。
+  // 主题/会话切换：刷新 token 并推送上下文，不重建插件实例。
   useEffect(() => {
     const shadow = hostRef.current?.shadowRoot;
-    if (shadow) applyShadowThemeTokens(shadow, theme);
-  }, [theme]);
+    if (!shadow) return;
+    applyShadowThemeTokens(shadow, theme);
+    runtimeRef.current?.updateContext(
+      hostContext(theme, `shadow:${pluginId}:${contributionId}`, sessionId),
+    );
+  }, [contributionId, pluginId, sessionId, theme]);
 
   return (
     <div
@@ -163,8 +247,8 @@ function ShadowContainer({ pluginId, contributionId, html, className }: Omit<Plu
  * 1. DOMParser 解析；`<link rel=stylesheet>` 与 `<script src>` 经宿主按
  *    插件目录安全读取（外链资源不落任意 URL，见 read_manifest_resource）；
  * 2. 其余节点（含内联 style）按序导入 shadow root；
- * 3. 脚本（内联 + 取回的外链）按文档顺序拼接后经 `new Function('bridge', …)`
- *    受控执行：插件脚本以参数拿到桥接对象，不污染全局命名空间。
+ * 3. 脚本（内联 + 取回的外链）按文档顺序拼接后受控执行。旧脚本仍可只使用
+ *    `bridge`；新脚本还可使用 `pluginRoot`、宿主上下文订阅与卸载登记。
  *
  * 图片等媒体资源暂不代理（后续按需扩展），当前面向脚本与样式驱动的页面。
  */
@@ -174,6 +258,9 @@ async function mountShadowContent(
   pluginId: string,
   contributionId: string,
   bridge: HostBridge,
+  getHostContext: () => PluginHostContext,
+  onHostContextChange: (handler: HostContextHandler) => () => void,
+  registerCleanup: (cleanup: ShadowCleanup) => void,
   isCancelled: () => boolean,
 ) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -227,8 +314,23 @@ async function mountShadowContent(
   if (isCancelled() || scripts.length === 0) return;
   try {
     const combined = scripts.join('\n;\n');
-    const runner = new Function('bridge', `"use strict";\n${combined}`);
-    runner.call(shadow, bridge);
+    const runner = new Function(
+      'bridge',
+      'pluginRoot',
+      'hostContext',
+      'onHostContextChange',
+      'registerCleanup',
+      `"use strict";\n${combined}`,
+    );
+    const returnedCleanup = runner.call(
+      shadow,
+      bridge,
+      shadow,
+      getHostContext(),
+      onHostContextChange,
+      registerCleanup,
+    );
+    if (typeof returnedCleanup === 'function') registerCleanup(returnedCleanup as ShadowCleanup);
   } catch (error) {
     console.error('[plugin-sandbox] 插件脚本执行失败:', error);
   }

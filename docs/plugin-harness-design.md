@@ -244,7 +244,7 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 | `session.message-action` | 消息操作按钮区 | 多 | session, message | 在「复制/重试」旁新增动作按钮 |
 | `session.before-input` | 输入框上方 | 多 | session | 输入上下文提示、快捷操作条 |
 | `session.after-input` | 输入框下方 | 多 | session | 附加输入辅助区 |
-| `session.interaction` | 覆盖输入区的临时交互层 | 单 | session | 审批、确认、选择和输入请求；显示时锁定输入区，不进入消息历史 |
+| `session.interaction` | 覆盖输入区并向上展开的临时交互层 | 单 | session | 审批、确认、选择和输入请求；普通内容完整显示，超长内容仅滚动中间区域；显示时锁定输入区，不进入消息历史 |
 | `session.empty-state` | 空会话占位 | 多 | session, workspace | 自定义新会话引导 |
 
 **拓展区（extension，即现有 workspace panel）**
@@ -287,7 +287,8 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 - 宿主在 Slot 位置渲染 `<tg-slot>` 自定义元素，内部 `attachShadow({ mode: "open" })`。
 - 插件提供的入口 HTML、CSS、JS 资源注入 shadow root。
 - 样式用 Shadow DOM 天然隔离，不污染主界面；主界面的样式 token 经桥接注入（见 6.4）。
-- JS 在受限上下文执行：CSP 限制、`window`/`document` 代理、仅暴露宿主桥接 API 白名单。
+- JS 与宿主共享同一个 JavaScript 环境。宿主对桥接调用继续做权限校验，但 Shadow 本身不隔离 `window` / `document`，因此只适用于用户信任的插件。
+- 宿主动态注入 `bridge`、`pluginRoot`、初始/变化上下文和卸载登记；旧脚本只读取 `bridge` 时保持兼容。
 - 优势：**真正挂载到主 DOM 树**，可参与布局、随 Slot 卸载/恢复、与 React 树共存；框架无关。
 
 **② iframe 容器（可选，`sandbox: "iframe"`）**
@@ -307,7 +308,7 @@ Slot 用点分层级的稳定字符串 ID 标识。宿主登记一份 Slot 目�
 | --- | --- | --- | --- |
 | 融入主 DOM 树、随界面布局 | ✅ | ❌ | ✅ |
 | 样式隔离 | ✅（Shadow DOM） | ✅（独立文档） | 需自约束 |
-| JS 强隔离 | ⚠️（白名单桥接 + CSP） | ✅ | ❌ |
+| JS 强隔离 | ❌（与宿主共享环境） | ✅ | ❌ |
 | 三方可用 | ✅ | ✅ | ❌（需签名） |
 | 加载第三方站点/任意网页 | ⚠️ | ✅ | ✅ |
 
@@ -321,24 +322,25 @@ interface HostBridge {
   // 调用宿主能力，返回 Promise<string>（JSON 序列化的结果）
   call(method: string, payload: string): Promise<string>;
 
-  // 订阅/取消订阅宿主事件
+  // 订阅宿主事件，返回取消函数
   on(channel: string, handler: (payload: string) => void): () => void;
-  off(channel: string, handler: (payload: string) => void): void;
-
-  // 只读上下文（宿主在挂载/变化时推送）
-  readonly context: {
-    theme: 'light' | 'dark';
-    tokens: Record<string, string>;       // 设计 token
-    session?: SessionContext;             // 按 Slot 注入
-    workspace?: string;
-    locale: string;
-  };
-
-  // 请求容器调整尺寸/可见性（可选）
-  resize(width: number, height: number): void;
-  ready(): void;                          // UI 就绪信号，宿主据此停止 loading 遮罩
 }
 ```
+
+Shadow 入口脚本除 `bridge` 外还收到以下运行参数；SDK 通过
+`getShadowHostRuntime()` 封装这些自由变量，同一份入口可在 iframe 中返回 `null` 并走原有路径：
+
+```ts
+interface ShadowHostRuntime {
+  root: ShadowRoot;
+  context: HostContext;
+  onContextChange(handler: (context: HostContext) => void): () => void;
+  registerCleanup(cleanup: () => void): void;
+}
+```
+
+宿主在插件安装、启用或更新后动态执行入口；禁用、更新或卸载时先调用插件登记的
+清理函数，再清理事件桥和 Shadow 内容。入口脚本也可以直接返回一个清理函数。
 
 桥接能力（`bridge.call` 可调用的 method）由权限白名单控制，首版提供：
 
@@ -353,7 +355,7 @@ interface HostBridge {
 
 ### 6.4 主题与设计 Token
 
-Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主在挂载及主题切换时经桥接推送**设计 Token**（沿用现有 `hostContext` 机制并标准化）：
+Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主在挂载及主题、会话切换时推送 **hostContext**；iframe 使用 `postMessage`，Shadow 使用初始参数与 `onContextChange`，同时把设计 token 写入 `:host` CSS 变量：
 
 ```jsonc
 {
@@ -384,7 +386,7 @@ Shadow 容器天然隔离样式，为让插件 UI 与宿主视觉一致，宿主
 - **`session.message-action`**：给消息加自定义操作。例如「加入收藏」「转发到看板」。
 - **`session.before-input` / `session.after-input`**：输入区上下文 UI。例如快捷指令条、当前工具状态。
 
-会话区 Slot 的容器生命周期与「当前会话 + 消息/轮次」绑定：切换会话时卸载旧实例、挂载新实例，上下文经桥接刷新。宿主提供 `session.*` 桥接能力让插件读取消息、触发工具。
+普通会话区 Slot 的容器生命周期可与「当前会话 + 消息/轮次」绑定。需要跨会话保活的单例（如 `session.interaction`）切换会话时不重建，宿主只推送新上下文，使插件保留其他会话尚未结束的请求。宿主提供 `session.*` 桥接能力让插件读取消息、触发工具。
 
 ### 6.6 拓展区扩展与「能力矩阵（App Matrix）」
 
@@ -651,7 +653,7 @@ approval、confirm、choice、multi_choice、input、form 六类参数解析、�
 1. **沙箱分级**：`shadow` / `iframe` / `native` 三级（见 6.2）。三方默认 `shadow`，可用 `iframe` 自降为强隔离；`native` 需官方签名。
 2. **最小权限**：`permissions` 逐项声明，导入时校验；敏感项（共享存储、原生容器、sidecar）不接受仅靠 manifest 自授。
 3. **桥接白名单**：`bridge.call` 的 method 按权限命名空间放行，未知 method 拒绝并记录；`bridge.on` 的事件按 manifest `capabilities.events` 放行。
-4. **CSP 与资源约束**：Shadow/iframe 容器施加 CSP；插件资源经 `get-view-resource` 按白名单路径读取，禁止任意本地/网络资源加载（需 `network.*` 权限）。
+4. **资源与脚本边界**：插件资源经 `get-view-resource` 按白名单路径读取，iframe 提供脚本强隔离；Shadow 与宿主共享 JavaScript 环境，当前允许普通三方声明，但安装来源必须可信，不能把它视为安全沙箱。
 5. **插件时限**：交互处理器自行在 15 秒后返回超时结果；宿主 20 秒通用上限只处理插件崩溃或失联。
 6. **可逆卸载**：插件卸载/禁用时撤销全部注册（Slot、工具、事件订阅、sidecar 进程），不残留 UI 与状态。
 7. **宿主中性**：`tiangong-plugin-runtime` 不感知具体插件业务，仅转发不透明负载；UI 桥接同样只做鉴权与透传，不解析业务 JSON。
