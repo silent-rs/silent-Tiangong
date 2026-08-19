@@ -77,6 +77,8 @@ afterEach(() => {
   vi.clearAllMocks();
   mocks.resources.clear();
   mocks.onBridgeEventHandlers.clear();
+  document.documentElement.style.removeProperty('--foreground');
+  document.documentElement.classList.remove('dark');
   delete (window as unknown as { __received?: string[] }).__received;
   delete (window as unknown as { __shadowBoots?: number }).__shadowBoots;
   delete (window as unknown as { __shadowContexts?: string[] }).__shadowContexts;
@@ -117,14 +119,37 @@ describe('PluginSandbox 沙箱容器', () => {
     expect(mocks.bridgeCall).toHaveBeenCalledWith('com.example.board', 'plugin.ping', '{}');
   });
 
-  it('shadow 模式注入宿主主题 token 为 :host CSS 变量', async () => {
+  it('shadow 模式直接继承 App 根变量，不向 shadow root 注入 token 副本', async () => {
+    document.documentElement.style.setProperty('--foreground', '213 31% 91%');
     await render(
       <PluginSandbox pluginId="p" contributionId="c" sandbox="shadow" html="<body><div>x</div></body>" />,
     );
-    const style = shadowHost()!.shadowRoot!.querySelector<HTMLStyleElement>('style[data-host-tokens]');
-    expect(style).toBeTruthy();
-    expect(style!.textContent).toContain(':host');
-    expect(style!.textContent).toContain('--host-theme: dark');
+    const host = shadowHost()!;
+    expect(host.shadowRoot!.querySelector('style[data-host-tokens]')).toBeNull();
+    expect(host.style.getPropertyValue('--foreground')).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--foreground')).toBe('213 31% 91%');
+  });
+
+  it('App 主题变量变化不触发 Shadow 上下文订阅，也不重建插件实例', async () => {
+    const html = `<body><div></div><script>
+      window.__shadowBoots = (window.__shadowBoots || 0) + 1;
+      window.__shadowContexts = [];
+      onHostContextChange((context) => window.__shadowContexts.push(context.theme));
+    </script></body>`;
+    document.documentElement.classList.add('dark');
+    document.documentElement.style.setProperty('--foreground', '213 31% 91%');
+    await render(
+      <PluginSandbox pluginId="theme-plugin" contributionId="main" sandbox="shadow" html={html} />,
+    );
+
+    document.documentElement.style.setProperty('--foreground', '222.2 47.4% 11.2%');
+    document.documentElement.classList.remove('dark');
+    await act(async () => {});
+
+    expect((window as unknown as { __shadowBoots: number }).__shadowBoots).toBe(1);
+    expect((window as unknown as { __shadowContexts: string[] }).__shadowContexts).toEqual(['dark']);
+    expect(shadowHost()!.shadowRoot!.querySelector('style[data-host-tokens]')).toBeNull();
+    expect(document.documentElement.style.getPropertyValue('--foreground')).toBe('222.2 47.4% 11.2%');
   });
 
   it('shadow 模式注入插件根节点并在会话变化时推送上下文且不重建脚本', async () => {

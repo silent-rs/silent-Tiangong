@@ -11,7 +11,6 @@ import {
 import {
   approvalOpinion,
   isRecord,
-  normalizeHostTokenValue,
   parseInvocation,
   payloadResult,
   userClosedFeedback,
@@ -35,6 +34,7 @@ const requests = ref<InteractionRequest[]>([]);
 const currentSessionId = ref<string | null>(null);
 const nowMs = ref(Date.now());
 const connectionError = ref('');
+const rootElement = ref<HTMLElement | null>(null);
 
 let bridge: HostBridge | null = null;
 let provider: ReturnType<typeof createToolProvider> | null = null;
@@ -236,19 +236,24 @@ function onClosed(closed: ToolClosed) {
 
 function applyHostContext(data: unknown) {
   if (!isRecord(data)) return;
-  if (!props.shadowContainer) {
+  const element = rootElement.value;
+  if (element && !props.shadowContainer) {
     const tokens = isRecord(data.tokens) ? data.tokens : {};
     for (const [name, value] of Object.entries(tokens)) {
       if (typeof value === 'string' && value) {
-        document.documentElement.style.setProperty(`--${name}`, normalizeHostTokenValue(value));
+        element.style.setProperty(`--${name}`, value.trim());
       }
     }
     if (typeof data.fontFamily === 'string' && data.fontFamily) {
-      document.body.style.fontFamily = data.fontFamily;
+      element.style.fontFamily = data.fontFamily;
     }
     if (data.theme === 'light' || data.theme === 'dark') {
-      document.documentElement.style.colorScheme = data.theme;
+      element.style.colorScheme = data.theme;
+      element.dataset.theme = data.theme;
     }
+  }
+  if (!props.shadowContainer && (data.theme === 'light' || data.theme === 'dark')) {
+    document.documentElement.style.colorScheme = data.theme;
   }
   const session = isRecord(data.session) ? data.session : null;
   currentSessionId.value = session && typeof session.id === 'string' ? session.id : null;
@@ -294,7 +299,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="wrap">
+  <div ref="rootElement" class="wrap">
     <section v-if="request">
       <div class="heading">
         <div class="heading-copy">
@@ -324,20 +329,27 @@ onUnmounted(() => {
       <div class="request-body">
         <p v-if="request.description" class="muted">{{ request.description }}</p>
 
-        <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content">
+        <div v-if="request.kind === 'choice' || request.kind === 'multi_choice'" class="content choices">
           <label
             v-for="option in request.options"
             :key="option"
             class="option"
-            :class="{ selected: request.selected.includes(option) }"
+            :class="{ selected: request.selected.includes(option), disabled: locked }"
           >
             <input
+              class="control-native"
               :type="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
+              :name="`interaction-${request.invocationId}`"
               :checked="request.selected.includes(option)"
               :disabled="locked"
               @change="toggleChoice(option)"
             />
-            <span>{{ option }}</span>
+            <span
+              class="selection-indicator"
+              :class="request.kind === 'multi_choice' ? 'checkbox' : 'radio'"
+              aria-hidden="true"
+            />
+            <span class="option-label">{{ option }}</span>
           </label>
         </div>
 
@@ -364,24 +376,34 @@ onUnmounted(() => {
         </div>
 
         <div v-else-if="request.kind === 'form'" class="content">
-          <label v-for="field in request.fields" :key="field.key" class="field">
+          <label
+            v-for="field in request.fields"
+            :key="field.key"
+            class="field"
+            :class="{ 'boolean-field': field.type === 'boolean' }"
+          >
             <span class="field-label">{{ field.label }}<b v-if="field.required">*</b></span>
-            <input
-              v-if="field.type === 'boolean'"
-              v-model="request.values[field.key]"
-              type="checkbox"
-              :disabled="locked"
-            />
-            <select
-              v-else-if="field.type === 'select'"
-              v-model="request.values[field.key]"
-              :disabled="locked"
-            >
-              <option value="" disabled>请选择</option>
-              <option v-for="option in field.options ?? []" :key="option" :value="option">
-                {{ option }}
-              </option>
-            </select>
+            <template v-if="field.type === 'boolean'">
+              <input
+                v-model="request.values[field.key]"
+                class="control-native"
+                type="checkbox"
+                :disabled="locked"
+              />
+              <span class="selection-indicator checkbox" aria-hidden="true" />
+            </template>
+            <span v-else-if="field.type === 'select'" class="select-control">
+              <select
+                v-model="request.values[field.key]"
+                :disabled="locked"
+              >
+                <option value="" disabled>请选择</option>
+                <option v-for="option in field.options ?? []" :key="option" :value="option">
+                  {{ option }}
+                </option>
+              </select>
+              <span class="select-chevron" aria-hidden="true" />
+            </span>
             <input
               v-else
               v-model="request.values[field.key]"
@@ -432,41 +454,22 @@ onUnmounted(() => {
   </div>
 </template>
 
-<style>
-html,
-body,
-#app {
-  width: 100%;
-  margin: 0;
-  background: transparent;
-}
-
-html,
-body {
-  height: 100%;
-}
-
-body {
-  overflow: hidden;
-}
-
-:host {
-  display: block;
-  width: 100%;
-  height: 100%;
-  max-height: inherit;
-  overflow: hidden;
-}
-
-#app {
-  box-sizing: border-box;
-  height: 100%;
-  max-height: inherit;
-}
-</style>
-
 <style scoped>
 .wrap {
+  --ui-background: hsl(var(--background, 0 0% 100%));
+  --ui-foreground: hsl(var(--foreground, 222.2 47.4% 11.2%));
+  --ui-card: hsl(var(--card, 0 0% 100%));
+  --ui-muted-foreground: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+  --ui-accent: hsl(var(--accent, 210 40% 96.1%));
+  --ui-accent-foreground: hsl(var(--accent-foreground, 222.2 47.4% 11.2%));
+  --ui-primary: hsl(var(--primary, 222.2 47.4% 11.2%));
+  --ui-primary-foreground: hsl(var(--primary-foreground, 210 40% 98%));
+  --ui-destructive: hsl(var(--destructive, 0 84.2% 60.2%));
+  --ui-input: hsl(var(--input, 214.3 31.8% 91.4%));
+  --ui-ring: hsl(var(--ring, 222.2 47.4% 11.2%));
+  --ui-status-error: hsl(var(--status-error, 0 84% 60%));
+  --ui-radius: var(--radius, 0.5rem);
+
   box-sizing: border-box;
   width: 100%;
   height: 100%;
@@ -474,8 +477,8 @@ body {
   min-height: 0;
   padding: 14px 16px;
   overflow: hidden;
-  color: var(--foreground, #222);
-  background: var(--card, transparent);
+  color: var(--ui-foreground, #0f172a);
+  background: var(--ui-card, #fff);
 }
 
 section {
@@ -520,7 +523,7 @@ h3 {
 
 .muted {
   margin: 4px 0 0;
-  color: var(--muted-foreground, #777);
+  color: var(--ui-muted-foreground, #64748b);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -535,14 +538,14 @@ h3 {
 
 .deadline {
   flex: 0 0 auto;
-  color: var(--muted-foreground, #888);
+  color: var(--ui-muted-foreground, #64748b);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
 }
 
 .deadline.overdue {
-  color: var(--status-error, #dc2626);
+  color: var(--ui-status-error, #dc2626);
 }
 
 .content {
@@ -552,39 +555,128 @@ h3 {
 }
 
 .question {
-  border-left: 2px solid var(--primary, #2563eb);
+  border-left: 2px solid var(--ui-primary, #0f172a);
   padding-left: 10px;
-  color: var(--foreground, #222);
+  color: var(--ui-foreground, #0f172a);
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .input-question {
-  color: var(--muted-foreground, #777);
+  color: var(--ui-muted-foreground, #64748b);
   font-size: 12px;
+}
+
+.choices {
+  gap: 4px;
 }
 
 .option {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  border: 1px solid var(--border, #d1d5db);
-  border-radius: 6px;
-  padding: 6px 9px;
-  font-size: 13px;
+  gap: 10px;
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius, 8px);
+  padding: 8px 10px;
+  color: var(--ui-foreground, #0f172a);
+  font-size: 14px;
+  line-height: 20px;
   cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 
+.option:hover:not(.disabled),
 .option.selected {
-  border-color: var(--primary, #2563eb);
-  background: var(--accent, #f1f5f9);
+  background: var(--ui-accent, #f1f5f9);
+  color: var(--ui-accent-foreground, #0f172a);
 }
 
-.option input {
-  margin: 0;
-  accent-color: var(--primary, #2563eb);
+.option.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.option-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.control-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  white-space: nowrap;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+}
+
+.selection-indicator {
+  position: relative;
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ui-input, #e2e8f0);
+  background: var(--ui-background, #fff);
+  color: var(--ui-primary-foreground, #f8fafc);
+  transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.selection-indicator.checkbox {
+  border-radius: 4px;
+}
+
+.selection-indicator.radio {
+  border-radius: 999px;
+}
+
+.selection-indicator::after {
+  content: '';
+  display: block;
+  opacity: 0;
+}
+
+.selection-indicator.checkbox::after {
+  width: 7px;
+  height: 4px;
+  border-bottom: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(-1px) rotate(-45deg);
+}
+
+.selection-indicator.radio::after {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.control-native:checked + .selection-indicator {
+  border-color: var(--ui-primary, #0f172a);
+  background: var(--ui-primary, #0f172a);
+}
+
+.control-native:checked + .selection-indicator::after {
+  opacity: 1;
+}
+
+.control-native:focus-visible + .selection-indicator {
+  box-shadow:
+    0 0 0 2px var(--ui-background, #fff),
+    0 0 0 4px var(--ui-ring, #0f172a);
+}
+
+.control-native:disabled + .selection-indicator {
+  cursor: not-allowed;
 }
 
 .field {
@@ -596,13 +688,28 @@ h3 {
 }
 
 .field-label {
-  color: var(--muted-foreground, #777);
+  color: var(--ui-muted-foreground, #64748b);
   overflow-wrap: anywhere;
 }
 
 .field-label b {
   margin-left: 2px;
-  color: var(--status-error, #dc2626);
+  color: var(--ui-status-error, #dc2626);
+}
+
+.boolean-field {
+  cursor: pointer;
+}
+
+.boolean-field:has(.control-native:disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.select-control {
+  position: relative;
+  display: block;
+  min-width: 0;
 }
 
 input[type='text'],
@@ -610,21 +717,63 @@ input[type='number'],
 select {
   box-sizing: border-box;
   width: 100%;
+  height: 40px;
   min-width: 0;
-  padding: 7px 8px;
-  border: 1px solid var(--border, #d1d5db);
-  border-radius: 6px;
-  background: var(--background, transparent);
-  color: inherit;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-input, #e2e8f0);
+  border-radius: var(--ui-radius, 8px);
+  background: var(--ui-background, #fff);
+  color: var(--ui-foreground, #0f172a);
   font: inherit;
+  font-size: 14px;
+  line-height: 20px;
   outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
 }
 
-input[type='text']:focus,
-input[type='number']:focus,
-select:focus {
-  border-color: var(--ring, #2563eb);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring, #2563eb) 20%, transparent);
+input[type='text']::placeholder,
+input[type='number']::placeholder {
+  color: var(--ui-muted-foreground, #64748b);
+}
+
+select {
+  appearance: none;
+  padding-right: 38px;
+  cursor: pointer;
+}
+
+input[type='text']:focus-visible,
+input[type='number']:focus-visible,
+select:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--ui-background, #fff),
+    0 0 0 4px var(--ui-ring, #0f172a);
+}
+
+input[type='text']:disabled,
+input[type='number']:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+select option {
+  background: var(--ui-background, #fff);
+  color: var(--ui-foreground, #0f172a);
+}
+
+.select-chevron {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--ui-foreground, #0f172a);
+  pointer-events: none;
+  opacity: 0.5;
+  transform: translateY(-70%) rotate(45deg);
 }
 
 .actions {
@@ -637,78 +786,89 @@ select:focus {
 }
 
 button {
+  display: inline-flex;
+  height: 40px;
   min-width: 72px;
-  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 7px 14px;
+  border-radius: var(--ui-radius, 8px);
+  padding: 8px 16px;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
+  line-height: 20px;
   letter-spacing: 0;
-  transition: filter 120ms ease, opacity 120ms ease;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 
-button.primary {
-  background: var(--primary, #2563eb);
-  color: var(--primary-foreground, white);
-}
-
+button.primary,
 button.approve {
-  background: var(--status-success, #16803f);
-  color: white;
+  background: var(--ui-primary, #0f172a);
+  color: var(--ui-primary-foreground, #f8fafc);
+}
+
+button.primary:hover:not(:disabled),
+button.approve:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-primary, #0f172a) 90%, transparent);
 }
 
 button.reject {
-  border-color: var(--status-error, #dc2626);
-  background: transparent;
-  color: var(--status-error, #dc2626);
+  background: var(--ui-destructive, #dc2626);
+  color: #f8fafc;
+}
+
+button.reject:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-destructive, #dc2626) 90%, transparent);
 }
 
 button.secondary {
-  border-color: var(--border, #d1d5db);
-  background: var(--muted, #e5e7eb);
-  color: var(--foreground, #222);
+  border-color: var(--ui-input, #e2e8f0);
+  background: var(--ui-background, #fff);
+  color: var(--ui-foreground, #0f172a);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: var(--ui-accent, #f1f5f9);
+  color: var(--ui-accent-foreground, #0f172a);
 }
 
 button.close {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
   border-color: transparent;
   padding: 0;
   background: transparent;
-  color: var(--muted-foreground, #777);
+  color: var(--ui-muted-foreground, #64748b);
   font-size: 20px;
   font-weight: 400;
   line-height: 1;
 }
 
 button.close:hover:not(:disabled) {
-  background: var(--muted, #e5e7eb);
-  color: var(--foreground, #222);
-  filter: none;
-}
-
-button:hover:not(:disabled) {
-  filter: brightness(0.94);
+  background: var(--ui-accent, #f1f5f9);
+  color: var(--ui-accent-foreground, #0f172a);
 }
 
 button:focus-visible {
-  outline: 2px solid var(--ring, #2563eb);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow:
+    0 0 0 2px var(--ui-background, #fff),
+    0 0 0 4px var(--ui-ring, #0f172a);
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
 .error {
   margin-top: 8px;
-  color: var(--status-error, #dc2626);
+  color: var(--ui-status-error, #dc2626);
   font-size: 12px;
   overflow-wrap: anywhere;
 }

@@ -37,15 +37,8 @@ export interface InteractionRequest {
 export const USER_TIMEOUT_MS = 15_000;
 export const USER_CLOSED_MESSAGE = '用户关闭了相关操作';
 
-const HSL_CHANNELS = /^-?(?:\d+(?:\.\d+)?)(?:deg|rad|grad|turn)?\s+-?(?:\d+(?:\.\d+)?)%\s+-?(?:\d+(?:\.\d+)?)%(?:\s*\/\s*(?:\d+(?:\.\d+)?%?))?$/;
-
 export function approvalOpinion(decision: ApprovalOpinion) {
   return { decision } as const;
-}
-
-export function normalizeHostTokenValue(value: string): string {
-  const normalized = value.trim();
-  return HSL_CHANNELS.test(normalized) ? `hsl(${normalized})` : normalized;
 }
 
 export function userClosedFeedback() {

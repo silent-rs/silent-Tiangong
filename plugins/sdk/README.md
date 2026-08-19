@@ -57,7 +57,7 @@ const root = runtime?.root ?? document;
 const target = root.querySelector('#app');
 
 const stopContext = runtime?.onContextChange((context) => {
-  console.log(context.session?.id, context.theme);
+  console.log(context.session?.id);
 });
 runtime?.registerCleanup(() => {
   stopContext?.();
@@ -112,6 +112,8 @@ Desktop TS 工具插件。
 
 ## 主题
 
-宿主在挂载及主题、会话切换时推送上下文：iframe 容器经
-`tiangong_host_context` postMessage；Shadow 容器经 `onContextChange` 推送，并将
-设计 token 写入 `:host` CSS 变量。插件 UI 直接用 `var(--background)` 等变量即可跟随主题。
+iframe 容器在挂载及主题、会话切换时通过 `tiangong_host_context` postMessage
+接收上下文。Shadow 容器中的 CSS 变量会从 App 根节点自然继承，插件 UI 直接使用
+`var(--background)` 等变量即可跟随主题，不需要订阅或复制颜色；
+`onContextChange` 只用于会话等非样式上下文。Shadow 脚本确实需要在 JavaScript
+中判断当前主题时，可直接读取 App 根节点的 class 或计算后的 CSS 变量。

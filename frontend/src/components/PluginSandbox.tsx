@@ -1,9 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { api, type SandboxKind } from '../api/tauri';
-import { useResolvedTheme } from '../hooks/useTheme';
 import { PluginIframe } from './PluginIframe';
 import {
-  applyShadowThemeTokens,
   hostContext,
   type PluginHostContext,
 } from './pluginHostContext';
@@ -71,6 +69,10 @@ type HostContextHandler = (context: PluginHostContext) => void;
 
 interface ShadowRuntimeState {
   updateContext(context: PluginHostContext): void;
+}
+
+function currentRootTheme(): 'light' | 'dark' {
+  return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
 }
 
 /**
@@ -147,7 +149,6 @@ function ShadowContainer({
 }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ShadowRuntimeState | null>(null);
-  const theme = useResolvedTheme();
 
   // 挂载/重建：解析 HTML → 取回外链资源 → 注入 shadow root → 按序执行脚本。
   useEffect(() => {
@@ -156,7 +157,11 @@ function ShadowContainer({
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
     const bridge = createHostBridge(pluginId);
     let cancelled = false;
-    let currentContext = hostContext(theme, `shadow:${pluginId}:${contributionId}`, sessionId);
+    let currentContext = hostContext(
+      currentRootTheme(),
+      `shadow:${pluginId}:${contributionId}`,
+      sessionId,
+    );
     const contextHandlers = new Set<HostContextHandler>();
     const cleanups: ShadowCleanup[] = [];
 
@@ -185,20 +190,14 @@ function ShadowContainer({
 
     const runtime: ShadowRuntimeState = {
       updateContext(context) {
-        if (
-          currentContext.theme === context.theme
-          && currentContext.session?.id === context.session?.id
-        ) {
-          currentContext = context;
-          return;
-        }
+        const sessionChanged = currentContext.session?.id !== context.session?.id;
         currentContext = context;
+        if (!sessionChanged) return;
         contextHandlers.forEach((handler) => handler(context));
       },
     };
     runtimeRef.current = runtime;
 
-    applyShadowThemeTokens(shadow, theme);
     void mountShadowContent(
       shadow,
       html,
@@ -219,19 +218,16 @@ function ShadowContainer({
       bridge.dispose();
       shadow.innerHTML = '';
     };
-    // theme 不参与重建：token 由独立 effect 刷新，避免主题切换重载插件页面。
+    // 主题变量从 App 根节点自动继承，主题和会话变化都不重建插件页面。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pluginId, contributionId, html]);
 
-  // 主题/会话切换：刷新 token 并推送上下文，不重建插件实例。
+  // 会话切换时刷新运行时上下文；主题样式由 CSS 继承自动更新。
   useEffect(() => {
-    const shadow = hostRef.current?.shadowRoot;
-    if (!shadow) return;
-    applyShadowThemeTokens(shadow, theme);
     runtimeRef.current?.updateContext(
-      hostContext(theme, `shadow:${pluginId}:${contributionId}`, sessionId),
+      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId),
     );
-  }, [contributionId, pluginId, sessionId, theme]);
+  }, [contributionId, pluginId, sessionId]);
 
   return (
     <div

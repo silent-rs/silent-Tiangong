@@ -2,7 +2,7 @@
  * 插件 UI 容器共享的宿主上下文：主题 token 采集。
  *
  * iframe 容器经 postMessage 推送 `tiangong_host_context`；
- * Shadow 容器把同名 token 写入 shadow root 的 `:host` CSS 变量。
+ * Shadow 容器直接继承 App 根节点的同名 CSS 变量。
  * 两种容器 token 同源，插件 UI 用同一套变量名消费。
  */
 
@@ -53,19 +53,3 @@ export function hostContext(theme: HostTheme, channel: string, sessionId?: strin
 
 /** iframe 与 Shadow 容器共享的宿主上下文负载。 */
 export type PluginHostContext = ReturnType<typeof hostContext>;
-
-/** 把主题 token 写入 shadow root 的 `:host` CSS 变量。 */
-export function applyShadowThemeTokens(shadow: ShadowRoot, theme: HostTheme) {
-  const tokens = collectHostTokens();
-  const declarations = Object.entries(tokens)
-    .filter(([, value]) => value !== '')
-    .map(([name, value]) => `--${name}: ${value};`)
-    .join('\n');
-  let style = shadow.querySelector<HTMLStyleElement>('style[data-host-tokens]');
-  if (!style) {
-    style = document.createElement('style');
-    style.setAttribute('data-host-tokens', '');
-    shadow.prepend(style);
-  }
-  style.textContent = `:host {\n${declarations}\n--host-theme: ${theme};\n}`;
-}
