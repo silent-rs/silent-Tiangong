@@ -31,6 +31,8 @@ pub struct SignedPluginRelease {
     /// 纯 TS/sidecar 插件无 wasm 制品，签名清单省略 wasm 条目。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm: Option<SignedArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui: Vec<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SignedArtifact>,
 }
@@ -109,8 +111,22 @@ impl SignedPluginRelease {
             (None, None) => {}
             _ => bail!("插件签名清单与 plugin.json 的 wasm 声明不一致"),
         }
-        // 无 wasm（纯 TS/sidecar 插件）：签名建立的是 sidecar 信任边界，
-        // manifest 哈希已覆盖 plugin.json；无需 wasm 制品。
+        let expected_ui = plugin_manifest
+            .ui_contributions()
+            .into_iter()
+            .map(|contribution| PathBuf::from(contribution.entry))
+            .collect::<BTreeSet<_>>();
+        let signed_ui = self
+            .ui
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<BTreeSet<_>>();
+        if signed_ui.len() != self.ui.len() || signed_ui != expected_ui {
+            bail!("插件签名清单与 plugin.json 的 UI 入口声明不一致");
+        }
+        for artifact in &self.ui {
+            artifact.verify(directory, &artifact.path)?;
+        }
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {
                 if !self.has_permission("sidecar.invoke") {

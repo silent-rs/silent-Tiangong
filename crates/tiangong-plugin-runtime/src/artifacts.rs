@@ -1,6 +1,6 @@
 //! 基于 OSS 静态目录的插件制品发现、下载与校验。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,6 +87,8 @@ pub struct PluginRelease {
     pub signed_releases: BTreeMap<String, RemoteSignedRelease>,
     #[serde(default)]
     pub sidecars: BTreeMap<String, RemoteArtifact>,
+    #[serde(default)]
+    pub ui: BTreeMap<String, RemoteArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,21 +301,29 @@ impl PluginRepository {
             );
         }
 
+        let ui_entries = manifest
+            .ui_contributions()
+            .into_iter()
+            .map(|contribution| contribution.entry)
+            .collect::<BTreeSet<_>>();
+        let catalog_ui_entries = release.ui.keys().cloned().collect::<BTreeSet<_>>();
+        if ui_entries != catalog_ui_entries {
+            bail!(
+                "插件 {} 的目录 UI 制品与 plugin.json 声明不一致",
+                release.id
+            );
+        }
+
         // 统计需要下载的制品文件，用于把进度按文件均分到 [0, 100]。
         let platform = current_platform_key();
-        let mut steps: Vec<(usize, usize)> = Vec::new();
-        // (wasm 必有)
-        steps.push((0, 0));
+        let has_wasm = manifest.wasm_binary().is_some();
         let has_sidecar = manifest.sidecar.is_some();
-        if has_sidecar {
-            steps.push((0, 0));
-        }
         let has_signed = manifest.sidecar.is_some() || !release.signed_releases.is_empty();
-        if has_signed {
-            // release.json + release.json.sig 合并视为一个进度段。
-            steps.push((0, 0));
-        }
-        let total_steps = steps.len().max(1);
+        let total_steps = ((has_wasm as usize)
+            + (has_sidecar as usize)
+            + (has_signed as usize)
+            + ui_entries.len())
+        .max(1);
         // 复用闭包：把单文件内的字节进度映射到全局百分比区间。
         let make_file_progress = |index: usize| -> Option<ProgressFn> {
             let progress = progress.clone()?;
@@ -330,6 +340,7 @@ impl PluginRepository {
             }))
         };
 
+        let mut step_index = 0;
         if let Some(wasm_binary) = manifest.wasm_binary() {
             let wasm_path = staged.path.join(wasm_binary);
             let wasm_name = wasm_binary
@@ -337,8 +348,9 @@ impl PluginRepository {
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
             validate_artifact_file_name(&release.wasm.url, wasm_name)?;
-            self.download_file(&release.wasm, &wasm_path, make_file_progress(0))
+            self.download_file(&release.wasm, &wasm_path, make_file_progress(step_index))
                 .await?;
+            step_index += 1;
         }
 
         if has_sidecar {
@@ -355,9 +367,10 @@ impl PluginRepository {
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow!("sidecar 文件名无效"))?;
             validate_artifact_file_name(&artifact.url, sidecar_name)?;
-            self.download_file(artifact, &sidecar_path, make_file_progress(1))
+            self.download_file(artifact, &sidecar_path, make_file_progress(step_index))
                 .await?;
             set_executable(&sidecar_path)?;
+            step_index += 1;
         } else if !release.sidecars.is_empty() {
             bail!(
                 "插件 {} 未声明 sidecar，但 OSS 目录包含 sidecar",
@@ -370,14 +383,32 @@ impl PluginRepository {
                 .signed_releases
                 .get(&platform)
                 .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的签名清单", release.id))?;
-            let signed_index = if has_sidecar { 2 } else { 1 };
             self.download_unchecked(&signed.url, &staged.path.join("release.json"))
                 .await?;
             self.download_unchecked(&signed.signature_url, &staged.path.join("release.json.sig"))
                 .await?;
-            if let Some(cb) = make_file_progress(signed_index) {
+            if let Some(cb) = make_file_progress(step_index) {
                 cb(100, 100);
             }
+            step_index += 1;
+        }
+        for entry in ui_entries {
+            let artifact = release
+                .ui
+                .get(&entry)
+                .ok_or_else(|| anyhow!("插件 {} 缺少 UI 制品 {entry}", release.id))?;
+            let file_name = Path::new(&entry)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow!("UI 制品文件名无效: {entry}"))?;
+            validate_artifact_file_name(&artifact.url, file_name)?;
+            self.download_file(
+                artifact,
+                &staged.path.join(&entry),
+                make_file_progress(step_index),
+            )
+            .await?;
+            step_index += 1;
         }
         for directory in ["runtime", "logs", "data"] {
             std::fs::create_dir_all(staged.path.join(directory))?;
@@ -568,6 +599,11 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
         validate_download_url(&plugin.wasm.url, "WASM 制品")?;
         parse_checksum(&plugin.manifest.checksum)?;
         parse_checksum(&plugin.wasm.checksum)?;
+        for (entry, artifact) in &plugin.ui {
+            validate_relative_artifact_path(Path::new(entry), "UI 制品")?;
+            validate_download_url(&artifact.url, "UI 制品")?;
+            parse_checksum(&artifact.checksum)?;
+        }
         for (platform, artifact) in &plugin.sidecars {
             validate_download_url(&artifact.url, "sidecar 制品")?;
             parse_checksum(&artifact.checksum)?;
@@ -584,6 +620,18 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
             validate_download_url(&signed.url, "插件签名清单")?;
             validate_download_url(&signed.signature_url, "插件签名文件")?;
         }
+    }
+    Ok(())
+}
+
+fn validate_relative_artifact_path(path: &Path, label: &str) -> Result<()> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        bail!("{label}路径无效: {}", path.display());
     }
     Ok(())
 }

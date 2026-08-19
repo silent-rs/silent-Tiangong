@@ -329,7 +329,6 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 manifest,
                 loaded.enabled,
                 loaded.ui_plugin.is_some(),
-                sidecar_running,
                 loaded.last_error.as_deref(),
             );
             PluginStatus {
@@ -824,13 +823,18 @@ pub fn get_view_resource(plugin_id: &str, path: &str) -> Option<(Vec<u8>, String
 
 /// 处理插件页面消息（iframe 与插件双向通信）。
 pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Option<String> {
-    let plugin = ui_plugin(plugin_id)?;
+    handle_view_message_result(plugin_id, method, payload).ok()
+}
+
+/// 处理插件页面消息并保留 WASM/sidecar 返回的具体错误。
+pub fn handle_view_message_result(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    let plugin = ui_plugin(plugin_id)
+        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载、未启用或没有逻辑层"))?;
     let method = method.to_string();
     let payload = payload.to_string();
     call_wasm_off_runtime(plugin, move |plugin| {
         plugin.handle_view_message(method, payload)
     })
-    .ok()
 }
 
 fn ui_plugin(plugin_id: &str) -> Option<Arc<Mutex<WasmPlugin>>> {
@@ -1087,14 +1091,14 @@ fn plugin_state(
     manifest: &PluginManifest,
     enabled: bool,
     has_wasm_ui: bool,
-    sidecar_running: bool,
     last_error: Option<&str>,
 ) -> &'static str {
+    // 未运行的 sidecar 可能仍在等待首次调用，只有已记录的错误才影响插件状态。
     if !enabled {
         "disabled"
     } else if !has_wasm_ui && manifest.wasm_binary().is_some() {
         "error"
-    } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
+    } else if last_error.is_some() {
         "degraded"
     } else {
         "loaded"
@@ -1118,13 +1122,7 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     let sidecar_running = sidecar
         .as_ref()
         .is_some_and(|connection| connection.has_runtime_endpoint());
-    let state = plugin_state(
-        manifest,
-        enabled,
-        has_ui,
-        sidecar_running,
-        last_error.as_deref(),
-    );
+    let state = plugin_state(manifest, enabled, has_ui, last_error.as_deref());
     let configured = configured_model_capabilities();
     Some(PluginStatus {
         unavailable_reason: if enabled {

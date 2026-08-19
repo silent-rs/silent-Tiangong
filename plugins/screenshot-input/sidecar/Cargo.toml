@@ -1,0 +1,24 @@
+[package]
+name = "tiangong-plugin-screenshot-input-sidecar"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Screenshot Input 独立 sidecar（macOS、Linux、Windows 区域截图）"
+publish = false
+
+[[bin]]
+name = "tiangong-screenshot-input-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-plugin-screenshot-input-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+scru128 = { workspace = true }

@@ -173,8 +173,7 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
             if wasm_method.is_empty() {
                 bail!("bridge.call method {method} 缺少插件方法名");
             }
-            crate::registry::handle_view_message(plugin_id, wasm_method, payload)
-                .ok_or_else(|| anyhow::anyhow!("bridge.call 插件 {plugin_id} 处理消息失败"))
+            crate::registry::handle_view_message_result(plugin_id, wasm_method, payload)
         }
         // storage.*：宿主直接路由到插件私有数据（设计 7.8），不经逻辑层
         "storage." => storage_call(plugin_id, method, payload),
@@ -269,10 +268,7 @@ pub fn set_session_input_handler(handler: SessionInputHandler) {
 }
 
 fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
-    if !matches!(
-        method,
-        "session.input.addAttachment" | "session.input.captureRegion"
-    ) {
+    if method != "session.input.addAttachment" {
         bail!("未知输入草稿桥接方法 {method}");
     }
     let handler = SESSION_INPUT_HANDLER

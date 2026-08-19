@@ -13,3 +13,5 @@ Memory 插件由三个独立 crate 组成：
 ```bash
 cargo run -p xtask -- build-plugin memory
 ```
+
+构建 sidecar 前需要安装 Protocol Buffers 编译器：macOS 使用 `brew install protobuf`，Linux 使用 `apt-get install protobuf-compiler`，Windows 使用 `choco install protoc`。
