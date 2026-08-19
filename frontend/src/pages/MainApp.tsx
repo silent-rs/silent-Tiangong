@@ -566,8 +566,12 @@ export function MainApp() {
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
       track(await listen<{ session_id: string }>('browser:agent_active', (event) => {
         const { session_id } = event.payload;
-        if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        void refreshAgentActiveMarkers(session_id);
+        // 插件面板事件带插件作用域（webview:<插件>:<会话>），反解对话 id
+        const target = session_id.startsWith('webview:')
+          ? session_id.split(':')[2] ?? ''
+          : session_id;
+        if (!target || useStore.getState().activeSessionId !== target) return;
+        void refreshAgentActiveMarkers(target);
       }));
       guard();
       track(await listen<{
