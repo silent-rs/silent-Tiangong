@@ -37,11 +37,16 @@ async function bootstrap() {
   const bridge = await createTiangongBridge();
   bridgeRef = bridge;
 
-  const root = getShadowHostRuntime()?.root ?? document;
+  const runtime = getShadowHostRuntime();
+  const root = runtime?.root ?? document;
   const host = root.querySelector<HTMLElement>('#terminal-root');
   if (!host) return;
 
   terminalView = createTerminalView(host, bridge);
+  runtime?.registerCleanup(() => {
+    terminalView?.dispose();
+    terminalView = null;
+  });
   // 附着最近会话；无会话时创建默认交互 shell（cmd 缺省即登录 shell，
   // 与原生终端「打开即可输入」的体验一致）。
   const latest = [...terminalSessions.values()].pop();

@@ -43,66 +43,75 @@ export function createTerminalView(
   const fit = new FitAddon();
   terminal.loadAddon(fit);
   terminal.open(host);
-  // 容器 0 尺寸（未布局/隐藏）时 fit 抛错；忽略等 ResizeObserver 首次回调再算
-  try { fit.fit(); } catch { /* 尚未布局 */ }
-
-  // 诊断角标：实测 cols/rows 与容器尺寸（调试显示异常时直接可见）
-  const diag = document.createElement('div');
-  diag.setAttribute('data-terminal-diag', '');
-  diag.style.cssText = 'position:absolute;right:8px;bottom:6px;color:#585b70;font-size:11px;font-family:ui-monospace,monospace;pointer-events:none;z-index:9;';
-  const updateDiag = () => {
-    diag.textContent = `cols=${terminal.cols} rows=${terminal.rows} host=${host.clientWidth}x${host.clientHeight}`;
+  const fitToHost = () => {
+    try {
+      fit.fit();
+      return true;
+    } catch {
+      return false;
+    }
   };
-  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
-  host.appendChild(diag);
-  updateDiag();
+  fitToHost();
 
   let attached: string | null = null;
   let disposers: Array<() => void> = [];
+  let lastSyncedSize = '';
+  const pendingOutput = new Map<string, string>();
+  const pendingTimers = new Set<number>();
+  const maxPendingOutput = 256 * 1024;
 
   // xterm 尺寸同步到 PTY（rows/cols 不一致会导致换行与全屏应用错乱）
   const syncSize = () => {
     if (!attached) return;
+    const sizeKey = `${attached}:${terminal.cols}x${terminal.rows}`;
+    if (sizeKey === lastSyncedSize) return;
+    lastSyncedSize = sizeKey;
     void bridge
       .call('sidecar.terminalResize', JSON.stringify({
         session_id: attached,
         rows: terminal.rows,
         cols: terminal.cols,
       }))
-      .catch(() => {});
+      .catch(() => {
+        if (lastSyncedSize === sizeKey) lastSyncedSize = '';
+      });
   };
 
-  // 视口回到最新行（shadow 容器内 xterm 的视口刷新异步，初始可能滞留顶部）
-  const scrollToBottomSoon = () => {
-    setTimeout(() => terminal.scrollToBottom(), 0);
+  const scheduleFit = (delay: number) => {
+    const timer = window.setTimeout(() => {
+      pendingTimers.delete(timer);
+      if (!fitToHost()) return;
+      syncSize();
+    }, delay);
+    pendingTimers.add(timer);
   };
 
   const handle = {
     attach(sessionId: string) {
       attached = sessionId;
+      lastSyncedSize = '';
       terminal.reset();
       terminal.focus();
-      try { fit.fit(); } catch { /* 尚未布局 */ }
+      fitToHost();
       syncSize();
-      updateDiag();
-      // shadow 容器内字体/布局测量可能晚一拍才稳定：延迟复测兜底，
-      // 避免会话以默认 80 列启动后不再修正（ls 列数异常的根源）。
-      setTimeout(() => {
-        try { fit.fit(); } catch { return; }
-        syncSize();
-        updateDiag();
-      }, 120);
-      setTimeout(() => {
-        try { fit.fit(); } catch { return; }
-        syncSize();
-        updateDiag();
-      }, 400);
-      scrollToBottomSoon();
+      // terminalSpawn 返回前 shell 已可能产生提示符。先重放这些原始输出，
+      // 保留完整控制序列，再让 xterm 在解析完成后定位到最新一行。
+      const buffered = pendingOutput.get(sessionId);
+      pendingOutput.clear();
+      if (buffered) {
+        terminal.write(buffered, () => terminal.scrollToBottom());
+      }
+      // 字体与 Shadow 布局可能晚一拍稳定，复测只在网格真的变化时同步。
+      scheduleFit(120);
+      scheduleFit(400);
     },
     size() {
       return { cols: terminal.cols, rows: terminal.rows };
     },
     dispose() {
+      for (const timer of pendingTimers) window.clearTimeout(timer);
+      pendingTimers.clear();
+      pendingOutput.clear();
       disposers.forEach((stop) => stop());
       disposers = [];
       terminal.dispose();
@@ -131,8 +140,12 @@ export function createTerminalView(
             session_id?: string;
             data?: string;
           };
-          if (output.session_id === attached && output.data) {
+          if (!output.session_id || !output.data) return;
+          if (output.session_id === attached) {
             terminal.write(output.data);
+          } else if (!attached) {
+            const buffered = `${pendingOutput.get(output.session_id) ?? ''}${output.data}`;
+            pendingOutput.set(output.session_id, buffered.slice(-maxPendingOutput));
           }
         } catch {
           /* 忽略坏帧 */
@@ -158,10 +171,8 @@ export function createTerminalView(
   // 容器尺寸自适应（环境不支持 ResizeObserver 时跳过，如测试环境）
   if (typeof ResizeObserver !== 'undefined') {
     const observer = new ResizeObserver(() => {
-      try { fit.fit(); } catch { return; }
+      if (!fitToHost()) return;
       syncSize();
-      updateDiag();
-      scrollToBottomSoon();
     });
     observer.observe(host);
     disposers.push(() => observer.disconnect());

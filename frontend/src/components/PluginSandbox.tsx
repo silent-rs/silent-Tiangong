@@ -83,23 +83,34 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
   let disposed = false;
   const channelHandlers = new Map<string, Set<(payload: string) => void>>();
   const subscribedChannels = new Set<string>();
+  const pendingSubscriptions = new Set<Promise<void>>();
   let unlistenEvent: (() => void) | null = null;
+  let eventListeningTask: Promise<void> | null = null;
 
-  const ensureEventListening = async () => {
-    if (unlistenEvent || disposed) return;
-    const stop = await api.onBridgeEvent((event) => {
+  const ensureEventListening = () => {
+    if (unlistenEvent || disposed) return Promise.resolve();
+    if (eventListeningTask) return eventListeningTask;
+    eventListeningTask = api.onBridgeEvent((event) => {
       if (event.plugin_id !== pluginId) return;
       channelHandlers.get(event.channel)?.forEach((handler) => handler(event.payload));
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlistenEvent = stop;
+      }
+    }).finally(() => {
+      eventListeningTask = null;
     });
-    if (disposed) {
-      stop();
-    } else {
-      unlistenEvent = stop;
-    }
+    return eventListeningTask;
   };
 
   return {
     async call(method, payload) {
+      if (disposed) throw new Error('bridge 已随容器卸载');
+      // 插件常在 bridge.on 后立即启动会产生通知的 sidecar。先等宿主订阅
+      // 真正生效，避免首批输出在 invoke 与 subscribe 的竞态中丢失。
+      await Promise.all([...pendingSubscriptions]);
       if (disposed) throw new Error('bridge 已随容器卸载');
       return api.bridgeCall(pluginId, method, payload);
     },
@@ -112,10 +123,16 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
       handlers.add(handler);
       if (!subscribedChannels.has(channel)) {
         subscribedChannels.add(channel);
-        api.bridgeSubscribe(pluginId, channel).catch((error) => {
-          console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
-        });
-        void ensureEventListening();
+        const subscription = Promise.all([
+          api.bridgeSubscribe(pluginId, channel),
+          ensureEventListening(),
+        ])
+          .catch((error) => {
+            console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
+          })
+          .then(() => undefined)
+          .finally(() => pendingSubscriptions.delete(subscription));
+        pendingSubscriptions.add(subscription);
       }
       return () => {
         handlers?.delete(handler);
@@ -129,6 +146,7 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
     dispose() {
       disposed = true;
       channelHandlers.clear();
+      pendingSubscriptions.clear();
       for (const channel of subscribedChannels) {
         api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
       }
