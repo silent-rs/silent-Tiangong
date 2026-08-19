@@ -102,7 +102,8 @@ fn login_shell_args(shell: &str) -> Vec<&'static str> {
     }
 }
 
-fn default_cols() -> u16 {    80
+fn default_cols() -> u16 {
+    80
 }
 fn default_rows() -> u16 {
     24
@@ -277,8 +278,8 @@ impl TerminalService {
         std::thread::spawn(move || {
             while let Ok(first) = chunk_rx.recv() {
                 let mut pending = first;
-                while let Ok(more) =
-                    chunk_rx.recv_timeout(std::time::Duration::from_millis(OUTPUT_FLUSH_INTERVAL_MS))
+                while let Ok(more) = chunk_rx
+                    .recv_timeout(std::time::Duration::from_millis(OUTPUT_FLUSH_INTERVAL_MS))
                 {
                     pending.extend_from_slice(&more);
                     if pending.len() >= 64 * 1024 {
@@ -507,7 +508,9 @@ async fn dispatch_operation(
         "terminalFind" => {
             let request: FindRequest =
                 serde_json::from_value(payload).context("terminalFind 参数无效")?;
-            Ok(serde_json::to_value(service.find_by_scope(&request.scope_id))?)
+            Ok(serde_json::to_value(
+                service.find_by_scope(&request.scope_id),
+            )?)
         }
         other => bail!("未知操作: {other}"),
     }
