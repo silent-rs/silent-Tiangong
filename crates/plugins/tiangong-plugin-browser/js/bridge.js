@@ -1079,6 +1079,14 @@
             var locatedSelector = located.selector;
             var target = located.target;
 
+            // Agent 鼠标：填写前在目标字段展示专属光标（无按压，标识
+            // Agent 正在操作此处）
+            try {
+                el.scrollIntoView({ block: 'center', behavior: 'instant' });
+                var fr = el.getBoundingClientRect();
+                this.showAgentCursor(fr.left + fr.width / 2, fr.top + fr.height / 2, {});
+            } catch (e) { /* ignore */ }
+
             if (el.getAttribute && el.getAttribute('contenteditable') === 'true') {
                 el.focus();
                 el.textContent = value;
@@ -1723,6 +1731,13 @@
             clickTarget.scrollIntoView({ block: 'center', behavior: 'instant' });
             clickTarget.focus();
 
+            // Agent 鼠标：点击前在目标位置展示专属光标与按压波纹（与
+            // 用户系统鼠标区分，操作可见）；纯视觉增强，失败不影响点击
+            try {
+                var cr = clickTarget.getBoundingClientRect();
+                this.showAgentCursor(cr.left + cr.width / 2, cr.top + cr.height / 2, { press: true });
+            } catch (e) { /* ignore */ }
+
             // 非原生按钮（如 div[role="button"]）使用模拟鼠标事件，
             // 确保 React/Vue 等框架的事件委托系统能正确捕获点击。
             // 原生按钮直接用 .click() 产生 trusted 事件。
@@ -1748,6 +1763,64 @@
             el.dispatchEvent(new MouseEvent('mousedown', opts));
             el.dispatchEvent(new MouseEvent('mouseup', opts));
             el.dispatchEvent(new MouseEvent('click', opts));
+        },
+
+        // Agent 鼠标：在页面固定层展示专属光标（紫色箭头 + Agent 标签 +
+        // 可选按压波纹），与用户系统鼠标区分。Shadow DOM 隔离页面样式，
+        // 幂等创建复用；停留 hold 后淡出移出视区。纯视觉增强，任何
+        // 异常静默吞掉，不影响操作本身。
+        showAgentCursor: function(x, y, opts) {
+            opts = opts || {};
+            try {
+                var host = document.getElementById('__tiangong_agent_cursor');
+                if (!host) {
+                    host = document.createElement('div');
+                    host.id = '__tiangong_agent_cursor';
+                    host.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483647;pointer-events:none;';
+                    var shadow = host.attachShadow ? host.attachShadow({ mode: 'closed' }) : host;
+                    var style = document.createElement('style');
+                    style.textContent = ''
+                        + '.cursor{position:fixed;left:-100px;top:-100px;transition:left .18s ease-out,top .18s ease-out,opacity .3s;will-change:left,top;opacity:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,.5));}'
+                        + '.cursor.fade{opacity:0;}'
+                        + '.arrow{display:block;width:22px;height:22px;}'
+                        + '.tag{position:absolute;left:17px;top:15px;padding:1px 5px;border-radius:4px;background:#7c3aed;color:#fff;font:600 10px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;white-space:nowrap;letter-spacing:.02em;}'
+                        + '.ripple{position:absolute;left:-9px;top:-9px;width:40px;height:40px;border:2px solid #7c3aed;border-radius:50%;opacity:0;transform:scale(.3);}'
+                        + '.cursor.press .ripple{animation:tgAgentPress .5s ease-out;}'
+                        + '@keyframes tgAgentPress{0%{opacity:.9;transform:scale(.3)}100%{opacity:0;transform:scale(1.2)}}';
+                    shadow.appendChild(style);
+                    var wrap = document.createElement('div');
+                    wrap.className = 'cursor';
+                    wrap.innerHTML = '<svg class="arrow" viewBox="0 0 24 24"><path d="M4 2l14 8.5-6.1 1.2L16 18l-3 1.5-4-6.3L4 16z" fill="#7c3aed" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/></svg><span class="tag">Agent</span><span class="ripple"></span>';
+                    shadow.appendChild(wrap);
+                    document.documentElement.appendChild(host);
+                    host.__tgWrap = wrap;
+                    host.__tgHideTimer = 0;
+                    host.__tgMoveTimer = 0;
+                }
+                var wrap = host.__tgWrap;
+                window.clearTimeout(host.__tgHideTimer);
+                window.clearTimeout(host.__tgMoveTimer);
+                wrap.classList.remove('fade');
+                // 下一帧再定位：先复位再移动，保证从上一位置滑入的过渡
+                window.requestAnimationFrame(function() {
+                    wrap.style.left = x + 'px';
+                    wrap.style.top = y + 'px';
+                });
+                if (opts.press) {
+                    wrap.classList.remove('press');
+                    void wrap.offsetWidth;
+                    wrap.classList.add('press');
+                }
+                host.__tgHideTimer = window.setTimeout(function() {
+                    wrap.classList.add('fade');
+                    host.__tgMoveTimer = window.setTimeout(function() {
+                        if (wrap.classList.contains('fade')) {
+                            wrap.style.left = '-100px';
+                            wrap.style.top = '-100px';
+                        }
+                    }, 400);
+                }, opts.hold || 1400);
+            } catch (e) { /* 纯增强，静默 */ }
         },
 
         // 等待页面条件满足（异步，返回 Promise）
