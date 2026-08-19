@@ -14,6 +14,7 @@
     "tools": true,
     "prompt": true,
     "events": [
+      "tool.*",
       "webview.event"
     ]
   },
