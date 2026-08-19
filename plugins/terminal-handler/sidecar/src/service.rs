@@ -164,44 +164,42 @@ impl TerminalService {
         let session_id = self.next_session_id();
         let killer = child.clone_killer();
 
-        // 输出读取线程：阻塞读 → 节流批量 → 通知推送
+        // 输出管道：阻塞读线程只管搬运；聚合线程首批到达后在
+        // OUTPUT_FLUSH_INTERVAL_MS 窗口内合并（避免每字节一帧），窗口结束
+        // 立即发送。此前在阻塞读上做攒批，PTY 无后续输出时永远等不到
+        // 退出条件，已读输出滞留不发送（终端黑框的直接原因）。
         let mut reader = pair
             .master
             .try_clone_reader()
             .context("克隆 PTY 读取端失败")?;
         let output_session = session_id.clone();
+        let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
-            let mut pending: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(bytes) => {
-                        pending.extend_from_slice(&buffer[..bytes]);
-                        // 攒批：短睡眠合并高频输出，避免每字节一帧
-                        while pending.len() < 64 * 1024 {
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                OUTPUT_FLUSH_INTERVAL_MS,
-                            ));
-                            match reader.read(&mut buffer) {
-                                Ok(0) => break,
-                                Ok(bytes) => pending.extend_from_slice(&buffer[..bytes]),
-                                Err(_) => break,
-                            }
+                        let chunk = buffer[..bytes].to_vec();
+                        if chunk_tx.send(chunk).is_err() {
+                            break;
                         }
-                        let data = String::from_utf8_lossy(&pending).to_string();
-                        pending.clear();
-                        let payload = serde_json::to_string(&OutputNotification {
-                            session_id: &output_session,
-                            data: &data,
-                        })
-                        .unwrap_or_default();
-                        emit_notification(CHANNEL_OUTPUT, payload);
                     }
                     Err(_) => break,
                 }
             }
-            if !pending.is_empty() {
+        });
+        std::thread::spawn(move || {
+            while let Ok(first) = chunk_rx.recv() {
+                let mut pending = first;
+                while let Ok(more) =
+                    chunk_rx.recv_timeout(std::time::Duration::from_millis(OUTPUT_FLUSH_INTERVAL_MS))
+                {
+                    pending.extend_from_slice(&more);
+                    if pending.len() >= 64 * 1024 {
+                        break;
+                    }
+                }
                 let data = String::from_utf8_lossy(&pending).to_string();
                 let payload = serde_json::to_string(&OutputNotification {
                     session_id: &output_session,
