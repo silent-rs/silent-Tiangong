@@ -429,9 +429,15 @@ jobs:
 
       - name: Check sidecar
         env:
+          PLUGIN: ${{ matrix.sidecar.plugin }}
           PACKAGE: ${{ matrix.sidecar.package }}
           TARGET: ${{ matrix.sidecar.target }}
-        run: cargo check --locked -p "$PACKAGE" --target "$TARGET"
+        run: |
+          if [[ "$(uname -s)" == MINGW* && "$PLUGIN" == "memory" ]]; then
+            export PATH="/c/Strawberry/perl/bin:$PATH"
+            perl -e 'use Locale::Maketext::Simple; print "perl OK: $^X\n"'
+          fi
+          cargo check --locked -p "$PACKAGE" --target "$TARGET"
 
       - name: Lint sidecar on Linux
         if: runner.os == 'Linux'
