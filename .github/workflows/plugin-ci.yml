@@ -1,0 +1,440 @@
+name: Plugin CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: plugin-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Plan Plugin Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.resolve.outputs.plugins }}
+      sidecars: ${{ steps.resolve.outputs.sidecars }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve affected plugins
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$PR_BASE" ]]; then
+            mapfile -t files < <(git diff --name-only "$PR_BASE...HEAD")
+          else
+            files=()
+          fi
+
+          check_all=false
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            check_all=true
+          fi
+          for file in "${files[@]}"; do
+            case "$file" in
+              Cargo.toml|Cargo.lock|.cargo/*|.github/workflows/plugin-ci.yml|plugins/sdk/*|xtask/*|crates/tiangong-plugin-runtime/*|crates/tiangong-plugin-sidecar/*)
+                check_all=true
+                ;;
+            esac
+          done
+
+          metadata="$(cargo metadata --no-deps --format-version 1 --locked)"
+          plugin_matrix='[]'
+          sidecar_matrix='[]'
+
+          changed_root() {
+            local root="$1"
+            if [[ "$check_all" == "true" ]]; then
+              return 0
+            fi
+            for file in "${files[@]}"; do
+              if [[ "$file" == "$root/"* ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          package_name() {
+            local manifest="$1"
+            jq -er --arg suffix "/$manifest" \
+              '.packages[] | select(.manifest_path | endswith($suffix)) | .name' \
+              <<< "$metadata"
+          }
+
+          append_plugin() {
+            local item="$1"
+            plugin_matrix="$(jq -c --argjson item "$item" '. + [$item]' <<< "$plugin_matrix")"
+          }
+
+          append_sidecars() {
+            local plugin="$1"
+            local root="$2"
+            local package="$3"
+            local runner platform target item
+            while IFS='|' read -r runner platform target; do
+              item="$(jq -nc \
+                --arg plugin "$plugin" \
+                --arg root "$root" \
+                --arg package "$package" \
+                --arg runner "$runner" \
+                --arg platform "$platform" \
+                --arg target "$target" \
+                '{plugin:$plugin,root:$root,package:$package,runner:$runner,platform:$platform,target:$target}')"
+              sidecar_matrix="$(jq -c --argjson item "$item" '. + [$item]' <<< "$sidecar_matrix")"
+            done <<'PLATFORMS'
+          ubuntu-latest|linux-x86_64|x86_64-unknown-linux-gnu
+          macos-latest|darwin-aarch64|aarch64-apple-darwin
+          windows-latest|windows-x86_64|x86_64-pc-windows-msvc
+          PLATFORMS
+          }
+
+          mapfile -t manifests < <(
+            git ls-files 'plugins/*/plugin.json' | awk -F/ 'NF == 3' | sort
+          )
+          for manifest in "${manifests[@]}"; do
+            root="${manifest%/plugin.json}"
+            if ! changed_root "$root"; then
+              continue
+            fi
+
+            id="$(jq -er '.id' "$manifest")"
+            protocol_manifest="$root/protocol/Cargo.toml"
+            wasm_manifest="$root/wasm/Cargo.toml"
+            sidecar_manifest="$root/sidecar/Cargo.toml"
+            package_json="$root/package.json"
+
+            has_protocol=false
+            has_wasm=false
+            has_sidecar=false
+            has_ui=false
+            [[ -f "$protocol_manifest" ]] && has_protocol=true
+            [[ -f "$wasm_manifest" ]] && has_wasm=true
+            [[ -f "$sidecar_manifest" ]] && has_sidecar=true
+            [[ -f "$package_json" ]] && has_ui=true
+
+            if [[ "$has_protocol" != "$has_wasm" ]]; then
+              echo "Plugin $id must provide protocol and WASM together" >&2
+              exit 1
+            fi
+            manifest_has_ui="$(jq -r '.ui != null' "$manifest")"
+            if [[ "$manifest_has_ui" != "$has_ui" ]]; then
+              echo "Plugin $id UI manifest and package.json do not match" >&2
+              exit 1
+            fi
+            if [[ "$has_protocol" != "true" && "$has_ui" != "true" ]]; then
+              echo "Plugin $id has no checkable WASM or UI" >&2
+              exit 1
+            fi
+
+            protocol=''
+            wasm=''
+            sidecar=''
+            ui_test=false
+            if [[ "$has_protocol" == "true" ]]; then
+              protocol="$(package_name "$protocol_manifest")"
+              wasm="$(package_name "$wasm_manifest")"
+            fi
+            if [[ "$has_sidecar" == "true" ]]; then
+              sidecar="$(package_name "$sidecar_manifest")"
+            fi
+            if [[ "$has_ui" == "true" ]]; then
+              if jq -e '.scripts.test // empty' "$package_json" >/dev/null; then
+                ui_test=true
+              fi
+            fi
+
+            item="$(jq -nc \
+              --arg id "$id" \
+              --arg root "$root" \
+              --arg manifest "$manifest" \
+              --arg protocol "$protocol" \
+              --arg wasm "$wasm" \
+              --arg sidecar "$sidecar" \
+              --argjson rust "$has_protocol" \
+              --argjson ui "$has_ui" \
+              --argjson ui_test "$ui_test" \
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
+            append_plugin "$item"
+            if [[ -n "$sidecar" ]]; then
+              append_sidecars "$id" "$root" "$sidecar"
+            fi
+          done
+
+          mapfile -t native_manifests < <(
+            git ls-files 'crates/plugins/*/Cargo.toml' | awk -F/ 'NF == 4' | sort
+          )
+          for manifest in "${native_manifests[@]}"; do
+            root="${manifest%/Cargo.toml}"
+            if ! changed_root "$root"; then
+              continue
+            fi
+            package="$(package_name "$manifest")"
+            id="${root##*/}"
+            id="${id#tiangong-plugin-}"
+            item="$(jq -nc \
+              --arg id "$id" \
+              --arg root "$root" \
+              --arg package "$package" \
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
+            append_plugin "$item"
+          done
+
+          plugin_matrix="$(jq -c 'sort_by(.id)' <<< "$plugin_matrix")"
+          sidecar_matrix="$(jq -c 'sort_by(.plugin, .platform)' <<< "$sidecar_matrix")"
+          echo "Plugins: $plugin_matrix"
+          echo "Sidecars: $sidecar_matrix"
+          echo "plugins=$plugin_matrix" >> "$GITHUB_OUTPUT"
+          echo "sidecars=$sidecar_matrix" >> "$GITHUB_OUTPUT"
+
+  plugin:
+    name: Plugin (${{ matrix.plugin.id }})
+    needs: plan
+    if: needs.plan.outputs.plugins != '[]' && needs.plan.outputs.plugins != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.plan.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust for WASM plugin
+        if: matrix.plugin.rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+
+      - name: Setup Rust for native plugin
+        if: matrix.plugin.native
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install native plugin system dependencies
+        if: matrix.plugin.native
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            pkg-config \
+            libglib2.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Cache Rust artifacts
+        if: matrix.plugin.rust || matrix.plugin.native
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: plugin-${{ matrix.plugin.id }}
+
+      - name: Validate plugin manifest
+        if: matrix.plugin.manifest != ''
+        env:
+          PLUGIN_ID: ${{ matrix.plugin.id }}
+          PLUGIN_MANIFEST: ${{ matrix.plugin.manifest }}
+        run: jq -e --arg id "$PLUGIN_ID" '.id == $id and (.version | type == "string")' "$PLUGIN_MANIFEST"
+
+      - name: Validate Rust plugin configuration
+        if: matrix.plugin.rust
+        env:
+          PLUGIN_ID: ${{ matrix.plugin.id }}
+        run: cargo run --locked -p xtask -- validate-plugin "$PLUGIN_ID"
+
+      - name: Check Rust plugin formatting
+        if: matrix.plugin.rust
+        env:
+          PROTOCOL: ${{ matrix.plugin.protocol }}
+          WASM: ${{ matrix.plugin.wasm }}
+          SIDECAR: ${{ matrix.plugin.sidecar }}
+        run: |
+          packages=(-p "$PROTOCOL" -p "$WASM")
+          if [[ -n "$SIDECAR" ]]; then
+            packages+=(-p "$SIDECAR")
+          fi
+          cargo fmt "${packages[@]}" -- --check
+
+      - name: Check plugin protocol
+        if: matrix.plugin.rust
+        env:
+          PROTOCOL: ${{ matrix.plugin.protocol }}
+        run: cargo check --locked -p "$PROTOCOL" --all-targets
+
+      - name: Test plugin protocol
+        if: matrix.plugin.rust
+        env:
+          PROTOCOL: ${{ matrix.plugin.protocol }}
+        run: cargo test --locked -p "$PROTOCOL"
+
+      - name: Lint plugin protocol
+        if: matrix.plugin.rust
+        env:
+          PROTOCOL: ${{ matrix.plugin.protocol }}
+        run: cargo clippy --locked -p "$PROTOCOL" --all-targets -- -D warnings
+
+      - name: Check plugin WASM
+        if: matrix.plugin.rust
+        env:
+          WASM: ${{ matrix.plugin.wasm }}
+        run: cargo check --locked -p "$WASM" --target wasm32-wasip2
+
+      - name: Lint plugin WASM
+        if: matrix.plugin.rust
+        env:
+          WASM: ${{ matrix.plugin.wasm }}
+        run: cargo clippy --locked -p "$WASM" --target wasm32-wasip2 -- -D warnings
+
+      - name: Check native plugin formatting
+        if: matrix.plugin.native
+        env:
+          PACKAGE: ${{ matrix.plugin.native_package }}
+        run: cargo fmt -p "$PACKAGE" -- --check
+
+      - name: Check native plugin
+        if: matrix.plugin.native
+        env:
+          PACKAGE: ${{ matrix.plugin.native_package }}
+        run: cargo check --locked -p "$PACKAGE"
+
+      - name: Lint native plugin
+        if: matrix.plugin.native
+        env:
+          PACKAGE: ${{ matrix.plugin.native_package }}
+        run: cargo clippy --locked -p "$PACKAGE" --all-targets -- -D warnings
+
+      - name: Test native plugin
+        if: matrix.plugin.native
+        env:
+          PACKAGE: ${{ matrix.plugin.native_package }}
+        run: cargo test --locked -p "$PACKAGE"
+
+      - name: Setup Node
+        if: matrix.plugin.ui
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: yarn
+          cache-dependency-path: ${{ matrix.plugin.root }}/yarn.lock
+
+      - name: Enable Yarn
+        if: matrix.plugin.ui
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+
+      - name: Install plugin UI dependencies
+        if: matrix.plugin.ui
+        run: yarn --cwd "${{ matrix.plugin.root }}" install --frozen-lockfile
+
+      - name: Test plugin UI
+        if: matrix.plugin.ui && matrix.plugin.ui_test
+        run: yarn --cwd "${{ matrix.plugin.root }}" test
+
+      - name: Build plugin UI
+        if: matrix.plugin.ui
+        run: yarn --cwd "${{ matrix.plugin.root }}" build
+
+      - name: Validate plugin UI entries
+        if: matrix.plugin.ui
+        env:
+          PLUGIN_ROOT: ${{ matrix.plugin.root }}
+          PLUGIN_MANIFEST: ${{ matrix.plugin.manifest }}
+        run: |
+          while IFS= read -r entry; do
+            test -f "$PLUGIN_ROOT/$entry"
+          done < <(jq -er '.ui.contributions[].entry' "$PLUGIN_MANIFEST")
+
+  sidecar:
+    name: Sidecar (${{ matrix.sidecar.plugin }} / ${{ matrix.sidecar.platform }})
+    needs: plan
+    if: needs.plan.outputs.sidecars != '[]' && needs.plan.outputs.sidecars != ''
+    runs-on: ${{ matrix.sidecar.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sidecar: ${{ fromJSON(needs.plan.outputs.sidecars) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.sidecar.target }}
+
+      - name: Install Computer Use Linux dependencies
+        if: runner.os == 'Linux' && matrix.sidecar.plugin == 'computer-use'
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Cache sidecar artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: plugin-sidecar-${{ matrix.sidecar.plugin }}-${{ matrix.sidecar.target }}
+
+      - name: Check sidecar
+        env:
+          PACKAGE: ${{ matrix.sidecar.package }}
+          TARGET: ${{ matrix.sidecar.target }}
+        run: cargo check --locked -p "$PACKAGE" --target "$TARGET"
+
+      - name: Lint sidecar on Linux
+        if: runner.os == 'Linux'
+        env:
+          PACKAGE: ${{ matrix.sidecar.package }}
+          TARGET: ${{ matrix.sidecar.target }}
+        run: cargo clippy --locked -p "$PACKAGE" --target "$TARGET" --all-targets -- -D warnings
+
+      - name: Test sidecar on Linux
+        if: runner.os == 'Linux'
+        env:
+          PACKAGE: ${{ matrix.sidecar.package }}
+          TARGET: ${{ matrix.sidecar.target }}
+        run: cargo test --locked -p "$PACKAGE" --target "$TARGET"
+
+  result:
+    name: Plugin CI
+    needs: [plan, plugin, sidecar]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check matrix results
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLUGIN_RESULT: ${{ needs.plugin.result }}
+          SIDECAR_RESULT: ${{ needs.sidecar.result }}
+        run: |
+          if [[ "$PLAN_RESULT" != "success" ]]; then
+            exit 1
+          fi
+          for result in "$PLUGIN_RESULT" "$SIDECAR_RESULT"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              exit 1
+            fi
+          done
