@@ -45,6 +45,9 @@ jobs:
           fi
 
           check_all=false
+          fallback_all=false
+          fallback_frontend=false
+          scoped_change=false
           frontend=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
             check_all=true
@@ -53,16 +56,35 @@ jobs:
 
           for file in "${files[@]}"; do
             case "$file" in
-              Cargo.toml|Cargo.lock|.cargo/*|.github/workflows/ci.yml|.github/actions/setup-rust/*)
+              .cargo/*)
                 check_all=true
+                ;;
+              Cargo.toml|Cargo.lock|.github/actions/setup-rust/*)
+                fallback_all=true
+                ;;
+              .github/workflows/ci.yml)
+                fallback_all=true
+                fallback_frontend=true
                 ;;
             esac
             case "$file" in
-              frontend/*|.github/workflows/ci.yml)
+              frontend/*|src/*|src-tauri/*|crates/*|plugins/*|bots/*)
+                scoped_change=true
+                ;;
+            esac
+            case "$file" in
+              frontend/*)
                 frontend=true
                 ;;
             esac
           done
+
+          if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
+            check_all=true
+            if [[ "$fallback_frontend" == "true" ]]; then
+              frontend=true
+            fi
+          fi
 
           workspace="$(pwd)/"
           metadata="$(cargo metadata --no-deps --format-version 1 --locked)"

@@ -46,16 +46,30 @@ jobs:
           fi
 
           check_all=false
+          fallback_all=false
+          scoped_change=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
             check_all=true
           fi
           for file in "${files[@]}"; do
             case "$file" in
-              Cargo.toml|Cargo.lock|.cargo/*|.github/workflows/plugin-ci.yml|plugins/sdk/*|xtask/*|crates/tiangong-plugin-runtime/*|crates/tiangong-plugin-sidecar/*)
+              .cargo/*|plugins/sdk/*|crates/tiangong-plugin-sidecar/*)
                 check_all=true
+                ;;
+              Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*|crates/tiangong-plugin-runtime/*)
+                fallback_all=true
+                ;;
+            esac
+            case "$file" in
+              frontend/*|src/*|src-tauri/*|crates/*|plugins/*|bots/*)
+                scoped_change=true
                 ;;
             esac
           done
+
+          if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
+            check_all=true
+          fi
 
           metadata="$(cargo metadata --no-deps --format-version 1 --locked)"
           plugin_matrix='[]'
@@ -392,6 +406,21 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Memory build dependencies on macOS
+        if: runner.os == 'macOS' && matrix.sidecar.plugin == 'memory'
+        run: brew install protobuf
+
+      - name: Install Memory build dependencies on Linux
+        if: runner.os == 'Linux' && matrix.sidecar.plugin == 'memory'
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Memory build dependencies on Windows
+        if: runner.os == 'Windows' && matrix.sidecar.plugin == 'memory'
+        run: choco install protoc -y
 
       - name: Cache sidecar artifacts
         uses: Swatinem/rust-cache@v2

@@ -42,14 +42,25 @@ jobs:
           fi
 
           check_all=false
+          fallback_all=false
+          scoped_change=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
             check_all=true
           fi
           for file in "${files[@]}"; do
             if [[ "$file" == ".github/workflows/bot-ci.yml" ]]; then
-              check_all=true
+              fallback_all=true
             fi
+            case "$file" in
+              frontend/*|src/*|src-tauri/*|crates/*|plugins/*|bots/*)
+                scoped_change=true
+                ;;
+            esac
           done
+
+          if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
+            check_all=true
+          fi
 
           bots='[]'
           mapfile -t manifests < <(git ls-files 'bots/*/Cargo.toml' | awk -F/ 'NF == 3' | sort)
