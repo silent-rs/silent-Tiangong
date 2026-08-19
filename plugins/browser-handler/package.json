@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "vue-tsc --noEmit",
-    "test": "vitest run",
     "build": "yarn typecheck && vite build",
     "package": "node scripts/package.mjs"
   },
