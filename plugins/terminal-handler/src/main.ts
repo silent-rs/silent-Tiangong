@@ -51,7 +51,7 @@ async function spawnDefault(
   host: HTMLElement,
   scopeId: string,
   workspace: string | undefined,
-): Promise<string> {
+): Promise<{ sessionId: string; boot?: string }> {
   // 等容器布局完成后按真实尺寸启动：shell 首次绘制（提示符/宽度计算）
   // 依赖正确的 cols/rows，错误宽度会导致换行错乱、光标被顶到底部。
   await waitSized(host);
@@ -63,6 +63,7 @@ async function spawnDefault(
     ...(workspace ? { cwd: workspace } : {}),
   })) as {
     session_id?: string;
+    boot_output?: string;
   };
   if (!spawned.session_id) throw new Error('sidecar 未返回会话 ID');
   const sessionId = String(spawned.session_id);
@@ -71,7 +72,9 @@ async function spawnDefault(
     scope_id: scopeId,
     created_at: Date.now(),
   });
-  return sessionId;
+  // 首批输出（提示符）随响应返回：冷启动窗口通知监听未就绪会丢首帧
+  //（黑屏根因），基线渲染不依赖通知时序。
+  return { sessionId, boot: spawned.boot_output };
 }
 
 /**
@@ -113,24 +116,27 @@ async function switchScope(
       view.attach(found.session_id, found.history);
       return;
     }
-    // 无存活会话（sidecar 重启过）：新建 shell，磁盘历史作为回填基线
-    // 显示在上方（对齐内置终端的应用重启恢复）。
-    const restored = found.history || undefined;
-    const sessionId = await spawnDefault(bridge, view, host, scopeId, workspace);
-    if (ticket !== switchTicket) return;
-    view.attach(sessionId, restored);
+    // 新建 shell（无存活会话——sidecar 重启过）：磁盘历史（若有）作为
+    // 回填基线显示在上方（对齐内置终端的应用重启恢复）。
+    await spawnAndAttach(found.history || undefined);
   } catch (error) {
     console.warn('[terminal] 恢复会话失败，转新建：', error);
     try {
-      const sessionId = await spawnDefault(bridge, view, host, scopeId, workspace);
-      if (ticket !== switchTicket) return;
-      view.attach(sessionId);
+      await spawnAndAttach();
     } catch (spawnError) {
       // 容器随面板重建/开发模式严格模式自检销毁：本实例自然终止，
       // 重建后的实例会重新初始化，无需提示（否则每次自检都误报）。
       if (String(spawnError).includes('已随容器卸载')) return;
       showBootError(host, String(spawnError));
     }
+  }
+
+  /** 新建会话并附着：历史基线在前、新 shell 首批输出在后；无可重放
+   * 内容时视图自身显示启动占位（见 terminal-view attach）。 */
+  async function spawnAndAttach(baseline?: string): Promise<void> {
+    const { sessionId, boot } = await spawnDefault(bridge, view, host, scopeId, workspace);
+    if (ticket !== switchTicket) return;
+    view.attach(sessionId, [baseline, boot].filter(Boolean).join('') || undefined);
   }
 }
 

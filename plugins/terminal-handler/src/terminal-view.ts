@@ -109,6 +109,10 @@ export function createTerminalView(
       const buffered = [history ?? '', pending].filter(Boolean).join('');
       if (buffered) {
         terminal.write(buffered, () => terminal.scrollToBottom());
+      } else {
+        // 无可重放内容时 shell 首个提示符可能数百毫秒后经通知到达
+        //（系统 shell 模块加载慢），先给一行状态避免长时间空白。
+        terminal.write('\x1b[90m正在启动终端…\x1b[0m\r\n');
       }
       // 字体与 Shadow 布局可能晚一拍稳定，复测只在网格真的变化时同步。
       scheduleFit(120);

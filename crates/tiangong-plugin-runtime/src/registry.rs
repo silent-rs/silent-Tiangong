@@ -1173,18 +1173,53 @@ fn install_staged_plugin_inner(
         .into_iter()
         .find(|installed| installed.manifest.id == staged.manifest.id);
 
-    if let Some(current) = current {
+    let status = if let Some(current) = current {
         if current.directory != destination {
             bail!(
                 "插件 {} 安装目录与 ID 不一致: {}",
-                current.manifest.id,
+                staged.manifest.id,
                 current.directory.display()
             );
         }
         ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
-        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest)
+        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
     } else {
-        install_new_plugin(storage_root, staged_path, staged.manifest)
+        install_new_plugin(storage_root, staged_path, staged.manifest.clone())
+    };
+    // sidecar 二进制是新落盘文件：macOS 首次执行有一次性的安全评估
+    // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
+    // 业务调用（打开终端 / 首次工具执行）上。
+    if status.is_ok() {
+        prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
+    }
+    status
+}
+
+/// 后台预热插件 sidecar：拉起进程并完成握手（幂等，已运行则即时返回）。
+/// 失败不影响使用——首个业务调用会按原路径重试启动。
+pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
+    let storage_root = storage_root.to_path_buf();
+    let plugin_id = plugin_id.to_string();
+    let spawned = std::thread::Builder::new()
+        .name(format!("prewarm-sidecar-{plugin_id}"))
+        .spawn(move || {
+            let Ok(installed) = find_installed_plugin(&storage_root, &plugin_id) else {
+                return;
+            };
+            if !installed.enabled || installed.manifest.sidecar.is_none() {
+                return;
+            }
+            match sidecar_connection(&storage_root, &installed, false)
+                .and_then(|connection| connection.ensure_running())
+            {
+                Ok(()) => tracing::info!(plugin_id, "插件 sidecar 预热完成"),
+                Err(error) => {
+                    tracing::debug!(plugin_id, %error, "插件 sidecar 预热失败（使用时重试）")
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::debug!(%error, "创建 sidecar 预热线程失败");
     }
 }
 

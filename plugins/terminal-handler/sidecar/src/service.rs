@@ -111,6 +111,12 @@ fn default_rows() -> u16 {
 #[derive(Debug, Serialize)]
 struct SpawnResponse {
     session_id: String,
+    /// 首批输出（shell 提示符等）：随响应返回给 UI 作渲染基线。
+    /// 冷启动窗口内宿主通知监听可能尚未连上（sidecar 通知无订阅者即
+    /// 丢弃），首批走通知会永久丢失——终端黑屏的根因；随响应走则
+    /// 不依赖通知时序。首批已落盘/入历史，聚合线程不再重发。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boot_output: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +247,7 @@ impl TerminalService {
             .context("克隆 PTY 读取端失败")?;
         let output_session = session_id.clone();
         let output_sessions = Arc::clone(&self.sessions);
+        let boot_sessions = Arc::clone(&self.sessions);
         let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
@@ -257,6 +264,16 @@ impl TerminalService {
                 }
             }
         });
+        // 首批输出随响应返回（见 SpawnResponse::boot_output）：最多等
+        // 40ms 收 shell 提示符，收到即止（不等满）。已入历史与落盘，
+        // 聚合线程只负责后续输出，不产生重复。
+        let boot_output = match chunk_rx.recv_timeout(std::time::Duration::from_millis(40)) {
+            Ok(first) => {
+                record_output(&boot_sessions, &output_session, &first);
+                Some(String::from_utf8_lossy(&first).to_string())
+            }
+            Err(_) => None,
+        };
         std::thread::spawn(move || {
             while let Ok(first) = chunk_rx.recv() {
                 let mut pending = first;
@@ -314,7 +331,10 @@ impl TerminalService {
             },
         );
 
-        Ok(SpawnResponse { session_id })
+        Ok(SpawnResponse {
+            session_id,
+            boot_output,
+        })
     }
 
     fn with_session<R>(
