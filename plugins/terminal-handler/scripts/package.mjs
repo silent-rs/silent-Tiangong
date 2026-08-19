@@ -18,10 +18,12 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
-// sidecar 二进制（本平台构建产物）随插件包分发
-const sidecarBinary = join(pluginRoot, 'terminal-handler-sidecar');
-if (existsSync(sidecarBinary)) {
-  copyFileSync(sidecarBinary, join(release, 'terminal-handler-sidecar'));
+// sidecar 制品随插件包分发：优先取 release/ 已有制品（build-sidecar.sh 已放）；
+// 不存在时自动构建（确保 yarn package 一步产出完整可导入的包）。
+const sidecarName = 'terminal-handler-sidecar';
+const releaseSidecar = join(release, sidecarName);
+if (!existsSync(releaseSidecar)) {
+  execSync('bash scripts/build-sidecar.sh', { cwd: pluginRoot, stdio: 'inherit' });
 }
 
 // 打包即校验：清单与 entry 就位，避免导入时才发现问题
