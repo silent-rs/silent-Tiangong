@@ -1487,6 +1487,26 @@ fn install_new_plugin(
     manifest: PluginManifest,
 ) -> Result<PluginStatus> {
     let destination = plugin_directory(storage_root, &manifest.id);
+    // 目录已存在但插件未被注册（如签名校验失败被忽略的旧版残留）：
+    // 按升级路径原子切换并保留数据目录，而不是拒绝导入。
+    if destination.exists() {
+        match PluginManifest::load(&destination.join(MANIFEST_FILE)) {
+            Ok(existing_manifest) => {
+                let existing = InstalledPlugin {
+                    directory: destination.clone(),
+                    manifest: existing_manifest,
+                    enabled: true,
+                    signed_release: None,
+                };
+                return replace_installed_plugin(storage_root, staged_path, &existing, manifest);
+            }
+            Err(_) => {
+                // 无法解析的坏残留：挪进事务目录丢弃后全新安装
+                let discard = transaction_directory(storage_root, "discard-stale")?;
+                std::fs::rename(&destination, &discard)?;
+            }
+        }
+    }
     let retained = if destination.exists() {
         validate_retained_data_directory(&destination)?;
         let retained = transaction_directory(storage_root, "retained-data")?;
