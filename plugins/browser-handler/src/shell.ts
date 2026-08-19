@@ -40,7 +40,15 @@ async function main() {
         return;
       }
       try {
-        const raw = await bridge.call(method, JSON.stringify(invocation.arguments ?? {}));
+        // 会话绑定（对齐终端插件）：Agent 打开/操作的页面归属发起对话，
+        // 与该对话的浏览器面板是同一实例（插件×会话双维度隔离）。
+        const raw = await bridge.call(
+          method,
+          JSON.stringify({
+            ...((invocation.arguments as Record<string, unknown>) ?? {}),
+            session_id: invocation.session_id,
+          }),
+        );
         const parsed = JSON.parse(raw) as {
           view_id?: string;
           tabs?: Array<{ id?: string; url?: string; title?: string }>;

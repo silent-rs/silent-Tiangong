@@ -17,8 +17,16 @@ pub fn handle_webview_primitive(
 ) -> anyhow::Result<String> {
     let request: serde_json::Value = serde_json::from_str(payload)
         .map_err(|error| anyhow::anyhow!("webview 原语负载无效：{error}"))?;
-    // 作用域：调用方插件按插件名隔离 webview 实例（view_id = 插件隔离的会话键）
-    let scope = format!("webview:{plugin_id}");
+    // 作用域：插件 × 会话 双维度隔离（对齐终端插件）：同一插件在不同对话
+    // 各持一套标签与 webview 实例，切换对话互不干扰；负载未带 session_id
+    // 时回退插件级共享（与 UI 无会话上下文的调用兼容）。
+    let session_scope = request
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|session| !session.is_empty())
+        .map(|session| format!("{plugin_id}:{session}"))
+        .unwrap_or_else(|| plugin_id.to_string());
+    let scope = format!("webview:{session_scope}");
     let manager = crate::BrowserManager::from_state(state.registry.session_state(&scope));
     let result = match method {
         // 创建 webview 实例：真实创建（open 复用现有基础设施，含默认 tab）
@@ -72,6 +80,118 @@ pub fn handle_webview_primitive(
                 .map_err(|error| anyhow::anyhow!("隐藏失败：{error}"))?;
             serde_json::json!({ "view_id": scope })
         }
+        // 管理界面位置同步：把 webview 对齐到插件 UI 内容区（窗口逻辑坐标，
+        // 与内置浏览器 browserSetPosition 同一通道）
+        "webview.setPosition" => {
+            let x = request.get("x").and_then(|v| v.as_f64()).unwrap_or(60.0);
+            let y = request.get("y").and_then(|v| v.as_f64()).unwrap_or(60.0);
+            let width = request
+                .get("width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1024.0);
+            let height = request
+                .get("height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(720.0);
+            manager
+                .set_position(x, y)
+                .map_err(|error| anyhow::anyhow!("设置位置失败：{error}"))?;
+            manager
+                .set_size(width, height)
+                .map_err(|error| anyhow::anyhow!("设置尺寸失败：{error}"))?;
+            serde_json::json!({ "view_id": scope })
+        }
+        // 恢复显示（hide 后）：按插件 UI 给定的矩形重新对齐
+        "webview.show" => {
+            let x = request.get("x").and_then(|v| v.as_f64()).unwrap_or(60.0);
+            let y = request.get("y").and_then(|v| v.as_f64()).unwrap_or(60.0);
+            let width = request
+                .get("width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1024.0);
+            let height = request
+                .get("height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(720.0);
+            manager
+                .show_active_webview(app, &(x, y, width, height))
+                .map_err(|error| anyhow::anyhow!("显示失败：{error}"))?;
+            serde_json::json!({ "view_id": scope })
+        }
+        // 标签快照：插件管理界面渲染 tab 条
+        "webview.tabs" => {
+            let snapshot = manager.snapshot_tabs();
+            serde_json::json!({
+                "view_id": scope,
+                "tabs": snapshot.tabs,
+                "active_tab_id": snapshot.active_tab_id,
+            })
+        }
+        "webview.tabNew" => {
+            let url = request
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("about:blank");
+            let tab_id = manager
+                .tab_new(app, url)
+                .map_err(|error| anyhow::anyhow!("新建标签失败：{error}"))?;
+            manager.persist_session_tabs();
+            let snapshot = manager.snapshot_tabs();
+            serde_json::json!({
+                "view_id": scope,
+                "tab_id": tab_id,
+                "tabs": snapshot.tabs,
+                "active_tab_id": snapshot.active_tab_id,
+            })
+        }
+        "webview.tabSwitch" => {
+            let tab_id = request
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.tabSwitch 缺少 tab_id 参数"))?;
+            manager
+                .tab_switch(tab_id)
+                .map_err(|error| anyhow::anyhow!("切换标签失败：{error}"))?;
+            let snapshot = manager.snapshot_tabs();
+            serde_json::json!({
+                "view_id": scope,
+                "tabs": snapshot.tabs,
+                "active_tab_id": snapshot.active_tab_id,
+            })
+        }
+        "webview.tabClose" => {
+            let tab_id = request
+                .get("tab_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.tabClose 缺少 tab_id 参数"))?;
+            manager
+                .tab_close(tab_id)
+                .map_err(|error| anyhow::anyhow!("关闭标签失败：{error}"))?;
+            let snapshot = manager.snapshot_tabs();
+            serde_json::json!({
+                "view_id": scope,
+                "tabs": snapshot.tabs,
+                "active_tab_id": snapshot.active_tab_id,
+            })
+        }
+        "webview.back" => {
+            manager
+                .go_back(app)
+                .map_err(|error| anyhow::anyhow!("后退失败：{error}"))?;
+            serde_json::json!({ "view_id": scope })
+        }
+        "webview.forward" => {
+            manager
+                .go_forward(app)
+                .map_err(|error| anyhow::anyhow!("前进失败：{error}"))?;
+            serde_json::json!({ "view_id": scope })
+        }
+        "webview.reload" => {
+            manager
+                .reload(app)
+                .map_err(|error| anyhow::anyhow!("刷新失败：{error}"))?;
+            serde_json::json!({ "view_id": scope })
+        }
         "webview.close" => {
             manager
                 .close()
@@ -79,12 +199,21 @@ pub fn handle_webview_primitive(
             serde_json::json!({ "view_id": scope })
         }
         // ── 页面协作原语：经命令通道复用 fetcher 实现（策略在插件 TS）──
+        // 注入调用方 scope（插件×会话），保证工具抓取/操作的就是该对话
+        // 面板正在看的同一实例——此前缺省会落到 webview:default，工具与
+        // 面板各看各的页面。
         "webview.fetch"
         | "webview.queryDom"
         | "webview.click"
         | "webview.formFill"
         | "webview.formExtract"
-        | "webview.locate" => crate::bridge::dispatch_collaboration(state, method, &request)?,
+        | "webview.locate" => {
+            let mut scoped = request.clone();
+            if let Some(map) = scoped.as_object_mut() {
+                map.insert("_scope".to_string(), serde_json::json!(session_scope));
+            }
+            crate::bridge::dispatch_collaboration(state, method, &scoped)?
+        }
         other => anyhow::bail!("未知 webview 原语方法：{other}"),
     };
     Ok(serde_json::to_string(&result)?)

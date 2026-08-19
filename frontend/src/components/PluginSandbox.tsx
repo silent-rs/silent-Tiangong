@@ -36,7 +36,10 @@ export function PluginSandbox({
   sessionId,
   workspace,
 }: PluginSandboxProps) {
-  if (sandbox === 'shadow') {
+  // webview 贡献（如浏览器插件）：管理界面（地址栏/工具栏）跑 shadow 容器——
+  // 页面本体是宿主原生 webview 实例，管理界面需要主文档坐标同步其位置，
+  // iframe 内拿不到主窗口坐标，故与 shadow 同路径渲染。
+  if (sandbox === 'shadow' || sandbox === 'webview') {
     return (
       <ShadowContainer
         pluginId={pluginId}
