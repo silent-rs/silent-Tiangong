@@ -1,6 +1,8 @@
 // 开发期打包：构建 UI 并组装可直接「导入本地插件」的插件包目录（release/）。
 // 产物 = plugin.json + dist/（不含源码与 node_modules），走天工正式导入流程
 // （清单校验 → 事务安装 → 注册表加载），用于开发验证的完整闭环。
+// sidecar 插件末尾经 xtask 生成官方开发签名（release.json + release.json.sig），
+// 否则导入后启动 sidecar 会被「未签名插件不允许启动原生 sidecar」拒绝。
 import { cpSync, copyFileSync, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -38,5 +40,11 @@ if (!existsSync(join(release, entry)) && existsSync(join(release, 'dist', entry)
 readFileSync(join(release, entry));
 const fingerprint = `id=${manifest.id} version=${manifest.version} entry=${entry}`;
 writeFileSync(join(release, '.package-info'), `${fingerprint}\n`);
+if (manifest.sidecar) {
+  execSync(`cargo run -p xtask -- sign-plugin "${release}"`, {
+    cwd: join(pluginRoot, '..', '..'),
+    stdio: 'inherit',
+  });
+}
 console.log(`[package] 完成: release/（${fingerprint}）`);
 console.log('[package] 天工「设置 → 插件管理 → 导入本地插件」选择 release 目录');

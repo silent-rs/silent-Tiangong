@@ -341,6 +341,7 @@ fn main() {
             Ok(config) => validate_plugin(config),
             Err(error) => Err(error),
         },
+        [command, directory] if command == "sign-plugin" => sign_plugin(Path::new(directory)),
         [command, input, output] if command == "merge-plugin-dist" => {
             merge_plugin_distributions(Path::new(input), Path::new(output), None)
         }
@@ -392,6 +393,7 @@ fn print_help() {
     eprintln!("  cargo run -p xtask -- validate-plugin <id>");
     eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
+    eprintln!("  cargo run -p xtask -- sign-plugin <插件包目录>");
     eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
     eprintln!(
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
@@ -620,7 +622,95 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
     if !status.success() {
         return Err(invalid_data("插件发布清单签名失败"));
     }
+    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
+    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
     eprintln!("[xtask] release.json 已签名");
+    Ok(())
+}
+
+/// 为本地开发插件包生成签名发布清单：`sign-plugin <插件包目录>`。
+///
+/// 与 CI 的 `build-plugin` 同构：生成 release.json 后用 tauri signer
+/// （官方私钥）签名，签出的制品可被运行时内置官方公钥直接验证。
+/// 需要设置 `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH` 指向本地官方私钥，
+/// 私钥有密码时再设 `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD`。
+fn sign_plugin(directory: &Path) -> io::Result<()> {
+    let manifest_path = directory.join("plugin.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
+        .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let plugin_id = manifest
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_input("plugin.json 缺少 id"))?;
+    if manifest.get("sidecar").is_none() {
+        return Err(invalid_input(format!(
+            "插件 {plugin_id} 未声明 sidecar，无需签名清单"
+        )));
+    }
+
+    let mut release = serde_json::json!({
+        "schema_version": 1,
+        "id": plugin_id,
+        "version": manifest.get("version").cloned().unwrap_or(serde_json::json!("")),
+        "publisher": "tiangong-official",
+        "permissions": manifest.get("permissions").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "manifest": {
+            "path": "plugin.json",
+            "sha256": sha256(&manifest_path)?,
+        },
+    });
+    if let Some(wasm_binary) = manifest
+        .get("wasm")
+        .and_then(|wasm| wasm.get("binary"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let wasm_path = directory.join(wasm_binary);
+        if wasm_path.is_file() {
+            release["wasm"] = serde_json::json!({
+                "path": wasm_binary,
+                "sha256": sha256(&wasm_path)?,
+            });
+        }
+    }
+    if let Some(binary) = manifest
+        .get("sidecar")
+        .and_then(|sidecar| sidecar.get("binary"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let sidecar_path = directory.join(binary);
+        release["sidecar"] = serde_json::json!({
+            "path": binary,
+            "sha256": sha256(&sidecar_path)?,
+        });
+    }
+    let release_path = directory.join("release.json");
+    write_json(&release_path, &release)?;
+
+    // 与 CI write_signed_release 一致：tauri signer 签名后，把原生两行
+    // 签名文本整体 base64 包装（运行时 verify_minisign 读取的格式）。
+    let key_path = std::env::var_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            invalid_input(
+                "缺少插件签名私钥：请设置 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH \
+                 指向本地官方私钥（有密码时另设 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD）",
+            )
+        })?;
+    let password =
+        std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
+    let status = Command::new("cargo")
+        .args(["tauri", "signer", "sign", "-f"])
+        .arg(&key_path)
+        .args(["-p", &password])
+        .arg(&release_path)
+        .status()?;
+    if !status.success() {
+        return Err(invalid_data("插件发布清单签名失败"));
+    }
+    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
+    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
+    eprintln!("[xtask] release.json 已签名（key: {}）", key_path.display());
     Ok(())
 }
 

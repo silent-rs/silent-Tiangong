@@ -11,9 +11,18 @@
 ## 开发循环
 
 ```sh
-yarn package   # 构建 + 组装 release/
+# 首次：确认官方私钥就位（不进仓库；有密码时另设
+# TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD）
+export TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=~/.tiangong/keys/plugin-signing.key
+
+yarn package   # 构建 + 组装 release/ + 官方签名（release.json/.sig）
 # 天工「设置 → 插件管理 → 导入本地插件」选择 release/ 目录
 ```
+
+sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` 签名，
+需要本地安装 tauri-cli）。无官方私钥时可用自生成密钥调试：
+`tauri signer generate -w <key>` 打包签名后，启动应用时设置
+`TIANGONG_PLUGIN_PUBKEY_B64` 为对应公钥内容（base64）覆盖内置公钥。
 
 ## 与宿主的协议
 

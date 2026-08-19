@@ -15,7 +15,8 @@ pub const SIGNED_RELEASE_FILE: &str = "release.json";
 pub const SIGNATURE_FILE: &str = "release.json.sig";
 pub const SIGNED_RELEASE_SCHEMA_VERSION: u32 = 1;
 
-/// 插件专用 minisign 公钥。私钥只保存在官方发布环境。
+/// 插件专用 minisign 公钥。私钥只保存在官方发布环境（CI secret 与
+/// 官方开发者本机，打包时经 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 提供）。
 const OFFICIAL_PLUGIN_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +28,9 @@ pub struct SignedPluginRelease {
     #[serde(default)]
     pub permissions: Vec<String>,
     pub manifest: SignedArtifact,
-    pub wasm: SignedArtifact,
+    /// 纯 TS/sidecar 插件无 wasm 制品，签名清单省略 wasm 条目。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SignedArtifact>,
 }
@@ -100,8 +103,11 @@ impl SignedPluginRelease {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
-        if let Some(wasm_binary) = plugin_manifest.wasm_binary() {
-            self.wasm.verify(directory, wasm_binary)?;
+        // wasm 条目与 plugin.json 声明一致才校验；纯 TS/sidecar 插件两边都缺省。
+        match (&self.wasm, plugin_manifest.wasm_binary()) {
+            (Some(signed_wasm), Some(wasm_binary)) => signed_wasm.verify(directory, wasm_binary)?,
+            (None, None) => {}
+            _ => bail!("插件签名清单与 plugin.json 的 wasm 声明不一致"),
         }
         // 无 wasm（纯 TS/sidecar 插件）：签名建立的是 sidecar 信任边界，
         // manifest 哈希已覆盖 plugin.json；无需 wasm 制品。
