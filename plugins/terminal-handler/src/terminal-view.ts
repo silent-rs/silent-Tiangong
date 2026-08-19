@@ -60,6 +60,11 @@ export function createTerminalView(
       .catch(() => {});
   };
 
+  // 视口回到最新行（shadow 容器内 xterm 的视口刷新异步，初始可能滞留顶部）
+  const scrollToBottomSoon = () => {
+    setTimeout(() => terminal.scrollToBottom(), 0);
+  };
+
   const handle = {
     attach(sessionId: string) {
       attached = sessionId;
@@ -67,6 +72,8 @@ export function createTerminalView(
       terminal.focus();
       fit.fit();
       syncSize();
+      // shadow 容器内视口刷新是异步的，初始可能停留在缓冲顶部
+      scrollToBottomSoon();
     },
     size() {
       return { cols: terminal.cols, rows: terminal.rows };
@@ -129,6 +136,7 @@ export function createTerminalView(
     const observer = new ResizeObserver(() => {
       fit.fit();
       syncSize();
+      scrollToBottomSoon();
     });
     observer.observe(host);
     disposers.push(() => observer.disconnect());
