@@ -18,10 +18,10 @@ WASM 插件。WASM 宿主接口位于
 
 | 形态 | 适用 | 参考工程 |
 | --- | --- | --- |
-| 纯 UI 插件（无 WASM） | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/screenshot-input`（Vue 3 + Vite） |
+| 纯 UI 插件（无 WASM） | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/templates/ui-app` |
 | Desktop TypeScript 工具插件 | 带 UI 的工具提供器、审批与用户征询 | `plugins/interaction-handler`（Vue 3 + Vite） |
 | WASM 逻辑层插件（v1/v2） | 工具、提示词、生命周期、sidecar | `plugins/tiangong-plugin-prompt` 等 |
-| v2 混合（逻辑层 + UI 挂载） | 既有 WASM 插件增加拓展区 App / 设置页 | 见「v2 插件形态」章节 |
+| v2 混合（逻辑层 + UI 挂载） | UI 需要 WASM 或原生 sidecar 能力 | `plugins/screenshot-input` |
 
 脚手架：`cargo run -p xtask -- new-plugin <id>` 生成纯 UI 最小骨架
 （不含交互权限，按需在 manifest 声明）。
@@ -443,7 +443,8 @@ cargo run -p xtask -- new-plugin com.example.myboard
 
 ### Vue 3 + Vite 工程结构
 
-可直接参考 `plugins/screenshot-input`：
+纯 UI 工程可参考 `plugins/interaction-handler`；带 WASM/sidecar 的混合插件可参考
+`plugins/screenshot-input`。Vue 工程的界面部分结构如下：
 
 ```text
 my-plugin/
@@ -581,9 +582,11 @@ yarn typecheck
 yarn package
 ```
 
-`yarn package` 应先构建，再组装仅包含 `plugin.json` 与 `dist/` 的 `release/`，并校验
-清单入口存在。不要导入源码目录，也不要把 `node_modules`、`dist` 或 `release` 提交
-到 Git。具体脚本参考 `plugins/screenshot-input/scripts/package.mjs`。
+纯 UI 插件的 `yarn package` 应先构建，再组装仅包含 `plugin.json` 与 `dist/` 的
+`release/`，并校验清单入口存在。带 sidecar 的混合插件还必须包含 WASM、当前平台
+sidecar、`release.json` 与官方签名；具体脚本参考
+`plugins/screenshot-input/scripts/package.mjs`。不要导入源码目录，也不要把
+`node_modules`、`dist` 或 `release` 提交到 Git。
 
 最后在天工「设置 → 插件管理 → 导入本地插件」选择 `release/`。修改已安装插件时
 同步提升 `plugin.json` 和 `package.json` 的版本，再重新打包导入。

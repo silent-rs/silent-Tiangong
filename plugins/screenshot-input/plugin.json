@@ -1,9 +1,19 @@
 {
   "schema_version": 2,
   "id": "screenshot-input",
-  "version": "0.2.0",
+  "version": "0.3.0",
+  "wasm": {
+    "binary": "tiangong_plugin_screenshot_input_wasm.wasm"
+  },
+  "sidecar": {
+    "binary": "tiangong-screenshot-input-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 300000
+  },
   "entrypoints": ["desktop"],
-  "permissions": ["session.write"],
+  "permissions": ["bridge.call", "session.write", "sidecar.invoke"],
   "ui": {
     "sandbox": "shadow",
     "contributions": [

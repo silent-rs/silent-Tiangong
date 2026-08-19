@@ -5,6 +5,12 @@ import { createTiangongBridge, type HostBridge } from '@tiangong/plugin-sdk';
 const busy = ref(false);
 let bridgePromise: Promise<HostBridge> | null = null;
 
+interface CaptureResult {
+  cancelled: boolean;
+  source?: string;
+  original_name?: string;
+}
+
 function getBridge() {
   bridgePromise ??= createTiangongBridge();
   return bridgePromise;
@@ -15,7 +21,17 @@ async function capture() {
   busy.value = true;
   try {
     const bridge = await getBridge();
-    await bridge.call('session.input.captureRegion', '{}');
+    const raw = await bridge.call('plugin.capture', '{}');
+    const result = JSON.parse(raw) as CaptureResult;
+    if (result.cancelled) return;
+    if (!result.source?.startsWith('data:image/png;base64,')) {
+      throw new Error('截图插件未返回有效的 PNG 图片');
+    }
+    await bridge.call('session.input.addAttachment', JSON.stringify({
+      source: result.source,
+      original_name: result.original_name ?? 'screenshot.png',
+      mime_type: 'image/png',
+    }));
   } catch (error) {
     bridgePromise = null;
     window.alert(error instanceof Error ? error.message : String(error));

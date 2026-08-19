@@ -52,6 +52,9 @@ members = [
     "plugins/tiangong-plugin-speech-to-text/protocol",
     "plugins/tiangong-plugin-speech-to-text/sidecar",
     "plugins/tiangong-plugin-speech-to-text/wasm",
+    "plugins/screenshot-input/protocol",
+    "plugins/screenshot-input/sidecar",
+    "plugins/screenshot-input/wasm",
     "plugins/tiangong-plugin-memory/protocol",
     "plugins/tiangong-plugin-memory/wasm",
     "plugins/tiangong-plugin-memory/sidecar",
@@ -129,6 +132,9 @@ tiangong-plugin-text-to-speech-wasm = { path = "plugins/tiangong-plugin-text-to-
 tiangong-plugin-speech-to-text-protocol = { path = "plugins/tiangong-plugin-speech-to-text/protocol" }
 tiangong-plugin-speech-to-text-sidecar = { path = "plugins/tiangong-plugin-speech-to-text/sidecar" }
 tiangong-plugin-speech-to-text-wasm = { path = "plugins/tiangong-plugin-speech-to-text/wasm" }
+tiangong-plugin-screenshot-input-protocol = { path = "plugins/screenshot-input/protocol" }
+tiangong-plugin-screenshot-input-sidecar = { path = "plugins/screenshot-input/sidecar" }
+tiangong-plugin-screenshot-input-wasm = { path = "plugins/screenshot-input/wasm" }
 tiangong-plugin-scheduler-protocol = { path = "plugins/tiangong-plugin-scheduler/protocol" }
 tiangong-plugin-scheduler-wasm = { path = "plugins/tiangong-plugin-scheduler/wasm" }
 tiangong-plugin-scheduler-sidecar = { path = "plugins/tiangong-plugin-scheduler/sidecar" }

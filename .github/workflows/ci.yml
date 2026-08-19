@@ -1,12 +1,15 @@
-name: CI
+name: App CI
 
 on:
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: app-ci-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,222 +20,122 @@ defaults:
 
 jobs:
   changes:
-    name: Detect Changes
+    name: Detect App Changes
     runs-on: ubuntu-latest
     outputs:
-      # 是否触发了任何后端 Rust 改动（含 workflow 自身），用于编排 fmt / tauri / frontend
-      rust: ${{ steps.resolve.outputs.rust }}
       frontend: ${{ steps.resolve.outputs.frontend }}
-      # 需要校验的 crate 列表（JSON 数组），仅含被直接改动的 crate。
-      # 不做反向依赖闭包扩散，避免底层改动触发几乎全部上游作业。
       matrix: ${{ steps.resolve.outputs.matrix }}
-      wasm_matrix: ${{ steps.resolve.outputs.wasm_matrix }}
-      # 独立 workspace 的 Bot 列表，使用各自 Cargo.toml 单独校验。
-      bots: ${{ steps.resolve.outputs.bots }}
     steps:
-      # 完整克隆：改动文件解析需用 git diff base.sha...HEAD，
-      # 默认 fetch-depth: 1 是浅克隆，base commit 不可达会导致 diff 为空、matrix=[]。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Filter changed paths
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            frontend:
-              - 'frontend/**'
-              - '.github/workflows/**'
-            rust_any:
-              - 'crates/**'
-              - 'plugins/**'
-              - 'src-tauri/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.github/workflows/**'
-            bot_any:
-              - 'bots/**'
-              - '.github/workflows/ci.yml'
-
-      - name: Resolve affected crates
+      - name: Resolve affected App crates
         id: resolve
         env:
-          FRONTEND_ANY: ${{ steps.filter.outputs.frontend }}
-          RUST_ANY: ${{ steps.filter.outputs.rust_any }}
-          BOT_ANY: ${{ steps.filter.outputs.bot_any }}
+          EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
-          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          # 1) 顶层 Rust / Bot / frontend 开关
-          if [[ "$RUST_ANY" == "true" ]]; then rust_flag="true"; else rust_flag="false"; fi
-          if [[ "$BOT_ANY" == "true" ]]; then bot_flag="true"; else bot_flag="false"; fi
-          if [[ "$FRONTEND_ANY" == "true" ]]; then frontend_flag="true"; else frontend_flag="false"; fi
-
-          # 2) 若根 workspace 与独立 Bot 都无 Rust 改动，直接输出空矩阵。
-          if [[ "$rust_flag" != "true" && "$bot_flag" != "true" ]]; then
-            echo "rust=false" >> "$GITHUB_OUTPUT"
-            echo "frontend=${frontend_flag}" >> "$GITHUB_OUTPUT"
-            echo 'matrix=[]' >> "$GITHUB_OUTPUT"
-            echo 'bots=[]' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # 3) 解析 diff。PR 用 base..HEAD，push 事件用 before..HEAD，兜底取全部文件。
           if [[ -n "$PR_BASE" ]]; then
-            range="${PR_BASE}...HEAD"
-          elif [[ -n "$BEFORE" && "$BEFORE" != "0000000000000000000000000000000000000000" ]]; then
-            range="${BEFORE}..HEAD"
+            mapfile -t files < <(git diff --name-only "$PR_BASE...HEAD")
           else
-            range=""
+            files=()
           fi
 
-          if [[ -n "$range" ]]; then
-            mapfile -t files < <(git diff --name-only "$range")
-          else
-            mapfile -t files < <(git diff --name-only HEAD)
+          check_all=false
+          fallback_all=false
+          fallback_frontend=false
+          scoped_change=false
+          frontend=false
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            check_all=true
+            frontend=true
           fi
 
-          # 把改动文件列表经环境变量传给 Python（换行分隔）
-          export CHANGED_FILES="$(printf '%s\n' "${files[@]}")"
+          for file in "${files[@]}"; do
+            case "$file" in
+              .cargo/*)
+                check_all=true
+                ;;
+              Cargo.toml|Cargo.lock|.github/actions/setup-rust/*)
+                fallback_all=true
+                ;;
+              .github/workflows/ci.yml)
+                fallback_all=true
+                fallback_frontend=true
+                ;;
+            esac
+            case "$file" in
+              frontend/*|src/*|src-tauri/*|crates/*|plugins/*|bots/*)
+                scoped_change=true
+                ;;
+            esac
+            case "$file" in
+              frontend/*)
+                frontend=true
+                ;;
+            esac
+          done
 
-          # 4) 用 Python 计算受影响的 crate 闭包：把改动文件映射到 crate，
-          #    再沿正向依赖图把闭包扩展到所有直接/间接依赖它们的上游 crate。
-          matrix_json="$(python3 <<'PY'
-          import json, os
+          if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
+            check_all=true
+            if [[ "$fallback_frontend" == "true" ]]; then
+              frontend=true
+            fi
+          fi
 
-          # workspace 中所有 crate -> 其源码目录前缀（相对仓库根）
-          # 包名与 cargo -p 用的标识一致；src-tauri 的二进制包名为 tiangong-app，
-          # 根二进制（src/main.rs）包名为 tiangong
-          crate_to_prefix = {
-              "tiangong-types":           "crates/tiangong-types/",
-              "tiangong-anthropic":       "crates/tiangong-anthropic/",
-              "tiangong-deepseek":        "crates/tiangong-deepseek/",
-              "tiangong-media":           "crates/tiangong-media/",
-              "tiangong-scheduler":       "crates/tiangong-scheduler/",
-              "tiangong-llm":             "crates/tiangong-llm/",
-              "tiangong-config":          "crates/tiangong-config/",
-              "tiangong-memory":          "crates/tiangong-memory/",
-              "tiangong-core":            "crates/tiangong-core/",
-              "tiangong-cli":             "crates/tiangong-cli/",
-              "tiangong-server":          "crates/tiangong-server/",
-              "tiangong-entry":           "crates/tiangong-entry/",
-              "tiangong-plugin-runtime":        "crates/tiangong-plugin-runtime/",
-              "tiangong-plugin-sidecar":        "crates/tiangong-plugin-sidecar/",
-              "tiangong-plugin-browser":         "crates/plugins/tiangong-plugin-browser/",
-              "tiangong-plugin-command-protocol": "plugins/tiangong-plugin-command/protocol/",
-              "tiangong-plugin-command-sidecar":  "plugins/tiangong-plugin-command/sidecar/",
-              "tiangong-plugin-command-wasm":     "plugins/tiangong-plugin-command/wasm/",
-              "tiangong-plugin-fetch-protocol": "plugins/tiangong-plugin-fetch/protocol/",
-              "tiangong-plugin-fetch-sidecar":  "plugins/tiangong-plugin-fetch/sidecar/",
-              "tiangong-plugin-fetch-wasm":     "plugins/tiangong-plugin-fetch/wasm/",
-              "tiangong-plugin-fs-protocol": "plugins/tiangong-plugin-fs/protocol/",
-              "tiangong-plugin-fs-sidecar":  "plugins/tiangong-plugin-fs/sidecar/",
-              "tiangong-plugin-fs-wasm":     "plugins/tiangong-plugin-fs/wasm/",
-              "tiangong-plugin-index-protocol": "plugins/tiangong-plugin-index/protocol/",
-              "tiangong-plugin-index-sidecar":  "plugins/tiangong-plugin-index/sidecar/",
-              "tiangong-plugin-index-wasm":     "plugins/tiangong-plugin-index/wasm/",
-              "tiangong-plugin-generate-image-protocol": "plugins/tiangong-plugin-generate-image/protocol/",
-              "tiangong-plugin-generate-image-sidecar":  "plugins/tiangong-plugin-generate-image/sidecar/",
-              "tiangong-plugin-generate-image-wasm":     "plugins/tiangong-plugin-generate-image/wasm/",
-              "tiangong-plugin-generate-image-openai-protocol": "plugins/tiangong-plugin-generate-image-openai/protocol/",
-              "tiangong-plugin-generate-image-openai-sidecar":  "plugins/tiangong-plugin-generate-image-openai/sidecar/",
-              "tiangong-plugin-generate-image-openai-wasm":     "plugins/tiangong-plugin-generate-image-openai/wasm/",
-              "tiangong-plugin-generate-video-protocol": "plugins/tiangong-plugin-generate-video/protocol/",
-              "tiangong-plugin-generate-video-sidecar":  "plugins/tiangong-plugin-generate-video/sidecar/",
-              "tiangong-plugin-generate-video-wasm":     "plugins/tiangong-plugin-generate-video/wasm/",
-              "tiangong-plugin-text-to-speech-protocol": "plugins/tiangong-plugin-text-to-speech/protocol/",
-              "tiangong-plugin-text-to-speech-sidecar":  "plugins/tiangong-plugin-text-to-speech/sidecar/",
-              "tiangong-plugin-text-to-speech-wasm":     "plugins/tiangong-plugin-text-to-speech/wasm/",
-              "tiangong-plugin-speech-to-text-protocol": "plugins/tiangong-plugin-speech-to-text/protocol/",
-              "tiangong-plugin-speech-to-text-sidecar":  "plugins/tiangong-plugin-speech-to-text/sidecar/",
-              "tiangong-plugin-speech-to-text-wasm":     "plugins/tiangong-plugin-speech-to-text/wasm/",
-              "tiangong-plugin-memory-protocol": "plugins/tiangong-plugin-memory/protocol/",
-              "tiangong-plugin-memory-sidecar":  "plugins/tiangong-plugin-memory/sidecar/",
-              "tiangong-plugin-memory-wasm":     "plugins/tiangong-plugin-memory/wasm/",
-              "tiangong-plugin-mcp-protocol":    "plugins/tiangong-plugin-mcp/protocol/",
-              "tiangong-plugin-mcp-sidecar":     "plugins/tiangong-plugin-mcp/sidecar/",
-              "tiangong-plugin-mcp-wasm":        "plugins/tiangong-plugin-mcp/wasm/",
-              "tiangong-plugin-scheduler-protocol": "plugins/tiangong-plugin-scheduler/protocol/",
-              "tiangong-plugin-scheduler-sidecar":  "plugins/tiangong-plugin-scheduler/sidecar/",
-              "tiangong-plugin-scheduler-wasm":     "plugins/tiangong-plugin-scheduler/wasm/",
-              "tiangong-plugin-terminal":       "crates/plugins/tiangong-plugin-terminal/",
-              "tiangong-plugin-analyze-attachment-protocol": "plugins/tiangong-plugin-analyze-attachment/protocol/",
-              "tiangong-plugin-analyze-attachment-sidecar":  "plugins/tiangong-plugin-analyze-attachment/sidecar/",
-              "tiangong-plugin-analyze-attachment-wasm":     "plugins/tiangong-plugin-analyze-attachment/wasm/",
-              "tiangong-plugin-skill-protocol": "plugins/tiangong-plugin-skill/protocol/",
-              "tiangong-plugin-skill-sidecar":  "plugins/tiangong-plugin-skill/sidecar/",
-              "tiangong-plugin-skill-wasm":     "plugins/tiangong-plugin-skill/wasm/",
-              "tiangong-plugin-coding-protocol": "plugins/tiangong-plugin-coding/protocol/",
-              "tiangong-plugin-coding-sidecar":  "plugins/tiangong-plugin-coding/sidecar/",
-              "tiangong-plugin-coding-wasm":     "plugins/tiangong-plugin-coding/wasm/",
-              "tiangong-plugin-prompt-protocol": "plugins/tiangong-plugin-prompt/protocol/",
-              "tiangong-plugin-prompt-wasm":     "plugins/tiangong-plugin-prompt/wasm/",
-              "tiangong-app":             "src-tauri/",
-              "tiangong":                 "src/",
-          }
-
-          files = os.environ.get("CHANGED_FILES", "")
-          file_list = [f for f in files.splitlines() if f]
-
-          # 只校验被直接改动的 crate（不做反向依赖闭包扩散）。
-          # rust-crate 作业会把所有受影响 crate 合并到一条 cargo 命令，
-          # 共享同一个 target/，共享依赖只编译一次；若再叠加反向依赖扩散，
-          # 会让底层 crate 改动拉起几乎全部上游 crate，反而拉长单次构建。
-          # 直接改动校验已能覆盖大多数破坏；上游编译问题由 Rust fmt（workspace 级）
-          # 与单次 workspace check 兜底。
-          order = list(crate_to_prefix.keys())
-          affected = [c for c in order if any(f.startswith(crate_to_prefix[c]) for f in file_list)]
-
-          # Split native and WASM-only crates.
-          wasm_crates = [c for c in affected if c.endswith('-wasm')]
-          native_crates = [c for c in affected if not c.endswith('-wasm')]
-
-          print(json.dumps(native_crates))
-          print('WASM_MATRIX:' + json.dumps(wasm_crates))
-          PY
+          workspace="$(pwd)/"
+          metadata="$(cargo metadata --no-deps --format-version 1 --locked)"
+          packages="$(
+            jq -c --arg workspace "$workspace" '
+              [
+                .packages[]
+                | select(.manifest_path | startswith($workspace))
+                | select((.manifest_path | contains("/plugins/")) | not)
+                | select((.manifest_path | endswith("/xtask/Cargo.toml")) | not)
+                | {
+                    name,
+                    prefix: (
+                      if .manifest_path == ($workspace + "Cargo.toml")
+                      then "src/"
+                      else (.manifest_path | ltrimstr($workspace) | rtrimstr("Cargo.toml"))
+                      end
+                    )
+                  }
+              ]
+            ' <<< "$metadata"
           )"
 
-          # 5) Bot 是独立 workspace，不能加入上面的 cargo -p 矩阵。
-          bots_json="$(python3 <<'PY'
-          import json, os
-          from pathlib import Path
+          affected='[]'
+          mapfile -t package_rows < <(jq -c '.[]' <<< "$packages")
+          for row in "${package_rows[@]}"; do
+            name="$(jq -r '.name' <<< "$row")"
+            prefix="$(jq -r '.prefix' <<< "$row")"
+            selected="$check_all"
+            if [[ "$selected" != "true" ]]; then
+              for file in "${files[@]}"; do
+                if [[ "$file" == "$prefix"* ]]; then
+                  selected=true
+                  break
+                fi
+              done
+            fi
+            if [[ "$selected" == "true" ]]; then
+              affected="$(jq -c --arg name "$name" '. + [$name] | unique' <<< "$affected")"
+            fi
+          done
 
-          available = sorted(path.parent.name for path in Path("bots").glob("*/Cargo.toml"))
-          file_list = [f for f in os.environ.get("CHANGED_FILES", "").splitlines() if f]
-          if ".github/workflows/ci.yml" in file_list:
-              affected = available
-          else:
-              changed = {
-                  parts[1]
-                  for f in file_list
-                  if len(parts := f.split("/")) >= 3 and parts[0] == "bots"
-              }
-              affected = [bot for bot in available if bot in changed]
-
-          print(json.dumps(affected))
-          PY
-          )"
-
-          # Extract WASM matrix from Python output (second print line)
-          wasm_matrix_json="$(echo "$matrix_json" | grep '^WASM_MATRIX:' | sed 's/^WASM_MATRIX://')"
-          matrix_json="$(echo "$matrix_json" | grep -v '^WASM_MATRIX:')"
-
-          echo "Affected crates: $matrix_json"
-          echo "Affected WASM crates: $wasm_matrix_json"
-          echo "Affected bots: $bots_json"
-          echo "rust=${rust_flag}" >> "$GITHUB_OUTPUT"
-          echo "frontend=${frontend_flag}" >> "$GITHUB_OUTPUT"
-          echo "matrix=${matrix_json}" >> "$GITHUB_OUTPUT"
-          echo "wasm_matrix=${wasm_matrix_json}" >> "$GITHUB_OUTPUT"
-          echo "bots=${bots_json}" >> "$GITHUB_OUTPUT"
+          echo "App crates: $affected"
+          echo "Frontend: $frontend"
+          echo "matrix=$affected" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
 
   rust-fmt:
-    name: Rust fmt (workspace)
+    name: App Rust fmt
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -240,15 +143,17 @@ jobs:
         with:
           components: rustfmt
       - name: Check formatting
-        # 格式校验必须保证整个 workspace 一致，因此仅做一次、不按 crate 拆分
-        run: cargo fmt --all -- --check
+        env:
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+        run: |
+          packages=()
+          while IFS= read -r package; do
+            packages+=(-p "$package")
+          done < <(jq -r '.[]' <<< "$MATRIX")
+          cargo fmt "${packages[@]}" -- --check
 
-  # check / clippy / nextest 三条作业并行调度、互不阻塞，wall-clock 取最慢的一条。
-  # 三者均把受影响 crate 合并成「-p a -p b ...」，共享同一 target/ 与 rust-cache，
-  # 公共依赖只编译一次；共享 .github/actions/setup-rust 复合 action，避免磁盘释放、
-  # 工具链、系统依赖、缓存、package 解析等步骤重复书写。
   rust-check:
-    name: Rust check (affected crates)
+    name: App Rust check
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
@@ -258,14 +163,18 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
-
-      - name: Check crate
+      - name: Check crates
         env:
-          PKGS: ${{ steps.setup.outputs.pkgs }}
-        run: cargo check $PKGS
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+        run: |
+          packages=()
+          while IFS= read -r package; do
+            packages+=(-p "$package")
+          done < <(jq -r '.[]' <<< "$MATRIX")
+          cargo check "${packages[@]}"
 
   rust-clippy:
-    name: Rust clippy (affected crates)
+    name: App Rust clippy
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
@@ -276,14 +185,18 @@ jobs:
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
           components: clippy
-
-      - name: Run clippy
+      - name: Lint crates
         env:
-          PKGS: ${{ steps.setup.outputs.pkgs }}
-        run: cargo clippy $PKGS --all-targets --tests --benches -- -D warnings
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+        run: |
+          packages=()
+          while IFS= read -r package; do
+            packages+=(-p "$package")
+          done < <(jq -r '.[]' <<< "$MATRIX")
+          cargo clippy "${packages[@]}" --all-targets --tests --benches -- -D warnings
 
   rust-test:
-    name: Rust nextest (affected crates)
+    name: App Rust nextest
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
@@ -294,98 +207,22 @@ jobs:
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
           install-nextest: true
-
-      - name: Run nextest
+      - name: Test crates
         env:
-          PKGS: ${{ steps.setup.outputs.pkgs }}
+          MATRIX: ${{ needs.changes.outputs.matrix }}
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
-        run: cargo nextest run $PKGS --no-tests pass
-
-
-  rust-wasm-check:
-    name: Rust check (WASM crates)
-    needs: changes
-    if: needs.changes.outputs.wasm_matrix != '[]' && needs.changes.outputs.wasm_matrix != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-      - name: Check WASM crates
-        env:
-          MATRIX: ${{ needs.changes.outputs.wasm_matrix }}
         run: |
-          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
-          cargo check $pkgs --target wasm32-wasip2
-
-  rust-wasm-clippy:
-    name: Rust clippy (WASM crates)
-    needs: changes
-    if: needs.changes.outputs.wasm_matrix != '[]' && needs.changes.outputs.wasm_matrix != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
-      - name: Run clippy on WASM crates
-        env:
-          MATRIX: ${{ needs.changes.outputs.wasm_matrix }}
-        run: |
-          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
-          cargo clippy $pkgs --target wasm32-wasip2 -- -D warnings
-
-  bot-check:
-    name: Bot Check (${{ matrix.bot }})
-    needs: changes
-    if: needs.changes.outputs.bots != '[]' && needs.changes.outputs.bots != ''
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        bot: ${{ fromJson(needs.changes.outputs.bots) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Install Bot system dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
-
-      - name: Cache Bot build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: bots/${{ matrix.bot }} -> ../../target
-
-      - name: Check Bot formatting
-        run: cargo fmt --manifest-path bots/${{ matrix.bot }}/Cargo.toml -- --check
-
-      - name: Check Bot
-        run: cargo check --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml
-
-      - name: Lint Bot
-        run: cargo clippy --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml --all-targets -- -D warnings
-
-      - name: Test Bot
-        run: cargo test --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml
+          packages=()
+          while IFS= read -r package; do
+            packages+=(-p "$package")
+          done < <(jq -r '.[]' <<< "$MATRIX")
+          cargo nextest run "${packages[@]}" --no-tests pass
 
   tauri:
     name: Tauri Shell Check
     needs: changes
-    # 仅当 src-tauri/ 本身被直接改动时才跑。matrix 把 src-tauri/ 映射成包名
-    # tiangong-app，所以判断 matrix 是否含该包即可；避免仅改 ci.yml / Cargo.lock
-    # 等无关 Rust 改动也拉起 tauri 校验。
-    if: contains(fromJson(needs.changes.outputs.matrix), 'tiangong-app')
+    if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-app')
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
@@ -398,9 +235,7 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: true
-
       - uses: actions/checkout@v4
-
       - name: Install Tauri system dependencies
         run: |
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
@@ -414,36 +249,28 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Check Tauri shell
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
   frontend:
-    name: Frontend Build
+    name: App Frontend Build
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: yarn
           cache-dependency-path: frontend/yarn.lock
-
       - name: Enable Corepack
         run: corepack enable
-
       - name: Install frontend dependencies
         run: yarn --cwd frontend install --frozen-lockfile
-
       - name: Run frontend tests
         run: yarn --cwd frontend test
-
       - name: Build frontend
         run: yarn --cwd frontend build

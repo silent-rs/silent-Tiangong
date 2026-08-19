@@ -11,7 +11,6 @@ inputs:
     default: ""
   install-nextest:
     description: 是否安装 cargo-nextest。
-    type: boolean
     default: false
   matrix:
     description: 受影响 crate 的 JSON 数组（来自 changes 作业的 matrix 输出）。

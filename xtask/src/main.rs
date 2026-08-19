@@ -34,6 +34,8 @@ struct PublishedPluginRelease {
     signed_releases: BTreeMap<String, PublishedSignedRelease>,
     #[serde(default)]
     sidecars: BTreeMap<String, PublishedRemoteArtifact>,
+    #[serde(default)]
+    ui: BTreeMap<String, PublishedRemoteArtifact>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +303,27 @@ const GENERATE_VIDEO: PluginConfig = PluginConfig {
     protocol_manifest: "plugins/tiangong-plugin-generate-video/protocol/Cargo.toml",
 };
 
+const SCREENSHOT_INPUT: PluginConfig = PluginConfig {
+    id: "screenshot-input",
+    name: "Screenshot Input",
+    description: "跨平台区域截图并加入当前输入草稿",
+    protocol_crate: "tiangong-plugin-screenshot-input-protocol",
+    wasm_crate: "tiangong-plugin-screenshot-input-wasm",
+    wasm_artifact: "tiangong_plugin_screenshot_input_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-screenshot-input-sidecar"),
+    sidecar_artifact: Some("tiangong-screenshot-input-sidecar"),
+    plugin_root: "plugins/screenshot-input",
+    plugin_manifest: "plugins/screenshot-input/plugin.json",
+    protocol_manifest: "plugins/screenshot-input/protocol/Cargo.toml",
+};
+
+fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
+    match config.id {
+        "screenshot-input" => &["dist/index.html"],
+        _ => &[],
+    }
+}
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -320,6 +343,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "fs" => Ok(&FS),
         "command" => Ok(&COMMAND),
         "computer-use" => Ok(&COMPUTER_USE),
+        "screenshot-input" => Ok(&SCREENSHOT_INPUT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
@@ -536,6 +560,7 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         workspace_root.join(config.plugin_manifest),
         staging.join("plugin.json"),
     )?;
+    stage_plugin_ui(&workspace_root, &staging, config)?;
     for directory in PRESERVED_DIRS {
         std::fs::create_dir_all(staging.join(directory))?;
     }
@@ -557,11 +582,44 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     Ok(())
 }
 
+fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig) -> io::Result<()> {
+    let entries = plugin_ui_entries(config);
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let prebuilt = std::env::var_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
+    if prebuilt.is_none() {
+        let plugin_root = workspace_root.join(config.plugin_root);
+        eprintln!("[xtask] 安装并构建 {} UI...", config.name);
+        run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
+        run_yarn(&plugin_root, &["build"])?;
+    } else if entries.len() != 1 {
+        return Err(invalid_input(
+            "TIANGONG_PLUGIN_PREBUILT_UI 仅支持单入口 UI 插件",
+        ));
+    }
+
+    for entry in entries {
+        let source = prebuilt
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(entry));
+        require_file(&source)?;
+        let destination = staging.join(entry);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &destination)?;
+    }
+    Ok(())
+}
+
 /// 生成插件签名发布清单（release.json）并对它做 minisign 数字签名。
 ///
 /// 清单结构与运行时 `signature.rs::SignedPluginRelease` 对齐，覆盖
 /// schema、id、version、publisher、permissions 以及 plugin.json、WASM
-/// 和（若有）sidecar 的 sha256。签名失败直接报错，绝不写空签名文件。
+/// UI 入口和（若有）sidecar 的 sha256。签名失败直接报错，绝不写空签名文件。
 fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> {
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
@@ -598,6 +656,18 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
             "path": sidecar_name,
             "sha256": sha256(&plugin.join(&sidecar_name))?,
         });
+    }
+    let ui = plugin_ui_entries(config)
+        .iter()
+        .map(|entry| {
+            Ok(serde_json::json!({
+                "path": entry,
+                "sha256": sha256(&plugin.join(entry))?,
+            }))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    if !ui.is_empty() {
+        release["ui"] = serde_json::Value::Array(ui);
     }
 
     let release_path = plugin.join("release.json");
@@ -643,6 +713,10 @@ fn generate_oss_distribution(
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
+    let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
+        .trim_end_matches('/')
+        .to_string();
+    let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
     let platform = current_platform_key();
     let dist_root = workspace_root.join(PLUGIN_DIST);
     let release_root = dist_root.join("plugins").join(config.id).join(version);
@@ -655,6 +729,21 @@ fn generate_oss_distribution(
     let dist_wasm = release_root.join(config.wasm_artifact);
     std::fs::copy(&manifest_path, &dist_manifest)?;
     std::fs::copy(plugin.join(config.wasm_artifact), &dist_wasm)?;
+    let mut ui_artifacts = serde_json::Map::new();
+    for entry in plugin_ui_entries(config) {
+        let destination = release_root.join(entry);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(plugin.join(entry), &destination)?;
+        ui_artifacts.insert(
+            (*entry).to_string(),
+            serde_json::json!({
+                "url": format!("{release_url}/{entry}"),
+                "checksum": format!("sha256:{}", sha256(&destination)?),
+            }),
+        );
+    }
     // 签名清单与签名文件复制到分平台目录，供运行时验签（仅 sidecar 插件）。
     if has_sidecar {
         std::fs::copy(
@@ -666,11 +755,6 @@ fn generate_oss_distribution(
             platform_root.join("release.json.sig"),
         )?;
     }
-
-    let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
-        .trim_end_matches('/')
-        .to_string();
-    let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
 
     // sidecar 分发（无 sidecar 的插件跳过）。
     let sidecar_entry = if let Some(sidecar_artifact) = config.sidecar_artifact {
@@ -721,6 +805,7 @@ fn generate_oss_distribution(
             "checksum": wasm_checksum,
         },
         "sidecars": sidecar_entry.unwrap_or_else(|| serde_json::json!({})),
+        "ui": ui_artifacts,
     });
     // 签名清单仅对 sidecar 插件生成，纯 WASM 插件不携带签名。
     if has_sidecar {
@@ -759,6 +844,13 @@ fn generate_oss_distribution(
             platform,
             sidecar_artifact,
             std::env::consts::EXE_SUFFIX,
+        ));
+    }
+    for entry in plugin_ui_entries(config) {
+        checksums.push_str(&format!(
+            "{}  {}\n",
+            sha256(&release_root.join(entry))?,
+            entry,
         ));
     }
     std::fs::write(
@@ -823,6 +915,10 @@ fn validate_plugin_catalog_value(value: &serde_json::Value, path: &Path) -> io::
         })?;
         validate_catalog_artifact(&plugin.manifest, "插件清单")?;
         validate_catalog_artifact(&plugin.wasm, "WASM 制品")?;
+        for (entry, artifact) in &plugin.ui {
+            validate_ui_entry(entry)?;
+            validate_catalog_artifact(artifact, "UI 制品")?;
+        }
 
         for (platform, artifact) in &plugin.sidecars {
             if platform.trim().is_empty() {
@@ -869,6 +965,19 @@ fn validate_catalog_url(value: &str, label: &str) -> io::Result<()> {
             .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
     if parsed.scheme() != "https" && !local_http {
         return Err(invalid_data(format!("{label} 必须使用 HTTPS: {value}")));
+    }
+    Ok(())
+}
+
+fn validate_ui_entry(entry: &str) -> io::Result<()> {
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(invalid_data(format!("UI 制品路径无效: {entry}")));
     }
     Ok(())
 }
@@ -971,6 +1080,23 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     {
         return Err(invalid_data("plugin.json sidecar.binary 与构建产物不一致"));
     }
+    let manifest_ui_entries = manifest
+        .get("ui")
+        .and_then(|value| value.get("contributions"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.get("entry").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let configured_ui_entries = plugin_ui_entries(config)
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if manifest_ui_entries != configured_ui_entries {
+        return Err(invalid_data(format!(
+            "plugin.json UI 入口与构建配置不一致: manifest={manifest_ui_entries:?}, config={configured_ui_entries:?}"
+        )));
+    }
 
     let plugin_root = workspace_root.join(config.plugin_root);
     require_file(&plugin_root.join("wasm/Cargo.toml"))?;
@@ -1030,6 +1156,21 @@ fn run_cargo(workspace_root: &Path, args: &[&str]) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!(
             "cargo {} 执行失败",
+            args.join(" ")
+        )))
+    }
+}
+
+fn run_yarn(directory: &Path, args: &[&str]) -> io::Result<()> {
+    let status = Command::new(env_var_or("YARN", "yarn"))
+        .current_dir(directory)
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "yarn {} 执行失败",
             args.join(" ")
         )))
     }
@@ -1231,9 +1372,12 @@ fn merge_plugin_distributions(
                     )));
                 }
             }
-            if existing.get("manifest") != Some(&manifest) || existing.get("wasm") != Some(&wasm) {
+            if existing.get("manifest") != Some(&manifest)
+                || existing.get("wasm") != Some(&wasm)
+                || existing.get("ui") != release.get("ui")
+            {
                 return Err(invalid_data(format!(
-                    "插件 {key} 的 plugin.json 或 WASM 在不同平台不一致"
+                    "插件 {key} 的 plugin.json、WASM 或 UI 在不同平台不一致"
                 )));
             }
             merge_platform_map(existing, &release, "sidecars", &key)?;

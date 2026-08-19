@@ -356,59 +356,12 @@ fn run_gui() {
                 ));
             }
 
-            // 输入草稿桥接：插件只能提交图片 data URL；宿主验证格式和大小后，
+            // 输入草稿桥接：插件提交图片 data URL；宿主验证格式和大小后，
             // 通过定向事件交给当前输入框加入草稿，不自动发送。
             {
                 let app_handle = app.handle().clone();
                 tiangong_plugin_runtime::set_session_input_handler(Arc::new(
                     move |plugin_id: &str, method: &str, payload: &str| {
-                        if method == "session.input.captureRegion" {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let capture_dir = std::env::temp_dir().join("tiangong-captures");
-                                std::fs::create_dir_all(&capture_dir).map_err(|error| {
-                                    anyhow::anyhow!("创建截图临时目录失败：{error}")
-                                })?;
-                                let file_name = format!("screenshot-{}.png", scru128::new());
-                                let path = capture_dir.join(&file_name);
-                                let status = std::process::Command::new("/usr/sbin/screencapture")
-                                    .arg("-i")
-                                    .arg("-o")
-                                    .arg(&path)
-                                    .status()
-                                    .map_err(|error| anyhow::anyhow!("启动系统截图失败：{error}"))?;
-                                if !status.success() || !path.is_file() {
-                                    return Ok(serde_json::json!({ "cancelled": true }).to_string());
-                                }
-                                let bytes = std::fs::read(&path)
-                                    .map_err(|error| anyhow::anyhow!("读取截图失败：{error}"))?;
-                                let _ = std::fs::remove_file(&path);
-                                let encoded = base64::Engine::encode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    bytes,
-                                );
-                                if encoded.len() as u64 > 50 * 1024 * 1024 {
-                                    anyhow::bail!("截图超过 50MB 限制");
-                                }
-                                app_handle
-                                    .emit(
-                                        "session_input_attachment",
-                                        serde_json::json!({
-                                            "plugin_id": plugin_id,
-                                            "attachment": {
-                                                "kind": "image",
-                                                "source": format!("data:image/png;base64,{encoded}"),
-                                                "original_name": file_name,
-                                                "mime_type": "image/png"
-                                            }
-                                        }),
-                                    )
-                                    .map_err(|error| anyhow::anyhow!("推送截图失败：{error}"))?;
-                                return Ok(serde_json::json!({ "cancelled": false }).to_string());
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            anyhow::bail!("当前平台暂不支持交互式区域截图");
-                        }
                         if method != "session.input.addAttachment" {
                             anyhow::bail!("未知输入草稿方法 {method}");
                         }
@@ -425,7 +378,7 @@ fn run_gui() {
                         if attachment.mime_type != "image/png"
                             || !attachment.source.starts_with("data:image/png;base64,")
                         {
-                            anyhow::bail!("截图插件只能添加 PNG 图片附件");
+                            anyhow::bail!("输入草稿附件仅支持 PNG 图片");
                         }
                         let base64 = attachment
                             .source
@@ -433,7 +386,7 @@ fn run_gui() {
                             .map(|(_, value)| value)
                             .unwrap_or_default();
                         if base64.is_empty() || base64.len() as u64 > 50 * 1024 * 1024 {
-                            anyhow::bail!("截图内容为空或超过 50MB 限制");
+                            anyhow::bail!("图片内容为空或超过 50MB 限制");
                         }
                         let title = if attachment.original_name.trim().is_empty() {
                             "screenshot.png".to_string()
