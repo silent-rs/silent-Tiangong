@@ -12,7 +12,10 @@
   ],
   "capabilities": {
     "tools": true,
-    "prompt": true
+    "prompt": true,
+    "events": [
+      "webview.event"
+    ]
   },
   "tools": [
     {

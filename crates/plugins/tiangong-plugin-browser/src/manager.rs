@@ -652,13 +652,19 @@ impl BrowserManager {
                 tab_id: tab_id.to_string(),
                 navigation_id,
                 state: BrowserNavigationStateKind::Failed,
-                url: requested_url,
+                url: requested_url.clone(),
                 message: Some(PAGE_LOAD_ERROR_MESSAGE.to_string()),
             },
         );
         let _ = app.emit(
             "browser:tab_updated",
             serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
+        );
+        // 阶段 1 事件通道：导航失败（超时）定向投递给插件 UI
+        crate::emit_plugin_event(
+            &session_id,
+            "navigation_failed",
+            &serde_json::json!({ "tab_id": tab_id, "url": &requested_url }),
         );
 
         if let Some(webview) = webview {
@@ -867,6 +873,12 @@ impl BrowserManager {
         let _ = app.emit(
             "browser:tab_updated",
             serde_json::json!({ "session_id": session_id.clone(), "tab_id": tab_id }),
+        );
+        // 阶段 1 事件通道：页面加载完成（标题/URL 就绪）定向投递给插件 UI
+        crate::emit_plugin_event(
+            &session_id,
+            "page_loaded",
+            &serde_json::json!({ "tab_id": tab_id, "title": title, "url": final_url }),
         );
         let summary = text.chars().take(2000).collect();
         let _ = app.emit(

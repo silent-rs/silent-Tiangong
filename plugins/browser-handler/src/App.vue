@@ -215,6 +215,41 @@ onMounted(async () => {
       void switchScope(next);
     });
 
+    // 页面事件通道（宿主定向推送）：加载完成/失败时实时刷新标签状态，
+    // 不再依赖操作后主动查询（SPA 内跳转、页面标题变化都能跟上）。
+    let refreshTimer = 0;
+    bridge.value.on('webview.event', (raw) => {
+      try {
+        const event = JSON.parse(raw) as {
+          event?: string;
+          scope?: string;
+          payload?: { tab_id?: string; url?: string; title?: string };
+        };
+        // 仅响应当前会话作用域的事件
+        const expected = scope.value === GLOBAL_SCOPE
+          ? 'webview:browser-handler'
+          : `webview:browser-handler:${scope.value}`;
+        if (event.scope !== expected || !event.payload) return;
+        if (event.event === 'navigation_failed') {
+          status.value = '页面加载失败';
+          return;
+        }
+        if (event.event === 'page_loaded') {
+          // 增量更新当前标签标题/地址，合并短时多次事件
+          const active = tabs.value.find((tab) => tab.id === event.payload?.tab_id);
+          if (active && event.payload) {
+            if (event.payload.title) active.title = event.payload.title;
+            if (event.payload.url) active.url = event.payload.url;
+            if (active.id === activeTabId.value) url.value = active.url;
+          }
+          window.clearTimeout(refreshTimer);
+          refreshTimer = window.setTimeout(() => void refreshTabs().catch(() => {}), 200);
+        }
+      } catch {
+        /* 忽略坏帧 */
+      }
+    });
+
     observer = new ResizeObserver(() => scheduleSync());
     if (contentRef.value) observer.observe(contentRef.value);
     window.addEventListener('resize', scheduleSync);

@@ -396,6 +396,19 @@ fn run_gui() {
                 ));
             }
 
+            // 浏览器页面事件定向转发给插件 UI（阶段 1 事件通道）：宿主页面
+            // 状态变化（加载完成/失败）经 runtime 订阅表投递给持有对应
+            // webview 作用域的插件，插件订阅 webview.event 实时刷新。
+            {
+                tiangong_plugin_browser::set_plugin_event_forwarder(Arc::new(
+                    |plugin_id: &str, channel: &str, payload: &str| {
+                        tiangong_plugin_runtime::bridge::bridge_emit_to(
+                            plugin_id, channel, payload,
+                        );
+                    },
+                ));
+            }
+
             // 输入草稿桥接：插件提交图片 data URL；宿主验证格式和大小后，
             // 通过定向事件交给当前输入框加入草稿，不自动发送。
             {
