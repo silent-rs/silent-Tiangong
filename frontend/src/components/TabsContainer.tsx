@@ -578,6 +578,10 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!isVisible) return;
+    // 矩阵态 = 用户尚未选择 App：不按 initialTabKind 隐式创建 tab
+    // （浏览器/终端已插件化，宿主不再默认开原生 App；显式打开走
+    // openWorkspacePanel，会切到 App 态并推进 openRequestVersion 再触发本 effect）。
+    if (mode === 'matrix') return;
     if (hydratingSessionRef.current !== null) {
       return;
     }
@@ -593,6 +597,7 @@ export function TabsContainer({
     hydrateVersion,
     initialTabKind,
     isVisible,
+    mode,
     openRequestVersion,
     terminalSessionId,
   ]);
