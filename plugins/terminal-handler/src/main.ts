@@ -27,8 +27,8 @@ async function bootstrap() {
   }
 }
 
-// 工具壳初始化（shell.ts 的 main 导出经此触发）
-import('./shell').then(({ /* 模块副作用完成工具订阅 */ }) => void 0);
+// 工具壳：shell.ts 已经顶部静态导入，模块加载即完成工具订阅；
+// 不用动态 import（其内联包装会引入 import.meta，shadow 容器无法执行）。
 
 void bootstrap();
 

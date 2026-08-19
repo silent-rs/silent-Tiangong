@@ -120,7 +120,8 @@
   },
   "capabilities": {
     "tools": true,
-    "prompt": true
+    "prompt": true,
+    "events": ["tool.*", "sidecar.*"]
   },
   "sidecar": {
     "binary": "terminal-handler-sidecar",
