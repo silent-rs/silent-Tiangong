@@ -663,8 +663,13 @@ pub fn spawn_sidecar_notification_listener(
     token: String,
 ) {
     let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
-    // 常驻任务跑共享 tokio runtime；句柄 detached（随进程存活）
-    let task = tokio::spawn(async move {
+    // 常驻任务需要 tokio reactor；无 runtime 上下文（同步宿主/测试环境）时
+    // 跳过监听（sidecar 请求-响应不受影响，仅无主动通知推送）。
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!(plugin_id = %plugin_id, "无 tokio 上下文，跳过 sidecar 通知监听");
+        return;
+    };
+    let task = handle.spawn(async move {
         let mut backoff_ms = 250u64;
         loop {
             match run_notification_connection(

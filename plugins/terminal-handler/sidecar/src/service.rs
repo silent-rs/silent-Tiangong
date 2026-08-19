@@ -316,6 +316,8 @@ async fn dispatch_operation(
             "sidecar_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
             "business_protocol": 1,
+            "instance_id": format!("terminal-handler-sidecar-{}", std::process::id()),
+            "status": "ready",
         })),
         "terminalSpawn" => {
             let request: SpawnRequest =

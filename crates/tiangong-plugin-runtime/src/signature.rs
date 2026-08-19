@@ -100,12 +100,11 @@ impl SignedPluginRelease {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
-        match plugin_manifest.wasm_binary() {
-            Some(wasm_binary) => self.wasm.verify(directory, wasm_binary)?,
-            // 无 wasm（纯 TS/sidecar 插件）：签名建立的是 sidecar 信任边界，
-            // manifest 哈希已覆盖 plugin.json；无需 wasm 制品。
-            None => {}
+        if let Some(wasm_binary) = plugin_manifest.wasm_binary() {
+            self.wasm.verify(directory, wasm_binary)?;
         }
+        // 无 wasm（纯 TS/sidecar 插件）：签名建立的是 sidecar 信任边界，
+        // manifest 哈希已覆盖 plugin.json；无需 wasm 制品。
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {
                 if !self.has_permission("sidecar.invoke") {
