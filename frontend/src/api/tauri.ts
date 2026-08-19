@@ -1108,9 +1108,6 @@ export const api = {
   // ----------------------------------------------------------------
   // 浏览器面板（通过 plugin:browser）
   // ----------------------------------------------------------------
-  browserOpen: (sessionId: string, url: string, x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('plugin:browser|browser_open', { sessionId, url, x, y, width, height }),
-
   browserClose: (sessionId: string): Promise<void> =>
     invoke('plugin:browser|browser_close', { sessionId }),
 
@@ -1119,13 +1116,6 @@ export const api = {
 
   browserNavigate: (sessionId: string, url: string): Promise<void> =>
     invoke('plugin:browser|browser_navigate', { sessionId, url }),
-
-  browserOpenUrl: (sessionId: string, url: string): Promise<{
-    session_id: string | null;
-    tabs: Array<{ id: string; url: string; title: string }>;
-    active_tab_id: string | null;
-  }> =>
-    invoke('plugin:browser|browser_open_url', { sessionId, url }),
 
   browserEval: (sessionId: string, js: string): Promise<void> =>
     invoke('plugin:browser|browser_eval', { sessionId, js }),

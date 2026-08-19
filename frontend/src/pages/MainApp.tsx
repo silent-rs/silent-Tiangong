@@ -533,11 +533,34 @@ export function MainApp() {
       }));
       guard();
       // browser:open 仅在用户明确要求打开浏览器时发出（web_fetch open=true），
-      // 此时需要弹出浏览器面板供用户查看。
+      // 此时弹出浏览器插件面板供用户查看（阶段 4b：内置面板退役）。
+      // fetcher 抓取与插件面板是不同作用域实例，在插件会话内重新打开同
+      // 一 URL 展示（core 工具全面切插件工具后自然消除双开）。
       track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
-        const { session_id } = event.payload;
+        const { session_id, url } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        await openWorkspacePanel('browser');
+        if (url) {
+          await api
+            .bridgeCall(
+              'browser-handler',
+              'webview.navigate',
+              JSON.stringify({ url, session_id }),
+            )
+            .catch(error => console.error('打开浏览器页面失败:', error));
+        }
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'open-plugin',
+          version: Date.now(),
+          app: {
+            pluginId: 'browser-handler',
+            contributionId: 'browser',
+            title: '浏览器',
+            sandbox: 'webview',
+            multi: false,
+          },
+        });
+        await openWorkspacePanel('plugin');
       }));
       guard();
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
