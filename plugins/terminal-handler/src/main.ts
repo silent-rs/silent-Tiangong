@@ -1,12 +1,11 @@
-import { createApp } from 'vue';
-import App from './App.vue';
-import { createTiangongBridge, type HostBridge } from '@tiangong/plugin-sdk';
+import { createTiangongBridge, getShadowHostRuntime, type HostBridge } from '@tiangong/plugin-sdk';
 import { createTerminalView, type TerminalViewHandle } from './terminal-view';
 import { sidecarCall, terminalSessions } from './shell';
 
 /**
- * 入口：初始化桥接 → 工具壳（shell.ts 逻辑内联于此触发）→ 终端视图。
- * extension.tab shadow 容器挂载后渲染 xterm。
+ * 入口：初始化桥接 → 工具壳（shell.ts 静态导入即完成订阅）→ 终端视图。
+ * shadow 容器把页面元素注入 ShadowRoot：挂载点必须经宿主注入的
+ * pluginRoot 查询（document 查不到 shadow 内元素）。
  */
 
 let bridgeRef: HostBridge | null = null;
@@ -16,22 +15,35 @@ async function bootstrap() {
   const bridge = await createTiangongBridge();
   bridgeRef = bridge;
 
-  // 挂载终端视图（宿主容器即本插件页面根节点）
-  const host = document.getElementById('terminal-root');
-  if (host) {
-    terminalView = createTerminalView(host, bridge);
-    // 附着最近会话（无会话时等待工具创建后手动 attach）
-    const latest = [...terminalSessions.values()].pop();
-    if (latest) terminalView.attach(latest.session_id);
-    else terminalView.attach('pending');
+  const root = getShadowHostRuntime()?.root ?? document;
+  const host = root.querySelector<HTMLElement>('#terminal-root');
+  if (!host) return;
+
+  terminalView = createTerminalView(host, bridge);
+  // 附着最近会话；无会话时创建默认交互 shell（cmd 缺省即登录 shell，
+  // 与原生终端「打开即可输入」的体验一致）。
+  const latest = [...terminalSessions.values()].pop();
+  if (latest) {
+    terminalView.attach(latest.session_id);
+    return;
+  }
+  try {
+    const spawned = (await sidecarCall(bridge, 'terminalSpawn', {})) as {
+      session_id?: string;
+    };
+    if (spawned.session_id) {
+      terminalSessions.set(spawned.session_id, {
+        session_id: spawned.session_id,
+        scope_id: 'ui',
+        created_at: Date.now(),
+      });
+      terminalView.attach(spawned.session_id);
+    }
+  } catch (error) {
+    console.warn('[terminal] 默认会话创建失败', error);
   }
 }
 
-// 工具壳：shell.ts 已经顶部静态导入，模块加载即完成工具订阅；
-// 不用动态 import（其内联包装会引入 import.meta，shadow 容器无法执行）。
-
 void bootstrap();
 
-const app = createApp(App);
-app.mount('#app');
 export { bridgeRef, terminalView, sidecarCall };

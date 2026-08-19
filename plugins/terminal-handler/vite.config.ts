@@ -1,5 +1,4 @@
 import { defineConfig } from 'vite';
-import vue from '@vitejs/plugin-vue';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
 // 单文件产物：宿主 iframe 容器以 srcdoc 注入，JS/CSS 必须内联自包含。
@@ -8,7 +7,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 // 关闭 modulepreload 避免产物携带 import.meta（仅 module 环境合法）。
 export default defineConfig({
   base: './',
-  plugins: [vue(), viteSingleFile()],
+  plugins: [viteSingleFile()],
   build: {
     modulePreload: false,
   },

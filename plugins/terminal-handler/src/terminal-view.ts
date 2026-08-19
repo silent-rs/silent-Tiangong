@@ -41,11 +41,25 @@ export function createTerminalView(
   let attached: string | null = null;
   let disposers: Array<() => void> = [];
 
+  // xterm 尺寸同步到 PTY（rows/cols 不一致会导致换行与全屏应用错乱）
+  const syncSize = () => {
+    if (!attached) return;
+    void bridge
+      .call('sidecar.terminalResize', JSON.stringify({
+        session_id: attached,
+        rows: terminal.rows,
+        cols: terminal.cols,
+      }))
+      .catch(() => {});
+  };
+
   const handle = {
     attach(sessionId: string) {
       attached = sessionId;
       terminal.reset();
       terminal.focus();
+      fit.fit();
+      syncSize();
     },
     dispose() {
       disposers.forEach((stop) => stop());
@@ -102,7 +116,10 @@ export function createTerminalView(
 
   // 容器尺寸自适应（环境不支持 ResizeObserver 时跳过，如测试环境）
   if (typeof ResizeObserver !== 'undefined') {
-    const observer = new ResizeObserver(() => fit.fit());
+    const observer = new ResizeObserver(() => {
+      fit.fit();
+      syncSize();
+    });
     observer.observe(host);
     disposers.push(() => observer.disconnect());
   }
