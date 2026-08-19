@@ -38,10 +38,24 @@ async function bootstrap() {
         created_at: Date.now(),
       });
       terminalView.attach(spawned.session_id);
+    } else {
+      showBootError(host, 'sidecar 未返回会话 ID');
     }
   } catch (error) {
-    console.warn('[terminal] 默认会话创建失败', error);
+    // 容器随面板重建/开发模式严格模式自检销毁：本实例自然终止，
+    // 重建后的实例会重新初始化，无需提示（否则每次自检都误报）。
+    if (String(error).includes('已随容器卸载')) return;
+    showBootError(host, String(error));
   }
+}
+
+/** 会话创建失败时把原因显示在终端区域（黑框静默失败无法排查）。 */
+function showBootError(host: HTMLElement, message: string) {
+  console.warn('[terminal] 默认会话创建失败:', message);
+  host.insertAdjacentHTML(
+    'beforeend',
+    `<div style="color:#f87171;font-family:ui-monospace,monospace;font-size:12px;padding:8px">终端会话创建失败：${message}</div>`,
+  );
 }
 
 void bootstrap();
