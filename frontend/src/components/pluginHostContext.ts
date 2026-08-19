@@ -39,15 +39,27 @@ export function collectHostTokens(): Record<string, string> {
   );
 }
 
-/** iframe 容器的 hostContext 消息体（沿用既有协议，保持 v1 插件兼容）。 */
-export function hostContext(theme: HostTheme, channel: string, sessionId?: string | null) {
+/**
+ * iframe 容器的 hostContext 消息体（沿用既有协议，保持 v1 插件兼容）。
+ * workspace 为当前会话工作目录（无活跃会话时为全局工作区），供终端等
+ * 插件作为默认初始目录。
+ */
+export function hostContext(
+  theme: HostTheme,
+  channel: string,
+  sessionId?: string | null,
+  workspace?: string | null,
+) {
+  const session: { id?: string; workspace?: string } = {};
+  if (sessionId) session.id = sessionId;
+  if (workspace) session.workspace = workspace;
   return {
     type: 'tiangong_host_context',
     channel,
     theme,
     tokens: collectHostTokens(),
     fontFamily: getComputedStyle(document.body).fontFamily,
-    ...(sessionId ? { session: { id: sessionId } } : {}),
+    ...(sessionId || workspace ? { session } : {}),
   };
 }
 

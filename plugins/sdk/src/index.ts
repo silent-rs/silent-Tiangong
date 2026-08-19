@@ -63,7 +63,9 @@ export interface HostContext {
   tokens: Record<string, string>;
   fontFamily?: string;
   session?: {
-    id: string;
+    id?: string;
+    /** 当前会话工作目录（无活跃会话时为全局工作区）。 */
+    workspace?: string;
   };
 }
 

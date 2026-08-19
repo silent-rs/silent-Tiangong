@@ -99,10 +99,13 @@ async function executeTool(
   if (operation === 'runCommand' || operation === 'runShell') {
     // 创建 PTY 会话执行命令/脚本；工具结果由 exit 通知驱动（简化版：
     // spawn 成功即返回会话信息，完整版等待 exit 或超时聚合输出）。
-    const spawnPayload =
-      operation === 'runShell'
+    // scope_id 绑定宿主会话：终端面板跟随会话切换时能恢复工具会话。
+    const spawnPayload = {
+      scope_id: invocation.session_id,
+      ...(operation === 'runShell'
         ? { script: args.script, cwd: args.cwd }
-        : { cmd: args.cmd, args: args.args, cwd: args.cwd };
+        : { cmd: args.cmd, args: args.args, cwd: args.cwd }),
+    };
     const spawned = (await sidecarCall(bridge, 'terminalSpawn', {
       ...spawnPayload,
     })) as { session_id?: string };

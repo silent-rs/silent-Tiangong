@@ -5,6 +5,7 @@
 //! - PTY 输出经 `emit_notification("terminal.output", ...)` 流式推送，
 //!   插件 UI（xterm.js）订阅 sidecar 事件渲染。
 
+mod persist;
 mod service;
 
 #[tokio::main]

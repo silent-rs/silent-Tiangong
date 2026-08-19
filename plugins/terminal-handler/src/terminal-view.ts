@@ -16,15 +16,22 @@ export interface TerminalViewBridge {
 
 export interface TerminalViewHandle {
   dispose(): void;
-  /** 写入输入到指定 PTY 会话。 */
-  attach(sessionId: string): void;
+  /** 写入输入到指定 PTY 会话；history 为 UI 重开等缓存丢失场景的重放基线。 */
+  attach(sessionId: string, history?: string): void;
   /** 当前网格尺寸（启动 PTY 会话时传入，避免首绘按错误宽度换行）。 */
   size(): { cols: number; rows: number };
+}
+
+/** 终端视图配置。 */
+export interface TerminalViewOptions {
+  /** 会话进程退出回调（含非当前显示的会话）：调用方清理会话注册表。 */
+  onSessionExit?(sessionId: string): void;
 }
 
 export function createTerminalView(
   host: HTMLElement,
   bridge: TerminalViewBridge,
+  options: TerminalViewOptions = {},
 ): TerminalViewHandle {
   const terminal = new Terminal({
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
@@ -87,17 +94,19 @@ export function createTerminalView(
   };
 
   const handle = {
-    attach(sessionId: string) {
+    attach(sessionId: string, history?: string) {
       attached = sessionId;
       lastSyncedSize = '';
       terminal.reset();
       terminal.focus();
       fitToHost();
       syncSize();
-      // terminalSpawn 返回前 shell 已可能产生提示符。先重放这些原始输出，
-      // 保留完整控制序列，再让 xterm 在解析完成后定位到最新一行。
-      const buffered = pendingOutput.get(sessionId);
-      pendingOutput.clear();
+      // terminalSpawn 返回前 shell 已可能产生提示符。重放顺序：恢复基线
+      // （UI 重开的磁盘历史 / sidecar 内存缓冲）在前、本视图缓存的增量在
+      // 后，保留完整控制序列；解析完成后定位到最新一行。
+      const pending = pendingOutput.get(sessionId) ?? '';
+      pendingOutput.delete(sessionId);
+      const buffered = [history ?? '', pending].filter(Boolean).join('');
       if (buffered) {
         terminal.write(buffered, () => terminal.scrollToBottom());
       }
@@ -143,7 +152,9 @@ export function createTerminalView(
           if (!output.session_id || !output.data) return;
           if (output.session_id === attached) {
             terminal.write(output.data);
-          } else if (!attached) {
+          } else {
+            // 非当前显示会话的输出持续缓存（上限截断）：切换回来时
+            // 完整重放，保持各会话终端互不丢失。
             const buffered = `${pendingOutput.get(output.session_id) ?? ''}${output.data}`;
             pendingOutput.set(output.session_id, buffered.slice(-maxPendingOutput));
           }
@@ -156,6 +167,10 @@ export function createTerminalView(
             session_id?: string;
             exit_code?: number;
           };
+          if (exit.session_id) {
+            options.onSessionExit?.(exit.session_id);
+            pendingOutput.delete(exit.session_id);
+          }
           if (exit.session_id === attached) {
             terminal.write(
               `\r\n\x1b[90m[进程已退出，退出码 ${exit.exit_code ?? '未知'}]\x1b[0m\r\n`,

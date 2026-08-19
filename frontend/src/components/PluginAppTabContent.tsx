@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react';
 import { api, type TabState } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
 import { PluginSandbox } from './PluginSandbox';
 
 /**
  * 三方 App（extension.tab 贡献）实例内容：按贡献取入口 HTML，
  * 经标准沙箱容器（shadow/iframe）渲染；与其他 App 实例一致地
  * 挂载保活、按 isActive 显隐。
+ *
+ * 会话上下文（sessionId + workspace）随当前活跃会话注入：终端等
+ * 插件以 workspace 作为默认初始目录，与内置终端面板行为一致。
  */
 export function PluginAppTabContent({ tab, isActive }: { tab: TabState; isActive: boolean }) {
   const [html, setHtml] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const sessionCwd = useStore((s) => s.sessionCwd);
+  const workspaceDir = useStore((s) => s.workspaceDir);
 
   useEffect(() => {
     let active = true;
@@ -44,6 +51,8 @@ export function PluginAppTabContent({ tab, isActive }: { tab: TabState; isActive
         contributionId={tab.contribution_id}
         sandbox={tab.sandbox ?? 'shadow'}
         html={html}
+        sessionId={activeSessionId ?? null}
+        workspace={sessionCwd || workspaceDir || null}
       />
     </div>
   );

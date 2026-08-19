@@ -23,6 +23,8 @@ export interface PluginSandboxProps {
   html: string;
   className?: string;
   sessionId?: string | null;
+  /** 当前会话工作目录（无活跃会话时为全局工作区）。 */
+  workspace?: string | null;
 }
 
 export function PluginSandbox({
@@ -32,6 +34,7 @@ export function PluginSandbox({
   html,
   className,
   sessionId,
+  workspace,
 }: PluginSandboxProps) {
   if (sandbox === 'shadow') {
     return (
@@ -41,6 +44,7 @@ export function PluginSandbox({
         html={html}
         className={className}
         sessionId={sessionId}
+        workspace={workspace}
       />
     );
   }
@@ -51,7 +55,7 @@ export function PluginSandbox({
       </div>
     );
   }
-  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} />;
+  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} workspace={workspace} />;
 }
 
 /** 宿主注入插件脚本的桥接对象（设计文档 6.3 的 Shadow 容器子集）。 */
@@ -164,6 +168,7 @@ function ShadowContainer({
   html,
   className,
   sessionId,
+  workspace,
 }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ShadowRuntimeState | null>(null);
@@ -179,6 +184,7 @@ function ShadowContainer({
       currentRootTheme(),
       `shadow:${pluginId}:${contributionId}`,
       sessionId,
+      workspace,
     );
     const contextHandlers = new Set<HostContextHandler>();
     const cleanups: ShadowCleanup[] = [];
@@ -208,9 +214,10 @@ function ShadowContainer({
 
     const runtime: ShadowRuntimeState = {
       updateContext(context) {
-        const sessionChanged = currentContext.session?.id !== context.session?.id;
+        const contextChanged = currentContext.session?.id !== context.session?.id
+          || currentContext.session?.workspace !== context.session?.workspace;
         currentContext = context;
-        if (!sessionChanged) return;
+        if (!contextChanged) return;
         contextHandlers.forEach((handler) => handler(context));
       },
     };
@@ -243,9 +250,9 @@ function ShadowContainer({
   // 会话切换时刷新运行时上下文；主题样式由 CSS 继承自动更新。
   useEffect(() => {
     runtimeRef.current?.updateContext(
-      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId),
+      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId, workspace),
     );
-  }, [contributionId, pluginId, sessionId]);
+  }, [contributionId, pluginId, sessionId, workspace]);
 
   return (
     <div
