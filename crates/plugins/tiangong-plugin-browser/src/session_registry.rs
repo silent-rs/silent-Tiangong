@@ -43,16 +43,31 @@ impl BrowserSessionRegistry {
 
     /// 获取或懒创建指定 session 的 state。
     ///
-    /// 首次访问时创建一个空的 `BrowserState`。
+    /// 首次访问时创建 `BrowserState` 并从持久化恢复标签元数据（应用重启
+    /// 后插件作用域经此取状态——此前只有内置面板切换路径会恢复，插件
+    /// 会话重启后标签丢失）。webview 实例不预建，显示时按需创建。
     pub fn session_state(&self, session_id: &str) -> Arc<Mutex<BrowserState>> {
         let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
         sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
-                Arc::new(Mutex::new(BrowserState::new_empty(
+                let state = Arc::new(Mutex::new(BrowserState::new_empty(
                     session_id.to_string(),
                     self.shared.clone(),
-                )))
+                )));
+                if let Ok(mut s) = state.lock() {
+                    if s.tabs.is_empty() {
+                        if let Ok(persisted) =
+                            crate::session_store::BrowserSessionStore::load(session_id)
+                        {
+                            if !persisted.tabs.is_empty() {
+                                s.tabs = persisted.tabs;
+                                s.active_tab_id = s.tabs.first().map(|tab| tab.id.clone());
+                            }
+                        }
+                    }
+                }
+                state
             })
             .clone()
     }

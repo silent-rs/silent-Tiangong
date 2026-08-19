@@ -218,7 +218,7 @@ pub fn handle_webview_primitive(
                     .unwrap_or(720.0),
             );
             manager
-                .show_tab_at(tab_id, rect)
+                .show_tab_at(app, tab_id, rect)
                 .map_err(|error| anyhow::anyhow!("显示实例失败：{error}"))?;
             serde_json::json!({ "view_id": scope, "tab_id": tab_id })
         }

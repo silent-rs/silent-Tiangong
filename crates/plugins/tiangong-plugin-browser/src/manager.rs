@@ -2439,14 +2439,53 @@ impl BrowserManager {
 
     /// 实例直达原语：把指定标签的 webview 显示到给定矩形并置为活跃
     /// （阶段 2 插件编排用——显示语义天然互斥，切换时隐藏原活跃实例）。
-    pub fn show_tab_at(&self, tab_id: &str, rect: (f64, f64, f64, f64)) -> Result<(), String> {
-        let is_active = {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            state
+    /// 恢复场景（应用重启后从持久化还原的标签）无 webview 实例，此处
+    /// 按需创建（与内置面板切换路径同机制）。
+    pub fn show_tab_at(
+        &self,
+        app: &AppHandle<Wry>,
+        tab_id: &str,
+        rect: (f64, f64, f64, f64),
+    ) -> Result<(), String> {
+        let (tab, has_webview) = {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let tab = state
                 .tabs
                 .iter()
                 .find(|t| t.id == tab_id)
+                .cloned()
                 .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
+            (tab, state.webviews.contains_key(tab_id))
+        };
+        // 恢复的标签尚无实例（非空白页）：先创建再显示
+        if !has_webview && !tab.url.starts_with("about:") {
+            let webview = Self::create_webview_for_tab(
+                app,
+                self.state.clone(),
+                tab_id,
+                &tab.url,
+                NavigationIntent::Restore,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+            )?;
+            {
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab_id.to_string(), webview);
+                state.browser_rect = rect;
+                state.active_tab_id = Some(tab_id.to_string());
+                state
+                    .visible
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.start_url_poll(app, &tab.url);
+            self.start_event_poll(app);
+            self.persist_session_tabs();
+            return Ok(());
+        }
+        let is_active = {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.browser_rect = rect;
             let is_active = state.active_tab_id.as_deref() == Some(tab_id);
             if is_active {
