@@ -639,11 +639,30 @@ export function MainApp() {
         console.error('无法打开浏览器：缺少 session_id');
         return;
       }
-      // 后端原子完成导航（避免面板 hydrate 与导航竞争），再打开面板
-      await api.browserOpenUrl(sessionId, url).catch(error =>
-        console.error('打开浏览器地址失败:', error)
-      );
-      await openWorkspacePanel('browser');
+      // 阶段 4 退役内置浏览器：链接打开走浏览器插件（插件×会话实例，
+      // 面板 attach 后自动对齐显示），再聚焦插件浏览器标签
+      try {
+        await api.bridgeCall(
+          'browser-handler',
+          'webview.navigate',
+          JSON.stringify({ url, session_id: sessionId }),
+        );
+      } catch (error) {
+        console.error('打开浏览器地址失败:', error);
+      }
+      setAppTabCommand({
+        kind: 'plugin',
+        action: 'open-plugin',
+        version: Date.now(),
+        app: {
+          pluginId: 'browser-handler',
+          contributionId: 'browser',
+          title: '浏览器',
+          sandbox: 'webview',
+          multi: false,
+        },
+      });
+      await openWorkspacePanel('plugin');
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 
