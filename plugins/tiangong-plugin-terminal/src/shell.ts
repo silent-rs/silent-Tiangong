@@ -27,6 +27,7 @@ const TOOL_TO_OPERATION: Record<string, string> = {
 type TerminalToolWindow = Window & {
   __tiangongTerminalLastOpened?: Map<string, string>;
   __tiangongTerminalToolClaims?: Set<string>;
+  __tiangongTerminalSessions?: Map<string, TerminalSessionInfo>;
 };
 
 function lastOpenedBySession(): Map<string, string> {
@@ -57,11 +58,13 @@ export interface TerminalSessionInfo {
   created_at: number;
 }
 
-const sessions = new Map<string, TerminalSessionInfo>();
-
-async function callSidecar(operation: string, payload: unknown): Promise<Record<string, unknown>> {
-  return {};
+function sessionRegistry(): Map<string, TerminalSessionInfo> {
+  const shared = window as TerminalToolWindow;
+  return shared.__tiangongTerminalSessions
+    ?? (shared.__tiangongTerminalSessions = new Map());
 }
+
+const sessions = sessionRegistry();
 
 async function main(bridgePromise: Awaitable<HostBridge>) {
   const bridge = await bridgePromise;
@@ -192,21 +195,20 @@ async function executeTool(
   bridge: HostBridge,
   operation: string,
   invocation: ToolInvocation,
-): Promise<{ ok: boolean; summary: string; stdout?: string; exit_code: number }> {
+): Promise<{
+  ok: boolean;
+  summary: string;
+  stdout?: string;
+  stderr?: string;
+  exit_code: number;
+}> {
   const args = (invocation.arguments ?? {}) as Record<string, unknown>;
   if (operation === 'runCommand' || operation === 'runShell') {
-    // 创建 PTY 会话执行命令/脚本；工具结果由 exit 通知驱动（简化版：
-    // spawn 成功即返回会话信息，完整版等待 exit 或超时聚合输出）。
-    // scope_id 绑定宿主会话：终端面板跟随会话切换时能恢复工具会话。
-    // 终端归属由插件路由，结果中告知实际执行的终端（PTY 会话编号）。
-    const spawnPayload = {
-      scope_id: invocation.session_id,
-      ...(operation === 'runShell'
-        ? { script: args.script, cwd: args.cwd }
-        : { cmd: args.cmd, args: args.args, cwd: args.cwd }),
-    };
+    // 先创建长期存活的登录 shell，再立即打开对应 App；命令由 terminalExec
+    // 写入这个 shell 并等待真实边界，结束后提示符仍可继续交互。
     const spawned = (await sidecarCall(bridge, 'terminalSpawn', {
-      ...spawnPayload,
+      scope_id: invocation.session_id,
+      cwd: args.cwd,
     })) as { session_id?: string };
     if (!spawned.session_id) {
       return { ok: false, summary: 'PTY 会话创建失败', exit_code: 1 };
@@ -222,10 +224,42 @@ async function executeTool(
       instanceId: spawned.session_id,
       showPanel: true,
     });
+
+    const executed = (await sidecarCall(bridge, 'terminalExec', {
+      session_id: spawned.session_id,
+      ...(operation === 'runShell'
+        ? {
+          script: args.script,
+          interactive: args.interactive === true,
+        }
+        : {
+          cmd: args.cmd,
+          args: Array.isArray(args.args) ? args.args : [],
+        }),
+      ...(typeof args.timeout === 'number' ? { timeout: args.timeout } : {}),
+    })) as {
+      stdout?: string;
+      stderr?: string;
+      exit_code?: number;
+      timed_out?: boolean;
+      cwd_after?: string;
+      interactive_mode?: boolean;
+    };
+    const exitCode = typeof executed.exit_code === 'number' ? executed.exit_code : -1;
+    const cwd = executed.cwd_after ? `，cwd: ${executed.cwd_after}` : '';
+    const summary = executed.interactive_mode
+      ? `命令已在终端 ${spawned.session_id} 进入交互状态`
+      : executed.timed_out
+        ? `命令在终端 ${spawned.session_id} 执行超时${cwd}`
+        : exitCode === 0
+          ? `命令已在终端 ${spawned.session_id} 执行完成${cwd}`
+          : `命令已在终端 ${spawned.session_id} 结束，退出码 ${exitCode}${cwd}`;
     return {
       ok: true,
-      summary: `命令已交由终端 ${spawned.session_id} 执行（输出见终端面板）`,
-      exit_code: 0,
+      summary,
+      stdout: executed.stdout ?? '',
+      stderr: executed.stderr ?? '',
+      exit_code: exitCode,
     };
   }
   // terminalSend：默认写入最近创建的活跃会话；指定 terminal_id 时定向

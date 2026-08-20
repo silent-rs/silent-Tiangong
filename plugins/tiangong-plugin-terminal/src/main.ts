@@ -19,6 +19,8 @@ let terminalView: TerminalViewHandle | null = null;
 const GLOBAL_SCOPE = '__global__';
 /** 当前跟随的会话作用域。 */
 let currentScope = '';
+/** 当前 App 实例；工具创建的实例 ID 同时就是要精确附着的 PTY ID。 */
+let currentAppInstance = '';
 /** 切换防抖序号：异步恢复中会话再变时丢弃过期结果。 */
 let switchTicket = 0;
 const switchTasks = new Set<Promise<void>>();
@@ -90,20 +92,16 @@ async function switchScope(
   host: HTMLElement,
   scopeId: string,
   workspace: string | undefined,
+  requestedSessionId: string | undefined,
 ): Promise<void> {
   const ticket = ++switchTicket;
   currentScope = scopeId;
 
-  const local = [...terminalSessions.values()]
-    .filter((session) => session.scope_id === scopeId)
-    .sort((a, b) => b.created_at - a.created_at)[0];
-  if (local) {
-    view.attach(local.session_id);
-    return;
-  }
-
   try {
-    const found = (await sidecarCall(bridge, 'terminalFind', { scope_id: scopeId })) as {
+    const found = (await sidecarCall(bridge, 'terminalFind', {
+      scope_id: scopeId,
+      ...(requestedSessionId ? { session_id: requestedSessionId } : {}),
+    })) as {
       session_id?: string;
       history?: string;
     };
@@ -154,12 +152,6 @@ async function bootstrap() {
   const host = root.querySelector<HTMLElement>('#terminal-root');
   if (!host) return;
 
-  terminalView = createTerminalView(host, bridge, {
-    // 会话退出即出注册表：切回该会话时按需新建 shell
-    onSessionExit(sessionId) {
-      terminalSessions.delete(sessionId);
-    },
-  });
   runtime?.registerCleanup(() => {
     terminalView?.dispose();
     terminalView = null;
@@ -168,6 +160,7 @@ async function bootstrap() {
     const scopeId = currentScope;
     ++switchTicket;
     currentScope = '';
+    currentAppInstance = '';
     await Promise.allSettled([...switchTasks]);
     const sessionId = terminalView?.sessionId();
     if (!scopeId) return;
@@ -179,23 +172,52 @@ async function bootstrap() {
   });
 
   // 会话上下文驱动终端跟随：无活跃会话时挂全局终端，会话出现后切换。
-  const follow = (session: { id?: string; workspace?: string } | undefined) => {
+  const follow = (
+    session: { id?: string; workspace?: string } | undefined,
+    app: { instance_id?: string; visible?: boolean } | undefined,
+  ) => {
     if (!terminalView) return;
     const scope = session?.id ?? GLOBAL_SCOPE;
-    if (scope === currentScope) return;
-    const task = switchScope(bridge, terminalView, host, scope, session?.workspace);
+    const appInstance = app?.instance_id ?? '';
+    if (scope === currentScope && appInstance === currentAppInstance) return;
+    currentAppInstance = appInstance;
+    const exactSession = terminalSessions.get(appInstance)?.session_id
+      ?? (appInstance.startsWith('tty-') ? appInstance : undefined);
+    const task = switchScope(
+      bridge,
+      terminalView,
+      host,
+      scope,
+      session?.workspace,
+      exactSession,
+    );
     switchTasks.add(task);
     void task.finally(() => switchTasks.delete(task));
   };
   const applyContext = (context: NonNullable<typeof runtime>['context']) => {
-    follow(context.session);
+    // 后台工具接应实例永远不可见：只执行 shell.ts 的工具订阅，不创建
+    // xterm 或默认 PTY。普通前台标签首次显示时再初始化，之后隐藏保活。
+    if (!terminalView && context.app?.visible === false) return;
+    if (!terminalView) {
+      terminalView = createTerminalView(host, bridge, {
+        onSessionExit(sessionId) {
+          terminalSessions.delete(sessionId);
+        },
+      });
+    }
+    follow(context.session, context.app);
     if (context.app?.visible) terminalView?.reveal();
   };
   if (runtime) {
     applyContext(runtime.context);
     runtime.onContextChange(applyContext);
   } else {
-    follow(undefined);
+    terminalView = createTerminalView(host, bridge, {
+      onSessionExit(sessionId) {
+        terminalSessions.delete(sessionId);
+      },
+    });
+    follow(undefined, undefined);
   }
 }
 

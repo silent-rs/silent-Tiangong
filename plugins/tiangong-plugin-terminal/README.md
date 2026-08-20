@@ -3,7 +3,7 @@
 终端能力的 manifest v2 插件化（参考 `plugins/tiangong-plugin-interaction` 模式）：
 工具声明（run_command / run_shell / terminal_send）与 prompt 引导来自本清单，
 经 TsPluginAdapter 注入 Core；工具执行策略在 `src/shell.ts`（TS 壳）——
-收到 tool.requested 后经宿主桥接 `terminal.*` 原生服务（PTY）执行并回传。
+收到 tool.requested 后创建长期交互 PTY，自动打开对应终端 App，在该 shell 内执行命令并等待真实输出、退出状态后回传。
 
 终端面板为宿主原生容器（xterm 渲染与 PTY 会话管理不在插件沙箱内），
 本插件的 UI 入口承载工具壳逻辑与 extension.tab 声明。

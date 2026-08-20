@@ -642,6 +642,9 @@ export function TabsContainer({
   const lastAppCommandVersionRef = useRef(0);
   useEffect(() => {
     if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
+    // 首次由工具自动拉起拓展区时，会话标签恢复与 app.open 同时发生。
+    // 等恢复完成再消费命令，否则刚创建的 App 标签会被稍后到达的恢复结果覆盖。
+    if (hydratingSessionRef.current !== null) return;
     lastAppCommandVersionRef.current = appCommand.version;
     if (appCommand.action === 'open-plugin' && appCommand.app) {
       const { pluginId, contributionId, title, sandbox, multi, instanceId, focusExisting } =
@@ -711,7 +714,7 @@ export function TabsContainer({
         await handleCloseTab(tabId);
       }
     })();
-  }, [appCommand, handleCloseTab, openWebviewPluginTab]);
+  }, [appCommand, handleCloseTab, hydrateVersion, openWebviewPluginTab]);
 
   useEffect(() => {
     if (persistTimerRef.current !== null) {
