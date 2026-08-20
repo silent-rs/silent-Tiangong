@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use chrono::{Local, NaiveDateTime};
@@ -15,6 +15,33 @@ use tiangong_core::model::ToolCall;
 use tiangong_core::tool::ToolResult;
 
 const MAX_RESULT_FIELD_BYTES: usize = 2_000_000;
+
+/// 每插件拉起请求冷却表：UI 挂载并完成订阅通常在秒级，冷却期内不重复
+/// 请求，避免同一 turn 连续工具调用触发反复弹面板。
+static UI_LAUNCH_LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+const UI_LAUNCH_COOLDOWN: Duration = Duration::from_secs(3);
+
+/// 经 `app.open` 原语请求宿主打开插件 App（Desktop 注入处理器后生效；
+/// CLI / Server 未注入，行为退化为等待超时）。
+fn request_plugin_ui(plugin_id: &str, session_id: &str) {
+    let cooldowns = UI_LAUNCH_LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut last_by_plugin) = cooldowns.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if last_by_plugin
+        .get(plugin_id)
+        .is_some_and(|last| now.duration_since(*last) < UI_LAUNCH_COOLDOWN)
+    {
+        return;
+    }
+    last_by_plugin.insert(plugin_id.to_string(), now);
+    drop(last_by_plugin);
+    let payload = serde_json::json!({ "session_id": session_id }).to_string();
+    if let Err(error) = crate::bridge::open_app_for_plugin(plugin_id, &payload) {
+        tracing::debug!(%error, plugin_id, "请求打开插件 App 失败");
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TsToolInvocation {
@@ -126,6 +153,12 @@ pub async fn execute(
         invocation_id: invocation_id.clone(),
     };
     emit_requested(&plugin_id, &invocation);
+
+    // 无人接应时请求宿主拉起插件 App（通用能力，不区分官方与三方插件）：
+    // 实例挂载后 shell 订阅 tool.requested，bridge_subscribe 会重放本调用。
+    if !crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested") {
+        request_plugin_ui(&plugin_id, &session_id);
+    }
 
     match tokio::time::timeout(Duration::from_millis(timeout_ms), receiver).await {
         Ok(Ok(resolution)) => {

@@ -41,9 +41,9 @@ const TABS_PERSIST_DEBOUNCE_MS = 500;
 /** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
 export interface AppTabCommand {
   kind: TabKind;
-  action: 'close-all' | 'open-plugin';
+  action: 'close-all' | 'close-plugin' | 'open-plugin';
   version: number;
-  /** open-plugin 携带的三方 App 元数据。 */
+  /** open-plugin 携带的三方 App 元数据；close-plugin 仅使用 pluginId。 */
   app?: {
     pluginId: string;
     contributionId: string;
@@ -52,6 +52,8 @@ export interface AppTabCommand {
     multi: boolean;
     /** 已由调用方创建或导航到的 webview 页面编号。 */
     instanceId?: string;
+    /** 工具调用拉起等宿主侧场景置 true：已有实例时聚焦而非新建（multi 亦然）。 */
+    focusExisting?: boolean;
   };
 }
 
@@ -622,7 +624,7 @@ export function TabsContainer({
         void openWebviewPluginTab(appCommand.app, instanceId);
         return;
       }
-      const existing = multi
+      const existing = multi && !appCommand.app.focusExisting
         ? null
         : tabsRef.current.find(
           (tab) => tab.kind === 'plugin'
@@ -649,6 +651,19 @@ export function TabsContainer({
       activeTabIdRef.current = nextTab.id;
       setTabs(nextTabs);
       setActiveTabId(nextTab.id);
+      return;
+    }
+    if (appCommand.action === 'close-plugin' && appCommand.app?.pluginId) {
+      // 按插件关闭其在本会话的全部 App 实例（app.close 原语落地）。
+      const pluginId = appCommand.app.pluginId;
+      const targetIds = tabsRef.current
+        .filter((tab) => tab.kind === 'plugin' && tab.plugin_id === pluginId)
+        .map((tab) => tab.id);
+      void (async () => {
+        for (const tabId of targetIds) {
+          await handleCloseTab(tabId);
+        }
+      })();
       return;
     }
     const targetIds = tabsRef.current

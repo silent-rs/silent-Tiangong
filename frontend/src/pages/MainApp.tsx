@@ -511,6 +511,69 @@ export function MainApp() {
         await openWorkspacePanel('plugin');
       }));
       guard();
+      // app.open 原语落地：宿主请求打开插件 App（工具调用无 UI 接应时
+      // 拉起实例等场景，官方与三方插件一致）。实例挂载后 shell 订阅
+      // tool.requested，宿主重放挂起调用，工具继续执行。
+      track(await listen<{
+        plugin_id: string;
+        contribution_id: string;
+        title?: string;
+        sandbox?: string;
+        multi?: boolean;
+        session_id?: string;
+      }>('app:open_plugin', (event) => {
+        const payload = event.payload;
+        // 后台会话的工具调用不弹面板，避免打断当前对话。
+        if (
+          payload.session_id
+          && useStore.getState().activeSessionId !== payload.session_id
+        ) return;
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'open-plugin',
+          version: Date.now(),
+          app: {
+            pluginId: payload.plugin_id,
+            contributionId: payload.contribution_id,
+            title: payload.title || payload.plugin_id,
+            sandbox: payload.sandbox === 'webview'
+              || payload.sandbox === 'iframe'
+              || payload.sandbox === 'native'
+              ? payload.sandbox
+              : 'shadow',
+            multi: Boolean(payload.multi),
+            focusExisting: true,
+          },
+        });
+        void openWorkspacePanel('plugin');
+      }));
+      guard();
+      // app.close 原语落地：宿主请求关闭插件 App（Agent/插件在必要时
+      // 收起对应 tab，官方与三方插件一致）。
+      track(await listen<{
+        plugin_id: string;
+        session_id?: string;
+      }>('app:close_plugin', (event) => {
+        const payload = event.payload;
+        if (
+          payload.session_id
+          && useStore.getState().activeSessionId !== payload.session_id
+        ) return;
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'close-plugin',
+          version: Date.now(),
+          // close-plugin 只消费 pluginId，其余字段为类型占位。
+          app: {
+            pluginId: payload.plugin_id,
+            contributionId: '',
+            title: '',
+            sandbox: 'shadow',
+            multi: false,
+          },
+        });
+      }));
+      guard();
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
       track(await listen<{ session_id: string }>('browser:agent_active', (event) => {
         const { session_id } = event.payload;

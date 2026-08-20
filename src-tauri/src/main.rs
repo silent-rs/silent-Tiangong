@@ -356,6 +356,57 @@ fn run_gui() {
                 ));
             }
 
+            // app.* 原语：打开/关闭声明 extension.tab 贡献的插件 App（前端
+            // open-plugin / close-plugin 通道执行）。工具调用无插件 UI 接应
+            // 时宿主内部经同一处理器拉起实例（官方与三方插件一致）；插件
+            // 声明 app.use 权限后亦可主动打开/关闭自己的 App。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_app_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| -> anyhow::Result<String> {
+                        if method != "app.open" && method != "app.close" {
+                            anyhow::bail!("app 原语不支持方法 {method}");
+                        }
+                        let session_id = serde_json::from_str::<serde_json::Value>(payload)
+                            .ok()
+                            .and_then(|value| value["session_id"].as_str().map(str::to_string))
+                            .unwrap_or_default();
+                        if method == "app.close" {
+                            let _ = app_handle.emit(
+                                "app:close_plugin",
+                                serde_json::json!({
+                                    "plugin_id": plugin_id,
+                                    "session_id": session_id,
+                                }),
+                            );
+                            return Ok(r#"{"ok":true}"#.to_string());
+                        }
+                        let Some(app_entry) =
+                            tiangong_plugin_runtime::registry::list_extension_apps()
+                                .into_iter()
+                                .find(|app_entry| app_entry.plugin_id == plugin_id)
+                        else {
+                            anyhow::bail!(
+                                "插件 {plugin_id} 没有 extension.tab 贡献，无可打开的 App"
+                            );
+                        };
+                        let _ = app_handle.emit(
+                            "app:open_plugin",
+                            serde_json::json!({
+                                "plugin_id": app_entry.plugin_id,
+                                "contribution_id": app_entry.contribution_id,
+                                "title": app_entry.title,
+                                "sandbox": app_entry.sandbox,
+                                "multi": app_entry.open_mode
+                                    == tiangong_plugin_runtime::OpenMode::Multi,
+                                "session_id": session_id,
+                            }),
+                        );
+                        Ok(r#"{"ok":true}"#.to_string())
+                    },
+                ));
+            }
+
             // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
             // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
             // 终端等流式界面将收不到任何输出。
