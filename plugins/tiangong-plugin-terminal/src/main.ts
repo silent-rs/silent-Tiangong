@@ -55,10 +55,12 @@ async function spawnDefault(
   scopeId: string,
   workspace: string | undefined,
   requestedSessionId: string | undefined,
-): Promise<{ sessionId: string; boot?: string }> {
+  isCurrent: () => boolean,
+): Promise<{ sessionId: string; boot?: string } | null> {
   // 等容器布局完成后按真实尺寸启动：shell 首次绘制（提示符/宽度计算）
   // 依赖正确的 cols/rows，错误宽度会导致换行错乱、光标被顶到底部。
   await waitSized(host);
+  if (!isCurrent()) return null;
   const size = view.size();
   const spawned = (await sidecarCall(bridge, 'terminalSpawn', {
     cols: size.cols,
@@ -95,8 +97,10 @@ async function switchScope(
   scopeId: string,
   workspace: string | undefined,
   requestedSessionId: string | undefined,
+  isActive: () => boolean,
 ): Promise<void> {
   const ticket = ++switchTicket;
+  const isCurrent = () => isActive() && ticket === switchTicket;
   currentScope = scopeId;
   // App 实例编号就是其 PTY 编号。先完成逻辑附着，后续 find/ensure 即使
   // 因 sidecar 冷启动稍慢，实时输出也能直接进入正确的 xterm，不留空光标。
@@ -109,19 +113,21 @@ async function switchScope(
       ? terminalSessions.get(requestedSessionId)
       : undefined;
     if (knownSession?.scope_id === scopeId) {
-      const { sessionId, boot } = await spawnDefault(
+      const spawned = await spawnDefault(
         bridge,
         view,
         host,
         scopeId,
         workspace,
         requestedSessionId,
+        isCurrent,
       );
-      if (ticket !== switchTicket) return;
-      view.attach(sessionId, boot);
+      if (!spawned || !isCurrent()) return;
+      view.attach(spawned.sessionId, spawned.boot);
       return;
     }
 
+    if (!isCurrent()) return;
     const found = (await sidecarCall(bridge, 'terminalFind', {
       scope_id: scopeId,
       ...(requestedSessionId ? { session_id: requestedSessionId } : {}),
@@ -130,7 +136,7 @@ async function switchScope(
       history?: string;
     };
     if (found.session_id) {
-      if (ticket !== switchTicket) return;
+      if (!isCurrent()) return;
       terminalSessions.set(found.session_id, {
         session_id: found.session_id,
         scope_id: scopeId,
@@ -143,13 +149,14 @@ async function switchScope(
     // 回填基线显示在上方（对齐内置终端的应用重启恢复）。
     await spawnAndAttach(found.history || undefined);
   } catch (error) {
+    if (!isCurrent() || isDisposedBridgeError(error)) return;
     console.warn('[terminal] 恢复会话失败，转新建：', error);
     try {
       await spawnAndAttach();
     } catch (spawnError) {
       // 容器随面板重建/开发模式严格模式自检销毁：本实例自然终止，
       // 重建后的实例会重新初始化，无需提示（否则每次自检都误报）。
-      if (String(spawnError).includes('已随容器卸载')) return;
+      if (!isCurrent() || isDisposedBridgeError(spawnError)) return;
       showBootError(host, String(spawnError));
     }
   }
@@ -157,14 +164,20 @@ async function switchScope(
   /** 新建会话并附着：历史基线在前、新 shell 首批输出在后；无可重放
    * 内容时视图自身显示启动占位（见 terminal-view attach）。 */
   async function spawnAndAttach(baseline?: string): Promise<void> {
-    const { sessionId, boot } = await spawnDefault(
+    const spawned = await spawnDefault(
       bridge,
       view,
       host,
       scopeId,
       workspace,
       requestedSessionId,
+      isCurrent,
     );
+    if (!spawned) return;
+    const { sessionId, boot } = spawned;
+    // 普通容器重建时保留刚创建的 PTY，供新容器直接恢复；同一容器内
+    // 的会话切换才回收已经过期的创建结果。
+    if (!isActive()) return;
     if (ticket !== switchTicket) {
       terminalSessions.delete(sessionId);
       await sidecarCall(bridge, 'terminalKill', { session_id: sessionId }).catch(() => {});
@@ -172,6 +185,10 @@ async function switchScope(
     }
     view.attach(sessionId, [baseline, boot].filter(Boolean).join('') || undefined);
   }
+}
+
+function isDisposedBridgeError(error: unknown): boolean {
+  return String(error).includes('bridge 已随容器卸载');
 }
 
 async function bootstrap() {
@@ -183,9 +200,16 @@ async function bootstrap() {
   const host = root.querySelector<HTMLElement>('#terminal-root');
   if (!host) return;
 
+  let active = true;
   runtime?.registerCleanup(() => {
+    active = false;
+    ++switchTicket;
+    currentScope = '';
+    currentAppInstance = '';
+    switchTasks.clear();
     terminalView?.dispose();
     terminalView = null;
+    if (bridgeRef === bridge) bridgeRef = null;
   });
   runtime?.registerBeforeClose(async () => {
     const scopeId = currentScope;
@@ -207,7 +231,7 @@ async function bootstrap() {
     session: { id?: string; workspace?: string } | undefined,
     app: { instance_id?: string; visible?: boolean } | undefined,
   ) => {
-    if (!terminalView) return;
+    if (!active || !terminalView) return;
     const scope = session?.id ?? GLOBAL_SCOPE;
     const appInstance = app?.instance_id ?? '';
     if (scope === currentScope && appInstance === currentAppInstance) return;
@@ -220,11 +244,13 @@ async function bootstrap() {
       scope,
       session?.workspace,
       exactSession,
+      () => active,
     );
     switchTasks.add(task);
     void task.finally(() => switchTasks.delete(task));
   };
   const applyContext = (context: NonNullable<typeof runtime>['context']) => {
+    if (!active) return;
     // 后台工具接应实例永远不可见：只执行 shell.ts 的工具订阅，不创建
     // xterm 或默认 PTY。普通前台标签首次显示时再初始化，之后隐藏保活。
     if (!terminalView && context.app?.visible === false) return;
@@ -240,7 +266,7 @@ async function bootstrap() {
   };
   if (runtime) {
     applyContext(runtime.context);
-    runtime.onContextChange(applyContext);
+    runtime.registerCleanup(runtime.onContextChange(applyContext));
   } else {
     terminalView = createTerminalView(host, bridge, {
       onSessionExit(sessionId) {

@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -156,7 +156,7 @@ pub struct ProcessSidecarConnection {
     config: SidecarConfig,
     start_lock: Mutex<()>,
     exec_env: Mutex<std::collections::BTreeMap<String, String>>,
-    notification_started: Mutex<bool>,
+    notification_token: Arc<Mutex<Option<String>>>,
 }
 
 impl ProcessSidecarConnection {
@@ -165,7 +165,7 @@ impl ProcessSidecarConnection {
             config,
             start_lock: Mutex::new(()),
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
-            notification_started: Mutex::new(false),
+            notification_token: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -189,27 +189,38 @@ impl ProcessSidecarConnection {
         result
     }
 
-    /// sidecar 就绪后启动一次常驻通知监听（幂等）。
+    /// sidecar 就绪后为当前 endpoint token 启动常驻通知监听（幂等）。
     fn ensure_notification_listener(&self) {
-        let Ok(mut started) = self.notification_started.lock() else {
+        let Ok(token) = load_endpoint(&self.config.endpoint).map(|endpoint| endpoint.token) else {
+            return;
+        };
+        let Ok(mut current_token) = self.notification_token.lock() else {
             tracing::warn!(
                 plugin_id = %self.config.plugin_id,
                 "sidecar 通知监听状态锁已损坏"
             );
             return;
         };
-        if *started {
+        if current_token.as_deref() == Some(token.as_str()) {
             return;
         }
-        let Ok(token) = load_endpoint(&self.config.endpoint).map(|endpoint| endpoint.token) else {
-            return;
-        };
+        *current_token = Some(token.clone());
         if spawn_sidecar_notification_listener(
             self.config.plugin_id.clone(),
             self.config.endpoint.clone(),
-            token,
+            token.clone(),
+            Arc::clone(&self.notification_token),
         ) {
-            *started = true;
+            return;
+        }
+        if current_token.as_deref() == Some(token.as_str()) {
+            *current_token = None;
+        }
+    }
+
+    fn invalidate_notification_listener(&self) {
+        if let Ok(mut current_token) = self.notification_token.lock() {
+            *current_token = None;
         }
     }
 
@@ -352,6 +363,7 @@ impl ProcessSidecarConnection {
                     .find_map(|cause| cause.downcast_ref::<std::io::Error>())
                     .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
             {
+                self.invalidate_notification_listener();
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -377,6 +389,7 @@ impl ProcessSidecarConnection {
             wait_for_process_exit(endpoint.pid, Duration::from_secs(5))?;
         }
         let _ = std::fs::remove_file(&self.config.endpoint);
+        self.invalidate_notification_listener();
         Ok(())
     }
 
@@ -647,7 +660,7 @@ fn load_endpoint(path: &Path) -> Result<IpcEndpoint> {
 /// sidecar 通知转发回调：`(plugin_id, channel, payload)`。
 ///
 /// 常驻通知连接收到 Notification 帧后调用；桌面入口注入后转 bridge 事件。
-pub type SidecarNotificationForwarder = std::sync::Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+pub type SidecarNotificationForwarder = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 static SIDECAR_NOTIFICATION_FORWARDER: std::sync::OnceLock<SidecarNotificationForwarder> =
     std::sync::OnceLock::new();
@@ -659,10 +672,11 @@ pub fn set_sidecar_notification_forwarder(forwarder: SidecarNotificationForwarde
 
 /// sidecar 通知常驻连接：认证后只读，收到 Notification 帧即转发。
 /// 连接断开（sidecar 重启）时指数退避重连；任务句柄 detached（随进程存活）。
-pub fn spawn_sidecar_notification_listener(
+fn spawn_sidecar_notification_listener(
     plugin_id: String,
     endpoint_path: std::path::PathBuf,
     token: String,
+    listener_token: Arc<Mutex<Option<String>>>,
 ) -> bool {
     let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
     // 常驻任务需要 tokio reactor；无 runtime 上下文（同步宿主/测试环境）时
@@ -674,6 +688,9 @@ pub fn spawn_sidecar_notification_listener(
     let task = handle.spawn(async move {
         let mut backoff_ms = 250u64;
         loop {
+            if !notification_listener_is_current(&listener_token, &token) {
+                break;
+            }
             match run_notification_connection(
                 &plugin_id,
                 &endpoint_path,
@@ -682,7 +699,7 @@ pub fn spawn_sidecar_notification_listener(
             )
             .await
             {
-                Ok(()) => break, // sidecar 正常关闭（endpoint 移除）
+                Ok(()) => break, // endpoint 已换代，本监听退出
                 Err(error) => {
                     tracing::debug!(
                         plugin_id = %plugin_id,
@@ -694,9 +711,24 @@ pub fn spawn_sidecar_notification_listener(
             tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(5_000);
         }
+        clear_notification_listener(&listener_token, &token);
     });
     std::mem::forget(task);
     true
+}
+
+fn notification_listener_is_current(listener_token: &Mutex<Option<String>>, token: &str) -> bool {
+    listener_token
+        .lock()
+        .is_ok_and(|current_token| current_token.as_deref() == Some(token))
+}
+
+fn clear_notification_listener(listener_token: &Mutex<Option<String>>, token: &str) {
+    if let Ok(mut current_token) = listener_token.lock()
+        && current_token.as_deref() == Some(token)
+    {
+        *current_token = None;
+    }
 }
 
 async fn run_notification_connection(
@@ -710,6 +742,11 @@ async fn run_notification_connection(
         .with_context(|| "读取 sidecar endpoint 失败")?;
     let endpoint: crate::protocol::IpcEndpoint =
         serde_json::from_str(&endpoint_json).with_context(|| "解析 sidecar endpoint 失败")?;
+    // endpoint 已被新的 sidecar 替换时，本监听只退出。新 token 对应的监听
+    // 由新的 ensure 调用创建，旧任务不能借新凭证继续连接，否则会重复转发通知。
+    if endpoint.token != token {
+        return Ok(());
+    }
     let address = (endpoint.host.as_str(), endpoint.port)
         .to_socket_addrs()?
         .next()
