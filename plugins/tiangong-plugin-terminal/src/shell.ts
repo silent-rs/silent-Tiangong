@@ -135,7 +135,7 @@ async function main(bridgePromise: Awaitable<HostBridge>) {
             await openExtensionApp(bridge, {
               sessionId: invocation.session_id,
               instanceId,
-              showPanel: true,
+              showPanel: false,
             });
           }
           if (isClose) sessions.delete(instanceId);
@@ -265,7 +265,7 @@ async function executeTool(
       await openExtensionApp(bridge, {
         sessionId: invocation.session_id,
         instanceId: sessionId,
-        showPanel: true,
+        showPanel: false,
       });
       executed = (await sidecarCall(bridge, 'terminalExec', {
         session_id: sessionId,
