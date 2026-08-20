@@ -356,6 +356,95 @@ fn run_gui() {
                 ));
             }
 
+            // app.* 原语：打开/关闭声明 extension.tab 贡献的插件 App（前端
+            // open-plugin / close-plugin 通道执行）。工具调用无插件 UI 接应
+            // 时宿主内部经同一处理器拉起实例（官方与三方插件一致）；插件
+            // 声明 app.use 权限后亦可主动打开/关闭自己的 App。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_app_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| -> anyhow::Result<String> {
+                        if method != "app.open" && method != "app.close" {
+                            anyhow::bail!("app 原语不支持方法 {method}");
+                        }
+                        let payload_value =
+                            serde_json::from_str::<serde_json::Value>(payload).ok();
+                        let session_id = payload_value
+                            .as_ref()
+                            .and_then(|value| value["session_id"].as_str().map(str::to_string))
+                            .unwrap_or_default();
+                        // mode=background：工具接应的隐性挂载（不弹拓展区面板）；
+                        // 缺省 focus：弹出并聚焦面板（插件工具显式请求展示时）。
+                        let background = payload_value
+                            .as_ref()
+                            .and_then(|value| value["mode"].as_str().map(str::to_string))
+                            .is_some_and(|mode| mode == "background");
+                        tracing::info!(
+                            plugin_id,
+                            method,
+                            background,
+                            session_id,
+                            "app 原语调用"
+                        );
+                        let Some(app_entry) =
+                            tiangong_plugin_runtime::registry::list_extension_apps()
+                                .into_iter()
+                                .find(|app_entry| app_entry.plugin_id == plugin_id)
+                        else {
+                            anyhow::bail!(
+                                "插件 {plugin_id} 没有 extension.tab 贡献，无可操作的 App"
+                            );
+                        };
+                        if method == "app.close" {
+                            // 关闭目标必须显式声明：instance_id 精确关一个实例，
+                            // all=true 才允许关闭该插件全部实例，避免误全关。
+                            let instance_id = payload_value.as_ref().and_then(|value| {
+                                value["instance_id"].as_str().map(str::to_string)
+                            });
+                            let close_all = payload_value
+                                .as_ref()
+                                .and_then(|value| value["all"].as_bool())
+                                .unwrap_or(false);
+                            if instance_id.is_none() && !close_all {
+                                anyhow::bail!(
+                                    "app.close 需要指定 instance_id（精确关闭）或 all=true（全部关闭）"
+                                );
+                            }
+                            let _ = app_handle.emit(
+                                "app:close_plugin",
+                                serde_json::json!({
+                                    "plugin_id": plugin_id,
+                                    "session_id": session_id,
+                                    "instance_id": instance_id,
+                                    "all": close_all,
+                                }),
+                            );
+                            return Ok(r#"{"ok":true}"#.to_string());
+                        }
+                        // 调用方可指定实例编号（幂等重开/精确关闭的锚点）：
+                        // 前端以其创建或聚焦对应 App 实例，缺省由前端生成。
+                        let requested_instance_id = payload_value.as_ref().and_then(|value| {
+                            value["instance_id"].as_str().map(str::to_string)
+                        });
+                        let _ = app_handle.emit(
+                            "app:open_plugin",
+                            serde_json::json!({
+                                "plugin_id": app_entry.plugin_id,
+                                "contribution_id": app_entry.contribution_id,
+                                "title": app_entry.title,
+                                "sandbox": app_entry.sandbox,
+                                "multi": app_entry.open_mode
+                                    == tiangong_plugin_runtime::OpenMode::Multi,
+                                "session_id": session_id,
+                                "background": background,
+                                "instance_id": requested_instance_id,
+                            }),
+                        );
+                        Ok(r#"{"ok":true}"#.to_string())
+                    },
+                ));
+            }
+
             // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
             // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
             // 终端等流式界面将收不到任何输出。

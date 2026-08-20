@@ -9,7 +9,8 @@
     "tool.provide",
     "sidecar.invoke",
     "bridge.call",
-    "bridge.events"
+    "bridge.events",
+    "app.use"
   ],
   "tools": [
     {
@@ -77,13 +78,17 @@
     },
     {
       "name": "terminal_send",
-      "description": "向终端发送按键/文本输入。",
+      "description": "向指定终端发送按键/文本输入；结果会告知实际送达的终端编号。",
       "input_schema": {
         "type": "object",
         "properties": {
           "input": {
             "type": "string",
             "description": "要发送的按键/文本"
+          },
+          "terminal_id": {
+            "type": "string",
+            "description": "目标终端编号（run_command、run_shell、terminal_open 或 terminal_send 结果中告知）"
           },
           "wait": {
             "type": "integer",
@@ -92,14 +97,41 @@
           }
         },
         "required": [
-          "input"
+          "input",
+          "terminal_id"
         ]
       },
       "timeout_ms": 120000
+    },
+    {
+      "name": "terminal_open",
+      "description": "打开终端面板（向用户展示命令执行、跟踪长任务时使用）。面板编号由插件管理并在结果中告知。",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "terminal_close",
+      "description": "关闭指定终端及其面板。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string",
+            "description": "要关闭的终端编号（终端工具结果中告知）"
+          }
+        },
+        "required": [
+          "terminal_id"
+        ]
+      },
+      "timeout_ms": 30000
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；需要在运行中的终端输入内容时用 terminal_send。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。长命令只在有明确时间边界时设置 timeout（秒）。"
   ],
   "ui": {
     "sandbox": "shadow",

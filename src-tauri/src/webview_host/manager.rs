@@ -45,6 +45,8 @@ const MAX_ZOOM: f64 = 5.0;
 /// 天工统一判定页面加载异常的固定截止时间。
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const PAGE_LOAD_ERROR_MESSAGE: &str = "页面未能在 30 秒内完成加载";
+/// 原生页面回调偶尔不会送达；导航开始后轻量复查当前文档状态作为兜底。
+const NAVIGATION_COMPLETION_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 /// 后台轮询（url_poll / event_poll / ObservePage）执行 eval 的超时上限。
 ///
 /// 复杂页面上单个 eval 可能耗时数秒；此前统一沿用 15 秒，导致多轮询线程
@@ -100,6 +102,8 @@ struct WebDocumentSnapshot {
     title: String,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    has_content: bool,
     #[serde(default)]
     internal_error: bool,
 }
@@ -195,7 +199,9 @@ fn accepts_completed_document(
     snapshot: &WebDocumentSnapshot,
 ) -> bool {
     snapshot.document_id == expected_document_id
-        && snapshot.ready_state == "complete"
+        && (snapshot.ready_state == "complete"
+            || (snapshot.ready_state == "interactive"
+                && (snapshot.has_content || !snapshot.text.trim().is_empty())))
         && !snapshot.url.is_empty()
         && !snapshot.internal_error
         && navigation.navigation_id == navigation_id
@@ -585,6 +591,8 @@ impl BrowserManager {
             );
         });
 
+        Self::start_navigation_completion_probe(app, state, tab_id, navigation_id);
+
         Ok(navigation_id)
     }
 
@@ -713,11 +721,11 @@ impl BrowserManager {
         }
 
         let begin_intent = {
-            let state = match state.lock() {
+            let browser_state = match state.lock() {
                 Ok(state) => state,
                 Err(error) => error.into_inner(),
             };
-            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+            let Some(signal) = browser_state.navigation_signals.get(tab_id).cloned() else {
                 return;
             };
             let mut navigation = match signal.state.lock() {
@@ -761,11 +769,11 @@ impl BrowserManager {
             return;
         };
 
-        let state = match state.lock() {
+        let browser_state = match state.lock() {
             Ok(state) => state,
             Err(error) => error.into_inner(),
         };
-        let Some(signal) = state.navigation_signals.get(tab_id) else {
+        let Some(signal) = browser_state.navigation_signals.get(tab_id) else {
             return;
         };
         let mut navigation = match signal.state.lock() {
@@ -783,6 +791,122 @@ impl BrowserManager {
         }
         navigation.started_url = Some(snapshot.url);
         navigation.document_id = Some(snapshot.document_id);
+    }
+
+    fn start_navigation_completion_probe(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        navigation_id: u64,
+    ) {
+        let app = app.clone();
+        let tab_id_for_thread = tab_id.to_string();
+        let state_for_thread = state.clone();
+        let result = std::thread::Builder::new()
+            .name("browser-load-probe".to_string())
+            .spawn(move || {
+                let manager = BrowserManager {
+                    state: state_for_thread.clone(),
+                };
+                let mut interactive_ready_polls = 0_u8;
+                loop {
+                    std::thread::sleep(NAVIGATION_COMPLETION_PROBE_INTERVAL);
+                    let still_current = {
+                        let browser_state = match state_for_thread.lock() {
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
+                        };
+                        let Some(signal) = browser_state.navigation_signals.get(&tab_id_for_thread)
+                        else {
+                            return;
+                        };
+                        let navigation = match signal.state.lock() {
+                            Ok(navigation) => navigation,
+                            Err(error) => error.into_inner(),
+                        };
+                        navigation.navigation_id == navigation_id
+                            && navigation.phase == NavigationPhase::Loading
+                    };
+                    if !still_current {
+                        return;
+                    }
+
+                    let Some(raw) = manager.eval_tab_with_result_timeout(
+                        &tab_id_for_thread,
+                        DOCUMENT_STATE_SCRIPT,
+                        POLL_EVAL_TIMEOUT,
+                    ) else {
+                        continue;
+                    };
+                    let Some(snapshot) = parse_web_document_snapshot(&raw) else {
+                        debug!(
+                            tab_id = %tab_id_for_thread,
+                            navigation_id,
+                            "browser load probe parse failed"
+                        );
+                        continue;
+                    };
+                    if snapshot.document_id.is_empty()
+                        || snapshot.url.is_empty()
+                        || snapshot.internal_error
+                    {
+                        interactive_ready_polls = 0;
+                        continue;
+                    }
+
+                    let document_ready = if snapshot.ready_state == "complete" {
+                        true
+                    } else if snapshot.ready_state == "interactive" && snapshot.has_content {
+                        interactive_ready_polls = interactive_ready_polls.saturating_add(1);
+                        interactive_ready_polls >= 2
+                    } else {
+                        interactive_ready_polls = 0;
+                        false
+                    };
+
+                    let expected_document_id = snapshot.document_id.clone();
+                    let accepted = {
+                        let browser_state = match state_for_thread.lock() {
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
+                        };
+                        let Some(signal) = browser_state
+                            .navigation_signals
+                            .get(&tab_id_for_thread)
+                            .cloned()
+                        else {
+                            return;
+                        };
+                        let mut navigation = match signal.state.lock() {
+                            Ok(navigation) => navigation,
+                            Err(error) => error.into_inner(),
+                        };
+                        accept_loading_document(&mut navigation, navigation_id, &snapshot)
+                    };
+                    if !accepted || !document_ready {
+                        continue;
+                    }
+
+                    if Self::complete_navigation_for_tab(
+                        &app,
+                        state_for_thread.clone(),
+                        &tab_id_for_thread,
+                        navigation_id,
+                        &expected_document_id,
+                        snapshot,
+                    ) {
+                        debug!(
+                            tab_id = %tab_id_for_thread,
+                            navigation_id,
+                            "browser load probe accepted completion"
+                        );
+                        return;
+                    }
+                }
+            });
+        if let Err(error) = result {
+            warn!(%error, tab_id, navigation_id, "browser load probe spawn failed");
+        }
     }
 
     fn complete_navigation_for_tab(
@@ -2073,6 +2197,11 @@ impl BrowserManager {
             "browser wait_for_navigation"
         );
         let Some(navigation) = navigation else {
+            warn!(
+                tab_id = %ticket.tab_id,
+                url,
+                "fetch 等待导航失败：无导航信号"
+            );
             return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
         };
         if navigation.navigation_id != ticket.navigation_id {
@@ -2080,6 +2209,15 @@ impl BrowserManager {
         }
         match navigation.phase {
             NavigationPhase::Failed | NavigationPhase::Loading => {
+                warn!(
+                    tab_id = %ticket.tab_id,
+                    url,
+                    phase = ?navigation.phase,
+                    started_url = ?navigation.started_url,
+                    document_id = ?navigation.document_id,
+                    waited_ms = t0.elapsed().as_millis() as u64,
+                    "fetch 等待导航未达 Loaded（document_id 为 None 说明页面文档事件从未到达）"
+                );
                 return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
             }
             NavigationPhase::Loaded => {}
@@ -2090,6 +2228,13 @@ impl BrowserManager {
             &format!("window.__tiangong_bridge.getFullText({max_chars})"),
             Duration::from_secs(4),
         );
+        if result.is_none() {
+            warn!(
+                tab_id = %ticket.tab_id,
+                url,
+                "fetch 正文提取脚本未返回（getFullText 注入无响应）"
+            );
+        }
 
         let still_current = self
             .navigation_ticket_for_tab(&ticket.tab_id)
@@ -3420,6 +3565,7 @@ mod tests {
             url: url.to_string(),
             title: String::new(),
             text: String::new(),
+            has_content: false,
             internal_error: false,
         }
     }
@@ -3481,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_requires_current_complete_document() {
+    fn completion_requires_current_readable_document() {
         let mut navigation = loading_navigation("https://example.com/b", 2);
         navigation.started_url = Some("https://example.com/final".to_string());
         navigation.document_id = Some("document-b".to_string());
@@ -3492,6 +3638,16 @@ mod tests {
             2,
             "document-b",
             &loading,
+        ));
+
+        let mut interactive =
+            document_snapshot("document-b", "interactive", "https://example.com/final");
+        interactive.has_content = true;
+        assert!(accepts_completed_document(
+            &navigation,
+            2,
+            "document-b",
+            &interactive,
         ));
 
         let complete = document_snapshot("document-b", "complete", "https://example.com/final");

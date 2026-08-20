@@ -16,6 +16,8 @@ export interface TerminalViewBridge {
 
 export interface TerminalViewHandle {
   dispose(): void;
+  /** 先绑定目标 PTY 并显示启动状态，避免异步恢复期间留下空白终端。 */
+  prepare(sessionId: string): void;
   /** 写入输入到指定 PTY 会话；history 为 UI 重开等缓存丢失场景的重放基线。 */
   attach(sessionId: string, history?: string): void;
   /** 当前网格尺寸（启动 PTY 会话时传入，避免首绘按错误宽度换行）。 */
@@ -30,6 +32,21 @@ export interface TerminalViewHandle {
 export interface TerminalViewOptions {
   /** 会话进程退出回调（含非当前显示的会话）：调用方清理会话注册表。 */
   onSessionExit?(sessionId: string): void;
+}
+
+const SCREEN_SNAPSHOT_THROTTLE_MS = 50;
+
+function snapshotVisibleScreen(terminal: Terminal): string {
+  const buffer = terminal.buffer.active;
+  const start = buffer.baseY;
+  const end = start + terminal.rows;
+  const lines: string[] = [];
+  for (let y = start; y < end; y += 1) {
+    const line = buffer.getLine(y);
+    lines.push(line ? line.translateToString(true) : '');
+  }
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+  return lines.join('\n');
 }
 
 export function createTerminalView(
@@ -65,8 +82,11 @@ export function createTerminalView(
   fitToHost();
 
   let attached: string | null = null;
+  let preparing: string | null = null;
   let disposers: Array<() => void> = [];
   let lastSyncedSize = '';
+  let lastSnapshotAt = 0;
+  let snapshotTimer: number | null = null;
   const pendingOutput = new Map<string, string>();
   const pendingTimers = new Set<number>();
   const maxPendingOutput = 256 * 1024;
@@ -97,9 +117,53 @@ export function createTerminalView(
     pendingTimers.add(timer);
   };
 
+  const sendScreenSnapshot = () => {
+    if (!attached) return;
+    lastSnapshotAt = Date.now();
+    void bridge.call('sidecar.terminalScreenUpdate', JSON.stringify({
+      session_id: attached,
+      screen: snapshotVisibleScreen(terminal),
+    })).catch(() => {});
+  };
+
+  const pushScreenSnapshot = () => {
+    const remaining = SCREEN_SNAPSHOT_THROTTLE_MS - (Date.now() - lastSnapshotAt);
+    if (remaining <= 0) {
+      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer);
+      snapshotTimer = null;
+      sendScreenSnapshot();
+      return;
+    }
+    if (snapshotTimer !== null) return;
+    snapshotTimer = window.setTimeout(() => {
+      snapshotTimer = null;
+      sendScreenSnapshot();
+    }, remaining);
+  };
+
+  const writeOutput = (data: string, scrollToBottom = false) => {
+    terminal.write(data, () => {
+      if (scrollToBottom) terminal.scrollToBottom();
+      pushScreenSnapshot();
+    });
+  };
+
+  const prepare = (sessionId: string) => {
+    if (attached === sessionId || preparing === sessionId) return;
+    preparing = sessionId;
+    attached = null;
+    lastSyncedSize = '';
+    terminal.reset();
+    terminal.focus();
+    fitToHost();
+    writeOutput('\x1b[90m正在连接终端…\x1b[0m\r\n');
+  };
+
   const handle = {
+    prepare,
     attach(sessionId: string, history?: string) {
       attached = sessionId;
+      preparing = null;
       lastSyncedSize = '';
       terminal.reset();
       terminal.focus();
@@ -112,11 +176,11 @@ export function createTerminalView(
       pendingOutput.delete(sessionId);
       const buffered = [history ?? '', pending].filter(Boolean).join('');
       if (buffered) {
-        terminal.write(buffered, () => terminal.scrollToBottom());
+        writeOutput(buffered, true);
       } else {
         // 无可重放内容时 shell 首个提示符可能数百毫秒后经通知到达
         //（系统 shell 模块加载慢），先给一行状态避免长时间空白。
-        terminal.write('\x1b[90m正在启动终端…\x1b[0m\r\n');
+        writeOutput('\x1b[90m正在启动终端…\x1b[0m\r\n');
       }
       // 字体与 Shadow 布局可能晚一拍稳定，复测只在网格真的变化时同步。
       scheduleFit(120);
@@ -126,7 +190,7 @@ export function createTerminalView(
       return { cols: terminal.cols, rows: terminal.rows };
     },
     sessionId() {
-      return attached;
+      return attached ?? preparing;
     },
     reveal() {
       if (fitToHost()) syncSize();
@@ -135,6 +199,8 @@ export function createTerminalView(
       scheduleFit(120);
     },
     dispose() {
+      if (snapshotTimer !== null) window.clearTimeout(snapshotTimer);
+      snapshotTimer = null;
       for (const timer of pendingTimers) window.clearTimeout(timer);
       pendingTimers.clear();
       pendingOutput.clear();
@@ -168,7 +234,7 @@ export function createTerminalView(
           };
           if (!output.session_id || !output.data) return;
           if (output.session_id === attached) {
-            terminal.write(output.data);
+            writeOutput(output.data);
           } else {
             // 非当前显示会话的输出持续缓存（上限截断）：切换回来时
             // 完整重放，保持各会话终端互不丢失。
@@ -189,7 +255,7 @@ export function createTerminalView(
             pendingOutput.delete(exit.session_id);
           }
           if (exit.session_id === attached) {
-            terminal.write(
+            writeOutput(
               `\r\n\x1b[90m[进程已退出，退出码 ${exit.exit_code ?? '未知'}]\x1b[0m\r\n`,
             );
           }

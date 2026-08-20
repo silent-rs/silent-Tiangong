@@ -1,16 +1,22 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import {
   api,
   type AvailablePlugin,
+  type SandboxKind,
   type SessionStreamEvent,
   type TabKind,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
+import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
-import { TabsContainer, type AppTabCommand } from '@/components/TabsContainer';
+import {
+  TabsContainer,
+  type AppTabCommand,
+  type PluginAppInstanceRef,
+} from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { InteractionPluginHost } from '@/components/InteractionPluginHost';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
@@ -101,9 +107,48 @@ function browserPluginSessionId(sessionId?: string | null): string {
   return sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId;
 }
 
+interface BackgroundAppInstance {
+  pluginId: string;
+  contributionId: string;
+  title: string;
+  sandbox: SandboxKind;
+  multi: boolean;
+  sessionId: string;
+  instanceId: string;
+}
+
+function findBackgroundApp(
+  instances: BackgroundAppInstance[],
+  sessionId: string,
+  pluginId?: string,
+  contributionId?: string,
+): BackgroundAppInstance | undefined {
+  for (let index = instances.length - 1; index >= 0; index -= 1) {
+    const instance = instances[index];
+    if (
+      instance.sessionId === sessionId
+      && (!pluginId || instance.pluginId === pluginId)
+      && (!contributionId || instance.contributionId === contributionId)
+    ) return instance;
+  }
+  return undefined;
+}
+
+function isSameAppInstance(
+  background: BackgroundAppInstance,
+  foreground: PluginAppInstanceRef,
+): boolean {
+  return background.pluginId === foreground.pluginId
+    && background.contributionId === foreground.contributionId
+    && background.instanceId === foreground.instanceId
+    && background.sessionId === foreground.sessionId;
+}
+
 export function MainApp() {
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const activeSessionId = useStore((state) => state.activeSessionId);
+  const newConversationId = useStore((state) => state.newConversationId);
+  const currentSessionId = activeSessionId ?? newConversationId;
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [interactionVisible, setInteractionVisible] = useState(false);
@@ -115,8 +160,23 @@ export function MainApp() {
   const [workspaceMode, setWorkspaceMode] = useState<'app' | 'matrix'>('matrix');
   // 矩阵右键菜单下发的 App 实例命令（新建实例/关闭全部），version 递增触发。
   const [appTabCommand, setAppTabCommand] = useState<AppTabCommand | null>(null);
-  // 已打开的 plugin App 键集合（`plugin_id:contribution_id`）：矩阵绿点数据源。
-  const [runningPluginApps, setRunningPluginApps] = useState<string[]>([]);
+  // 工具接应的后台插件实例（app.open mode=background）：隐藏挂载不弹面板。
+  const [bgPluginInstances, setBgPluginInstances] = useState<BackgroundPluginInstance[]>([]);
+  // 插件通过 app.open 登记、尚未接入顶部标签的后台 App 实例。
+  const [backgroundAppInstances, setBackgroundAppInstances] = useState<BackgroundAppInstance[]>([]);
+  const backgroundAppInstancesRef = useRef<BackgroundAppInstance[]>([]);
+  backgroundAppInstancesRef.current = backgroundAppInstances;
+  // 已接入当前会话顶部标签的 App 键集合。
+  const [foregroundPluginApps, setForegroundPluginApps] = useState<string[]>([]);
+  const runningPluginApps = useMemo(() => {
+    const apps = new Set(foregroundPluginApps);
+    for (const instance of backgroundAppInstances) {
+      if (instance.sessionId === currentSessionId) {
+        apps.add(`${instance.pluginId}:${instance.contributionId}`);
+      }
+    }
+    return Array.from(apps);
+  }, [backgroundAppInstances, currentSessionId, foregroundPluginApps]);
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -218,17 +278,18 @@ export function MainApp() {
   workspacePanelMountedRef.current = workspacePanelMounted;
   const refreshAgentActiveMarkers = useCallback(async (sessionId: string) => {
     if (workspacePanelMountedRef.current) return;
+    const pluginApps = new Set<string>();
     try {
       const result = await api.getSessionTabs(sessionId);
-      const pluginApps = Array.from(new Set(
-        result.tabs
-          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
-          .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
-      ));
-      setRunningPluginApps(pluginApps);
+      for (const tab of result.tabs) {
+        if (tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id) {
+          pluginApps.add(`${tab.plugin_id}:${tab.contribution_id}`);
+        }
+      }
     } catch {
       // 会话 tabs 未就绪时静默
     }
+    setForegroundPluginApps(Array.from(pluginApps));
   }, []);
 
   const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
@@ -273,6 +334,7 @@ export function MainApp() {
       // 有 tab → 聚焦上次活跃的 App 态；无 tab → 进入矩阵态。
       const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
       let lastKind: TabKind | null = null;
+      let backgroundApp: BackgroundAppInstance | undefined;
       if (sessionId) {
         try {
           const result = await api.getSessionTabs(sessionId);
@@ -283,9 +345,30 @@ export function MainApp() {
         } catch {
           // 会话 tabs 未就绪时按无已打开 App 处理
         }
+        if (!lastKind) {
+          backgroundApp = findBackgroundApp(backgroundAppInstancesRef.current, sessionId);
+        }
       }
       if (lastKind) {
         void openWorkspacePanel(lastKind);
+      } else if (backgroundApp) {
+        // 插件已在后台建立 App 实例：用户打开拓展区时接入同一实例。
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'open-plugin',
+          version: Date.now(),
+          sessionId: backgroundApp.sessionId,
+          app: {
+            pluginId: backgroundApp.pluginId,
+            contributionId: backgroundApp.contributionId,
+            title: backgroundApp.title,
+            sandbox: backgroundApp.sandbox,
+            multi: backgroundApp.multi,
+            focusExisting: true,
+            instanceId: backgroundApp.instanceId,
+          },
+        });
+        void openWorkspacePanel('plugin');
       } else {
         setWorkspaceMode('matrix');
         setSidebarOpenByLayout(false);
@@ -347,7 +430,7 @@ export function MainApp() {
   // 离开会话（新对话）时清零，避免绿点残留。
   useEffect(() => {
     if (!activeSessionId) {
-      setRunningPluginApps([]);
+      setForegroundPluginApps([]);
       return;
     }
     void refreshAgentActiveMarkers(activeSessionId);
@@ -465,15 +548,13 @@ export function MainApp() {
       // 浏览器 tab 增删/更新时刷新"使用中"标记。
       // 标记语义：当前会话浏览器存在 tab（即浏览器在使用），且用户尚未打开浏览器面板。
       track(await listen<{ session_id?: string }>('browser:tab_updated', (event) => {
-        const sessionId = event.payload?.session_id;
+        const sessionId = browserPluginSessionId(event.payload?.session_id);
         if (!sessionId || useStore.getState().activeSessionId !== sessionId) return;
         void refreshAgentActiveMarkers(sessionId);
       }));
       guard();
-      // browser:open 仅在用户明确要求打开浏览器时发出（web_fetch open=true），
-      // 此时弹出浏览器插件面板供用户查看（阶段 4b：内置面板退役）。
-      // fetcher 抓取与插件面板是不同作用域实例，在插件会话内重新打开同
-      // 一 URL 展示（core 工具全面切插件工具后自然消除双开）。
+      // 兼容旧宿主浏览器命令的 browser:open；插件工具（web_fetch / browser_open）
+      // 已由浏览器插件通过 SDK 的 app.open 自行决定是否展开拓展区。
       track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
         const { url } = event.payload;
         const sessionId = browserPluginSessionId(event.payload.session_id);
@@ -499,6 +580,7 @@ export function MainApp() {
           kind: 'plugin',
           action: 'open-plugin',
           version: Date.now(),
+          sessionId,
           app: {
             pluginId: 'browser',
             contributionId: 'browser',
@@ -509,6 +591,140 @@ export function MainApp() {
           },
         });
         await openWorkspacePanel('plugin');
+      }));
+      guard();
+      // app.open 原语落地：宿主请求打开插件 App（官方与三方插件一致）。
+      // mode=background 为工具接应的隐性挂载：不弹拓展区面板，Agent 操作
+      // 的页面照常在插件作用域进行，用户可随时自行打开拓展区观察（协同）。
+      // 前台模式（用户明确要求展示，如 web_fetch open=true / browser_open）
+      // 弹出并聚焦面板。实例挂载后 shell 订阅 tool.requested，宿主重放
+      // 挂起调用，工具继续执行。
+      track(await listen<{
+        plugin_id: string;
+        contribution_id: string;
+        title?: string;
+        sandbox?: string;
+        multi?: boolean;
+        session_id?: string;
+        background?: boolean;
+        instance_id?: string | null;
+      }>('app:open_plugin', (event) => {
+        const payload = event.payload;
+        const normalizeSandbox = (): SandboxKind => (
+          payload.sandbox === 'webview'
+            || payload.sandbox === 'iframe'
+            || payload.sandbox === 'native'
+            ? payload.sandbox
+            : 'shadow'
+        );
+        const requestedSessionId = payload.session_id
+          || useStore.getState().activeSessionId
+          || useStore.getState().newConversationId
+          || '';
+        const rememberBackgroundInstance = () => {
+          if (!requestedSessionId || !payload.instance_id) return;
+          const instance: BackgroundAppInstance = {
+            pluginId: payload.plugin_id,
+            contributionId: payload.contribution_id,
+            title: payload.title || payload.plugin_id,
+            sandbox: normalizeSandbox(),
+            multi: Boolean(payload.multi),
+            sessionId: requestedSessionId,
+            instanceId: payload.instance_id,
+          };
+          setBackgroundAppInstances((prev) => [
+            ...prev.filter((item) => !(
+              item.pluginId === instance.pluginId
+              && item.contributionId === instance.contributionId
+              && item.sessionId === instance.sessionId
+              && item.instanceId === instance.instanceId
+            )),
+            instance,
+          ]);
+        };
+        if (payload.background) {
+          // 跟随发起工具调用的会话（含后台会话），不弹面板、不打扰用户。
+          if (!requestedSessionId) return;
+          setBgPluginInstances((prev) => {
+            const exists = prev.some((item) => item.pluginId === payload.plugin_id
+              && item.contributionId === payload.contribution_id
+              && item.sessionId === requestedSessionId);
+            if (exists) return prev;
+            return [...prev, {
+              pluginId: payload.plugin_id,
+              contributionId: payload.contribution_id,
+              sandbox: normalizeSandbox(),
+              sessionId: requestedSessionId,
+            }];
+          });
+          rememberBackgroundInstance();
+          return;
+        }
+        // 前台：后台会话的工具调用不弹面板，避免打断当前对话。
+        if (
+          payload.session_id
+          && (useStore.getState().activeSessionId || useStore.getState().newConversationId)
+            !== payload.session_id
+        ) {
+          rememberBackgroundInstance();
+          return;
+        }
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'open-plugin',
+          version: Date.now(),
+          sessionId: requestedSessionId,
+          app: {
+            pluginId: payload.plugin_id,
+            contributionId: payload.contribution_id,
+            title: payload.title || payload.plugin_id,
+            sandbox: normalizeSandbox(),
+            multi: Boolean(payload.multi),
+            focusExisting: true,
+            instanceId: payload.instance_id ?? undefined,
+          },
+        });
+        void openWorkspacePanel('plugin');
+      }));
+      guard();
+      // app.close 原语落地：宿主请求关闭插件 App 实例（Agent/插件在必要
+      // 时收起对应 tab）。instance_id 精确关一个实例，all 收起全部。
+      track(await listen<{
+        plugin_id: string;
+        session_id?: string;
+        instance_id?: string | null;
+        all?: boolean;
+      }>('app:close_plugin', (event) => {
+        const payload = event.payload;
+        const sessionId = payload.session_id
+          || useStore.getState().activeSessionId
+          || useStore.getState().newConversationId
+          || '';
+        setBackgroundAppInstances((prev) => prev.filter((instance) => {
+          if (instance.pluginId !== payload.plugin_id || instance.sessionId !== sessionId) {
+            return true;
+          }
+          return payload.all !== true && instance.instanceId !== payload.instance_id;
+        }));
+        if (
+          payload.session_id
+          && useStore.getState().activeSessionId !== payload.session_id
+        ) return;
+        setAppTabCommand({
+          kind: 'plugin',
+          action: 'close-plugin',
+          version: Date.now(),
+          sessionId,
+          // close-plugin 只消费 pluginId / instanceId，其余字段为类型占位。
+          app: {
+            pluginId: payload.plugin_id,
+            contributionId: '',
+            title: '',
+            sandbox: 'shadow',
+            multi: false,
+            instanceId: payload.instance_id ?? undefined,
+          },
+        });
       }));
       guard();
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
@@ -595,6 +811,7 @@ export function MainApp() {
         kind: 'plugin',
         action: 'open-plugin',
         version: Date.now(),
+        sessionId,
         app: {
           pluginId: 'browser',
           contributionId: 'browser',
@@ -607,38 +824,6 @@ export function MainApp() {
       await openWorkspacePanel('plugin');
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
-
-    const onOpenPluginInstance = async (event: Event) => {
-      const detail = (event as CustomEvent<{
-        plugin_id?: string;
-        contribution_id?: string;
-        instance_id?: string;
-        session_id?: string;
-      }>).detail;
-      if (
-        detail?.plugin_id !== 'browser'
-        || detail.contribution_id !== 'browser'
-        || !detail.instance_id
-      ) return;
-      const store = useStore.getState();
-      const currentSessionId = store.activeSessionId || store.newConversationId;
-      if (!currentSessionId || detail.session_id !== currentSessionId) return;
-      setAppTabCommand({
-        kind: 'plugin',
-        action: 'open-plugin',
-        version: Date.now(),
-        app: {
-          pluginId: 'browser',
-          contributionId: 'browser',
-          title: '浏览器',
-          sandbox: 'webview',
-          multi: true,
-          instanceId: detail.instance_id,
-        },
-      });
-      await openWorkspacePanel('plugin');
-    };
-    window.addEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
 
     return () => {
       // 先标记本轮 disposed，使尚未完成的异步注册流程在后续 guard 处自行放弃；
@@ -658,7 +843,6 @@ export function MainApp() {
         sessionsRefreshTimerRef.current = null;
       }
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
-      window.removeEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
     };
   }, [
     setSidebarOpenByLayout,
@@ -672,6 +856,8 @@ export function MainApp() {
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
+      {/* 工具接应的后台插件实例：隐藏挂载，仅保证插件工具有人执行 */}
+      <BackgroundPluginHost instances={bgPluginInstances} />
       <div className="flex flex-col h-screen w-full overflow-hidden">
         <LazyStatusPanel
           // 高亮 = 拓展区面板展开中；绿点 = 会话存在已打开的 App 实例（在用标记）
@@ -721,18 +907,29 @@ export function MainApp() {
                       <ExtensionMatrix
                         runningPluginApps={runningPluginApps}
                         onOpenPluginApp={(app) => {
+                          const backgroundApp = currentSessionId
+                            ? findBackgroundApp(
+                              backgroundAppInstances,
+                              currentSessionId,
+                              app.plugin_id,
+                              app.contribution_id,
+                            )
+                            : undefined;
                           // App 统一走插件命令通道：按 open_mode 分派
                           // （单例聚焦/多例新建），native 容器由官方签名插件声明。
                           setAppTabCommand({
                             kind: 'plugin',
                             action: 'open-plugin',
                             version: Date.now(),
+                            sessionId: currentSessionId ?? undefined,
                             app: {
                               pluginId: app.plugin_id,
                               contributionId: app.contribution_id,
                               title: app.title,
                               sandbox: app.sandbox,
                               multi: app.open_mode === 'multi',
+                              focusExisting: Boolean(backgroundApp),
+                              instanceId: backgroundApp?.instanceId,
                             },
                           });
                           void openWorkspacePanel('plugin');
@@ -742,8 +939,13 @@ export function MainApp() {
                     appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
-                    onTabKindsChanged={(_kinds, pluginApps) => {
-                      setRunningPluginApps(pluginApps);
+                    onTabKindsChanged={(_kinds, pluginApps, pluginInstances) => {
+                      setForegroundPluginApps(pluginApps);
+                      setBackgroundAppInstances((prev) => prev.filter(
+                        (background) => !pluginInstances.some(
+                          (foreground) => isSameAppInstance(background, foreground),
+                        ),
+                      ));
                     }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />

@@ -288,7 +288,8 @@ describe('MainApp sessions_updated scheduling contract', () => {
     await advance(120);
 
     expect(getSessionsMock).not.toHaveBeenCalled();
-    expect(registeredUnlisteners.length).toBe(8);
+    // 8 个基础监听 + app:open_plugin / app:close_plugin（app 原语落地）。
+    expect(registeredUnlisteners.length).toBe(10);
     for (const unlisten of registeredUnlisteners) {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }

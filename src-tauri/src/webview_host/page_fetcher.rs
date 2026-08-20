@@ -63,7 +63,6 @@ impl PageFetcher for BrowserPageFetcher {
         &self,
         url: &str,
         max_chars: usize,
-        open: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<BrowserResponse>> + Send>> {
         let tx = self.cmd_tx.clone();
         let Some(session_id) = self.session_id() else {
@@ -78,7 +77,6 @@ impl PageFetcher for BrowserPageFetcher {
                     session_id: session_id.clone(),
                     url,
                     max_chars,
-                    open,
                     response_tx
                 },
                 response_rx,
@@ -450,20 +448,13 @@ impl BrowserToolOverride {
             .get("max_chars")
             .and_then(|v| v.as_u64())
             .unwrap_or(12000) as usize;
-        // 用户明确要求打开浏览器时为 true，触发前端弹出面板；默认 false（agent 自主抓取）
-        let open = call
-            .arguments
-            .get("open")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
         let fetcher = fetcher.clone();
         let fetch_lock = fetch_lock.clone();
         Box::pin(async move {
             // 串行化 web_fetch：并发调用等待前一个完成后再操作 WebView，
             // 规避 wry 在 WebView 导航中 URL() 返回 nil 的 panic。
             let _guard = fetch_lock.lock().await;
-            let result = match fetcher.fetch_page(&url, max_chars, open).await {
+            let result = match fetcher.fetch_page(&url, max_chars).await {
                 Some(r) => r,
                 None => {
                     return Some(tiangong_core::tool::ToolResult {

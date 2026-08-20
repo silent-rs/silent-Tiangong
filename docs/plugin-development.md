@@ -545,15 +545,23 @@ Vue 组件统一使用 `<style scoped>`。Shadow 会隔离插件选择器，而 
 插件 UI 内经统一桥接访问宿主（两种容器自动适配，见 `plugins/sdk`）：
 
 ```ts
-import { createTiangongBridge, pluginStorage } from '@tiangong/plugin-sdk';
+import {
+  createTiangongBridge,
+  openExtensionApp,
+  pluginStorage,
+} from '@tiangong/plugin-sdk';
 const bridge = await createTiangongBridge();
 await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
+
+// 仅 extension.tab App 可用；false 表示后台建立实例但不自动展开拓展区。
+await openExtensionApp(bridge, { sessionId, showPanel: false });
 ```
 
 - `storage.get/set/delete/list`：私有数据，落盘在插件 `data/` 目录，需声明
   `storage.private` 权限。
 - `plugin.*`：转发到本插件 WASM 逻辑层（带逻辑层的 v2 插件与 v1 插件通用）。
 - `session.*`、`tool.*` 等宿主能力按清单权限开放，负载使用 JSON 字符串。
+- `openExtensionApp`：声明 `extension.tab` 且具有 `app.use` 权限的 App 插件打开自身实例；`showPanel` 由插件决定是否自动展开拓展区。
 - iframe 通过 `tiangong_host_context` 接收主题 token；Shadow 直接继承 App 根变量。
 
 不要在插件中调用 Tauri API 或宿主内部函数；所有跨边界行为都应走 SDK 桥接，宿主

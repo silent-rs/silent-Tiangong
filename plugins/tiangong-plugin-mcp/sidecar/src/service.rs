@@ -76,12 +76,11 @@ impl McpService {
             .unwrap_or_default()
     }
 
-    #[allow(dead_code)]
-    fn targets_snapshot(&self) -> std::collections::HashMap<String, McpFunctionTarget> {
+    fn target_for_function(&self, function_name: &str) -> Option<McpFunctionTarget> {
         self.mcp_targets
             .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .ok()
+            .and_then(|guard| guard.get(function_name).cloned())
     }
 
     fn reconfigure(&self) {
@@ -270,10 +269,15 @@ impl McpService {
                 use tiangong_plugin_mcp_protocol::tool::ExecuteToolRequest;
                 let req: ExecuteToolRequest = serde_json::from_value(payload)?;
                 let config = self.config_snapshot();
-                let target = McpFunctionTarget {
-                    server_name: req.server_name,
-                    tool_name: req.tool_name,
-                };
+                let function_name = format!("mcp__{}__{}", req.server_name, req.tool_name);
+                // WASM 为满足模型函数名限制会把连字符等字符转成下划线；
+                // 执行时必须用 capability 建立的绑定还原真实 server/tool 名。
+                let target =
+                    self.target_for_function(&function_name)
+                        .unwrap_or(McpFunctionTarget {
+                            server_name: req.server_name,
+                            tool_name: req.tool_name,
+                        });
                 let workspace = req
                     .workspace
                     .clone()

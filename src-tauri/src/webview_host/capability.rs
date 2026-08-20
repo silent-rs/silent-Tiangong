@@ -24,13 +24,10 @@ use crate::webview_host::types::{
 pub trait PageFetcher: Send + Sync + 'static {
     /// 获取指定 URL 的页面内容。
     ///
-    /// `open` 为 true 时表示用户明确要求打开浏览器（前端会弹出面板），
-    /// 为 false 时表示 agent 自主抓取（只亮标记，不弹面板）。
     fn fetch_page(
         &self,
         url: &str,
         max_chars: usize,
-        open: bool,
     ) -> Pin<Box<dyn Future<Output = Option<BrowserResponse>> + Send>>;
 
     /// 获取当前浏览器页面的快照。

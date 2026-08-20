@@ -348,8 +348,10 @@ pub fn handle_webview_primitive(
 // BrowserCommand 通道执行——策略（工具 schema、参数映射、结果格式化）在
 // browser 的 TS 层，引擎与页面注入在宿主（browser_data 事件流）。
 
-/// 协作原语超时：页面操作可能涉及导航等待。
-const COLLABORATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 协作原语超时：页面加载与稳定等待受网络影响可能很慢（webview 环境下
+/// 页面就绪耗时常见超过 30 秒），给足等待时间；工具级上限
+/// （plugin.json timeout_ms）仍兜底。
+const COLLABORATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 pub fn dispatch_collaboration(
     state: &crate::webview_host::WebviewHostState,
@@ -374,144 +376,147 @@ pub fn dispatch_collaboration(
     let request = request.clone();
     let method = method.to_string();
 
-    // 在 tokio 上下文内构造命令并等待响应（oneshot + 超时）
-    let result = runtime.block_on(async move {
-        let value = match method.as_str() {
-            "webview.fetch" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::FetchPage {
-                        session_id: session_id.clone(),
-                        url: request
-                            .get("url")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        max_chars: request
-                            .get("max_chars")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(40_000) as usize,
-                        open: request
-                            .get("open")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(response)) => serde_json::json!({
-                        "ok": response.ok,
-                        "title": response.title,
-                        "content": response.content,
-                    }),
-                    _ => anyhow::bail!("webview.fetch 超时或通道关闭"),
+    // Handle::block_on 禁止在 runtime 工作线程上调用（插件 UI 经异步命令
+    // bridge_call 进入时会 panic "Cannot start a runtime from within a
+    // runtime"）。转到独立线程阻塞等待命令响应，不阻塞调用方的 worker。
+    let worker = std::thread::spawn(move || {
+        runtime.block_on(async move {
+            let value = match method.as_str() {
+                "webview.fetch" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::FetchPage {
+                            session_id: session_id.clone(),
+                            url: request
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            max_chars: request
+                                .get("max_chars")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(40_000) as usize,
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(response)) => serde_json::json!({
+                            "ok": response.ok,
+                            "title": response.title,
+                            "content": response.content,
+                        }),
+                        _ => anyhow::bail!("webview.fetch 超时或通道关闭"),
+                    }
                 }
-            }
-            "webview.queryDom" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::QueryDom {
-                        session_id: session_id.clone(),
-                        selector: request
-                            .get("selector")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        max_results: request
-                            .get("max_results")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(20) as usize,
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(result)) => serde_json::to_value(result)?,
-                    _ => anyhow::bail!("webview.queryDom 超时或通道关闭"),
+                "webview.queryDom" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::QueryDom {
+                            session_id: session_id.clone(),
+                            selector: request
+                                .get("selector")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            max_results: request
+                                .get("max_results")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(20) as usize,
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => serde_json::to_value(result)?,
+                        _ => anyhow::bail!("webview.queryDom 超时或通道关闭"),
+                    }
                 }
-            }
-            "webview.click" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::ClickElement {
-                        session_id: session_id.clone(),
-                        selector: request
-                            .get("selector")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        wait_for: None,
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(result)) => serde_json::to_value(result)?,
-                    _ => anyhow::bail!("webview.click 超时或通道关闭"),
+                "webview.click" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::ClickElement {
+                            session_id: session_id.clone(),
+                            selector: request
+                                .get("selector")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            wait_for: None,
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => serde_json::to_value(result)?,
+                        _ => anyhow::bail!("webview.click 超时或通道关闭"),
+                    }
                 }
-            }
-            "webview.formFill" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::FormFill {
-                        session_id: session_id.clone(),
-                        selector: request
-                            .get("selector")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        value: request
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        strategy: request
-                            .get("strategy")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("auto")
-                            .to_string(),
-                        wait_for: None,
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(result)) => serde_json::to_value(result)?,
-                    _ => anyhow::bail!("webview.formFill 超时或通道关闭"),
+                "webview.formFill" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::FormFill {
+                            session_id: session_id.clone(),
+                            selector: request
+                                .get("selector")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            value: request
+                                .get("value")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            strategy: request
+                                .get("strategy")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("auto")
+                                .to_string(),
+                            wait_for: None,
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => serde_json::to_value(result)?,
+                        _ => anyhow::bail!("webview.formFill 超时或通道关闭"),
+                    }
                 }
-            }
-            "webview.formExtract" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::FormExtract {
-                        session_id: session_id.clone(),
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(result)) => serde_json::to_value(result)?,
-                    _ => anyhow::bail!("webview.formExtract 超时或通道关闭"),
+                "webview.formExtract" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::FormExtract {
+                            session_id: session_id.clone(),
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => serde_json::to_value(result)?,
+                        _ => anyhow::bail!("webview.formExtract 超时或通道关闭"),
+                    }
                 }
-            }
-            "webview.locate" => {
-                let (tx, rx) = oneshot::channel();
-                let _ = cmd_tx
-                    .send(BrowserCommand::LocateElement {
-                        session_id: session_id.clone(),
-                        query: request
-                            .get("query")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        response_tx: tx,
-                    })
-                    .await;
-                match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
-                    Ok(Ok(result)) => serde_json::to_value(result)?,
-                    _ => anyhow::bail!("webview.locate 超时或通道关闭"),
+                "webview.locate" => {
+                    let (tx, rx) = oneshot::channel();
+                    let _ = cmd_tx
+                        .send(BrowserCommand::LocateElement {
+                            session_id: session_id.clone(),
+                            query: request
+                                .get("query")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            response_tx: tx,
+                        })
+                        .await;
+                    match tokio::time::timeout(COLLABORATION_TIMEOUT, rx).await {
+                        Ok(Ok(result)) => serde_json::to_value(result)?,
+                        _ => anyhow::bail!("webview.locate 超时或通道关闭"),
+                    }
                 }
-            }
-            other => anyhow::bail!("未知协作原语：{other}"),
-        };
-        Ok::<serde_json::Value, anyhow::Error>(value)
-    })?;
+                other => anyhow::bail!("未知协作原语：{other}"),
+            };
+            Ok::<serde_json::Value, anyhow::Error>(value)
+        })
+    });
+    let result = worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("协作原语执行线程异常退出"))??;
     Ok(result)
 }
 

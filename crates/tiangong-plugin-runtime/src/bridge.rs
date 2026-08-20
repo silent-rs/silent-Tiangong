@@ -64,6 +64,11 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         description: "webview 容器原语",
     },
     BridgeNamespace {
+        prefix: "app.",
+        permission: "app.use",
+        description: "打开/关闭插件 App 实例（声明 extension.tab 贡献的插件）",
+    },
+    BridgeNamespace {
         prefix: "sidecar.",
         permission: "sidecar.invoke",
         description: "本插件 sidecar 原生逻辑层",
@@ -200,6 +205,8 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         // webview.*：宿主 webview 容器原语（声明式创建/导航/eval），插件
         // 在其上构建浏览器类能力；运行时只做权限与路由，引擎在宿主进程。
         "webview." => native_service_call(&WEBVIEW_HANDLER, "webview", plugin_id, method, payload),
+        // app.*：打开插件 App 实例（只能打开调用方自己的贡献）。
+        "app." => native_service_call(&APP_HANDLER, "app", plugin_id, method, payload),
         // sidecar.*：TS 插件调用本插件 sidecar（请求-响应；输出流经通知事件）。
         // 仅到达本插件 sidecar，宿主不解析业务负载。
         "sidecar." => {
@@ -241,6 +248,7 @@ pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> +
 static TERMINAL_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static BROWSER_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static WEBVIEW_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static APP_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 
 /// 注入终端原生服务（PTY 会话管理，桌面入口启动时调用）。
 pub fn set_terminal_handler(handler: NativeServiceHandler) {
@@ -256,6 +264,21 @@ pub fn set_browser_handler(handler: NativeServiceHandler) {
 /// 方法如 webview.create/navigate/eval/hide/close，事件经通知通道推送）。
 pub fn set_webview_handler(handler: NativeServiceHandler) {
     let _ = WEBVIEW_HANDLER.set(handler);
+}
+
+/// 注入 App 实例原语服务（app.open：打开声明 extension.tab 贡献的插件
+/// App，前端 open-plugin 通道执行；工具调用无 UI 接应时宿主内部亦经
+/// [`open_app_for_plugin`] 使用同一处理器）。
+pub fn set_app_handler(handler: NativeServiceHandler) {
+    let _ = APP_HANDLER.set(handler);
+}
+
+/// 宿主内部请求打开插件 App（工具调用无 UI 接应等场景）。
+///
+/// 不经 `bridge.call` 权限校验（宿主可信调用），直接路由到注入的
+/// `app.open` 原生服务；插件侧主动调用应走 `bridge_call`。
+pub(crate) fn open_app_for_plugin(plugin_id: &str, payload: &str) -> Result<String> {
+    native_service_call(&APP_HANDLER, "app", plugin_id, "app.open", payload)
 }
 
 fn native_service_call(
@@ -340,6 +363,7 @@ pub fn bridge_subscribe(plugin_id: &str, channel: &str) -> Result<()> {
     let channels = subscriptions.entry(plugin_id.to_string()).or_default();
     *channels.entry(channel.to_string()).or_default() += 1;
     drop(subscriptions);
+    tracing::info!(plugin_id, channel, "插件订阅建立（将重放等待中的调用）");
 
     // 工具调用可能早于插件页面完成订阅。订阅生效后重放仍在等待的调用；
     // invocation_id 保持不变，插件可据此幂等处理并忽略重复投递。
@@ -422,7 +446,25 @@ pub fn bridge_emit_to(plugin_id: &str, channel: &str, payload: &str) {
         .unwrap_or(false);
     if subscribed {
         emitter(plugin_id, channel, payload);
+    } else if channel == "tool.requested" {
+        tracing::info!(
+            plugin_id,
+            channel,
+            "定向事件无订阅者，暂不投递（等待后台挂载后重放）"
+        );
     }
+}
+
+/// 查询插件当前是否有存活订阅者（如判断 `tool.requested` 是否有人接应）。
+pub fn plugin_has_subscriber(plugin_id: &str, channel: &str) -> bool {
+    event_subscriptions()
+        .lock()
+        .map(|subscriptions| {
+            subscriptions
+                .get(plugin_id)
+                .is_some_and(|channels| channels.contains_key(channel))
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

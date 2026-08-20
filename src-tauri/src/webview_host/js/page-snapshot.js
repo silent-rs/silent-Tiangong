@@ -14,6 +14,7 @@
             url: String(page.url || window.location.href || ''),
             title: String(page.title || document.title || ''),
             text: String(page.text || ''),
+            has_content: String(page.text || '').trim().length > 0,
             internal_error: !!(
                 document.documentElement &&
                 document.documentElement.getAttribute('data-tiangong-navigation-error') === 'true'
@@ -26,6 +27,7 @@
             url: '',
             title: '',
             text: '',
+            has_content: false,
             internal_error: false
         };
     }

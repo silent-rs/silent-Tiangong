@@ -26,6 +26,16 @@ export interface HostBridge {
   on(channel: string, handler: (payload: string) => void): () => void;
 }
 
+/** 打开本插件 `extension.tab` App 的参数。 */
+export interface OpenExtensionAppOptions {
+  /** App 所属会话；缺省时由宿主使用当前会话。 */
+  sessionId?: string;
+  /** 插件生成的实例编号，用于幂等打开或聚焦指定实例。 */
+  instanceId?: string;
+  /** 是否自动展开并聚焦拓展区，缺省为 true。 */
+  showPanel?: boolean;
+}
+
 /** App 打开模式：singleton 全局至多一个实例，multi 每次打开新建。 */
 export type OpenMode = 'singleton' | 'multi';
 
@@ -231,6 +241,23 @@ export async function createTiangongBridge(): Promise<HostBridge> {
     return new IframeBridge();
   }
   throw new Error('未检测到天工容器（不在插件沙箱内运行）');
+}
+
+/**
+ * 打开本插件声明的 `extension.tab` App。
+ *
+ * 仅声明了 `extension.tab` 贡献及 `app.use` 权限的插件可用，宿主会再次校验。
+ * `showPanel=false` 只建立后台实例，不会自动展开拓展区。
+ */
+export async function openExtensionApp(
+  bridge: HostBridge,
+  options: OpenExtensionAppOptions = {},
+): Promise<void> {
+  const payload: Record<string, unknown> = {};
+  if (options.sessionId !== undefined) payload.session_id = options.sessionId;
+  if (options.instanceId !== undefined) payload.instance_id = options.instanceId;
+  if (options.showPanel === false) payload.mode = 'background';
+  await bridge.call('app.open', JSON.stringify(payload));
 }
 
 /** Desktop 纯 TypeScript 工具插件收到的权威调用。 */
