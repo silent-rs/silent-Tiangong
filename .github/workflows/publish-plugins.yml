@@ -24,7 +24,12 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       plugin_id: ${{ steps.plugin.outputs.plugin_id }}
+      plugin_root: ${{ steps.plugin.outputs.plugin_root }}
+      has_wasm: ${{ steps.plugin.outputs.has_wasm }}
+      has_ui: ${{ steps.plugin.outputs.has_ui }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Resolve plugin ID
         id: plugin
         env:
@@ -41,10 +46,28 @@ jobs:
             exit 1
           fi
           echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
+          # 从 plugin.json 解析插件形态：纯 UI 插件（如 interaction/browser）
+          # 无 wasm；带 UI 贡献的插件需要预构建单文件页面。
+          python3 - "$plugin_id" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys
+          plugin_id = sys.argv[1]
+          for root in (f"plugins/tiangong-plugin-{plugin_id}", f"plugins/{plugin_id}"):
+              if os.path.isfile(f"{root}/plugin.json"):
+                  manifest = json.load(open(f"{root}/plugin.json"))
+                  has_wasm = "true" if manifest.get("wasm") else "false"
+                  has_ui = "true" if manifest.get("ui", {}).get("contributions") else "false"
+                  print(f"plugin_root={root}")
+                  print(f"has_wasm={has_wasm}")
+                  print(f"has_ui={has_ui}")
+                  break
+          else:
+              raise SystemExit(f"plugin.json not found for {plugin_id}")
+          PY
 
   build-wasm:
     name: Build shared WASM
     needs: resolve-plugin
+    if: needs.resolve-plugin.outputs.has_wasm == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -53,20 +76,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip2
-      - name: Setup Node for screenshot UI
-        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Build shared screenshot UI
-        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
-        run: |
-          corepack enable
-          corepack prepare yarn@1.22.22 --activate
-          yarn --cwd plugins/screenshot-input install --frozen-lockfile
-          yarn --cwd plugins/screenshot-input build
-          mkdir -p target/shared-ui/dist
-          cp plugins/screenshot-input/dist/index.html target/shared-ui/dist/index.html
       - name: Build deterministic shared WASM
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -78,8 +87,30 @@ jobs:
           path: target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
           if-no-files-found: error
           retention-days: 7
-      - name: Upload shared screenshot UI
-        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+
+  build-ui:
+    name: Build shared UI
+    needs: resolve-plugin
+    if: needs.resolve-plugin.outputs.has_ui == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build deterministic shared UI
+        env:
+          PLUGIN_ROOT: ${{ needs.resolve-plugin.outputs.plugin_root }}
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn --cwd "$PLUGIN_ROOT" install --frozen-lockfile
+          yarn --cwd "$PLUGIN_ROOT" build
+          mkdir -p target/shared-ui/dist
+          cp "$PLUGIN_ROOT/dist/index.html" target/shared-ui/dist/index.html
+      - name: Upload shared UI
         uses: actions/upload-artifact@v4
         with:
           name: plugin-ui-${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -88,7 +119,7 @@ jobs:
           retention-days: 7
   build-plugin:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
-    needs: [resolve-plugin, build-wasm]
+    needs: [resolve-plugin, build-wasm, build-ui]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -147,12 +178,13 @@ jobs:
       # 下无法可靠地让 Strawberry 优先，因此必须在执行构建的同一 shell 内前置——见下方
       # Build and sign plugin 步骤。
       - name: Download shared WASM
+        if: needs.resolve-plugin.outputs.has_wasm == 'true'
         uses: actions/download-artifact@v4
         with:
           name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
           path: target/shared-wasm
-      - name: Download shared screenshot UI
-        if: needs.resolve-plugin.outputs.plugin_id == 'screenshot-input'
+      - name: Download shared UI
+        if: needs.resolve-plugin.outputs.has_ui == 'true'
         uses: actions/download-artifact@v4
         with:
           name: plugin-ui-${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -186,8 +218,8 @@ jobs:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
-          TIANGONG_PLUGIN_PREBUILT_WASM: ${{ github.workspace }}/target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
-          TIANGONG_PLUGIN_PREBUILT_UI: ${{ github.workspace }}/target/shared-ui/dist/index.html
+          TIANGONG_PLUGIN_PREBUILT_WASM: ${{ needs.resolve-plugin.outputs.has_wasm == 'true' && format('{0}/target/shared-wasm/{1}.wasm', github.workspace, needs.resolve-plugin.outputs.plugin_id) || '' }}
+          TIANGONG_PLUGIN_PREBUILT_UI: ${{ needs.resolve-plugin.outputs.has_ui == 'true' && format('{0}/target/shared-ui/dist/index.html', github.workspace) || '' }}
         run: |
           if [[ "$(uname -s)" == MINGW* ]]; then
             # Git Bash 每个 step 会重排 PATH，使 MSYS2 自带 perl 优先于 Strawberry；

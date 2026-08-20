@@ -360,7 +360,7 @@ Memory 的目录和构建说明见 [`plugins/tiangong-plugin-memory/README.md`](
 
 ## GitHub Actions 发布到 OSS
 
-短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `plugins/` 下完整的 `plugin.json`、WASM、protocol 和 sidecar；每次只构建、签名和上传所选插件。可通过 `cargo run -p xtask -- list-plugins` 查询当前可发布插件。
+短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `plugins/` 下的 `plugin.json` 与声明的制品（WASM、protocol、sidecar、UI）；每次只构建、签名和上传所选插件。发布形态由 `plugin.json` 决定：纯 UI 插件（如 `interaction`、`browser`）只发布单文件页面，跳过 WASM 构建，无 sidecar 则不生成签名清单；带 sidecar 的插件（如 `terminal`）仍要求官方签名并在三平台矩阵构建原生二进制。
 
 日常发布一次只触发一个插件，并等待任务结束后再发布下一个。首次集中发布多个插件时每批最多触发两个，确认本批任务全部结束后再触发下一批；不要同时推送大量插件标签，因为共享发布锁只负责串行写入，等待中的任务可能被后续任务取消。
 

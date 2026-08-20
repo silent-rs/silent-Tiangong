@@ -29,7 +29,9 @@ struct PublishedPluginRelease {
     #[serde(default, rename = "description")]
     _description: String,
     manifest: PublishedRemoteArtifact,
-    wasm: PublishedRemoteArtifact,
+    /// 纯 UI 插件无 WASM 制品，目录条目省略 wasm。
+    #[serde(default)]
+    wasm: Option<PublishedRemoteArtifact>,
     #[serde(default)]
     signed_releases: BTreeMap<String, PublishedSignedRelease>,
     #[serde(default)]
@@ -50,276 +52,319 @@ struct PublishedRemoteArtifact {
     checksum: String,
 }
 
-/// 单个 WASM 插件的构建配置。
+/// 单个插件的构建配置。纯 UI 插件（无 WASM）省略 protocol/wasm 字段，
+/// 声明 sidecar 的插件（如 terminal）仍要求官方签名发布。
 struct PluginConfig {
     id: &'static str,
     name: &'static str,
     description: &'static str,
-    protocol_crate: &'static str,
-    wasm_crate: &'static str,
-    wasm_artifact: &'static str,
+    protocol_crate: Option<&'static str>,
+    wasm_crate: Option<&'static str>,
+    wasm_artifact: Option<&'static str>,
     sidecar_crate: Option<&'static str>,
     sidecar_artifact: Option<&'static str>,
     plugin_root: &'static str,
     plugin_manifest: &'static str,
-    protocol_manifest: &'static str,
+    protocol_manifest: Option<&'static str>,
 }
 
 const MEMORY: PluginConfig = PluginConfig {
     id: "memory",
     name: "Memory",
     description: "对话记忆、召回与数据管理",
-    protocol_crate: "tiangong-plugin-memory-protocol",
-    wasm_crate: "tiangong-plugin-memory-wasm",
-    wasm_artifact: "tiangong_plugin_memory_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-memory-protocol"),
+    wasm_crate: Some("tiangong-plugin-memory-wasm"),
+    wasm_artifact: Some("tiangong_plugin_memory_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-memory-sidecar"),
     sidecar_artifact: Some("tiangong-memory-sidecar"),
     plugin_root: "plugins/tiangong-plugin-memory",
     plugin_manifest: "plugins/tiangong-plugin-memory/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-memory/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-memory/protocol/Cargo.toml"),
 };
 
 const MCP: PluginConfig = PluginConfig {
     id: "mcp",
     name: "MCP",
     description: "MCP server 管理与工具桥接",
-    protocol_crate: "tiangong-plugin-mcp-protocol",
-    wasm_crate: "tiangong-plugin-mcp-wasm",
-    wasm_artifact: "tiangong_plugin_mcp_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-mcp-protocol"),
+    wasm_crate: Some("tiangong-plugin-mcp-wasm"),
+    wasm_artifact: Some("tiangong_plugin_mcp_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-mcp-sidecar"),
     sidecar_artifact: Some("tiangong-mcp-sidecar"),
     plugin_root: "plugins/tiangong-plugin-mcp",
     plugin_manifest: "plugins/tiangong-plugin-mcp/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-mcp/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-mcp/protocol/Cargo.toml"),
 };
 
 const FETCH: PluginConfig = PluginConfig {
     id: "fetch",
     name: "Fetch",
     description: "URL 获取（text 提取正文 / download 落盘），含 SSRF 防护",
-    protocol_crate: "tiangong-plugin-fetch-protocol",
-    wasm_crate: "tiangong-plugin-fetch-wasm",
-    wasm_artifact: "tiangong_plugin_fetch_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-fetch-protocol"),
+    wasm_crate: Some("tiangong-plugin-fetch-wasm"),
+    wasm_artifact: Some("tiangong_plugin_fetch_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-fetch-sidecar"),
     sidecar_artifact: Some("tiangong-fetch-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fetch",
     plugin_manifest: "plugins/tiangong-plugin-fetch/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-fetch/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-fetch/protocol/Cargo.toml"),
 };
 
 const INDEX: PluginConfig = PluginConfig {
     id: "index",
     name: "Index",
     description: "工作区文件索引、对话历史索引与代码检索",
-    protocol_crate: "tiangong-plugin-index-protocol",
-    wasm_crate: "tiangong-plugin-index-wasm",
-    wasm_artifact: "tiangong_plugin_index_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-index-protocol"),
+    wasm_crate: Some("tiangong-plugin-index-wasm"),
+    wasm_artifact: Some("tiangong_plugin_index_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-index-sidecar"),
     sidecar_artifact: Some("tiangong-index-sidecar"),
     plugin_root: "plugins/tiangong-plugin-index",
     plugin_manifest: "plugins/tiangong-plugin-index/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-index/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-index/protocol/Cargo.toml"),
 };
 
 const SCHEDULER: PluginConfig = PluginConfig {
     id: "scheduler",
     name: "Scheduler",
     description: "定时任务调度与执行",
-    protocol_crate: "tiangong-plugin-scheduler-protocol",
-    wasm_crate: "tiangong-plugin-scheduler-wasm",
-    wasm_artifact: "tiangong_plugin_scheduler_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-scheduler-protocol"),
+    wasm_crate: Some("tiangong-plugin-scheduler-wasm"),
+    wasm_artifact: Some("tiangong_plugin_scheduler_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-scheduler-sidecar"),
     sidecar_artifact: Some("tiangong-scheduler-sidecar"),
     plugin_root: "plugins/tiangong-plugin-scheduler",
     plugin_manifest: "plugins/tiangong-plugin-scheduler/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-scheduler/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-scheduler/protocol/Cargo.toml"),
 };
 
 const SKILL: PluginConfig = PluginConfig {
     id: "skill",
     name: "Skill",
     description: "Skill 注册表管理、详情查询与 prompt 段落注入",
-    protocol_crate: "tiangong-plugin-skill-protocol",
-    wasm_crate: "tiangong-plugin-skill-wasm",
-    wasm_artifact: "tiangong_plugin_skill_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-skill-protocol"),
+    wasm_crate: Some("tiangong-plugin-skill-wasm"),
+    wasm_artifact: Some("tiangong_plugin_skill_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-skill-sidecar"),
     sidecar_artifact: Some("tiangong-skill-sidecar"),
     plugin_root: "plugins/tiangong-plugin-skill",
     plugin_manifest: "plugins/tiangong-plugin-skill/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-skill/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-skill/protocol/Cargo.toml"),
 };
 
 const CODING: PluginConfig = PluginConfig {
     id: "coding",
     name: "Coding",
     description: "通用开发工作流、项目上下文与交付审查",
-    protocol_crate: "tiangong-plugin-coding-protocol",
-    wasm_crate: "tiangong-plugin-coding-wasm",
-    wasm_artifact: "tiangong_plugin_coding_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-coding-protocol"),
+    wasm_crate: Some("tiangong-plugin-coding-wasm"),
+    wasm_artifact: Some("tiangong_plugin_coding_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-coding-sidecar"),
     sidecar_artifact: Some("tiangong-coding-sidecar"),
     plugin_root: "plugins/tiangong-plugin-coding",
     plugin_manifest: "plugins/tiangong-plugin-coding/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-coding/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-coding/protocol/Cargo.toml"),
 };
 
 const PROMPT: PluginConfig = PluginConfig {
     id: "prompt",
     name: "Prompt",
     description: "产品文案与自定义指令注入",
-    protocol_crate: "tiangong-plugin-prompt-protocol",
-    wasm_crate: "tiangong-plugin-prompt-wasm",
-    wasm_artifact: "tiangong_plugin_prompt_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-prompt-protocol"),
+    wasm_crate: Some("tiangong-plugin-prompt-wasm"),
+    wasm_artifact: Some("tiangong_plugin_prompt_wasm.wasm"),
     sidecar_crate: None,
     sidecar_artifact: None,
     plugin_root: "plugins/tiangong-plugin-prompt",
     plugin_manifest: "plugins/tiangong-plugin-prompt/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-prompt/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-prompt/protocol/Cargo.toml"),
 };
 
 const FS: PluginConfig = PluginConfig {
     id: "fs",
     name: "Fs",
     description: "基础文件工具（读写/补丁/目录树）+ 进程级文件锁表",
-    protocol_crate: "tiangong-plugin-fs-protocol",
-    wasm_crate: "tiangong-plugin-fs-wasm",
-    wasm_artifact: "tiangong_plugin_fs_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-fs-protocol"),
+    wasm_crate: Some("tiangong-plugin-fs-wasm"),
+    wasm_artifact: Some("tiangong_plugin_fs_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-fs-sidecar"),
     sidecar_artifact: Some("tiangong-fs-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fs",
     plugin_manifest: "plugins/tiangong-plugin-fs/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-fs/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-fs/protocol/Cargo.toml"),
 };
 
 const COMMAND: PluginConfig = PluginConfig {
     id: "command",
     name: "Command",
     description: "基础命令执行（run_command/run_shell）+ 命令校验策略",
-    protocol_crate: "tiangong-plugin-command-protocol",
-    wasm_crate: "tiangong-plugin-command-wasm",
-    wasm_artifact: "tiangong_plugin_command_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-command-protocol"),
+    wasm_crate: Some("tiangong-plugin-command-wasm"),
+    wasm_artifact: Some("tiangong_plugin_command_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-command-sidecar"),
     sidecar_artifact: Some("tiangong-command-sidecar"),
     plugin_root: "plugins/tiangong-plugin-command",
     plugin_manifest: "plugins/tiangong-plugin-command/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-command/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-command/protocol/Cargo.toml"),
 };
 
 const COMPUTER_USE: PluginConfig = PluginConfig {
     id: "computer-use",
     name: "Computer Use",
     description: "跨平台桌面应用控制（Windows UI Automation / macOS AXUIElement / Linux AT-SPI2）",
-    protocol_crate: "tiangong-plugin-computer-use-protocol",
-    wasm_crate: "tiangong-plugin-computer-use-wasm",
-    wasm_artifact: "tiangong_plugin_computer_use_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-computer-use-protocol"),
+    wasm_crate: Some("tiangong-plugin-computer-use-wasm"),
+    wasm_artifact: Some("tiangong_plugin_computer_use_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-computer-use-sidecar"),
     sidecar_artifact: Some("tiangong-computer-use-sidecar"),
     plugin_root: "plugins/tiangong-plugin-computer-use",
     plugin_manifest: "plugins/tiangong-plugin-computer-use/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-computer-use/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-computer-use/protocol/Cargo.toml"),
 };
 
 const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
     id: "text-to-speech",
     name: "Text To Speech",
     description: "Text to Speech",
-    protocol_crate: "tiangong-plugin-text-to-speech-protocol",
-    wasm_crate: "tiangong-plugin-text-to-speech-wasm",
-    wasm_artifact: "tiangong_plugin_text_to_speech_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-text-to-speech-protocol"),
+    wasm_crate: Some("tiangong-plugin-text-to-speech-wasm"),
+    wasm_artifact: Some("tiangong_plugin_text_to_speech_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-text-to-speech-sidecar"),
     sidecar_artifact: Some("tiangong-text-to-speech-sidecar"),
     plugin_root: "plugins/tiangong-plugin-text-to-speech",
     plugin_manifest: "plugins/tiangong-plugin-text-to-speech/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml"),
 };
 
 const GENERATE_IMAGE: PluginConfig = PluginConfig {
     id: "generate-image",
     name: "Generate Image",
     description: "Generate Image",
-    protocol_crate: "tiangong-plugin-generate-image-protocol",
-    wasm_crate: "tiangong-plugin-generate-image-wasm",
-    wasm_artifact: "tiangong_plugin_generate_image_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-generate-image-protocol"),
+    wasm_crate: Some("tiangong-plugin-generate-image-wasm"),
+    wasm_artifact: Some("tiangong_plugin_generate_image_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-generate-image-sidecar"),
     sidecar_artifact: Some("tiangong-generate-image-sidecar"),
     plugin_root: "plugins/tiangong-plugin-generate-image",
     plugin_manifest: "plugins/tiangong-plugin-generate-image/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-generate-image/protocol/Cargo.toml"),
 };
 
 const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
     id: "generate-image-openai",
     name: "Generate Image OpenAI",
     description: "Generate Image OpenAI",
-    protocol_crate: "tiangong-plugin-generate-image-openai-protocol",
-    wasm_crate: "tiangong-plugin-generate-image-openai-wasm",
-    wasm_artifact: "tiangong_plugin_generate_image_openai_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-generate-image-openai-protocol"),
+    wasm_crate: Some("tiangong-plugin-generate-image-openai-wasm"),
+    wasm_artifact: Some("tiangong_plugin_generate_image_openai_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-generate-image-openai-sidecar"),
     sidecar_artifact: Some("tiangong-generate-image-openai-sidecar"),
     plugin_root: "plugins/tiangong-plugin-generate-image-openai",
     plugin_manifest: "plugins/tiangong-plugin-generate-image-openai/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-generate-image-openai/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-generate-image-openai/protocol/Cargo.toml"),
 };
 
 const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
     id: "analyze-attachment",
     name: "Analyze Attachment",
     description: "Analyze Attachment",
-    protocol_crate: "tiangong-plugin-analyze-attachment-protocol",
-    wasm_crate: "tiangong-plugin-analyze-attachment-wasm",
-    wasm_artifact: "tiangong_plugin_analyze_attachment_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-analyze-attachment-protocol"),
+    wasm_crate: Some("tiangong-plugin-analyze-attachment-wasm"),
+    wasm_artifact: Some("tiangong_plugin_analyze_attachment_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-analyze-attachment-sidecar"),
     sidecar_artifact: Some("tiangong-analyze-attachment-sidecar"),
     plugin_root: "plugins/tiangong-plugin-analyze-attachment",
     plugin_manifest: "plugins/tiangong-plugin-analyze-attachment/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml"),
 };
 
 const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
     id: "speech-to-text",
     name: "Speech To Text",
     description: "Speech To Text",
-    protocol_crate: "tiangong-plugin-speech-to-text-protocol",
-    wasm_crate: "tiangong-plugin-speech-to-text-wasm",
-    wasm_artifact: "tiangong_plugin_speech_to_text_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-speech-to-text-protocol"),
+    wasm_crate: Some("tiangong-plugin-speech-to-text-wasm"),
+    wasm_artifact: Some("tiangong_plugin_speech_to_text_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-speech-to-text-sidecar"),
     sidecar_artifact: Some("tiangong-speech-to-text-sidecar"),
     plugin_root: "plugins/tiangong-plugin-speech-to-text",
     plugin_manifest: "plugins/tiangong-plugin-speech-to-text/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml"),
 };
 
 const GENERATE_VIDEO: PluginConfig = PluginConfig {
     id: "generate-video",
     name: "Generate Video",
     description: "Generate Video",
-    protocol_crate: "tiangong-plugin-generate-video-protocol",
-    wasm_crate: "tiangong-plugin-generate-video-wasm",
-    wasm_artifact: "tiangong_plugin_generate_video_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-generate-video-protocol"),
+    wasm_crate: Some("tiangong-plugin-generate-video-wasm"),
+    wasm_artifact: Some("tiangong_plugin_generate_video_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-generate-video-sidecar"),
     sidecar_artifact: Some("tiangong-generate-video-sidecar"),
     plugin_root: "plugins/tiangong-plugin-generate-video",
     plugin_manifest: "plugins/tiangong-plugin-generate-video/plugin.json",
-    protocol_manifest: "plugins/tiangong-plugin-generate-video/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/tiangong-plugin-generate-video/protocol/Cargo.toml"),
 };
 
 const SCREENSHOT_INPUT: PluginConfig = PluginConfig {
     id: "screenshot-input",
     name: "Screenshot Input",
     description: "跨平台区域截图并加入当前输入草稿",
-    protocol_crate: "tiangong-plugin-screenshot-input-protocol",
-    wasm_crate: "tiangong-plugin-screenshot-input-wasm",
-    wasm_artifact: "tiangong_plugin_screenshot_input_wasm.wasm",
+    protocol_crate: Some("tiangong-plugin-screenshot-input-protocol"),
+    wasm_crate: Some("tiangong-plugin-screenshot-input-wasm"),
+    wasm_artifact: Some("tiangong_plugin_screenshot_input_wasm.wasm"),
     sidecar_crate: Some("tiangong-plugin-screenshot-input-sidecar"),
     sidecar_artifact: Some("tiangong-screenshot-input-sidecar"),
     plugin_root: "plugins/screenshot-input",
     plugin_manifest: "plugins/screenshot-input/plugin.json",
-    protocol_manifest: "plugins/screenshot-input/protocol/Cargo.toml",
+    protocol_manifest: Some("plugins/screenshot-input/protocol/Cargo.toml"),
+};
+
+const INTERACTION: PluginConfig = PluginConfig {
+    id: "interaction",
+    name: "Interaction",
+    description: "审批征询交互处理器：审批、确认、选择、输入与表单",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: None,
+    sidecar_artifact: None,
+    plugin_root: "plugins/tiangong-plugin-interaction",
+    plugin_manifest: "plugins/tiangong-plugin-interaction/plugin.json",
+    protocol_manifest: None,
+};
+
+const BROWSER: PluginConfig = PluginConfig {
+    id: "browser",
+    name: "Browser",
+    description: "嵌入式浏览器：页面、标签与浏览工具（webview 引擎由宿主提供）",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: None,
+    sidecar_artifact: None,
+    plugin_root: "plugins/tiangong-plugin-browser",
+    plugin_manifest: "plugins/tiangong-plugin-browser/plugin.json",
+    protocol_manifest: None,
+};
+
+const TERMINAL: PluginConfig = PluginConfig {
+    id: "terminal",
+    name: "Terminal",
+    description: "嵌入式终端：多标签、会话隔离与命令执行",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: Some("tiangong-plugin-terminal-sidecar"),
+    sidecar_artifact: Some("tiangong-terminal-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-terminal",
+    plugin_manifest: "plugins/tiangong-plugin-terminal/plugin.json",
+    protocol_manifest: None,
 };
 
 fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "screenshot-input" => &["dist/index.html"],
+        "screenshot-input" | "interaction" | "browser" | "terminal" => &["dist/index.html"],
         _ => &[],
     }
 }
@@ -344,6 +389,9 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "command" => Ok(&COMMAND),
         "computer-use" => Ok(&COMPUTER_USE),
         "screenshot-input" => Ok(&SCREENSHOT_INPUT),
+        "interaction" => Ok(&INTERACTION),
+        "browser" => Ok(&BROWSER),
+        "terminal" => Ok(&TERMINAL),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
@@ -433,37 +481,38 @@ fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
 }
 
 fn build_plugin_wasm(config: &PluginConfig, output: &str) -> io::Result<()> {
+    let Some(wasm_crate) = config.wasm_crate else {
+        return Err(invalid_input(format!("插件 {} 无 WASM 制品", config.id)));
+    };
+    let protocol_crate = config.protocol_crate.expect("无 WASM 的插件必有 protocol");
     let workspace_root = workspace_root();
     validate_versions(&workspace_root, config)?;
     eprintln!("[xtask] CI build-plugin-wasm");
-    run_cargo(&workspace_root, &["check", "-p", config.protocol_crate])?;
+    run_cargo(&workspace_root, &["check", "-p", protocol_crate])?;
     run_cargo(
         &workspace_root,
-        &[
-            "check",
-            "-p",
-            config.protocol_crate,
-            "--target",
-            WASM_TARGET,
-        ],
+        &["check", "-p", protocol_crate, "--target", WASM_TARGET],
     )?;
     run_cargo(
         &workspace_root,
         &[
             "build",
             "-p",
-            config.wasm_crate,
+            wasm_crate,
             "--target",
             WASM_TARGET,
             "--release",
         ],
     )?;
     eprintln!("[xtask] WASM check ok");
+    let wasm_artifact = config
+        .wasm_artifact
+        .expect("wasm_crate 存在时必有 artifact");
     let wasm = workspace_root
         .join("target")
         .join(WASM_TARGET)
         .join("release")
-        .join(config.wasm_artifact);
+        .join(wasm_artifact);
     require_file(&wasm)?;
     let dest = Path::new(output);
     if let Some(parent) = dest.parent() {
@@ -479,46 +528,51 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     validate_versions(&workspace_root, config)?;
 
     let plugin_name = config.name;
-    eprintln!("[xtask] 检查 {plugin_name} 私有协议（native）...");
-    run_cargo(&workspace_root, &["check", "-p", config.protocol_crate])?;
-    eprintln!("[xtask] 检查 {plugin_name} 私有协议（{WASM_TARGET}）...");
-    run_cargo(
-        &workspace_root,
-        &[
-            "check",
-            "-p",
-            config.protocol_crate,
-            "--target",
-            WASM_TARGET,
-        ],
-    )?;
-    let wasm = match std::env::var("TIANGONG_PLUGIN_PREBUILT_WASM") {
-        Ok(path) => {
-            eprintln!("[xtask] using prebuilt wasm");
-            let p = PathBuf::from(path);
-            require_file(&p)?;
-            p
+    if let Some(protocol_crate) = config.protocol_crate {
+        eprintln!("[xtask] 检查 {plugin_name} 私有协议（native）...");
+        run_cargo(&workspace_root, &["check", "-p", protocol_crate])?;
+        eprintln!("[xtask] 检查 {plugin_name} 私有协议（{WASM_TARGET}）...");
+        run_cargo(
+            &workspace_root,
+            &["check", "-p", protocol_crate, "--target", WASM_TARGET],
+        )?;
+    }
+    let wasm: Option<PathBuf> = match config.wasm_artifact {
+        Some(wasm_artifact) => {
+            let wasm = match non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_WASM").map(PathBuf::from) {
+                Some(path) => {
+                    eprintln!("[xtask] using prebuilt wasm");
+                    require_file(&path)?;
+                    path
+                }
+                None => {
+                    eprintln!("[xtask] build wasm...");
+                    let wasm_crate = config.wasm_crate.expect("wasm_artifact 存在时必有 crate");
+                    run_cargo(
+                        &workspace_root,
+                        &[
+                            "build",
+                            "-p",
+                            wasm_crate,
+                            "--target",
+                            WASM_TARGET,
+                            "--release",
+                        ],
+                    )?;
+                    let p = workspace_root
+                        .join("target")
+                        .join(WASM_TARGET)
+                        .join("release")
+                        .join(wasm_artifact);
+                    require_file(&p)?;
+                    p
+                }
+            };
+            Some(wasm)
         }
-        Err(_) => {
-            eprintln!("[xtask] build wasm...");
-            run_cargo(
-                &workspace_root,
-                &[
-                    "build",
-                    "-p",
-                    config.wasm_crate,
-                    "--target",
-                    WASM_TARGET,
-                    "--release",
-                ],
-            )?;
-            let p = workspace_root
-                .join("target")
-                .join(WASM_TARGET)
-                .join("release")
-                .join(config.wasm_artifact);
-            require_file(&p)?;
-            p
+        None => {
+            eprintln!("[xtask] {plugin_name} 无 WASM 制品，跳过 WASM 构建");
+            None
         }
     };
 
@@ -529,8 +583,9 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     remove_dir_if_exists(&staging)?;
     std::fs::create_dir_all(&staging)?;
 
-    let staged_wasm = staging.join(config.wasm_artifact);
-    std::fs::copy(&wasm, &staged_wasm)?;
+    if let (Some(wasm), Some(wasm_artifact)) = (&wasm, config.wasm_artifact) {
+        std::fs::copy(wasm, staging.join(wasm_artifact))?;
+    }
 
     // sidecar 构建和复制（无 sidecar 的插件跳过）。
     if let (Some(sidecar_crate), Some(sidecar_artifact)) =
@@ -567,7 +622,12 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         std::fs::create_dir_all(staging.join(directory))?;
     }
 
-    eprintln!("[xtask] WASM sha256: {}", sha256(&staged_wasm)?);
+    if let Some(wasm_artifact) = config.wasm_artifact {
+        eprintln!(
+            "[xtask] WASM sha256: {}",
+            sha256(&staging.join(wasm_artifact))?
+        );
+    }
     if let Some(sidecar_artifact) = config.sidecar_artifact {
         let staged_sidecar = staging.join(format!(
             "{sidecar_artifact}{}",
@@ -590,7 +650,8 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
         return Ok(());
     }
 
-    let prebuilt = std::env::var_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
+    // CI 对无 UI 插件会传空串占位，空值视为未设置。
+    let prebuilt = non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
     if prebuilt.is_none() {
         let plugin_root = workspace_root.join(config.plugin_root);
         eprintln!("[xtask] 安装并构建 {} UI...", config.name);
@@ -645,11 +706,16 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
             "path": "plugin.json",
             "sha256": sha256(&manifest_path)?,
         },
-        "wasm": {
-            "path": config.wasm_artifact,
-            "sha256": sha256(&plugin.join(config.wasm_artifact))?,
-        },
     });
+
+    // WASM 条目（纯 UI/sidecar 插件无 wasm 制品，签名清单省略，
+    // 与运行时 SignedPluginRelease 的可选 wasm 字段对齐）。
+    if let Some(wasm_artifact) = config.wasm_artifact {
+        release["wasm"] = serde_json::json!({
+            "path": wasm_artifact,
+            "sha256": sha256(&plugin.join(wasm_artifact))?,
+        });
+    }
 
     // sidecar 声明（无 sidecar 的插件跳过，保持清单与 plugin.json 一致）。
     if let Some(sidecar_artifact) = config.sidecar_artifact {
@@ -845,9 +911,10 @@ fn generate_oss_distribution(
     std::fs::create_dir_all(index_root.join("fragments"))?;
 
     let dist_manifest = release_root.join("plugin.json");
-    let dist_wasm = release_root.join(config.wasm_artifact);
     std::fs::copy(&manifest_path, &dist_manifest)?;
-    std::fs::copy(plugin.join(config.wasm_artifact), &dist_wasm)?;
+    if let Some(wasm_artifact) = config.wasm_artifact {
+        std::fs::copy(plugin.join(wasm_artifact), release_root.join(wasm_artifact))?;
+    }
     let mut ui_artifacts = serde_json::Map::new();
     for entry in plugin_ui_entries(config) {
         let destination = release_root.join(entry);
@@ -909,7 +976,6 @@ fn generate_oss_distribution(
     };
 
     let manifest_checksum = format!("sha256:{}", sha256(&dist_manifest)?);
-    let wasm_checksum = format!("sha256:{}", sha256(&dist_wasm)?);
     let mut release = serde_json::json!({
         "id": config.id,
         "name": config.name,
@@ -919,13 +985,18 @@ fn generate_oss_distribution(
             "url": format!("{release_url}/plugin.json"),
             "checksum": manifest_checksum,
         },
-        "wasm": {
-            "url": format!("{release_url}/{}", config.wasm_artifact),
-            "checksum": wasm_checksum,
-        },
         "sidecars": sidecar_entry.unwrap_or_else(|| serde_json::json!({})),
         "ui": ui_artifacts,
     });
+    // WASM 条目（纯 UI 插件无 wasm 制品，目录条目省略；
+    // 客户端按 plugin.json 是否声明 wasm 决定下载）。
+    if let Some(wasm_artifact) = config.wasm_artifact {
+        let dist_wasm = release_root.join(wasm_artifact);
+        release["wasm"] = serde_json::json!({
+            "url": format!("{release_url}/{}", wasm_artifact),
+            "checksum": format!("sha256:{}", sha256(&dist_wasm)?),
+        });
+    }
     // 签名清单仅对 sidecar 插件生成，纯 WASM 插件不携带签名。
     if has_sidecar {
         release["signed_releases"] = serde_json::json!({
@@ -946,12 +1017,14 @@ fn generate_oss_distribution(
         &release,
     )?;
 
-    let mut checksums = format!(
-        "{}  plugin.json\n{}  {}\n",
-        sha256(&dist_manifest)?,
-        sha256(&dist_wasm)?,
-        config.wasm_artifact,
-    );
+    let mut checksums = format!("{}  plugin.json\n", sha256(&dist_manifest)?);
+    if let Some(wasm_artifact) = config.wasm_artifact {
+        checksums.push_str(&format!(
+            "{}  {}\n",
+            sha256(&release_root.join(wasm_artifact))?,
+            wasm_artifact,
+        ));
+    }
     if let Some(sidecar_artifact) = config.sidecar_artifact {
         let dist_sidecar = platform_root.join(format!(
             "{sidecar_artifact}{}",
@@ -1033,7 +1106,9 @@ fn validate_plugin_catalog_value(value: &serde_json::Value, path: &Path) -> io::
             ))
         })?;
         validate_catalog_artifact(&plugin.manifest, "插件清单")?;
-        validate_catalog_artifact(&plugin.wasm, "WASM 制品")?;
+        if let Some(wasm) = &plugin.wasm {
+            validate_catalog_artifact(wasm, "WASM 制品")?;
+        }
         for (entry, artifact) in &plugin.ui {
             validate_ui_entry(entry)?;
             validate_catalog_artifact(artifact, "UI 制品")?;
@@ -1122,13 +1197,6 @@ fn current_platform_key() -> String {
 }
 
 fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result<()> {
-    let protocol = read_toml(&workspace_root.join(config.protocol_manifest))?;
-    let crate_version = protocol
-        .get("package")
-        .and_then(|value| value.get("version"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| invalid_data("无法读取 protocol package.version"))?;
-
     let manifest_path = workspace_root.join(config.plugin_manifest);
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
         .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
@@ -1136,31 +1204,67 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
-    if manifest_version != crate_version {
+
+    // 版本一致性来源：wasm 插件对照 protocol crate；纯 sidecar 插件
+    // （如 terminal，无独立协议 crate）对照 sidecar crate；纯 UI 插件
+    // 对照 package.json。发布版本必须全仓唯一可信。
+    let version_source: String = if let Some(protocol_manifest) = config.protocol_manifest {
+        read_toml(&workspace_root.join(protocol_manifest))?
+            .get("package")
+            .and_then(|value| value.get("version"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| invalid_data("无法读取 protocol package.version"))?
+            .to_string()
+    } else if config.sidecar_crate.is_some() {
+        let sidecar_manifest = workspace_root
+            .join(config.plugin_root)
+            .join("sidecar/Cargo.toml");
+        read_toml(&sidecar_manifest)?
+            .get("package")
+            .and_then(|value| value.get("version"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| invalid_data("无法读取 sidecar package.version"))?
+            .to_string()
+    } else {
+        let package_json = workspace_root.join(config.plugin_root).join("package.json");
+        let package: serde_json::Value = serde_json::from_slice(&std::fs::read(&package_json)?)
+            .map_err(|error| {
+                invalid_data(format!("解析 {} 失败: {error}", package_json.display()))
+            })?;
+        package
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_data("package.json 缺少 version"))?
+            .to_string()
+    };
+    if manifest_version != version_source {
         return Err(invalid_data(format!(
-            "插件版本不一致: crate={crate_version}, plugin.json={manifest_version}"
+            "插件版本不一致: 工程={version_source}, plugin.json={manifest_version}"
         )));
     }
 
-    // business-protocol / transport-protocol 校验（仅 sidecar 插件需要）。
+    // business-protocol 校验需要 protocol crate 元数据；纯 sidecar 插件
+    // 直接依赖插件运行时，仅校验 transport 协议与清单一致。
     if config.sidecar_artifact.is_some() {
-        let protocol = read_toml(&workspace_root.join(config.protocol_manifest))?;
-        let business_protocol = protocol
-            .get("package")
-            .and_then(|value| value.get("metadata"))
-            .and_then(|value| value.get("tiangong"))
-            .and_then(|value| value.get("business-protocol"))
-            .and_then(toml::Value::as_integer)
-            .ok_or_else(|| invalid_data("Protocol 缺少 business-protocol 元数据"))?;
-        let manifest_business_protocol = manifest
-            .get("sidecar")
-            .and_then(|value| value.get("business_protocol"))
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| invalid_data("plugin.json 缺少 sidecar.business_protocol"))?;
-        if u64::try_from(business_protocol).ok() != Some(manifest_business_protocol) {
-            return Err(invalid_data(format!(
-                "业务协议版本不一致: protocol={business_protocol}, plugin.json={manifest_business_protocol}"
-            )));
+        if let Some(protocol_manifest) = config.protocol_manifest {
+            let protocol = read_toml(&workspace_root.join(protocol_manifest))?;
+            let business_protocol = protocol
+                .get("package")
+                .and_then(|value| value.get("metadata"))
+                .and_then(|value| value.get("tiangong"))
+                .and_then(|value| value.get("business-protocol"))
+                .and_then(toml::Value::as_integer)
+                .ok_or_else(|| invalid_data("Protocol 缺少 business-protocol 元数据"))?;
+            let manifest_business_protocol = manifest
+                .get("sidecar")
+                .and_then(|value| value.get("business_protocol"))
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| invalid_data("plugin.json 缺少 sidecar.business_protocol"))?;
+            if u64::try_from(business_protocol).ok() != Some(manifest_business_protocol) {
+                return Err(invalid_data(format!(
+                    "业务协议版本不一致: protocol={business_protocol}, plugin.json={manifest_business_protocol}"
+                )));
+            }
         }
 
         let runtime = read_toml(&workspace_root.join(RUNTIME_MANIFEST))?;
@@ -1191,7 +1295,8 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
         .get("sidecar")
         .and_then(|value| value.get("binary"))
         .and_then(serde_json::Value::as_str);
-    if wasm_binary != Some(config.wasm_artifact) {
+    // 纯 UI 插件清单不声明 wasm；声明与配置必须两侧同时存在且一致。
+    if wasm_binary != config.wasm_artifact {
         return Err(invalid_data("plugin.json wasm.binary 与构建产物不一致"));
     }
     if let Some(expected) = config.sidecar_artifact
@@ -1218,9 +1323,13 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     }
 
     let plugin_root = workspace_root.join(config.plugin_root);
-    require_file(&plugin_root.join("wasm/Cargo.toml"))?;
-    require_file(&plugin_root.join("protocol/Cargo.toml"))?;
-    if config.sidecar_artifact.is_some() {
+    if config.protocol_crate.is_some() {
+        require_file(&plugin_root.join("protocol/Cargo.toml"))?;
+    }
+    if config.wasm_crate.is_some() {
+        require_file(&plugin_root.join("wasm/Cargo.toml"))?;
+    }
+    if config.sidecar_crate.is_some() {
         require_file(&plugin_root.join("sidecar/Cargo.toml"))?;
     }
     Ok(())
@@ -1360,6 +1469,10 @@ fn env_var_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+fn non_empty_env_os(key: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(key).filter(|value| !value.is_empty())
+}
+
 /// 从模板生成纯 UI 插件骨架：复制 templates/ui-app 并替换插件 ID。
 fn new_plugin(plugin_id: &str, output_dir: Option<&str>) -> io::Result<()> {
     if plugin_id.is_empty()
@@ -1472,10 +1585,8 @@ fn merge_plugin_distributions(
             .get("manifest")
             .cloned()
             .ok_or_else(|| invalid_data(format!("{} 缺少 manifest", fragment_path.display())))?;
-        let wasm = release
-            .get("wasm")
-            .cloned()
-            .ok_or_else(|| invalid_data(format!("{} 缺少 wasm", fragment_path.display())))?;
+        // 纯 UI 插件无 wasm 条目，跨平台一致性由下方 existing 比较保证。
+        let wasm = release.get("wasm").cloned();
 
         let key = format!("{id}@{version}");
         fragment_platforms
@@ -1492,7 +1603,7 @@ fn merge_plugin_distributions(
                 }
             }
             if existing.get("manifest") != Some(&manifest)
-                || existing.get("wasm") != Some(&wasm)
+                || existing.get("wasm") != wasm.as_ref()
                 || existing.get("ui") != release.get("ui")
             {
                 return Err(invalid_data(format!(
