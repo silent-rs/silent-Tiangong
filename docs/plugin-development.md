@@ -19,7 +19,7 @@ WASM 插件。WASM 宿主接口位于
 | 形态 | 适用 | 参考工程 |
 | --- | --- | --- |
 | 纯 UI 插件（无 WASM） | 面板、工具页、输入区动作，仅需宿主桥接 | `plugins/templates/ui-app` |
-| Desktop TypeScript 工具插件 | 带 UI 的工具提供器、审批与用户征询 | `plugins/interaction-handler`（Vue 3 + Vite） |
+| Desktop TypeScript 工具插件 | 带 UI 的工具提供器、审批与用户征询 | `plugins/tiangong-plugin-interaction`（Vue 3 + Vite） |
 | WASM 逻辑层插件（v1/v2） | 工具、提示词、生命周期、sidecar | `plugins/tiangong-plugin-prompt` 等 |
 | v2 混合（逻辑层 + UI 挂载） | UI 需要 WASM 或原生 sidecar 能力 | `plugins/screenshot-input` |
 
@@ -443,7 +443,7 @@ cargo run -p xtask -- new-plugin com.example.myboard
 
 ### Vue 3 + Vite 工程结构
 
-纯 UI 工程可参考 `plugins/interaction-handler`；带 WASM/sidecar 的混合插件可参考
+纯 UI 工程可参考 `plugins/tiangong-plugin-interaction`；带 WASM/sidecar 的混合插件可参考
 `plugins/screenshot-input`。Vue 工程的界面部分结构如下：
 
 ```text
@@ -602,7 +602,7 @@ Desktop 可安装纯 TypeScript 工具插件，不需要 WASM，也不修改 `pl
 插件在 manifest 的 `tools` 与 `prompt` 中声明工具规格和提示词，使用
 `tool.provide` 权限接收 `tool.requested`，再通过 `tool.resolve` 提交完整工具结果。
 
-默认交互处理器插件见 **`plugins/interaction-handler`**（Vue 3 + Vite 工程：
+默认交互处理器插件见 **`plugins/tiangong-plugin-interaction`**（Vue 3 + Vite 工程：
 `plugin.json` 声明 `request_user`，`src/App.vue` 完成六类参数解析、界面、
 15 秒倒计时和 answered/expired/cancelled 结果生成。宿主只转发不透明工具调用，
 并保留会话归属和 20 秒通用兜底时限，不解释审批结果。审批结果返回 Agent 后，

@@ -110,7 +110,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
 
 function browserPluginSessionId(sessionId?: string | null): string {
   if (!sessionId) return '';
-  const prefix = 'webview:browser-handler:';
+  const prefix = 'webview:browser:';
   return sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId;
 }
 
@@ -550,7 +550,7 @@ export function MainApp() {
         if (url) {
           const raw = await api
             .bridgeCall(
-              'browser-handler',
+              'browser',
               'webview.navigate',
               JSON.stringify({ url, session_id: sessionId }),
             )
@@ -568,7 +568,7 @@ export function MainApp() {
           action: 'open-plugin',
           version: Date.now(),
           app: {
-            pluginId: 'browser-handler',
+            pluginId: 'browser',
             contributionId: 'browser',
             title: '浏览器',
             sandbox: 'webview',
@@ -687,7 +687,7 @@ export function MainApp() {
       let instanceId: string | undefined;
       try {
         const raw = await api.bridgeCall(
-          'browser-handler',
+          'browser',
           'webview.navigate',
           JSON.stringify({ url, session_id: sessionId }),
         );
@@ -701,7 +701,7 @@ export function MainApp() {
         action: 'open-plugin',
         version: Date.now(),
         app: {
-          pluginId: 'browser-handler',
+          pluginId: 'browser',
           contributionId: 'browser',
           title: '浏览器',
           sandbox: 'webview',
@@ -721,7 +721,7 @@ export function MainApp() {
         session_id?: string;
       }>).detail;
       if (
-        detail?.plugin_id !== 'browser-handler'
+        detail?.plugin_id !== 'browser'
         || detail.contribution_id !== 'browser'
         || !detail.instance_id
       ) return;
@@ -733,7 +733,7 @@ export function MainApp() {
         action: 'open-plugin',
         version: Date.now(),
         app: {
-          pluginId: 'browser-handler',
+          pluginId: 'browser',
           contributionId: 'browser',
           title: '浏览器',
           sandbox: 'webview',

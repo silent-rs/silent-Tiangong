@@ -11,8 +11,8 @@ const mocks = vi.hoisted(() => {
     payload: string;
   }) => void>();
   const defaultContribution = (): SlotContributionEntry => ({
-    plugin_id: 'interaction-handler',
-    contribution_id: 'interaction-handler',
+    plugin_id: 'interaction',
+    contribution_id: 'interaction',
     slot: 'session.interaction',
     title: '交互处理器',
     description: '',
@@ -102,7 +102,7 @@ async function renderHost(onVisibilityChange = vi.fn()) {
   return onVisibilityChange;
 }
 
-function emit(channel: string, payload: object, pluginId = 'interaction-handler') {
+function emit(channel: string, payload: object, pluginId = 'interaction') {
   for (const handler of mocks.bridgeHandlers) {
     handler({ plugin_id: pluginId, channel, payload: JSON.stringify(payload) });
   }

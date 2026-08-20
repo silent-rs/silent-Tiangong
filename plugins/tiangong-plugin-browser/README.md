@@ -1,4 +1,4 @@
-# 浏览器插件（Browser Handler）
+# 浏览器插件（Browser）
 
 浏览器能力的 manifest v2 插件化（阶段 4 完全体雏形）：
 - 工具声明（browser_open/navigate/eval）与 prompt 来自本清单；

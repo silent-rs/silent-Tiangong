@@ -20,7 +20,7 @@ function invocation(argumentsValue: Record<string, unknown>): ToolInvocation {
   };
 }
 
-describe('interaction-handler 业务边界', () => {
+describe('interaction 业务边界', () => {
   it('由插件按调用创建时间独立计算 15 秒截止时间', () => {
     const request = parseInvocation(invocation({
       kind: 'approval',

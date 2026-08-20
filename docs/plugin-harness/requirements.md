@@ -23,6 +23,7 @@
 6. 打开 App 后，拓展区顶部有 tab 栏可**切换实例**，最左侧固定一个**启动台按钮**用于快速回到 App 矩阵。
 7. 浏览器、终端、Agent Team 这些内建能力本身都变成这类插件，三方能用同样的方式替换或新增。
 8. 操作审核（审批）与「agent 需要用户选择/填写」的交互，统一为可插拔能力，三方可自定义其界面与处理逻辑。
+9. 官方终端、审批征询和嵌入式浏览器插件分别使用 `terminal`、`interaction`、`browser` 作为插件 ID，项目目录和工程名分别为 `tiangong-plugin-terminal`、`tiangong-plugin-interaction`、`tiangong-plugin-browser`。
 
 ## 3. 必须满足（Must）
 
@@ -38,6 +39,7 @@
 10. Shadow 宿主必须向普通第三方脚本提供插件根节点、初始/动态宿主上下文和卸载登记；会话或主题变化不得强制重建需保活的插件，安装、更新、禁用和卸载必须触发对应挂载或清理。已有只使用 `bridge` 的 Shadow 脚本继续运行。
 11. 默认交互处理器的输入框、按钮、下拉框、单选和多选必须与 Desktop App 的现有控件视觉保持一致，统一尺寸、间距、圆角、边框、色彩及悬停、焦点、选中、禁用状态。插件组件样式统一使用 `scoped`，不依赖 Shadow DOM 外部样式穿透；Shadow 模式直接继承 App 根节点的主题变量并随深浅主题自动更新，主题适配不重复订阅宿主上下文；iframe 页面重置和主题变量只能作用于自己的文档。
 12. 默认截图输入插件使用 Vue 3 虚拟 DOM 与 Vite 单文件构建，继续挂载在 `session.input-action` 的 Shadow 容器中；区域截图由插件自己的 WASM 与官方签名 sidecar 完成，并支持 macOS、Linux 与 Windows。插件取得 PNG 后仅通过通用 `session.input.addAttachment` 宿主桥接加入当前输入草稿，不自动发送。App 与公共运行时不得包含截图专用操作或业务处理。用户取消时不加入附件；平台截图工具缺失、权限不足或截图失败时必须给出明确提示；附件继续受 50MB 上限约束。插件必须直接继承 App 主题变量、使用作用域样式、在宿主卸载时释放 Vue 实例，并可组装为包含当前平台 WASM、sidecar 与签名清单的完整导入包。
+13. 官方 Desktop 插件不得继续使用 `*-handler` 目录、插件 ID 或工程名；代码、配置、打包产物和文档中的引用必须与新名称一致。
 
 ## 4. 应该满足（Should）
 
@@ -70,7 +72,7 @@
 - 现有 `docs/plugin-development.md` 描述的 WASM 插件开发指南继续有效，作为新形态的子集。
 - 现有 `plugin.wit` 的 `plugin`/`plugin-ui` 接口映射到工具/提示词/生命周期/UI 接缝，见设计文档附录。
 - 浏览器/终端当前通过 `plugin:browser|*`、`plugin:terminal|*` 硬编码命令与 `BrowserTabContent`/`TerminalTabContent` 组件实现，是本方案「内置能力插件化」的迁移对象。
-- 审批、确认、选择和输入统一由 Desktop `interaction-handler` 插件通过 `request_user` 工具处理；CLI 与 Server 不加载这项 Desktop 专用工具。
+- 审批、确认、选择和输入统一由 Desktop `interaction` 插件通过 `request_user` 工具处理；CLI 与 Server 不加载这项 Desktop 专用工具。
 - 审批结果只是返回给 Agent 的用户意见；Agent 自行决定后续步骤，Core 与公共运行时不据此放行或拒绝工具。
 
 ## 8. 关键决策（已定稿）

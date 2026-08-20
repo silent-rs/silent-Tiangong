@@ -453,7 +453,7 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 &request_id,
                 ErrorCode::ProtocolMismatch,
                 format!(
-                    "terminal-handler 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
+                    "terminal 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                     request.protocol_version
                 ),
                 false,
@@ -481,12 +481,12 @@ async fn dispatch_operation(
 ) -> Result<serde_json::Value> {
     match operation {
         HANDSHAKE_OPERATION => Ok(serde_json::json!({
-            "plugin_id": "terminal-handler",
+            "plugin_id": "terminal",
             "plugin_version": env!("CARGO_PKG_VERSION"),
             "sidecar_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
             "business_protocol": 1,
-            "instance_id": format!("terminal-handler-sidecar-{}", std::process::id()),
+            "instance_id": format!("terminal-sidecar-{}", std::process::id()),
             "status": "ready",
         })),
         "terminalSpawn" => {

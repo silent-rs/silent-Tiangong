@@ -2,11 +2,11 @@
 
 > 状态：进行中
 > 分支：`feature/browser-plugin`
-> 关联：`docs/plugin-harness-design.md`（Everything is a Plugin）、`plugins/browser-handler`
+> 关联：`docs/plugin-harness-design.md`（Everything is a Plugin）、`plugins/tiangong-plugin-browser`
 
 ## 1. 目标
 
-嵌入式浏览器从内置实现（`crates/plugins/tiangong-plugin-browser` + 前端 `BrowserPanel/BrowserTabContent`）迁移为 `browser-handler` 插件，对标终端插件化终态：**宿主零浏览器界面与工具代码**，浏览器能力以插件形态交付。
+嵌入式浏览器从内置实现（`crates/plugins/tiangong-plugin-browser` + 前端 `BrowserPanel/BrowserTabContent`）迁移为 `browser` 插件，对标终端插件化终态：**宿主零浏览器界面与工具代码**，浏览器能力以插件形态交付。
 
 - 页面引擎保留宿主原生 webview（容器原语 `webview.*`，按插件隔离实例）；
 - 管理界面（地址栏/导航）在插件 UI（shadow 容器），页面标签统一由 App 拓展区顶部标签承载；
@@ -17,8 +17,8 @@
 | 层 | 职责 | 现状 |
 |----|------|------|
 | `webview.*` 容器原语（宿主注入） | 实例创建/导航/eval/位置对齐/标签管理/页面协作 | create/navigate/eval/hide/close + setPosition/show/tabs/tabNew/tabSwitch/tabClose/back/forward/reload + fetch/queryDom/click/formFill/formExtract/locate |
-| `browser-handler` 插件 UI | 单个页面的地址栏、导航和位置同步（内容区矩形 → 对应 webview 实例） | 本任务实现 |
-| `browser-handler` 工具壳 | browser_open/navigate/eval + web_* 协作工具（映射到原语） | 雏形已有，随迁移完善 |
+| `browser` 插件 UI | 单个页面的地址栏、导航和位置同步（内容区矩形 → 对应 webview 实例） | 本任务实现 |
+| `browser` 工具壳 | browser_open/navigate/eval + web_* 协作工具（映射到原语） | 雏形已有，随迁移完善 |
 | 宿主 `sandbox: webview` 分发 | 管理界面渲染进 shadow 容器（主文档坐标可同步原生 webview 位置；iframe 拿不到主窗口坐标） | 本任务实现 |
 
 ## 3. 任务分解

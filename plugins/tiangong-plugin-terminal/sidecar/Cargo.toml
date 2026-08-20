@@ -1,5 +1,5 @@
 [package]
-name = "tiangong-terminal-handler-sidecar"
+name = "tiangong-plugin-terminal-sidecar"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"

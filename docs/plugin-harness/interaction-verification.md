@@ -1,13 +1,13 @@
-# interaction-handler 插件开发验证清单
+# interaction 插件开发验证清单
 
-> 插件工程：`plugins/interaction-handler`（Vue 3 + Vite，默认交互处理器）
+> 插件工程：`plugins/tiangong-plugin-interaction`（Vue 3 + Vite，默认交互处理器）
 > 关联设计：`./interaction-model-redesign.md`；开发流程：`../plugin-development.md` 开发流程总览
 > 状态：代码与自动化测试已通过，**GUI 手动验证待执行**（本文即验证脚本）
 
 ## 前置准备
 
 ```bash
-cd plugins/interaction-handler
+cd plugins/tiangong-plugin-interaction
 yarn install          # 首次
 yarn package          # 构建并组装 release/（插件包）
 ```
@@ -16,7 +16,7 @@ yarn package          # 构建并组装 release/（插件包）
 
 **导入校验点**：
 
-- [ ] 导入成功，插件列表出现「交互处理器」（interaction-handler），状态已加载
+- [ ] 导入成功，插件列表出现「交互处理器」（interaction），状态已加载
 - [ ] 清单解析通过（若失败，日志现在会给出具体字段原因——曾有旧包含 `host_handler` 被拒的案例，重新 `yarn package` 导入即可）
 - [ ] 卸载后重新导入可正常（当前版本 0.3.0）
 

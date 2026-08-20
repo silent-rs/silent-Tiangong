@@ -45,6 +45,8 @@ crates="$(
       printf '%s\n' "tiangong-plugin-scheduler-sidecar"
     elif [[ "$f" == plugins/tiangong-plugin-scheduler/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-scheduler-wasm"
+    elif [[ "$f" == plugins/tiangong-plugin-terminal/sidecar/* ]]; then
+      printf '%s\n' "tiangong-plugin-terminal-sidecar"
     elif [[ "$f" == plugins/*/* ]]; then
       rest="${f#plugins/}"
       printf '%s\n' "${rest%%/*}"

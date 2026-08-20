@@ -115,7 +115,7 @@ DeepSeek Harness 的核心启示是「**Everything is a Plugin**」：模型适�
 | 提示词（Prompt） | 向 system prompt 注入段落 | 记忆、技能等插件 | ✅ |
 | 生命周期（Lifecycle） | 会话/轮次钩子 | Memory 反刍 | ✅ |
 | UI（UI） | 贡献界面到挂载点 | 浏览器/终端/设置 | ✅（本文核心） |
-| Desktop TS 工具 | Desktop 端纯 TS 工具与用户征询 | `interaction-handler` | ✅ |
+| Desktop TS 工具 | Desktop 端纯 TS 工具与用户征询 | `interaction` | ✅ |
 | 事件（Event） | 订阅宿主事件流 | 无默认 | ✅ |
 | 存储（Storage） | 数据目录与 sidecar | 无默认 | ✅ |
 
@@ -506,7 +506,7 @@ Desktop 纯 TypeScript 插件可直接在 schema v2 manifest 中声明 `tools` �
 
 ### 7.6 审批与用户征询插件
 
-默认 `plugins/interaction-handler` 在上述通用工具桥上声明 `request_user`，并独立实现
+默认 `plugins/tiangong-plugin-interaction` 在上述通用工具桥上声明 `request_user`，并独立实现
 approval、confirm、choice、multi_choice、input、form 六类参数解析、界面和结果。
 插件按调用创建时间独立执行 15 秒用户时限，宿主只保留 20 秒通用工具执行上限。
 
@@ -576,7 +576,7 @@ approval、confirm、choice、multi_choice、input、form 六类参数解析、�
 ### 8.4 操作审核（Approval）
 
 当前实现：Agent 在需要用户意见时调用 `request_user(kind=approval)`，Desktop
-`interaction-handler` 插件显示操作框，并在 15 秒内返回普通工具结果。
+`interaction` 插件显示操作框，并在 15 秒内返回普通工具结果。
 
 - 用户选择只作为 Tool Result 返回 Agent，由 Agent 决定后续步骤。
 - Core 和公共运行时不维护审批计时、挑战、授权或放行状态。

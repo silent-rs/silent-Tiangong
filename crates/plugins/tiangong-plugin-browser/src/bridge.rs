@@ -343,7 +343,7 @@ pub fn handle_webview_primitive(
 //
 // webview.fetch / queryDom / click / formFill / formExtract / locate 经
 // BrowserCommand 通道执行——策略（工具 schema、参数映射、结果格式化）在
-// browser-handler 的 TS 层，引擎与页面注入在宿主（browser_data 事件流）。
+// browser 的 TS 层，引擎与页面注入在宿主（browser_data 事件流）。
 
 /// 协作原语超时：页面操作可能涉及导航等待。
 const COLLABORATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
