@@ -23,6 +23,43 @@ pub mod session_store;
 pub mod types;
 pub mod watcher;
 
+// ── 插件事件转发（阶段 1：页面事件 → 插件 UI）──
+//
+// 宿主把页面状态变化（加载完成/失败、标题与 URL 更新）定向投递给持有
+// 对应 webview 作用域的插件 UI，经 runtime 的订阅表（bridge_emit_to）
+// 送达；与 sidecar 通知转发器同一模式。插件端订阅 `webview.event`。
+
+/// 插件事件转发器：`(plugin_id, channel, payload_json)`，由桌面入口注入。
+pub type PluginEventForwarder = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+static PLUGIN_EVENT_FORWARDER: std::sync::OnceLock<PluginEventForwarder> =
+    std::sync::OnceLock::new();
+
+/// 注入转发器（桌面入口启动时调用一次）。
+pub fn set_plugin_event_forwarder(forwarder: PluginEventForwarder) {
+    let _ = PLUGIN_EVENT_FORWARDER.set(forwarder);
+}
+
+/// 按 webview 作用域（`webview:<插件>[:<会话>]`）把页面事件投给对应插件。
+/// 未注入或作用域格式异常时静默跳过（内置浏览器路径无插件消费者）。
+pub fn emit_plugin_event(scope: &str, event: &str, payload: &serde_json::Value) {
+    let Some(forwarder) = PLUGIN_EVENT_FORWARDER.get() else {
+        return;
+    };
+    let Some(plugin_id) = scope
+        .strip_prefix("webview:")
+        .and_then(|rest| rest.split(':').next())
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let wrapped = serde_json::json!({
+        "event": event,
+        "scope": scope,
+        "payload": payload,
+    });
+    forwarder(plugin_id, "webview.event", &wrapped.to_string());
+}
+
 /// 构造浏览器进程内插件（issue #156 自注册架构）。
 ///
 /// 供 main.rs setup 阶段调用，返回的 `BrowserPlugin` 通过

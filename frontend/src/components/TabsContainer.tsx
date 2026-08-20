@@ -8,6 +8,7 @@ import { useStore } from '@/store/useStore';
 import { AgentTeamPanel } from './AgentTeamPanel';
 import { BrowserTabContent } from './BrowserTabContent';
 import { PluginAppTabContent } from './PluginAppTabContent';
+import { runPluginBeforeClose } from './PluginSandbox';
 import { TerminalTabContent } from './TerminalTabContent';
 import { Button } from './ui/button';
 import {
@@ -56,7 +57,109 @@ export interface AppTabCommand {
     title: string;
     sandbox: SandboxKind;
     multi: boolean;
+    /** 已由调用方创建或导航到的 webview 页面编号。 */
+    instanceId?: string;
   };
+}
+
+interface WebviewPluginTabInfo {
+  id: string;
+  url: string;
+  title: string;
+}
+
+interface WebviewPluginSnapshot {
+  tab_id?: string;
+  tabs?: WebviewPluginTabInfo[];
+  active_tab_id?: string | null;
+}
+
+function isWebviewPluginTab(tab: TabState): boolean {
+  return tab.kind === 'plugin'
+    && tab.sandbox === 'webview'
+    && Boolean(tab.plugin_id && tab.contribution_id);
+}
+
+function webviewSessionId(sessionId: string): string {
+  return sessionId || '__global__';
+}
+
+async function callWebviewPlugin<T>(
+  pluginId: string,
+  sessionId: string,
+  method: string,
+  payload: Record<string, unknown> = {},
+): Promise<T> {
+  const raw = await api.bridgeCall(
+    pluginId,
+    method,
+    JSON.stringify({ session_id: webviewSessionId(sessionId), ...payload }),
+  );
+  return JSON.parse(raw) as T;
+}
+
+function createWebviewPluginTab(
+  page: WebviewPluginTabInfo,
+  app: NonNullable<AppTabCommand['app']>,
+): TabState {
+  return {
+    id: page.id,
+    kind: 'plugin',
+    title: page.title || app.title,
+    url: page.url || DEFAULT_BROWSER_URL,
+    created_at: nowText(),
+    plugin_id: app.pluginId,
+    contribution_id: app.contributionId,
+    sandbox: app.sandbox,
+  };
+}
+
+async function reconcileWebviewPluginTabs(
+  sessionId: string,
+  sourceTabs: TabState[],
+  sourceActiveTabId: string | null,
+): Promise<{ tabs: TabState[]; activeTabId: string | null }> {
+  let tabs = [...sourceTabs];
+  let activeTabId = sourceActiveTabId;
+  const groups = new Map<string, TabState[]>();
+  for (const tab of sourceTabs.filter(isWebviewPluginTab)) {
+    const key = `${tab.plugin_id}:${tab.contribution_id}`;
+    groups.set(key, [...(groups.get(key) ?? []), tab]);
+  }
+
+  for (const group of groups.values()) {
+    const sample = group[0];
+    if (!sample?.plugin_id || !sample.contribution_id) continue;
+    try {
+      const snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
+        sample.plugin_id,
+        sessionId,
+        'webview.tabs',
+      );
+      const app: NonNullable<AppTabCommand['app']> = {
+        pluginId: sample.plugin_id,
+        contributionId: sample.contribution_id,
+        title: sample.plugin_id === 'browser-handler' ? '浏览器' : sample.title,
+        sandbox: 'webview',
+        multi: true,
+      };
+      const runtimeTabs = (snapshot.tabs ?? []).map((page) => createWebviewPluginTab(page, app));
+      const groupIds = new Set(group.map((tab) => tab.id));
+      const insertAt = Math.max(0, tabs.findIndex((tab) => groupIds.has(tab.id)));
+      tabs = tabs.filter((tab) => !groupIds.has(tab.id));
+      tabs.splice(Math.min(insertAt, tabs.length), 0, ...runtimeTabs);
+      if (activeTabId && groupIds.has(activeTabId)) {
+        activeTabId = snapshot.active_tab_id
+          ?? runtimeTabs[0]?.id
+          ?? tabs[0]?.id
+          ?? null;
+      }
+    } catch (error) {
+      console.warn('恢复 webview 插件顶部标签失败：', error);
+    }
+  }
+
+  return { tabs, activeTabId };
 }
 
 function nowText(): string {
@@ -143,6 +246,62 @@ export function TabsContainer({
     [activeTabId, tabs],
   );
 
+  const openWebviewPluginTab = useCallback(async (
+    app: NonNullable<AppTabCommand['app']>,
+    requestedInstanceId?: string,
+  ) => {
+    if (app.sandbox !== 'webview') return;
+    try {
+      let snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
+        app.pluginId,
+        terminalSessionId,
+        'webview.tabs',
+      );
+      if (!requestedInstanceId && (app.multi || (snapshot.tabs ?? []).length === 0)) {
+        snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
+          app.pluginId,
+          terminalSessionId,
+          'webview.tabNew',
+          { url: DEFAULT_BROWSER_URL },
+        );
+      }
+
+      const instanceId = requestedInstanceId
+        ?? snapshot.tab_id
+        ?? snapshot.active_tab_id
+        ?? snapshot.tabs?.[0]?.id;
+      const page = snapshot.tabs?.find((tab) => tab.id === instanceId);
+      if (!instanceId || !page) throw new Error('宿主未返回可用的浏览器页面');
+
+      const nextTab = createWebviewPluginTab(page, app);
+      const currentTabs = tabsRef.current;
+      const nextTabs = currentTabs.some((tab) => tab.id === nextTab.id)
+        ? currentTabs.map((tab) => tab.id === nextTab.id ? { ...tab, ...nextTab } : tab)
+        : [...currentTabs, nextTab];
+      tabsRef.current = nextTabs;
+      activeTabIdRef.current = nextTab.id;
+      setTabs(nextTabs);
+      setActiveTabId(nextTab.id);
+    } catch (error) {
+      console.error('打开 webview 插件标签失败：', error);
+    }
+  }, [terminalSessionId]);
+
+  const hideWebviewPluginTabs = useCallback((
+    targetTabs: TabState[],
+    sessionId = terminalSessionId,
+  ) => {
+    const plugins = new Set(
+      targetTabs
+        .filter(isWebviewPluginTab)
+        .map((tab) => tab.plugin_id)
+        .filter((pluginId): pluginId is string => Boolean(pluginId)),
+    );
+    for (const pluginId of plugins) {
+      void callWebviewPlugin(pluginId, sessionId, 'webview.hide').catch(console.error);
+    }
+  }, [terminalSessionId]);
+
   // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
   const onTabKindsChangedRef = useRef(onTabKindsChanged);
   onTabKindsChangedRef.current = onTabKindsChanged;
@@ -218,6 +377,7 @@ export function TabsContainer({
 
     if (!visible) {
       await api.browserHide(sessionId).catch(console.error);
+      hideWebviewPluginTabs(nextTabs, sessionId);
       return;
     }
 
@@ -225,10 +385,19 @@ export function TabsContainer({
     if (activeTab?.kind === 'terminal') {
       await api.terminalTabSwitch(sessionId, activeTab.id).catch(console.error);
       await api.browserHide(sessionId).catch(console.error);
+      hideWebviewPluginTabs(nextTabs, sessionId);
     } else if (!activeTab || activeTab.kind !== 'browser') {
       await api.browserHide(sessionId).catch(console.error);
+      if (!activeTab || !isWebviewPluginTab(activeTab)) {
+        hideWebviewPluginTabs(nextTabs, sessionId);
+      }
     }
-  }, [sessionCwd, syncBrowserRuntimeForTabs, workspaceDir]);
+  }, [hideWebviewPluginTabs, sessionCwd, syncBrowserRuntimeForTabs, workspaceDir]);
+
+  useEffect(() => {
+    if (isVisible && mode === 'app') return;
+    hideWebviewPluginTabs(tabsRef.current);
+  }, [hideWebviewPluginTabs, isVisible, mode]);
 
   const handleNewTab = useCallback(async (kind: TabKind) => {
     if (kind === 'browser') {
@@ -405,6 +574,50 @@ export function TabsContainer({
     };
   }, [mergeBrowserRuntimeTabs, terminalSessionId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void api.onBridgeEvent((event) => {
+      if (cancelled || event.channel !== 'webview.event') return;
+      let pageEvent: {
+        scope?: string;
+        payload?: { tab_id?: string; url?: string; title?: string };
+      };
+      try {
+        pageEvent = JSON.parse(event.payload);
+      } catch {
+        return;
+      }
+      const expectedScope = `webview:${event.plugin_id}:${webviewSessionId(terminalSessionId)}`;
+      const tabId = pageEvent.payload?.tab_id;
+      if (pageEvent.scope !== expectedScope || !tabId) return;
+
+      let changed = false;
+      const nextTabs = tabsRef.current.map((tab) => {
+        if (!isWebviewPluginTab(tab) || tab.plugin_id !== event.plugin_id || tab.id !== tabId) {
+          return tab;
+        }
+        changed = true;
+        return {
+          ...tab,
+          url: pageEvent.payload?.url ?? tab.url,
+          title: pageEvent.payload?.title || tab.title,
+        };
+      });
+      if (changed) {
+        tabsRef.current = nextTabs;
+        setTabs(nextTabs);
+      }
+    }).then((cleanup) => {
+      if (cancelled) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [terminalSessionId]);
+
   const persistTabsNow = useCallback(() => {
     if (persistTimerRef.current !== null) {
       window.clearTimeout(persistTimerRef.current);
@@ -452,8 +665,14 @@ export function TabsContainer({
       try {
         const sessionTabs = await api.getSessionTabs(sessionId);
         if (cancelled) return;
-        const nextTabs = sessionTabs.tabs;
-        const nextActiveTabId = normalizeActiveTabId(nextTabs, sessionTabs.active_tab_id);
+        const reconciled = await reconcileWebviewPluginTabs(
+          sessionId,
+          sessionTabs.tabs,
+          sessionTabs.active_tab_id,
+        );
+        if (cancelled) return;
+        const nextTabs = reconciled.tabs;
+        const nextActiveTabId = normalizeActiveTabId(nextTabs, reconciled.activeTabId);
         await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
         if (cancelled) return;
 
@@ -622,6 +841,20 @@ export function TabsContainer({
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
+    const currentTab = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
+    if (currentTab && currentTab.id !== tabId && isWebviewPluginTab(currentTab) && currentTab.plugin_id) {
+      const switchingWithinPlugin = Boolean(
+        nextTab
+        && isWebviewPluginTab(nextTab)
+        && nextTab.plugin_id === currentTab.plugin_id,
+      );
+      void callWebviewPlugin(
+        currentTab.plugin_id,
+        terminalSessionId,
+        switchingWithinPlugin ? 'webview.instanceHide' : 'webview.hide',
+        switchingWithinPlugin ? { tab_id: currentTab.id } : {},
+      ).catch(console.error);
+    }
     if (nextTab?.kind === 'terminal') {
       void api.browserHide(terminalSessionId).catch(console.error);
       void api.terminalTabSwitch(terminalSessionId, tabId).catch(console.error);
@@ -632,24 +865,67 @@ export function TabsContainer({
     setActiveTabId(tabId);
   }, [tabs, terminalSessionId]);
 
-  const handleCloseTab = useCallback((tabId: string) => {
-    const currentTabs = tabsRef.current;
-    const closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+  const handleCloseTab = useCallback(async (tabId: string) => {
+    let currentTabs = tabsRef.current;
+    let closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
     if (closedIndex === -1) return;
 
     const closingTab = currentTabs[closedIndex];
+    if (closingTab.kind === 'plugin') {
+      try {
+        await runPluginBeforeClose(closingTab.id);
+      } catch (error) {
+        console.error('插件关闭前处理失败：', error);
+        return;
+      }
+      currentTabs = tabsRef.current;
+      closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+      if (closedIndex === -1) return;
+    }
     if (closingTab.kind === 'browser') {
       void api.browserTabClose(terminalSessionId, tabId).catch(console.error);
     } else if (closingTab.kind === 'terminal') {
       void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
+    } else if (isWebviewPluginTab(closingTab) && closingTab.plugin_id) {
+      try {
+        await callWebviewPlugin(
+          closingTab.plugin_id,
+          terminalSessionId,
+          'webview.tabClose',
+          { tab_id: closingTab.id },
+        );
+      } catch (error) {
+        console.error('关闭 webview 插件标签失败：', error);
+        return;
+      }
+      currentTabs = tabsRef.current;
+      closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+      if (closedIndex === -1) return;
     }
-    // plugin（三方 App）实例无后端运行时，仅移除前端状态与持久化引用
+    // 普通 plugin（三方 App）实例无后端运行时，仅移除前端状态与持久化引用。
 
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     const currentActiveId = activeTabIdRef.current;
     const nextActiveId = currentActiveId === tabId
       ? pickNextActiveTab(nextTabs, closedIndex) ?? ''
       : normalizeActiveTabId(nextTabs, currentActiveId);
+
+    if (currentActiveId === tabId && isWebviewPluginTab(closingTab) && closingTab.plugin_id) {
+      const nextActiveTab = nextTabs.find((tab) => tab.id === nextActiveId);
+      const remainsInSameWebviewPlugin = Boolean(
+        nextActiveTab
+        && isWebviewPluginTab(nextActiveTab)
+        && nextActiveTab.plugin_id === closingTab.plugin_id,
+      );
+      if (!remainsInSameWebviewPlugin) {
+        await callWebviewPlugin(
+          closingTab.plugin_id,
+          terminalSessionId,
+          'webview.hide',
+        ).catch(console.error);
+      }
+    }
+
     tabsRef.current = nextTabs;
     activeTabIdRef.current = nextActiveId;
     setTabs(nextTabs);
@@ -683,8 +959,9 @@ export function TabsContainer({
 
   const handleCloseWorkspace = useCallback(() => {
     void api.browserHide(terminalSessionId).catch(console.error);
+    hideWebviewPluginTabs(tabsRef.current);
     onClose();
-  }, [onClose]);
+  }, [hideWebviewPluginTabs, onClose, terminalSessionId]);
 
   // 宿主（矩阵右键菜单）下发的实例命令：新建走既有 handleNewTab（宿主并行
   // 切换 App 态）；关闭全部按 id 快照逐个走 handleCloseTab（末 tab 关闭会
@@ -699,7 +976,11 @@ export function TabsContainer({
       return;
     }
     if (appCommand.action === 'open-plugin' && appCommand.app) {
-      const { pluginId, contributionId, title, sandbox, multi } = appCommand.app;
+      const { pluginId, contributionId, title, sandbox, multi, instanceId } = appCommand.app;
+      if (sandbox === 'webview') {
+        void openWebviewPluginTab(appCommand.app, instanceId);
+        return;
+      }
       const existing = multi
         ? null
         : tabsRef.current.find(
@@ -732,10 +1013,12 @@ export function TabsContainer({
     const targetIds = tabsRef.current
       .filter((tab) => tab.kind === appCommand.kind)
       .map((tab) => tab.id);
-    for (const tabId of targetIds) {
-      handleCloseTab(tabId);
-    }
-  }, [appCommand, handleCloseTab, handleNewTab]);
+    void (async () => {
+      for (const tabId of targetIds) {
+        await handleCloseTab(tabId);
+      }
+    })();
+  }, [appCommand, handleCloseTab, handleNewTab, openWebviewPluginTab]);
 
   const handleBrowserMetadataChange = useCallback((
     tabId: string,
@@ -814,7 +1097,10 @@ export function TabsContainer({
           )}
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
-            const Icon = tab.kind === 'browser' ? Globe : tab.kind === 'plugin' ? Puzzle : TerminalSquare;
+            const webviewPlugin = isWebviewPluginTab(tab);
+            const Icon = tab.kind === 'browser' || webviewPlugin
+              ? Globe
+              : tab.kind === 'plugin' ? Puzzle : TerminalSquare;
             const busy = tab.kind === 'terminal'
               && Boolean(tab.phase && BUSY_TERMINAL_PHASES.has(tab.phase));
             return (
@@ -848,7 +1134,7 @@ export function TabsContainer({
                       className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-destructive"
                       onClick={(event) => {
                         event.stopPropagation();
-                        handleCloseTab(tab.id);
+                        void handleCloseTab(tab.id);
                       }}
                       title="关闭"
                       aria-label="关闭标签页"
@@ -858,25 +1144,45 @@ export function TabsContainer({
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
-                  {/* 多实例 App 才提供新建；单实例（浏览器）重复打开聚焦已有，不支持多开 */}
-                  {BUILTIN_TAB_KIND_MULTI[tab.kind] && (
-                    <ContextMenuItem onClick={() => void handleNewTab(tab.kind)}>
-                      新建{TAB_KIND_NAME[tab.kind]}标签页
+                  {(BUILTIN_TAB_KIND_MULTI[tab.kind] || webviewPlugin) && (
+                    <ContextMenuItem onClick={() => {
+                      if (webviewPlugin && tab.plugin_id && tab.contribution_id) {
+                        void openWebviewPluginTab({
+                          pluginId: tab.plugin_id,
+                          contributionId: tab.contribution_id,
+                          title: tab.plugin_id === 'browser-handler' ? '浏览器' : tab.title,
+                          sandbox: 'webview',
+                          multi: true,
+                        });
+                      } else {
+                        void handleNewTab(tab.kind);
+                      }
+                    }}>
+                      新建{webviewPlugin ? '浏览器' : TAB_KIND_NAME[tab.kind]}标签页
                     </ContextMenuItem>
                   )}
-                  {tabs.length > 1 && BUILTIN_TAB_KIND_MULTI[tab.kind] && (
+                  {tabs.length > 1 && (BUILTIN_TAB_KIND_MULTI[tab.kind] || webviewPlugin) && (
                     <ContextMenuItem
                       onClick={() => {
-                        for (const other of tabsRef.current.filter((item) => item.id !== tab.id)) {
-                          handleCloseTab(other.id);
-                        }
+                        const others = tabsRef.current.filter((item) => (
+                          item.id !== tab.id
+                          && (!webviewPlugin || (
+                            item.plugin_id === tab.plugin_id
+                            && item.contribution_id === tab.contribution_id
+                          ))
+                        ));
+                        void (async () => {
+                          for (const other of others) {
+                            await handleCloseTab(other.id);
+                          }
+                        })();
                       }}
                     >
                       关闭其他标签页
                     </ContextMenuItem>
                   )}
                   <ContextMenuSeparator className="my-1" />
-                  <ContextMenuItem onClick={() => handleCloseTab(tab.id)}>
+                  <ContextMenuItem onClick={() => void handleCloseTab(tab.id)}>
                     关闭标签页
                   </ContextMenuItem>
                 </ContextMenuContent>
@@ -931,6 +1237,16 @@ export function TabsContainer({
                 key={`${terminalSessionId}:${tab.id}`}
                 tab={tab}
                 isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
+                sessionId={terminalSessionId || null}
+                onRequestNew={isWebviewPluginTab(tab) && tab.plugin_id && tab.contribution_id
+                  ? () => void openWebviewPluginTab({
+                    pluginId: tab.plugin_id!,
+                    contributionId: tab.contribution_id!,
+                    title: tab.plugin_id === 'browser-handler' ? '浏览器' : tab.title,
+                    sandbox: 'webview',
+                    multi: true,
+                  })
+                  : undefined}
               />
             )
           ) : (

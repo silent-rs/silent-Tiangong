@@ -20,6 +20,10 @@ export interface TerminalViewHandle {
   attach(sessionId: string, history?: string): void;
   /** 当前网格尺寸（启动 PTY 会话时传入，避免首绘按错误宽度换行）。 */
   size(): { cols: number; rows: number };
+  /** 当前附着的 PTY 会话；标签关闭前用于结束对应进程。 */
+  sessionId(): string | null;
+  /** 顶部 App 标签重新显示时刷新尺寸、画面和输入焦点。 */
+  reveal(): void;
 }
 
 /** 终端视图配置。 */
@@ -120,6 +124,15 @@ export function createTerminalView(
     },
     size() {
       return { cols: terminal.cols, rows: terminal.rows };
+    },
+    sessionId() {
+      return attached;
+    },
+    reveal() {
+      if (fitToHost()) syncSize();
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      terminal.focus();
+      scheduleFit(120);
     },
     dispose() {
       for (const timer of pendingTimers) window.clearTimeout(timer);

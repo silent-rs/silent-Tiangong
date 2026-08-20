@@ -49,6 +49,7 @@ export function hostContext(
   channel: string,
   sessionId?: string | null,
   workspace?: string | null,
+  app?: { instance_id: string; visible: boolean },
 ) {
   const session: { id?: string; workspace?: string } = {};
   if (sessionId) session.id = sessionId;
@@ -60,6 +61,7 @@ export function hostContext(
     tokens: collectHostTokens(),
     fontFamily: getComputedStyle(document.body).fontFamily,
     ...(sessionId || workspace ? { session } : {}),
+    ...(app ? { app } : {}),
   };
 }
 

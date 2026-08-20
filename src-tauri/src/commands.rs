@@ -6,7 +6,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::AgentInputKind;
@@ -4564,6 +4564,7 @@ async fn download_and_install_plugin(
     plugin_id: String,
     app: AppHandle,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let total_started = Instant::now();
     let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
         .map_err(|error| error.to_string())?;
     let progress: tiangong_plugin_runtime::artifacts::ProgressFn = std::sync::Arc::new({
@@ -4576,16 +4577,45 @@ async fn download_and_install_plugin(
             );
         }
     });
-    let staged = repository
+    let download_started = Instant::now();
+    let staged_result = repository
         .download(&storage_root, &plugin_id, Some(progress))
-        .await
-        .map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
+        .await;
+    let download_ms = download_started.elapsed().as_millis() as u64;
+    let staged = match staged_result {
+        Ok(staged) => staged,
+        Err(error) => {
+            tracing::warn!(
+                plugin_id,
+                download_ms,
+                total_ms = total_started.elapsed().as_millis() as u64,
+                %error,
+                "插件下载阶段失败"
+            );
+            return Err(error.to_string());
+        }
+    };
+
+    let install_started = Instant::now();
+    let install_task = tauri::async_runtime::spawn_blocking(move || {
         tiangong_plugin_runtime::registry::install_staged_plugin(&storage_root, staged.path())
             .map_err(|error| error.to_string())
     })
-    .await
-    .map_err(|error| format!("安装插件任务失败: {error}"))?
+    .await;
+    let install_ms = install_started.elapsed().as_millis() as u64;
+    let result = match install_task {
+        Ok(result) => result,
+        Err(error) => Err(format!("安装插件任务失败: {error}")),
+    };
+    tracing::info!(
+        plugin_id,
+        download_ms,
+        install_ms,
+        total_ms = total_started.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        "插件下载安装阶段完成"
+    );
+    result
 }
 
 /// 从用户选择的本地完整目录导入插件。
@@ -4599,13 +4629,40 @@ pub async fn import_local_plugin(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     let status = tauri::async_runtime::spawn_blocking(move || {
-        let staged = tiangong_plugin_runtime::artifacts::stage_local_plugin(
+        let total_started = Instant::now();
+        let stage_started = Instant::now();
+        let staged_result = tiangong_plugin_runtime::artifacts::stage_local_plugin(
             &storage_root,
             std::path::Path::new(&path),
         )
-        .map_err(|error| error.to_string())?;
-        tiangong_plugin_runtime::registry::import_staged_plugin(&storage_root, staged.path())
-            .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+        let stage_ms = stage_started.elapsed().as_millis() as u64;
+        let staged = match staged_result {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::warn!(
+                    stage_ms,
+                    total_ms = total_started.elapsed().as_millis() as u64,
+                    %error,
+                    "本地插件暂存阶段失败"
+                );
+                return Err(error);
+            }
+        };
+
+        let install_started = Instant::now();
+        let result =
+            tiangong_plugin_runtime::registry::import_staged_plugin(&storage_root, staged.path())
+                .map_err(|error| error.to_string());
+        let install_ms = install_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            stage_ms,
+            install_ms,
+            total_ms = total_started.elapsed().as_millis() as u64,
+            success = result.is_ok(),
+            "本地插件导入阶段完成"
+        );
+        result
     })
     .await
     .map_err(|error| format!("导入本地插件任务失败: {error}"))??;

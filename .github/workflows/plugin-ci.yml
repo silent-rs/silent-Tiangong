@@ -46,6 +46,8 @@ jobs:
           fi
 
           check_all=false
+          sdk_changed=false
+          sidecar_shared_changed=false
           fallback_all=false
           scoped_change=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
@@ -53,8 +55,14 @@ jobs:
           fi
           for file in "${files[@]}"; do
             case "$file" in
-              .cargo/*|plugins/sdk/*|crates/tiangong-plugin-sidecar/*)
+              .cargo/*)
                 check_all=true
+                ;;
+              plugins/sdk/*)
+                sdk_changed=true
+                ;;
+              crates/tiangong-plugin-sidecar/*)
+                sidecar_shared_changed=true
                 ;;
               Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*|crates/tiangong-plugin-runtime/*)
                 fallback_all=true
@@ -127,8 +135,9 @@ jobs:
           )
           for manifest in "${manifests[@]}"; do
             root="${manifest%/plugin.json}"
-            if ! changed_root "$root"; then
-              continue
+            direct_change=false
+            if changed_root "$root"; then
+              direct_change=true
             fi
 
             id="$(jq -er '.id' "$manifest")"
@@ -145,6 +154,27 @@ jobs:
             [[ -f "$wasm_manifest" ]] && has_wasm=true
             [[ -f "$sidecar_manifest" ]] && has_sidecar=true
             [[ -f "$package_json" ]] && has_ui=true
+
+            uses_sdk=false
+            if [[ "$has_ui" == "true" ]] && jq -e '
+              ((.dependencies // {}) + (.devDependencies // {}))
+              | has("@tiangong/plugin-sdk")
+            ' "$package_json" >/dev/null; then
+              uses_sdk=true
+            fi
+
+            plugin_selected="$direct_change"
+            if [[ "$sdk_changed" == "true" && "$uses_sdk" == "true" ]]; then
+              plugin_selected=true
+            fi
+            sidecar_selected=false
+            if [[ "$has_sidecar" == "true" ]] \
+              && [[ "$direct_change" == "true" || "$sidecar_shared_changed" == "true" ]]; then
+              sidecar_selected=true
+            fi
+            if [[ "$plugin_selected" != "true" && "$sidecar_selected" != "true" ]]; then
+              continue
+            fi
 
             if [[ "$has_protocol" != "$has_wasm" ]]; then
               echo "Plugin $id must provide protocol and WASM together" >&2
@@ -188,8 +218,10 @@ jobs:
               --argjson ui "$has_ui" \
               --argjson ui_test "$ui_test" \
               '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
-            append_plugin "$item"
-            if [[ -n "$sidecar" ]]; then
+            if [[ "$plugin_selected" == "true" ]]; then
+              append_plugin "$item"
+            fi
+            if [[ "$sidecar_selected" == "true" ]]; then
               append_sidecars "$id" "$root" "$sidecar"
             fi
           done

@@ -29,11 +29,15 @@ export function PluginIframe({
   html,
   sessionId,
   workspace,
+  instanceId,
+  visible,
 }: {
   pluginId: string;
   html: string;
   sessionId?: string | null;
   workspace?: string | null;
+  instanceId?: string;
+  visible?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const theme = useResolvedTheme();
@@ -42,10 +46,18 @@ export function PluginIframe({
 
   const sendHostContext = useCallback(() => {
     iframeRef.current?.contentWindow?.postMessage(
-      hostContext(theme, channel, sessionId, workspace),
+      hostContext(
+        theme,
+        channel,
+        sessionId,
+        workspace,
+        instanceId && typeof visible === 'boolean'
+          ? { instance_id: instanceId, visible }
+          : undefined,
+      ),
       '*',
     );
-  }, [channel, sessionId, theme, workspace]);
+  }, [channel, instanceId, sessionId, theme, visible, workspace]);
 
   useEffect(() => {
     sendHostContext();

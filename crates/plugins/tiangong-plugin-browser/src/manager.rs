@@ -562,6 +562,15 @@ impl BrowserManager {
                 message: None,
             },
         );
+        crate::emit_plugin_event(
+            &session_id,
+            "navigation_started",
+            &serde_json::json!({
+                "tab_id": tab_id,
+                "navigation_id": navigation_id,
+                "url": url,
+            }),
+        );
 
         let app_for_timeout = app.clone();
         let state_for_timeout = state.clone();
@@ -652,13 +661,19 @@ impl BrowserManager {
                 tab_id: tab_id.to_string(),
                 navigation_id,
                 state: BrowserNavigationStateKind::Failed,
-                url: requested_url,
+                url: requested_url.clone(),
                 message: Some(PAGE_LOAD_ERROR_MESSAGE.to_string()),
             },
         );
         let _ = app.emit(
             "browser:tab_updated",
             serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
+        );
+        // 阶段 1 事件通道：导航失败（超时）定向投递给插件 UI
+        crate::emit_plugin_event(
+            &session_id,
+            "navigation_failed",
+            &serde_json::json!({ "tab_id": tab_id, "url": &requested_url }),
         );
 
         if let Some(webview) = webview {
@@ -868,6 +883,12 @@ impl BrowserManager {
             "browser:tab_updated",
             serde_json::json!({ "session_id": session_id.clone(), "tab_id": tab_id }),
         );
+        // 阶段 1 事件通道：页面加载完成（标题/URL 就绪）定向投递给插件 UI
+        crate::emit_plugin_event(
+            &session_id,
+            "page_loaded",
+            &serde_json::json!({ "tab_id": tab_id, "title": title, "url": final_url }),
+        );
         let summary = text.chars().take(2000).collect();
         let _ = app.emit(
             "browser:page_loaded",
@@ -880,6 +901,52 @@ impl BrowserManager {
             },
         );
         true
+    }
+
+    fn handle_page_load_finished(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        observed_navigation_id: u64,
+        event_url: &str,
+        snapshot: WebDocumentSnapshot,
+    ) {
+        if snapshot.document_id.is_empty()
+            || snapshot.url.is_empty()
+            || snapshot.internal_error
+            || (!event_url.is_empty()
+                && normalize_url_for_compare(event_url) != normalize_url_for_compare(&snapshot.url))
+        {
+            return;
+        }
+
+        let expected_document_id = snapshot.document_id.clone();
+        let accepted = {
+            let state = match state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+                return;
+            };
+            let mut navigation = match signal.state.lock() {
+                Ok(navigation) => navigation,
+                Err(error) => error.into_inner(),
+            };
+            accept_loading_document(&mut navigation, observed_navigation_id, &snapshot)
+        };
+        if !accepted {
+            return;
+        }
+
+        Self::complete_navigation_for_tab(
+            app,
+            state,
+            tab_id,
+            observed_navigation_id,
+            &expected_document_id,
+            snapshot,
+        );
     }
 
     /// 为指定标签创建独立的 WebView 实例
@@ -984,7 +1051,7 @@ impl BrowserManager {
                 }
 
                 if payload.event() == PageLoadEvent::Finished {
-                    let (navigation_id, expected_document_id) = {
+                    let navigation_id = {
                         let state = match state_clone_holder.lock() {
                             Ok(state) => state,
                             Err(error) => error.into_inner(),
@@ -1003,23 +1070,13 @@ impl BrowserManager {
                         {
                             return;
                         }
-                        let Some(expected_url) = navigation.started_url.as_deref() else {
-                            return;
-                        };
-                        if normalize_url_for_compare(expected_url)
-                            != normalize_url_for_compare(&event_url)
-                        {
-                            return;
-                        }
-                        let Some(document_id) = navigation.document_id.clone() else {
-                            return;
-                        };
-                        (navigation.navigation_id, document_id)
+                        navigation.navigation_id
                     };
 
                     let state_for_finished = state_clone_holder.clone();
                     let tab_id_for_finished = tab_id_for_closure.clone();
                     let app_for_finished = app_clone.clone();
+                    let event_url_for_finished = event_url.clone();
                     if let Err(error) = webview.eval_with_callback(
                         PAGE_SNAPSHOT_SCRIPT,
                         move |result| {
@@ -1027,12 +1084,12 @@ impl BrowserManager {
                                 debug!("browser finished page snapshot parse failed");
                                 return;
                             };
-                            Self::complete_navigation_for_tab(
+                            Self::handle_page_load_finished(
                                 &app_for_finished,
                                 state_for_finished.clone(),
                                 &tab_id_for_finished,
                                 navigation_id,
-                                &expected_document_id,
+                                &event_url_for_finished,
                                 snapshot,
                             );
                         },
@@ -1767,6 +1824,7 @@ impl BrowserManager {
             BrowserTabSource::Agent,
             Some(agent_domain),
             rect_override,
+            None,
         )?;
         self.start_url_poll(app, url);
         self.start_event_poll(app);
@@ -2348,7 +2406,17 @@ impl BrowserManager {
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
-        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None)
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, None)
+    }
+
+    /// 以插件自带编号新建标签（阶段 3：标签模型上移插件后由插件主导标识）。
+    pub fn tab_new_with_id(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+        tab_id: &str,
+    ) -> Result<String, String> {
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, Some(tab_id))
     }
 
     fn tab_new_with_source(
@@ -2358,8 +2426,12 @@ impl BrowserManager {
         source: BrowserTabSource,
         agent_domain: Option<String>,
         rect_override: Option<(f64, f64, f64, f64)>,
+        external_id: Option<&str>,
     ) -> Result<String, String> {
-        let tab_id = scru128::new().to_string();
+        // 插件可自带标签编号（阶段 3 标签模型上移后由插件主导标识）
+        let tab_id = external_id
+            .map(str::to_string)
+            .unwrap_or_else(|| scru128::new().to_string());
         let is_blank = url == "about:blank";
 
         let rect = {
@@ -2408,6 +2480,92 @@ impl BrowserManager {
         }
         self.persist_session_tabs();
         Ok(tab_id)
+    }
+
+    /// 实例直达原语：把指定标签的 webview 显示到给定矩形并置为活跃
+    /// （阶段 2 插件编排用——显示语义天然互斥，切换时隐藏原活跃实例）。
+    /// 恢复场景（应用重启后从持久化还原的标签）无 webview 实例，此处
+    /// 按需创建（与内置面板切换路径同机制）。
+    pub fn show_tab_at(
+        &self,
+        app: &AppHandle<Wry>,
+        tab_id: &str,
+        rect: (f64, f64, f64, f64),
+    ) -> Result<(), String> {
+        let (tab, has_webview) = {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let tab = state
+                .tabs
+                .iter()
+                .find(|t| t.id == tab_id)
+                .cloned()
+                .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
+            (tab, state.webviews.contains_key(tab_id))
+        };
+        // 恢复的标签尚无实例（非空白页）：先创建再显示
+        if !has_webview && !tab.url.starts_with("about:") {
+            let webview = Self::create_webview_for_tab(
+                app,
+                self.state.clone(),
+                tab_id,
+                &tab.url,
+                NavigationIntent::Restore,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+            )?;
+            {
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(tab_id.to_string(), webview);
+                state.browser_rect = rect;
+                state.active_tab_id = Some(tab_id.to_string());
+                state
+                    .visible
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.start_url_poll(app, &tab.url);
+            self.start_event_poll(app);
+            self.persist_session_tabs();
+            return Ok(());
+        }
+        let is_active = {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.browser_rect = rect;
+            let is_active = state.active_tab_id.as_deref() == Some(tab_id);
+            if is_active {
+                if let Some(wv) = state.webviews.get(tab_id) {
+                    let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
+                    let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
+                }
+                state
+                    .visible
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            is_active
+        };
+        if !is_active {
+            // tab_switch 读最新 browser_rect：隐藏原活跃并摆放到目标矩形
+            self.tab_switch(tab_id)?;
+        }
+        Ok(())
+    }
+
+    /// 实例直达原语：把指定标签的 webview 挪出可视区（不改变活跃标签）。
+    pub fn hide_tab(&self, tab_id: &str) -> Result<(), String> {
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        let wv = state
+            .webviews
+            .get(tab_id)
+            .ok_or_else(|| format!("标签 {tab_id} 不存在或尚未加载 webview"))?;
+        let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
+        Ok(())
+    }
+
+    /// 实例直达原语：对指定标签执行脚本并等待结果（与活跃标签 eval 同
+    /// 回执机制），阶段 3 协作策略上移插件的基础。
+    pub fn eval_tab_result_text(&self, tab_id: &str, js: &str) -> Option<String> {
+        self.eval_tab_with_result_timeout(tab_id, js, Duration::from_secs(15))
     }
 
     pub fn tab_switch(&self, tab_id: &str) -> Result<(), String> {

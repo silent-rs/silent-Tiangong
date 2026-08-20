@@ -30,7 +30,7 @@ export interface HostBridge {
 export type OpenMode = 'singleton' | 'multi';
 
 /** UI 贡献沙箱级别。 */
-export type SandboxKind = 'shadow' | 'iframe' | 'native';
+export type SandboxKind = 'shadow' | 'iframe' | 'native' | 'webview';
 
 /** manifest v2 `ui.contributions[]` 声明。 */
 export interface UiContribution {
@@ -67,6 +67,11 @@ export interface HostContext {
     /** 当前会话工作目录（无活跃会话时为全局工作区）。 */
     workspace?: string;
   };
+  /** extension.tab 顶部标签实例及其当前显隐状态。 */
+  app?: {
+    instance_id: string;
+    visible: boolean;
+  };
 }
 
 // ── 运行时 ──
@@ -77,6 +82,7 @@ declare const pluginRoot: ShadowRoot | undefined;
 declare const hostContext: HostContext | undefined;
 declare const onHostContextChange: ((handler: (context: HostContext) => void) => () => void) | undefined;
 declare const registerCleanup: ((cleanup: () => void) => void) | undefined;
+declare const registerBeforeClose: ((handler: () => void | Promise<void>) => void) | undefined;
 
 /** Shadow 脚本由宿主动态注入的 DOM、上下文与生命周期能力；样式变量直接继承 App 根节点。 */
 export interface ShadowHostRuntime {
@@ -85,6 +91,8 @@ export interface ShadowHostRuntime {
   /** 会话等非样式上下文变化；主题颜色直接继承 App 根节点。 */
   onContextChange(handler: (context: HostContext) => void): () => void;
   registerCleanup(cleanup: () => void): void;
+  /** 顶部标签明确关闭前执行；异步处理完成后宿主才移除实例。 */
+  registerBeforeClose(handler: () => void | Promise<void>): void;
 }
 
 /** 容器类型。 */
@@ -115,6 +123,7 @@ export function getShadowHostRuntime(): ShadowHostRuntime | null {
       || !hostContext
       || typeof onHostContextChange !== 'function'
       || typeof registerCleanup !== 'function'
+      || typeof registerBeforeClose !== 'function'
     ) {
       return null;
     }
@@ -123,6 +132,7 @@ export function getShadowHostRuntime(): ShadowHostRuntime | null {
       context: hostContext,
       onContextChange: onHostContextChange,
       registerCleanup,
+      registerBeforeClose,
     };
   } catch {
     return null;

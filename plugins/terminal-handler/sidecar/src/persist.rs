@@ -97,6 +97,17 @@ pub fn scope_log_path(scope_id: &str) -> Option<PathBuf> {
     )
 }
 
+pub fn clear_scope_log(scope_id: &str) -> std::io::Result<()> {
+    let Some(path) = scope_log_path(scope_id) else {
+        return Ok(());
+    };
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// 路径段清洗（对齐内置终端）：仅保留字母数字与 `-_`。
 fn sanitize_path_segment(value: &str) -> String {
     value

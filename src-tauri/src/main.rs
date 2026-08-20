@@ -55,6 +55,20 @@ async fn observe_browser_snapshot_for_injection(
     .flatten()
 }
 
+/// 注入目标对话 id：浏览器事件携带的是作用域标识——插件面板为
+/// `webview:<插件>:<会话>`（插件×会话双维度隔离），反解出会话段才能
+/// 路由到对话；内置路径原样（对话 id 即作用域）。纯插件级作用域
+/// （无会话段，如全局浏览器）不属于任何对话，返回 None 跳过注入。
+fn injection_target_session(scope: &str) -> Option<String> {
+    if let Some(rest) = scope.strip_prefix("webview:") {
+        return rest
+            .split_once(':')
+            .map(|(_, session)| session.to_string())
+            .filter(|session| !session.is_empty());
+    }
+    Some(scope.to_string())
+}
+
 async fn ack_browser_events(
     app: tauri::AppHandle,
     session_id: String,
@@ -186,8 +200,12 @@ fn run_gui() {
                     return;
                 }
                 use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                let Some(target_session) = injection_target_session(&data.session_id) else {
+                    debug!("浏览器页面事件来自非会话作用域，跳过注入");
+                    return;
+                };
                 let _ = tx1.send(tiangong_app::ToolInjection {
-                    session_id: Some(data.session_id),
+                    session_id: Some(target_session),
                     tool: Box::new(BrowserContent {
                         title: data.title,
                         url: data.url,
@@ -294,9 +312,14 @@ fn run_gui() {
                     }
 
                     use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                    // 插件作用域反解对话 id（见 injection_target_session）
+                    let Some(target_session) = injection_target_session(&session_id) else {
+                        debug!("浏览器网络事件来自非会话作用域，跳过注入");
+                        return;
+                    };
                     let queued = injection_tx
                         .send(tiangong_app::ToolInjection {
-                            session_id: Some(session_id.clone()),
+                            session_id: Some(target_session.clone()),
                             tool: Box::new(BrowserContent {
                                 title,
                                 url: page_url.clone(),
@@ -392,6 +415,19 @@ fn run_gui() {
                             method,
                             payload,
                         )
+                    },
+                ));
+            }
+
+            // 浏览器页面事件定向转发给插件 UI（阶段 1 事件通道）：宿主页面
+            // 状态变化（加载完成/失败）经 runtime 订阅表投递给持有对应
+            // webview 作用域的插件，插件订阅 webview.event 实时刷新。
+            {
+                tiangong_plugin_browser::set_plugin_event_forwarder(Arc::new(
+                    |plugin_id: &str, channel: &str, payload: &str| {
+                        tiangong_plugin_runtime::bridge::bridge_emit_to(
+                            plugin_id, channel, payload,
+                        );
                     },
                 ));
             }

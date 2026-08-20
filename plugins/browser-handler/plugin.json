@@ -12,7 +12,11 @@
   ],
   "capabilities": {
     "tools": true,
-    "prompt": true
+    "prompt": true,
+    "events": [
+      "tool.*",
+      "webview.event"
+    ]
   },
   "tools": [
     {
@@ -203,7 +207,7 @@
         "description": "嵌入式浏览器（webview 容器原语 + 插件管理界面）",
         "icon": "globe",
         "entry": "dist/index.html",
-        "open_mode": "singleton",
+        "open_mode": "multi",
         "context": [
           "session"
         ]

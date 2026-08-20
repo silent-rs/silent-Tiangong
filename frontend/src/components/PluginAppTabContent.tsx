@@ -11,12 +11,45 @@ import { PluginSandbox } from './PluginSandbox';
  * 会话上下文（sessionId + workspace）随当前活跃会话注入：终端等
  * 插件以 workspace 作为默认初始目录，与内置终端面板行为一致。
  */
-export function PluginAppTabContent({ tab, isActive }: { tab: TabState; isActive: boolean }) {
+interface PluginAppTabContentProps {
+  tab: TabState;
+  isActive: boolean;
+  sessionId?: string | null;
+  onRequestNew?: () => void;
+}
+
+export function PluginAppTabContent({
+  tab,
+  isActive,
+  sessionId,
+  onRequestNew,
+}: PluginAppTabContentProps) {
   const [html, setHtml] = useState('');
   const [error, setError] = useState<string | null>(null);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
+  const containerClassName = isActive
+    ? 'flex h-full min-h-0 w-full flex-1 flex-col'
+    : 'hidden';
+
+  useEffect(() => {
+    if (!isActive || !onRequestNew) return;
+    const handleRequestNew = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        plugin_id?: string;
+        contribution_id?: string;
+      }>).detail;
+      if (
+        detail?.plugin_id === tab.plugin_id
+        && detail?.contribution_id === tab.contribution_id
+      ) {
+        onRequestNew();
+      }
+    };
+    window.addEventListener('tiangong:plugin-request-new', handleRequestNew);
+    return () => window.removeEventListener('tiangong:plugin-request-new', handleRequestNew);
+  }, [isActive, onRequestNew, tab.contribution_id, tab.plugin_id]);
 
   useEffect(() => {
     let active = true;
@@ -36,23 +69,37 @@ export function PluginAppTabContent({ tab, isActive }: { tab: TabState; isActive
   }, [tab.plugin_id, tab.contribution_id]);
 
   if (!tab.plugin_id || !tab.contribution_id) {
-    return <div className="p-4 text-sm text-muted-foreground">插件实例元数据缺失。</div>;
+    return (
+      <div className={`${containerClassName} p-4 text-sm text-muted-foreground`}>
+        插件实例元数据缺失。
+      </div>
+    );
   }
   if (error) {
-    return <div className="p-4 text-sm text-muted-foreground">加载失败：{error}</div>;
+    return (
+      <div className={`${containerClassName} p-4 text-sm text-muted-foreground`}>
+        加载失败：{error}
+      </div>
+    );
   }
   if (!html) {
-    return <div className="p-4 text-sm text-muted-foreground">加载中…</div>;
+    return (
+      <div className={`${containerClassName} p-4 text-sm text-muted-foreground`}>
+        加载中…
+      </div>
+    );
   }
   return (
-    <div className={isActive ? 'flex h-full min-h-0 w-full flex-1 flex-col' : 'hidden'}>
+    <div className={containerClassName}>
       <PluginSandbox
         pluginId={tab.plugin_id}
         contributionId={tab.contribution_id}
         sandbox={tab.sandbox ?? 'shadow'}
         html={html}
-        sessionId={activeSessionId ?? null}
+        sessionId={sessionId ?? activeSessionId ?? null}
         workspace={sessionCwd || workspaceDir || null}
+        instanceId={tab.id}
+        visible={isActive}
       />
     </div>
   );
