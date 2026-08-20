@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[[bin]]
+name = "tiangong-terminal-sidecar"
+path = "src/main.rs"
+
 [dependencies]
 tiangong-plugin-sidecar = { path = "../../../crates/tiangong-plugin-sidecar" }
 tiangong-plugin-runtime = { path = "../../../crates/tiangong-plugin-runtime" }

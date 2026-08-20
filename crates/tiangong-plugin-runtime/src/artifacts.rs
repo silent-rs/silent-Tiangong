@@ -85,7 +85,10 @@ pub struct PluginRelease {
     #[serde(default)]
     pub description: String,
     pub manifest: RemoteArtifact,
-    pub wasm: RemoteArtifact,
+    /// 纯 UI 插件（无 WASM 制品）在目录中省略 wasm 条目；
+    /// 是否下载以 plugin.json 是否声明 wasm 为准。
+    #[serde(default)]
+    pub wasm: Option<RemoteArtifact>,
     #[serde(default)]
     pub signed_releases: BTreeMap<String, RemoteSignedRelease>,
     #[serde(default)]
@@ -345,15 +348,21 @@ impl PluginRepository {
 
         let mut step_index = 0;
         if let Some(wasm_binary) = manifest.wasm_binary() {
+            let wasm_artifact = release
+                .wasm
+                .as_ref()
+                .ok_or_else(|| anyhow!("插件 {} 声明了 WASM，但目录缺少 WASM 制品", release.id))?;
             let wasm_path = staged.path.join(wasm_binary);
             let wasm_name = wasm_binary
                 .file_name()
                 .and_then(|value| value.to_str())
                 .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
-            validate_artifact_file_name(&release.wasm.url, wasm_name)?;
-            self.download_file(&release.wasm, &wasm_path, make_file_progress(step_index))
+            validate_artifact_file_name(&wasm_artifact.url, wasm_name)?;
+            self.download_file(wasm_artifact, &wasm_path, make_file_progress(step_index))
                 .await?;
             step_index += 1;
+        } else if release.wasm.is_some() {
+            bail!("插件 {} 未声明 WASM，但 OSS 目录包含 WASM 制品", release.id);
         }
 
         if has_sidecar {
@@ -599,9 +608,11 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
         Version::parse(&plugin.version)
             .with_context(|| format!("插件 {} 版本不是有效语义版本", plugin.id))?;
         validate_download_url(&plugin.manifest.url, "插件清单")?;
-        validate_download_url(&plugin.wasm.url, "WASM 制品")?;
         parse_checksum(&plugin.manifest.checksum)?;
-        parse_checksum(&plugin.wasm.checksum)?;
+        if let Some(wasm) = &plugin.wasm {
+            validate_download_url(&wasm.url, "WASM 制品")?;
+            parse_checksum(&wasm.checksum)?;
+        }
         for (entry, artifact) in &plugin.ui {
             validate_relative_artifact_path(Path::new(entry), "UI 制品")?;
             validate_download_url(&artifact.url, "UI 制品")?;
