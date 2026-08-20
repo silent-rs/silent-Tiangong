@@ -71,8 +71,16 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
-pub const EVENT_NAMESPACE_PREFIXES: &[&str] =
-    &["session.", "tool.", "lifecycle.", "config.", "sidecar."];
+pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
+    "session.",
+    "tool.",
+    "lifecycle.",
+    "config.",
+    "sidecar.",
+    // webview.*：宿主 webview 容器原语的页面事件通道（如浏览器插件的
+    // webview.event），插件在 capabilities.events 声明后可订阅。
+    "webview.",
+];
 
 /// 查找 method 所属的桥接命名空间。
 pub fn namespace_of(method: &str) -> Option<&'static BridgeNamespace> {

@@ -8,7 +8,8 @@
   "permissions": [
     "tool.provide",
     "webview.use",
-    "bridge.call"
+    "bridge.call",
+    "storage.private"
   ],
   "capabilities": {
     "tools": true,
