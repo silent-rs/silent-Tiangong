@@ -46,6 +46,8 @@ export interface AppTabCommand {
   kind: TabKind;
   action: 'close-all' | 'close-plugin' | 'open-plugin';
   version: number;
+  /** 命令所属会话；会话标签完成恢复且仍为当前会话时才执行。 */
+  sessionId?: string;
   /** open-plugin 携带的三方 App 元数据；close-plugin 仅使用 pluginId。 */
   app?: {
     pluginId: string;
@@ -473,10 +475,13 @@ export function TabsContainer({
         activeTabIdRef.current = '';
         setTabs([]);
         setActiveTabId('');
-        // 失败时清除 hydrating，允许下次重试
+        // 持久化读取失败时以空标签进入可用态，不能让 App 打开命令永久
+        // 等待；后续新建标签仍会按正常路径重新落盘。
         if (hydratingSessionRef.current === sessionId) {
           hydratingSessionRef.current = null;
         }
+        hydratedSessionRef.current = sessionId;
+        setHydrateVersion((version) => version + 1);
         setActivationRetryVersion((version) => version + 1);
       }
     };
@@ -642,9 +647,11 @@ export function TabsContainer({
   const lastAppCommandVersionRef = useRef(0);
   useEffect(() => {
     if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
-    // 首次由工具自动拉起拓展区时，会话标签恢复与 app.open 同时发生。
-    // 等恢复完成再消费命令，否则刚创建的 App 标签会被稍后到达的恢复结果覆盖。
-    if (hydratingSessionRef.current !== null) return;
+    // 首次由工具自动拉起拓展区时，会话切换、标签恢复与 app.open 可能
+    // 同时发生。只在命令所属会话仍为当前会话且恢复完成后消费，避免刚
+    // 创建的 App 标签被稍后到达的恢复结果覆盖。
+    if (appCommand.sessionId && appCommand.sessionId !== terminalSessionId) return;
+    if (!terminalSessionId || hydratedSessionRef.current !== terminalSessionId) return;
     lastAppCommandVersionRef.current = appCommand.version;
     if (appCommand.action === 'open-plugin' && appCommand.app) {
       const { pluginId, contributionId, title, sandbox, multi, instanceId, focusExisting } =
@@ -714,7 +721,14 @@ export function TabsContainer({
         await handleCloseTab(tabId);
       }
     })();
-  }, [appCommand, handleCloseTab, hydrateVersion, openWebviewPluginTab]);
+  }, [
+    activationRetryVersion,
+    appCommand,
+    handleCloseTab,
+    hydrateVersion,
+    openWebviewPluginTab,
+    terminalSessionId,
+  ]);
 
   useEffect(() => {
     if (persistTimerRef.current !== null) {

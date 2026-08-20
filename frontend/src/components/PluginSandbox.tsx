@@ -114,7 +114,8 @@ function currentRootTheme(): 'light' | 'dark' {
 function createHostBridge(pluginId: string): DisposableHostBridge {
   let disposed = false;
   const channelHandlers = new Map<string, Set<(payload: string) => void>>();
-  const subscribedChannels = new Set<string>();
+  const requestedChannels = new Set<string>();
+  const registeredChannels = new Set<string>();
   const pendingSubscriptions = new Set<Promise<void>>();
   let unlistenEvent: (() => void) | null = null;
   let eventListeningTask: Promise<void> | null = null;
@@ -153,12 +154,22 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
         channelHandlers.set(channel, handlers);
       }
       handlers.add(handler);
-      if (!subscribedChannels.has(channel)) {
-        subscribedChannels.add(channel);
+      if (!requestedChannels.has(channel)) {
+        requestedChannels.add(channel);
         // bridgeSubscribe 会同步触发待处理工具调用重放，必须先让全局事件
         // 监听器就绪，否则首次后台挂载时重放事件可能在监听建立前丢失。
         const subscription = ensureEventListening()
-          .then(() => api.bridgeSubscribe(pluginId, channel))
+          .then(async () => {
+            if (disposed || !requestedChannels.has(channel)) return;
+            await api.bridgeSubscribe(pluginId, channel);
+            // 容器可能在异步订阅期间卸载。只有仍存活的请求才登记；否则
+            // 立即成对退订，避免宿主留下没有前端处理器的虚假订阅者。
+            if (disposed || !requestedChannels.has(channel)) {
+              await api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
+              return;
+            }
+            registeredChannels.add(channel);
+          })
           .catch((error) => {
             console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
           })
@@ -170,19 +181,22 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
         handlers?.delete(handler);
         if (handlers?.size === 0) {
           channelHandlers.delete(channel);
-          subscribedChannels.delete(channel);
-          api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
+          requestedChannels.delete(channel);
+          if (registeredChannels.delete(channel)) {
+            api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
+          }
         }
       };
     },
     dispose() {
       disposed = true;
       channelHandlers.clear();
+      requestedChannels.clear();
       pendingSubscriptions.clear();
-      for (const channel of subscribedChannels) {
+      for (const channel of registeredChannels) {
         api.bridgeUnsubscribe(pluginId, channel).catch(() => {});
       }
-      subscribedChannels.clear();
+      registeredChannels.clear();
       unlistenEvent?.();
       unlistenEvent = null;
     },

@@ -357,6 +357,7 @@ export function MainApp() {
           kind: 'plugin',
           action: 'open-plugin',
           version: Date.now(),
+          sessionId: backgroundApp.sessionId,
           app: {
             pluginId: backgroundApp.pluginId,
             contributionId: backgroundApp.contributionId,
@@ -579,6 +580,7 @@ export function MainApp() {
           kind: 'plugin',
           action: 'open-plugin',
           version: Date.now(),
+          sessionId,
           app: {
             pluginId: 'browser',
             contributionId: 'browser',
@@ -671,6 +673,7 @@ export function MainApp() {
           kind: 'plugin',
           action: 'open-plugin',
           version: Date.now(),
+          sessionId: requestedSessionId,
           app: {
             pluginId: payload.plugin_id,
             contributionId: payload.contribution_id,
@@ -711,6 +714,7 @@ export function MainApp() {
           kind: 'plugin',
           action: 'close-plugin',
           version: Date.now(),
+          sessionId,
           // close-plugin 只消费 pluginId / instanceId，其余字段为类型占位。
           app: {
             pluginId: payload.plugin_id,
@@ -807,6 +811,7 @@ export function MainApp() {
         kind: 'plugin',
         action: 'open-plugin',
         version: Date.now(),
+        sessionId,
         app: {
           pluginId: 'browser',
           contributionId: 'browser',
@@ -916,6 +921,7 @@ export function MainApp() {
                             kind: 'plugin',
                             action: 'open-plugin',
                             version: Date.now(),
+                            sessionId: currentSessionId ?? undefined,
                             app: {
                               pluginId: app.plugin_id,
                               contributionId: app.contribution_id,
