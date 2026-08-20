@@ -23,11 +23,37 @@ const FIRST_LAUNCH_MARKER: &str = ".first_launch_completed";
 /// 默认插件 ID 列表。
 ///
 /// 这些插件提供 Agent 的基础能力（系统提示词、文件操作、命令执行、网络获取、
-/// 索引搜索、技能管理、MCP 工具桥接、终端与浏览器），确保用户安装后即可
+/// 索引搜索、技能管理、MCP 工具桥接、审批征询、终端与浏览器），确保用户安装后即可
 /// 获得基本体验。
 pub const DEFAULT_PLUGIN_IDS: &[&str] = &[
-    "prompt", "fs", "command", "fetch", "index", "skill", "mcp", "terminal", "browser",
+    "prompt",
+    "fs",
+    "command",
+    "fetch",
+    "index",
+    "skill",
+    "mcp",
+    "interaction",
+    "terminal",
+    "browser",
 ];
+
+/// 启动时自动安装的核心插件 ID 列表（终端、浏览器、审批征询）。
+///
+/// 属于默认插件集合的子集：未安装且未被用户主动卸载时，宿主启动后台任务
+/// 会自动从 OSS 目录安装，不依赖首启推荐引导。
+pub const AUTO_INSTALL_PLUGIN_IDS: &[&str] = &["terminal", "browser", "interaction"];
+
+/// 用户主动卸载的插件记录文件（位于存储根目录）。
+///
+/// 记录中的插件不会被自动安装或自动升级；用户重新手动安装成功后记录清除。
+const UNINSTALLED_PLUGINS_FILE: &str = "uninstalled_plugins.json";
+
+/// 卸载记录文件结构版本。
+const UNINSTALLED_PLUGINS_VERSION: u32 = 1;
+
+/// 与 `registry::DISABLED_MARKER` 保持一致的禁用标记文件名。
+const DISABLED_MARKER_FILE: &str = ".disabled";
 
 /// 场景分类常量：日常工作。
 pub const CATEGORY_DAILY: &str = "daily";
@@ -41,7 +67,7 @@ pub fn plugin_categories(id: &str) -> Vec<&'static str> {
     match id {
         // 基础能力：日常与编程通用。
         "prompt" | "fs" | "command" | "fetch" | "index" | "skill" | "mcp" | "memory"
-        | "terminal" | "browser" => {
+        | "interaction" | "terminal" | "browser" => {
             vec![CATEGORY_DAILY, CATEGORY_CODING]
         }
         // 编程开发专属。
@@ -117,6 +143,9 @@ pub struct AvailablePlugin {
     pub supported: bool,
     pub installed_version: Option<String>,
     pub update_available: bool,
+    /// 已安装插件的启用状态（未安装时为 false）。
+    #[serde(default)]
+    pub installed_enabled: bool,
     /// 是否为默认插件（基础能力，首次启动时会推荐安装）。
     #[serde(default)]
     pub is_default: bool,
@@ -213,13 +242,14 @@ impl PluginRepository {
 
     pub async fn list_available(&self, storage_root: &Path) -> Result<Vec<AvailablePlugin>> {
         let catalog = self.fetch_catalog().await?;
-        let installed = installed_versions(storage_root);
+        let installed = installed_plugin_states(storage_root);
         let platform = current_platform_key();
         Ok(catalog
             .plugins
             .into_iter()
             .map(|plugin| {
-                let installed_version = installed.get(&plugin.id).cloned();
+                let installed_state = installed.get(&plugin.id);
+                let installed_version = installed_state.map(|state| state.version.clone());
                 let update_available = installed_version
                     .as_deref()
                     .is_some_and(|local| version_is_newer(local, &plugin.version));
@@ -228,6 +258,7 @@ impl PluginRepository {
                         || plugin.sidecars.contains_key(&platform),
                     is_default: is_default_plugin(&plugin.id),
                     categories: plugin_categories(&plugin.id),
+                    installed_enabled: installed_state.is_some_and(|state| state.enabled),
                     id: plugin.id,
                     name: plugin.name,
                     version: plugin.version,
@@ -650,16 +681,142 @@ fn validate_relative_artifact_path(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn installed_versions(storage_root: &Path) -> HashMap<String, String> {
+/// 已安装插件的本地状态快照。
+#[derive(Debug, Clone)]
+struct InstalledPluginState {
+    version: String,
+    enabled: bool,
+}
+
+fn installed_plugin_states(storage_root: &Path) -> HashMap<String, InstalledPluginState> {
     let plugins_dir = storage_root.join("plugins");
     let Ok(entries) = std::fs::read_dir(plugins_dir) else {
         return HashMap::new();
     };
     entries
         .filter_map(Result::ok)
-        .filter_map(|entry| PluginManifest::load(&entry.path().join(MANIFEST_FILE)).ok())
-        .map(|manifest| (manifest.id, manifest.version))
+        .filter_map(|entry| {
+            let manifest = PluginManifest::load(&entry.path().join(MANIFEST_FILE)).ok()?;
+            let enabled = !entry.path().join(DISABLED_MARKER_FILE).is_file();
+            Some((
+                manifest.id,
+                InstalledPluginState {
+                    version: manifest.version,
+                    enabled,
+                },
+            ))
+        })
         .collect()
+}
+
+/// 读取用户主动卸载的插件 ID 集合。
+///
+/// 文件不存在视为空集合；损坏时同样按空集合处理并告警——卸载记录缺失
+/// 最坏结果是多余的自动重装，不应阻断启动维护任务。
+pub fn read_uninstalled_plugins(storage_root: &Path) -> BTreeSet<String> {
+    let path = storage_root.join(UNINSTALLED_PLUGINS_FILE);
+    let Ok(content) = std::fs::read(&path) else {
+        return BTreeSet::new();
+    };
+    #[derive(serde::Deserialize)]
+    struct UninstalledRecord {
+        version: u32,
+        uninstalled: BTreeSet<String>,
+    }
+    match serde_json::from_slice::<UninstalledRecord>(&content) {
+        Ok(record) if record.version == UNINSTALLED_PLUGINS_VERSION => record.uninstalled,
+        Ok(record) => {
+            tracing::warn!(
+                version = record.version,
+                path = %path.display(),
+                "卸载记录版本不兼容，按空集合处理"
+            );
+            BTreeSet::new()
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "卸载记录损坏，按空集合处理");
+            BTreeSet::new()
+        }
+    }
+}
+
+/// 记录一个用户主动卸载的插件（temp + rename 原子写）。
+pub fn record_uninstalled_plugin(storage_root: &Path, plugin_id: &str) -> Result<()> {
+    let mut uninstalled = read_uninstalled_plugins(storage_root);
+    if !uninstalled.insert(plugin_id.to_string()) {
+        return Ok(());
+    }
+    write_uninstalled_plugins(storage_root, &uninstalled)
+}
+
+/// 清除插件的卸载记录（重新安装成功后调用，用户改主意即失效）。
+pub fn clear_uninstalled_plugin(storage_root: &Path, plugin_id: &str) -> Result<()> {
+    let mut uninstalled = read_uninstalled_plugins(storage_root);
+    if uninstalled.remove(plugin_id) {
+        write_uninstalled_plugins(storage_root, &uninstalled)?;
+    }
+    Ok(())
+}
+
+fn write_uninstalled_plugins(storage_root: &Path, uninstalled: &BTreeSet<String>) -> Result<()> {
+    std::fs::create_dir_all(storage_root)
+        .with_context(|| format!("创建存储目录失败: {}", storage_root.display()))?;
+    let path = storage_root.join(UNINSTALLED_PLUGINS_FILE);
+    let temp = storage_root.join(format!(
+        ".{UNINSTALLED_PLUGINS_FILE}.tmp-{}",
+        std::process::id()
+    ));
+    let content = serde_json::json!({
+        "version": UNINSTALLED_PLUGINS_VERSION,
+        "uninstalled": uninstalled,
+    });
+    std::fs::write(&temp, serde_json::to_vec_pretty(&content)?)?;
+    if let Err(error) = std::fs::rename(&temp, &path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        let _ = std::fs::remove_file(&temp);
+        return Err(anyhow!(error))
+            .with_context(|| format!("写入卸载记录失败: {}", path.display()));
+    }
+    Ok(())
+}
+
+/// 启动时自动维护决策结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoMaintenancePlan {
+    /// 需要自动安装的核心插件 ID。
+    pub install: Vec<String>,
+    /// 需要自动升级的已启用插件 ID。
+    pub upgrade: Vec<String>,
+}
+
+/// 计算启动时的自动维护计划。
+///
+/// - 自动安装：核心插件（`AUTO_INSTALL_PLUGIN_IDS`）在目录中存在、平台支持、
+///   未安装且不在卸载记录中；
+/// - 自动升级：已安装、启用、目录声明了更新版本且不在卸载记录中
+///   （禁用插件尊重用户意愿，保持现状，可手动升级）。
+pub fn plan_auto_maintenance(
+    available: &[AvailablePlugin],
+    uninstalled: &BTreeSet<String>,
+) -> AutoMaintenancePlan {
+    let mut install = Vec::new();
+    let mut upgrade = Vec::new();
+    for plugin in available {
+        if uninstalled.contains(&plugin.id) {
+            continue;
+        }
+        let is_core = AUTO_INSTALL_PLUGIN_IDS.contains(&plugin.id.as_str());
+        if is_core && plugin.supported && plugin.installed_version.is_none() {
+            install.push(plugin.id.clone());
+        } else if plugin.installed_version.is_some()
+            && plugin.installed_enabled
+            && plugin.update_available
+        {
+            upgrade.push(plugin.id.clone());
+        }
+    }
+    AutoMaintenancePlan { install, upgrade }
 }
 
 fn version_is_newer(installed: &str, available: &str) -> bool {
