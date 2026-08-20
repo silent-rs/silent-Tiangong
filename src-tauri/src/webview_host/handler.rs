@@ -124,7 +124,6 @@ pub async fn browser_command_handler(
                 session_id,
                 url,
                 max_chars,
-                open,
                 response_tx,
             } => {
                 let url_for_error = url.clone();
@@ -133,24 +132,6 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
 
-                if open {
-                    // 用户明确要求打开浏览器：发 browser:open 让前端弹出面板
-                    let _ = app.emit(
-                        "browser:open",
-                        BrowserOpenEvent {
-                            session_id: session_id.clone(),
-                            url: url.clone(),
-                        },
-                    );
-                } else {
-                    // agent 自主抓取：只亮标记，不弹面板
-                    let _ = app.emit(
-                        "browser:agent_active",
-                        BrowserAgentActiveEvent {
-                            session_id: session_id.clone(),
-                        },
-                    );
-                }
                 let ticket = match manager.navigate_for_agent(&app, &url) {
                     Ok(ticket) => ticket,
                     Err(error) => {

@@ -23,9 +23,12 @@ interface TabsContainerProps {
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
-   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。
-   *  第二参量为已打开的三方/官方 plugin App 键（`plugin_id:contribution_id`）。 */
-  onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
+   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
+  onTabKindsChanged?: (
+    kinds: TabKind[],
+    pluginApps: string[],
+    pluginInstances: PluginAppInstanceRef[],
+  ) => void;
   /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
   appCommand?: AppTabCommand | null;
   /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
@@ -55,6 +58,14 @@ export interface AppTabCommand {
     /** 工具调用拉起等宿主侧场景置 true：已有实例时聚焦而非新建（multi 亦然）。 */
     focusExisting?: boolean;
   };
+}
+
+/** 已接入拓展区顶部标签的通用 App 实例引用。 */
+export interface PluginAppInstanceRef {
+  pluginId: string;
+  contributionId: string;
+  instanceId: string;
+  sessionId: string;
 }
 
 interface WebviewPluginTabInfo {
@@ -277,18 +288,27 @@ export function TabsContainer({
   const lastTabKindsRef = useRef<string>('');
   useEffect(() => {
     const kinds = Array.from(new Set(tabs.map((tab) => tab.kind)));
-    const pluginApps = Array.from(
-      new Set(
-        tabs
-          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
-          .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
-      ),
-    );
-    const key = `${kinds.join(',')}|${pluginApps.join(',')}`;
+    const pluginInstances = tabs.flatMap((tab): PluginAppInstanceRef[] => (
+      tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id
+        ? [{
+          pluginId: tab.plugin_id,
+          contributionId: tab.contribution_id,
+          instanceId: tab.id,
+          sessionId: terminalSessionId,
+        }]
+        : []
+    ));
+    const pluginApps = Array.from(new Set(
+      pluginInstances.map((instance) => `${instance.pluginId}:${instance.contributionId}`),
+    ));
+    const instanceKey = pluginInstances
+      .map((instance) => `${instance.pluginId}:${instance.contributionId}:${instance.instanceId}`)
+      .join(',');
+    const key = `${terminalSessionId}|${kinds.join(',')}|${pluginApps.join(',')}|${instanceKey}`;
     if (key === lastTabKindsRef.current) return;
     lastTabKindsRef.current = key;
-    onTabKindsChangedRef.current?.(kinds, pluginApps);
-  }, [tabs]);
+    onTabKindsChangedRef.current?.(kinds, pluginApps, pluginInstances);
+  }, [tabs, terminalSessionId]);
 
   useEffect(() => {
     onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);

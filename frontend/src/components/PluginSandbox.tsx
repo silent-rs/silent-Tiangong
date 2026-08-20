@@ -155,10 +155,10 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
       handlers.add(handler);
       if (!subscribedChannels.has(channel)) {
         subscribedChannels.add(channel);
-        const subscription = Promise.all([
-          api.bridgeSubscribe(pluginId, channel),
-          ensureEventListening(),
-        ])
+        // bridgeSubscribe 会同步触发待处理工具调用重放，必须先让全局事件
+        // 监听器就绪，否则首次后台挂载时重放事件可能在监听建立前丢失。
+        const subscription = ensureEventListening()
+          .then(() => api.bridgeSubscribe(pluginId, channel))
           .catch((error) => {
             console.warn(`[plugin-sandbox] 订阅 ${channel} 失败:`, error);
           })

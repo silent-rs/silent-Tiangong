@@ -1,6 +1,8 @@
 import {
   createTiangongBridge,
   createToolProvider,
+  openExtensionApp,
+  type HostBridge,
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
 
@@ -24,12 +26,27 @@ const TOOL_TO_OPERATION: Record<string, string> = {
 // 的 invocation 去重同模式），保证 open/close 可落到不同实例。
 type TerminalToolWindow = Window & {
   __tiangongTerminalLastOpened?: Map<string, string>;
+  __tiangongTerminalToolClaims?: Set<string>;
 };
 
 function lastOpenedBySession(): Map<string, string> {
   const shared = window as TerminalToolWindow;
   return shared.__tiangongTerminalLastOpened
     ?? (shared.__tiangongTerminalLastOpened = new Map());
+}
+
+function claimInvocation(invocationId: string): boolean {
+  const sharedWindow = window as TerminalToolWindow;
+  const claims = sharedWindow.__tiangongTerminalToolClaims
+    ?? (sharedWindow.__tiangongTerminalToolClaims = new Set());
+  if (claims.has(invocationId)) return false;
+  claims.add(invocationId);
+  return true;
+}
+
+function releaseInvocation(invocationId: string): void {
+  const claims = (window as TerminalToolWindow).__tiangongTerminalToolClaims;
+  window.setTimeout(() => claims?.delete(invocationId), 5_000);
 }
 
 /** 插件内共享的 PTY 会话注册表（工具执行与 UI 共用）。 */
@@ -46,11 +63,12 @@ async function callSidecar(operation: string, payload: unknown): Promise<Record<
   return {};
 }
 
-async function main(bridgePromise: Awaitable<HostBridgeLike>) {
+async function main(bridgePromise: Awaitable<HostBridge>) {
   const bridge = await bridgePromise;
   const tools = createToolProvider(bridge);
 
   tools.onRequested((invocation: ToolInvocation) => {
+    if (!claimInvocation(invocation.invocation_id)) return;
     void (async () => {
       // 面板开关走 app.* 宿主原语（不经 sidecar）。实例编号由插件自行
       // 生成与管理（app.open 幂等重开同一实例），Agent 无需传入——结果
@@ -76,15 +94,22 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
         const instanceId = isClose
           ? closeTarget!
           : `terminal-${crypto.randomUUID()}`;
-        const method = isClose ? 'app.close' : 'app.open';
         try {
-          await bridge.call(
-            method,
-            JSON.stringify({
-              session_id: invocation.session_id,
-              instance_id: instanceId,
-            }),
-          );
+          if (isClose) {
+            await bridge.call(
+              'app.close',
+              JSON.stringify({
+                session_id: invocation.session_id,
+                instance_id: instanceId,
+              }),
+            );
+          } else {
+            await openExtensionApp(bridge, {
+              sessionId: invocation.session_id,
+              instanceId,
+              showPanel: true,
+            });
+          }
           if (isClose) {
             const opened = lastOpenedBySession();
             if (opened.get(invocation.session_id) === instanceId) {
@@ -144,20 +169,15 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
           },
         });
       }
-    })();
+    })().finally(() => releaseInvocation(invocation.invocation_id));
   });
 }
 
-/** HostBridge 的最小结构（避免循环依赖 SDK 类型）。 */
-interface HostBridgeLike {
-  call(method: string, payload: string): Promise<string>;
-  on(channel: string, handler: (payload: string) => void): () => void;
-}
 type Awaitable<T> = Promise<T> | T;
 
 /** 供 TerminalView 复用的 sidecar 直调封装。 */
 export async function sidecarCall(
-  bridge: { call(method: string, payload: string): Promise<string> },
+  bridge: HostBridge,
   operation: string,
   payload: unknown,
 ): Promise<Record<string, unknown>> {
@@ -169,7 +189,7 @@ export async function sidecarCall(
 export const terminalSessions = sessions;
 
 async function executeTool(
-  bridge: { call(method: string, payload: string): Promise<string> },
+  bridge: HostBridge,
   operation: string,
   invocation: ToolInvocation,
 ): Promise<{ ok: boolean; summary: string; stdout?: string; exit_code: number }> {
@@ -195,6 +215,12 @@ async function executeTool(
       session_id: spawned.session_id,
       scope_id: invocation.session_id,
       created_at: Date.now(),
+    });
+    lastOpenedBySession().set(invocation.session_id, spawned.session_id);
+    await openExtensionApp(bridge, {
+      sessionId: invocation.session_id,
+      instanceId: spawned.session_id,
+      showPanel: true,
     });
     return {
       ok: true,

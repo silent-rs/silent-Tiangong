@@ -367,14 +367,16 @@ fn run_gui() {
                         if method != "app.open" && method != "app.close" {
                             anyhow::bail!("app 原语不支持方法 {method}");
                         }
-                        let session_id = serde_json::from_str::<serde_json::Value>(payload)
-                            .ok()
+                        let payload_value =
+                            serde_json::from_str::<serde_json::Value>(payload).ok();
+                        let session_id = payload_value
+                            .as_ref()
                             .and_then(|value| value["session_id"].as_str().map(str::to_string))
                             .unwrap_or_default();
                         // mode=background：工具接应的隐性挂载（不弹拓展区面板）；
                         // 缺省 focus：弹出并聚焦面板（插件工具显式请求展示时）。
-                        let background = serde_json::from_str::<serde_json::Value>(payload)
-                            .ok()
+                        let background = payload_value
+                            .as_ref()
                             .and_then(|value| value["mode"].as_str().map(str::to_string))
                             .is_some_and(|mode| mode == "background");
                         tracing::info!(
@@ -384,11 +386,18 @@ fn run_gui() {
                             session_id,
                             "app 原语调用"
                         );
+                        let Some(app_entry) =
+                            tiangong_plugin_runtime::registry::list_extension_apps()
+                                .into_iter()
+                                .find(|app_entry| app_entry.plugin_id == plugin_id)
+                        else {
+                            anyhow::bail!(
+                                "插件 {plugin_id} 没有 extension.tab 贡献，无可操作的 App"
+                            );
+                        };
                         if method == "app.close" {
                             // 关闭目标必须显式声明：instance_id 精确关一个实例，
                             // all=true 才允许关闭该插件全部实例，避免误全关。
-                            let payload_value =
-                                serde_json::from_str::<serde_json::Value>(payload).ok();
                             let instance_id = payload_value.as_ref().and_then(|value| {
                                 value["instance_id"].as_str().map(str::to_string)
                             });
@@ -412,22 +421,11 @@ fn run_gui() {
                             );
                             return Ok(r#"{"ok":true}"#.to_string());
                         }
-                        let Some(app_entry) =
-                            tiangong_plugin_runtime::registry::list_extension_apps()
-                                .into_iter()
-                                .find(|app_entry| app_entry.plugin_id == plugin_id)
-                        else {
-                            anyhow::bail!(
-                                "插件 {plugin_id} 没有 extension.tab 贡献，无可打开的 App"
-                            );
-                        };
                         // 调用方可指定实例编号（幂等重开/精确关闭的锚点）：
                         // 前端以其创建或聚焦对应 App 实例，缺省由前端生成。
-                        let requested_instance_id = serde_json::from_str::<serde_json::Value>(
-                            payload,
-                        )
-                        .ok()
-                        .and_then(|value| value["instance_id"].as_str().map(str::to_string));
+                        let requested_instance_id = payload_value.as_ref().and_then(|value| {
+                            value["instance_id"].as_str().map(str::to_string)
+                        });
                         let _ = app_handle.emit(
                             "app:open_plugin",
                             serde_json::json!({

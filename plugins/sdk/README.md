@@ -81,8 +81,24 @@ JavaScript 环境；不可信插件应声明 `iframe`。
 | `storage.get/set/delete/list` | 插件私有数据读写 | `storage.private` |
 | `session.*` | 按宿主版本渐进开放 | 见设计文档 6.3 |
 | `tool.resolve` | Desktop TS 插件闭合自己声明的工具调用 | `tool.provide` |
+| `app.open` | 打开本插件声明的拓展区 App | `app.use` + `extension.tab` 贡献 |
 
 负载均为字符串（JSON 序列化），宿主不做业务解析。
+
+声明了 `extension.tab` 的 App 插件应通过 SDK 决定是否自动展开拓展区：
+
+```ts
+import { openExtensionApp } from '@tiangong/plugin-sdk';
+
+await openExtensionApp(bridge, {
+  sessionId: invocation.session_id,
+  instanceId: pageId,
+  showPanel: invocation.arguments.open === true,
+});
+```
+
+`showPanel` 缺省为 `true`；设为 `false` 时只建立后台实例，用户之后仍可手动
+进入拓展区查看。未声明 `extension.tab` 或缺少 `app.use` 权限时宿主会拒绝调用。
 
 ## Desktop TypeScript 工具提供器
 
