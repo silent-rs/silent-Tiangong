@@ -2073,6 +2073,11 @@ impl BrowserManager {
             "browser wait_for_navigation"
         );
         let Some(navigation) = navigation else {
+            warn!(
+                tab_id = %ticket.tab_id,
+                url,
+                "fetch 等待导航失败：无导航信号"
+            );
             return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
         };
         if navigation.navigation_id != ticket.navigation_id {
@@ -2080,6 +2085,15 @@ impl BrowserManager {
         }
         match navigation.phase {
             NavigationPhase::Failed | NavigationPhase::Loading => {
+                warn!(
+                    tab_id = %ticket.tab_id,
+                    url,
+                    phase = ?navigation.phase,
+                    started_url = ?navigation.started_url,
+                    document_id = ?navigation.document_id,
+                    waited_ms = t0.elapsed().as_millis() as u64,
+                    "fetch 等待导航未达 Loaded（document_id 为 None 说明页面文档事件从未到达）"
+                );
                 return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
             }
             NavigationPhase::Loaded => {}
@@ -2090,6 +2104,13 @@ impl BrowserManager {
             &format!("window.__tiangong_bridge.getFullText({max_chars})"),
             Duration::from_secs(4),
         );
+        if result.is_none() {
+            warn!(
+                tab_id = %ticket.tab_id,
+                url,
+                "fetch 正文提取脚本未返回（getFullText 注入无响应）"
+            );
+        }
 
         let still_current = self
             .navigation_ticket_for_tab(&ticket.tab_id)
