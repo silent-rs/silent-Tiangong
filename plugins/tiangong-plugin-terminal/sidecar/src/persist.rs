@@ -214,6 +214,7 @@ impl vte::Perform for LineBuildHandler {
                 self.cursor = 0;
             }
             b'\r' => self.cursor = 0,
+            b'\x08' => self.cursor = self.cursor.saturating_sub(1),
             _ => {}
         }
     }

@@ -54,6 +54,7 @@ async function spawnDefault(
   host: HTMLElement,
   scopeId: string,
   workspace: string | undefined,
+  requestedSessionId: string | undefined,
 ): Promise<{ sessionId: string; boot?: string }> {
   // 等容器布局完成后按真实尺寸启动：shell 首次绘制（提示符/宽度计算）
   // 依赖正确的 cols/rows，错误宽度会导致换行错乱、光标被顶到底部。
@@ -63,6 +64,7 @@ async function spawnDefault(
     cols: size.cols,
     rows: size.rows,
     scope_id: scopeId,
+    ...(requestedSessionId ? { session_id: requestedSessionId } : {}),
     ...(workspace ? { cwd: workspace } : {}),
   })) as {
     session_id?: string;
@@ -96,6 +98,9 @@ async function switchScope(
 ): Promise<void> {
   const ticket = ++switchTicket;
   currentScope = scopeId;
+  // App 实例编号就是其 PTY 编号。先完成逻辑附着，后续 find/ensure 即使
+  // 因 sidecar 冷启动稍慢，实时输出也能直接进入正确的 xterm，不留空光标。
+  if (requestedSessionId) view.prepare(requestedSessionId);
 
   try {
     const found = (await sidecarCall(bridge, 'terminalFind', {
@@ -133,7 +138,14 @@ async function switchScope(
   /** 新建会话并附着：历史基线在前、新 shell 首批输出在后；无可重放
    * 内容时视图自身显示启动占位（见 terminal-view attach）。 */
   async function spawnAndAttach(baseline?: string): Promise<void> {
-    const { sessionId, boot } = await spawnDefault(bridge, view, host, scopeId, workspace);
+    const { sessionId, boot } = await spawnDefault(
+      bridge,
+      view,
+      host,
+      scopeId,
+      workspace,
+      requestedSessionId,
+    );
     if (ticket !== switchTicket) {
       terminalSessions.delete(sessionId);
       await sidecarCall(bridge, 'terminalKill', { session_id: sessionId }).catch(() => {});
@@ -181,8 +193,7 @@ async function bootstrap() {
     const appInstance = app?.instance_id ?? '';
     if (scope === currentScope && appInstance === currentAppInstance) return;
     currentAppInstance = appInstance;
-    const exactSession = terminalSessions.get(appInstance)?.session_id
-      ?? (appInstance.startsWith('tty-') ? appInstance : undefined);
+    const exactSession = appInstance || undefined;
     const task = switchScope(
       bridge,
       terminalView,

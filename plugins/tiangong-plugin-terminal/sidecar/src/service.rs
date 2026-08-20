@@ -24,16 +24,25 @@ pub const CHANNEL_EXIT: &str = "terminal.exit";
 const OUTPUT_FLUSH_INTERVAL_MS: u64 = 16;
 /// 会话最近输出环形缓冲上限（字节）：UI 重新附着时重放历史（含控制序列原样字节）。
 const HISTORY_LIMIT_BYTES: usize = 128 * 1024;
-/// 未显式指定时，非交互命令最多等待两分钟（与旧终端实现一致）。
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 120;
 /// 轮询 PTY 输出的间隔。
 const COMMAND_POLL_INTERVAL_MS: u64 = 50;
+/// 登录 shell 清理残留输入并确认重新接管终端的最长等待时间。
+const SHELL_READY_TIMEOUT_SECS: u64 = 3;
 /// 内部命令边界标记公共前缀；这些行不得显示给用户。
 const MARKER_PREFIX: &str = "__TIANGONG_";
 
 pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
     sequence: Mutex<u64>,
+    spawn_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionPhase {
+    Idle,
+    Reserved,
+    Running,
+    Interactive,
 }
 
 struct PtySession {
@@ -46,6 +55,8 @@ struct PtySession {
     scope_id: Option<String>,
     /// 创建序号：单调递增，同 scope 多会话时分辨最新。
     sequence: u64,
+    /// Agent 命令选择与交互状态；选择时只复用空闲终端。
+    phase: SessionPhase,
     /// 原始 PTY 输出：仅供命令边界识别与结果收集，包含内部标记。
     raw_history: Vec<u8>,
     /// 原始缓冲首字节在会话输出流中的绝对偏移。
@@ -54,6 +65,9 @@ struct PtySession {
     raw_bytes_total: u64,
     /// 用户可见输出：过滤内部标记后供 UI 重放。
     display_history: Vec<u8>,
+    /// xterm 回传的当前可见画面，供 terminal_send 返回交互结果。
+    screen_snapshot: String,
+    screen_updates: u64,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -73,6 +87,9 @@ struct ExitNotification<'a> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnRequest {
+    /// App 实例编号。UI 创建终端时由调用方指定，保证 App 与 PTY 一一对应。
+    #[serde(default)]
+    session_id: Option<String>,
     #[serde(default)]
     cmd: String,
     #[serde(default)]
@@ -84,6 +101,9 @@ struct SpawnRequest {
     /// 宿主会话标识：终端跟随会话切换的锚点。
     #[serde(default)]
     scope_id: Option<String>,
+    /// Agent 选择后立即预留，避免并行命令复用同一终端。
+    #[serde(default)]
+    reserve: bool,
     #[serde(default = "default_cols")]
     cols: u16,
     #[serde(default = "default_rows")]
@@ -104,6 +124,8 @@ struct ExecRequest {
     timeout: Option<u64>,
     #[serde(default)]
     interactive: bool,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// 用户默认交互 shell（SHELL 环境变量，缺省回退 sh/cmd）。
@@ -170,6 +192,44 @@ struct WriteRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ScreenUpdateRequest {
+    session_id: String,
+    screen: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcquireRequest {
+    scope_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AcquireResponse {
+    session_id: Option<String>,
+    history: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendRequest {
+    scope_id: String,
+    session_id: String,
+    input: String,
+    #[serde(default)]
+    wait: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SendResponse {
+    session_id: String,
+    stdout: String,
+    exit_code: i32,
+    interactive_mode: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResizeRequest {
     session_id: String,
     cols: u16,
@@ -216,6 +276,7 @@ impl TerminalService {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             sequence: Mutex::new(0),
+            spawn_lock: Mutex::new(()),
         }
     }
 
@@ -226,6 +287,48 @@ impl TerminalService {
     }
 
     fn spawn_session(&self, request: SpawnRequest) -> Result<SpawnResponse> {
+        let _spawn_guard = self.spawn_lock.lock().expect("终端创建锁损坏");
+        let requested_session_id = request
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(session_id) = requested_session_id.as_deref() {
+            let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+            if let Some(session) = sessions.get_mut(session_id) {
+                if session.scope_id.as_deref() != request.scope_id.as_deref() {
+                    bail!("终端 {session_id} 已属于其他会话");
+                }
+                if request.reserve {
+                    if session.phase != SessionPhase::Idle {
+                        bail!("终端 {session_id} 正在使用");
+                    }
+                    session.phase = SessionPhase::Reserved;
+                }
+                return Ok(SpawnResponse {
+                    session_id: session_id.to_string(),
+                    boot_output: Some(
+                        String::from_utf8_lossy(&session.display_history).to_string(),
+                    ),
+                });
+            }
+        }
+
+        let (sequence, session_id) = loop {
+            let sequence = self.next_sequence();
+            let session_id = requested_session_id
+                .clone()
+                .unwrap_or_else(|| format!("tty-{sequence}"));
+            if !self
+                .sessions
+                .lock()
+                .expect("会话表锁损坏")
+                .contains_key(&session_id)
+            {
+                break (sequence, session_id);
+            }
+        };
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -278,8 +381,6 @@ impl TerminalService {
             .context("启动 PTY 子进程失败")?;
         drop(pair.slave);
 
-        let sequence = self.next_sequence();
-        let session_id = format!("tty-{sequence}");
         let killer = child.clone_killer();
         // 输出持久化（按 scope 分文件）：应用重启后回填该会话的终端历史
         let logger = request
@@ -306,10 +407,17 @@ impl TerminalService {
                 exec_lock: Arc::new(tokio::sync::Mutex::new(())),
                 scope_id: request.scope_id,
                 sequence,
+                phase: if request.reserve {
+                    SessionPhase::Reserved
+                } else {
+                    SessionPhase::Idle
+                },
                 raw_history: Vec::new(),
                 raw_history_start: 0,
                 raw_bytes_total: 0,
                 display_history: Vec::new(),
+                screen_snapshot: String::new(),
+                screen_updates: 0,
                 logger,
             },
         );
@@ -417,17 +525,156 @@ impl TerminalService {
     }
 
     fn close_session(&self, request: CloseRequest) -> Result<OkResponse> {
-        let removed = request.session_id.as_deref().and_then(|session_id| {
-            self.sessions
-                .lock()
-                .expect("会话表锁损坏")
-                .remove(session_id)
-        });
+        let (removed, has_other_scope_sessions) = {
+            let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+            let removed = if let Some(session_id) = request.session_id.as_deref() {
+                if let Some(session) = sessions.get(session_id)
+                    && session.scope_id.as_deref() != Some(request.scope_id.as_str())
+                {
+                    bail!("终端 {session_id} 不属于当前会话");
+                }
+                sessions.remove(session_id)
+            } else {
+                None
+            };
+            let has_other_scope_sessions = sessions
+                .values()
+                .any(|session| session.scope_id.as_deref() == Some(request.scope_id.as_str()));
+            (removed, has_other_scope_sessions)
+        };
         if let Some(mut session) = removed {
             let _ = session.killer.kill();
         }
-        persist::clear_scope_log(&request.scope_id).context("清理终端恢复记录失败")?;
+        if !has_other_scope_sessions {
+            persist::clear_scope_log(&request.scope_id).context("清理终端恢复记录失败")?;
+        }
         Ok(OkResponse { ok: true })
+    }
+
+    fn acquire_session(&self, request: AcquireRequest) -> AcquireResponse {
+        let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+        let had_live_terminal = sessions
+            .values()
+            .any(|session| session.scope_id.as_deref() == Some(request.scope_id.as_str()));
+        let selected = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.scope_id.as_deref() == Some(request.scope_id.as_str())
+                    && session.phase == SessionPhase::Idle
+            })
+            .min_by_key(|(_, session)| session.sequence)
+            .map(|(session_id, _)| session_id.clone());
+        let Some(session_id) = selected else {
+            return AcquireResponse {
+                session_id: None,
+                history: String::new(),
+                reason: if had_live_terminal {
+                    "all_busy".to_string()
+                } else {
+                    "no_available".to_string()
+                },
+            };
+        };
+        let session = sessions.get_mut(&session_id).expect("刚选择的终端不存在");
+        session.phase = SessionPhase::Reserved;
+        AcquireResponse {
+            session_id: Some(session_id),
+            history: String::from_utf8_lossy(&session.display_history).to_string(),
+            reason: "reused_idle".to_string(),
+        }
+    }
+
+    fn release_session(&self, request: SessionIdRequest) -> Result<OkResponse> {
+        self.with_session(&request.session_id, |session| {
+            if session.phase == SessionPhase::Reserved {
+                session.phase = SessionPhase::Idle;
+            }
+            Ok(OkResponse { ok: true })
+        })
+    }
+
+    fn update_screen(&self, request: ScreenUpdateRequest) -> Result<OkResponse> {
+        self.with_session(&request.session_id, |session| {
+            session.screen_snapshot = request.screen;
+            session.screen_updates = session.screen_updates.saturating_add(1);
+            Ok(OkResponse { ok: true })
+        })
+    }
+
+    async fn send_to_session(&self, request: SendRequest) -> Result<SendResponse> {
+        let data = decode_terminal_escapes(&request.input);
+        let (session_id, start_offset, baseline_updates) = {
+            let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+            let selected = sessions
+                .get(&request.session_id)
+                .filter(|session| session.scope_id.as_deref() == Some(request.scope_id.as_str()))
+                .map(|_| request.session_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("目标终端不存在或不属于当前会话"))?;
+            let session = sessions.get_mut(&selected).expect("刚选择的终端不存在");
+            let start_offset = session.raw_bytes_total;
+            let baseline_updates = session.screen_updates;
+            session
+                .writer
+                .write_all(data.as_bytes())
+                .context("写入交互输入失败")?;
+            session.writer.flush().context("刷新交互输入失败")?;
+            (selected, start_offset, baseline_updates)
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(request.wait.unwrap_or(3).max(1));
+        let stable_window = Duration::from_millis(300);
+        let mut last_raw_total = start_offset;
+        let mut last_screen_updates = baseline_updates;
+        let mut last_change_at = None;
+        let mut saw_screen_update = false;
+        loop {
+            let (raw_total, screen_updates) = self.with_session(&session_id, |session| {
+                Ok((session.raw_bytes_total, session.screen_updates))
+            })?;
+            if raw_total != last_raw_total {
+                last_raw_total = raw_total;
+                last_change_at = Some(Instant::now());
+            }
+            if screen_updates != last_screen_updates {
+                last_screen_updates = screen_updates;
+                last_change_at = Some(Instant::now());
+                saw_screen_update = true;
+            }
+            let required_stability = if saw_screen_update {
+                stable_window
+            } else {
+                stable_window * 2
+            };
+            if last_change_at.is_some_and(|changed| changed.elapsed() >= required_stability)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
+
+        let raw = self.raw_output_since(&session_id, start_offset)?;
+        let (screen, screen_updates, interactive_mode) =
+            self.with_session(&session_id, |session| {
+                Ok((
+                    session.screen_snapshot.clone(),
+                    session.screen_updates,
+                    session.phase == SessionPhase::Interactive,
+                ))
+            })?;
+        let raw_output = visible_text_from_raw(&raw);
+        Ok(SendResponse {
+            session_id,
+            stdout: if screen_updates > baseline_updates && !screen.trim().is_empty() {
+                screen
+            } else if !raw_output.trim().is_empty() {
+                raw_output
+            } else {
+                screen
+            },
+            exit_code: 0,
+            interactive_mode,
+        })
     }
 
     async fn exec_in_session(&self, request: ExecRequest) -> Result<ExecResponse> {
@@ -436,16 +683,106 @@ impl TerminalService {
             Ok(Arc::clone(&session.exec_lock))
         })?;
         let _guard = exec_lock.lock().await;
+        self.with_session(&request.session_id, |session| {
+            if session.phase == SessionPhase::Interactive {
+                bail!("终端正在运行交互程序");
+            }
+            session.phase = SessionPhase::Running;
+            Ok(())
+        })?;
 
-        if request.interactive {
-            return self
-                .exec_interactive(&request.session_id, &command, request.timeout)
-                .await;
+        let result = async {
+            // 与正式版一致：先取消 shell 中的残留输入或前台命令，再用隐藏
+            // 探针确认登录 shell 已重新接管，最后才发送 Agent 的真实命令。
+            self.prepare_shell_for_command(&request.session_id).await?;
+            if request.interactive {
+                self.exec_interactive(&request.session_id, &command, request.timeout)
+                    .await
+            } else {
+                self.exec_non_interactive(&request, &command).await
+            }
+        }
+        .await;
+        let next_phase = if result
+            .as_ref()
+            .is_ok_and(|response| response.interactive_mode)
+        {
+            SessionPhase::Interactive
+        } else {
+            SessionPhase::Idle
+        };
+        let _ = self.with_session(&request.session_id, |session| {
+            session.phase = next_phase;
+            Ok(())
+        });
+        result
+    }
+
+    async fn prepare_shell_for_command(&self, session_id: &str) -> Result<()> {
+        let initial_deadline = Instant::now() + Duration::from_secs(SHELL_READY_TIMEOUT_SECS);
+        while self.with_session(session_id, |session| Ok(session.raw_bytes_total == 0))?
+            && Instant::now() < initial_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
 
+        let marker = format!("__TIANGONG_READY_{}__", scru128::new());
+        let start_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
+        self.with_session(session_id, |session| {
+            session
+                .writer
+                .write_all(b"\x03")
+                .context("清理终端残留输入失败")?;
+            session.writer.flush().context("刷新终端中断输入失败")
+        })?;
+
+        // 提示符空闲时部分 shell 处理 Ctrl+C 不会产生完整新行。短暂等待
+        // 任意输出变化；即使没有回显也继续由下面的精确探针判断是否就绪。
+        let interrupt_deadline = Instant::now() + Duration::from_millis(300);
+        loop {
+            let raw = self.raw_output_since(session_id, start_offset)?;
+            if !raw.is_empty() || Instant::now() >= interrupt_deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
+
+        let probe_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
+        self.with_session(session_id, |session| {
+            session
+                .writer
+                .write_all(format!("echo '{}'\r", marker).as_bytes())
+                .context("发送 Shell 就绪探针失败")?;
+            session.writer.flush().context("刷新 Shell 就绪探针失败")
+        })?;
+
+        let probe_deadline = Instant::now() + Duration::from_secs(SHELL_READY_TIMEOUT_SECS);
+        loop {
+            let raw = self.raw_output_since(session_id, probe_offset)?;
+            let mut processor = persist::TerminalLineProcessor::new();
+            let mut lines = processor.process(&String::from_utf8_lossy(&raw));
+            let current = processor.current_line();
+            if !current.trim().is_empty() {
+                lines.push(current);
+            }
+            if lines.iter().any(|line| line.trim() == marker) {
+                return Ok(());
+            }
+            if Instant::now() >= probe_deadline {
+                bail!("等待 Shell 就绪超时");
+            }
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    async fn exec_non_interactive(
+        &self,
+        request: &ExecRequest,
+        command: &str,
+    ) -> Result<ExecResponse> {
         let marker_id = scru128::new().to_string();
         let markers = CommandMarkers::new(&marker_id);
-        let prepared = prepare_non_interactive_command(&command, &markers)?;
+        let prepared = prepare_non_interactive_command(command, &markers)?;
         let start_offset =
             self.with_session(&request.session_id, |session| Ok(session.raw_bytes_total))?;
 
@@ -464,20 +801,29 @@ impl TerminalService {
             session.writer.flush().context("刷新终端命令失败")
         })?;
 
-        let timeout = Duration::from_secs(
-            request
-                .timeout
-                .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
-                .max(1),
-        );
-        let deadline = Instant::now() + timeout;
+        let deadline = request
+            .timeout
+            .map(|timeout| Instant::now() + Duration::from_secs(timeout.max(1)));
+        let mut exit_code_seen_at = None;
         loop {
             let raw = self.raw_output_since(&request.session_id, start_offset)?;
             let parsed = parse_command_output(&raw, &markers);
             if parsed.completed {
+                // end marker 已闭合后让登录 shell 完成提示符绘制，避免紧随其后的
+                // terminal_send 与 wrapper 收尾交错，造成输入多字或终端状态异常。
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 return Ok(parsed.into_response(false));
             }
-            if Instant::now() >= deadline {
+            if parsed.exit_code.is_some() {
+                let seen_at = exit_code_seen_at.get_or_insert_with(Instant::now);
+                // 少数 TTY 程序会污染 end marker。退出码已出现但 500ms 内仍
+                // 未见 end 时按已完成兜底，不能固定等到整个命令超时。
+                if seen_at.elapsed() >= Duration::from_millis(500) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    return Ok(parsed.into_response(false));
+                }
+            }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 self.with_session(&request.session_id, |session| {
                     session
                         .writer
@@ -782,21 +1128,35 @@ impl ParsedCommandOutput {
 }
 
 fn command_from_request(request: &ExecRequest) -> Result<String> {
-    if let Some(script) = request.script.as_deref() {
+    let command = if let Some(script) = request.script.as_deref() {
         if script.trim().is_empty() {
             bail!("script 不能为空");
         }
-        return Ok(script.to_string());
+        script.to_string()
+    } else {
+        if request.cmd.trim().is_empty() {
+            bail!("cmd 不能为空");
+        }
+        let mut command = shell_quote(request.cmd.trim());
+        for arg in &request.args {
+            command.push(' ');
+            command.push_str(&shell_quote(arg));
+        }
+        command
+    };
+    let Some(cwd) = request
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    else {
+        return Ok(command);
+    };
+    if cfg!(windows) {
+        Ok(format!("cd /d {} && {}", shell_quote(cwd), command))
+    } else {
+        Ok(format!("cd {} && {}", shell_quote(cwd), command))
     }
-    if request.cmd.trim().is_empty() {
-        bail!("cmd 不能为空");
-    }
-    let mut command = shell_quote(request.cmd.trim());
-    for arg in &request.args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
-    }
-    Ok(command)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -839,6 +1199,71 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+/// terminal_send 接受 Agent 常用的字面控制键写法（如 `\x1b`、`\r`）。
+fn decode_terminal_escapes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        let Some(escaped) = chars.next() else {
+            output.push('\\');
+            break;
+        };
+        match escaped {
+            'n' => output.push('\n'),
+            'r' => output.push('\r'),
+            't' => output.push('\t'),
+            '0' => output.push('\0'),
+            'e' | 'E' => output.push('\x1b'),
+            '\\' => output.push('\\'),
+            'x' => {
+                let digits = chars.clone().take(2).collect::<String>();
+                if digits.len() == 2
+                    && let Ok(value) = u8::from_str_radix(&digits, 16)
+                {
+                    chars.next();
+                    chars.next();
+                    output.push(char::from(value));
+                } else {
+                    output.push_str("\\x");
+                }
+            }
+            'u' => {
+                let digits = chars.clone().take(4).collect::<String>();
+                if digits.len() == 4
+                    && let Ok(value) = u32::from_str_radix(&digits, 16)
+                    && let Some(value) = char::from_u32(value)
+                {
+                    for _ in 0..4 {
+                        chars.next();
+                    }
+                    output.push(value);
+                } else {
+                    output.push_str("\\u");
+                }
+            }
+            other => {
+                output.push('\\');
+                output.push(other);
+            }
+        }
+    }
+    output
+}
+
+fn visible_text_from_raw(raw: &[u8]) -> String {
+    let mut processor = persist::TerminalLineProcessor::new();
+    let mut lines = processor.process(&String::from_utf8_lossy(raw));
+    let current = processor.current_line();
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines.join("\n")
+}
+
 struct PreparedCommand {
     input: String,
     /// Unix 下保持临时脚本存活到命令结束；drop 后自动删除。
@@ -866,7 +1291,7 @@ fn prepare_non_interactive_command(
     Ok(PreparedCommand {
         // marker 放在输入行最前面，reader 从首个 chunk 起就会暂存并过滤
         // shell/ZLE 回显，不会因路径换行或语法高亮把内部 source 命令漏到 UI。
-        input: format!("__TIANGONG_= . {}\n", shell_quote(&path)),
+        input: format!("__TIANGONG_= . {}\r", shell_quote(&path)),
         _file: Some(file),
     })
 }
@@ -917,11 +1342,6 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
         if start_seen && !contains_marker(trimmed) {
             output.push(line.trim_end().to_string());
         }
-    }
-    // 退出码标记紧跟用户命令，命中即代表命令已经结束；end marker 只作
-    // 额外边界，避免被 TTY-aware 命令遗留的控制序列污染后固定等到超时。
-    if parsed.exit_code.is_some() {
-        parsed.completed = true;
     }
     parsed.stdout = output.join("\n");
     parsed
@@ -977,6 +1397,16 @@ async fn dispatch_operation(
                 serde_json::from_value(payload).context("terminalSpawn 参数无效")?;
             Ok(serde_json::to_value(service.spawn_session(request)?)?)
         }
+        "terminalAcquire" => {
+            let request: AcquireRequest =
+                serde_json::from_value(payload).context("terminalAcquire 参数无效")?;
+            Ok(serde_json::to_value(service.acquire_session(request))?)
+        }
+        "terminalRelease" => {
+            let request: SessionIdRequest =
+                serde_json::from_value(payload).context("terminalRelease 参数无效")?;
+            Ok(serde_json::to_value(service.release_session(request)?)?)
+        }
         "terminalExec" => {
             let request: ExecRequest =
                 serde_json::from_value(payload).context("terminalExec 参数无效")?;
@@ -995,6 +1425,18 @@ async fn dispatch_operation(
                 session.writer.flush().context("刷新 PTY 失败")
             })?;
             Ok(serde_json::to_value(OkResponse { ok: true })?)
+        }
+        "terminalSend" => {
+            let request: SendRequest =
+                serde_json::from_value(payload).context("terminalSend 参数无效")?;
+            Ok(serde_json::to_value(
+                service.send_to_session(request).await?,
+            )?)
+        }
+        "terminalScreenUpdate" => {
+            let request: ScreenUpdateRequest =
+                serde_json::from_value(payload).context("terminalScreenUpdate 参数无效")?;
+            Ok(serde_json::to_value(service.update_screen(request)?)?)
         }
         "terminalResize" => {
             let request: ResizeRequest =
@@ -1071,11 +1513,13 @@ mod tests {
         let service = TerminalService::new();
         let spawned = service
             .spawn_session(SpawnRequest {
+                session_id: None,
                 cmd: String::new(),
                 args: Vec::new(),
                 script: None,
                 cwd: Some(cwd.path().to_string_lossy().to_string()),
                 scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
                 cols: 80,
                 rows: 24,
             })
@@ -1089,6 +1533,7 @@ mod tests {
                 script: None,
                 timeout: Some(10),
                 interactive: false,
+                cwd: None,
             })
             .await
             .expect("第一次命令执行失败");
@@ -1115,6 +1560,7 @@ mod tests {
                 script: Some("false".to_string()),
                 timeout: Some(10),
                 interactive: false,
+                cwd: None,
             })
             .await
             .expect("第二次命令执行失败");
@@ -1128,6 +1574,7 @@ mod tests {
                 script: Some("sleep 5".to_string()),
                 timeout: Some(1),
                 interactive: false,
+                cwd: None,
             })
             .await
             .expect("超时命令执行失败");
@@ -1142,6 +1589,7 @@ mod tests {
                 script: Some("printf 'still-alive\\n'".to_string()),
                 timeout: Some(10),
                 interactive: false,
+                cwd: None,
             })
             .await
             .expect("超时后的命令执行失败");

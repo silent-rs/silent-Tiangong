@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type SandboxKind } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
 import { PluginSandbox } from './PluginSandbox';
 
 export interface BackgroundPluginInstance {
@@ -35,6 +36,13 @@ export function BackgroundPluginHost({
 
 function BackgroundInstance({ instance }: { instance: BackgroundPluginInstance }) {
   const [html, setHtml] = useState('');
+  const workspace = useStore((state) => state.sessions.find(
+    (session) => session.id === instance.sessionId,
+  )?.cwd || (
+    state.newConversationId === instance.sessionId
+      ? state.sessionCwd || state.workspaceDir
+      : state.workspaceDir
+  ));
 
   useEffect(() => {
     let active = true;
@@ -58,6 +66,7 @@ function BackgroundInstance({ instance }: { instance: BackgroundPluginInstance }
       sandbox={instance.sandbox}
       html={html}
       sessionId={instance.sessionId}
+      workspace={workspace}
       instanceId={`bg-${instance.pluginId}`}
       visible={false}
     />
