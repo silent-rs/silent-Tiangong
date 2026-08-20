@@ -40,56 +40,28 @@ impl DesktopCoreFactory {
         &self,
         _models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
-        use tracing::{info, warn};
+        use tracing::info;
 
         let storage_root = self.storage_root.clone();
         let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
         // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-        let Some(app_handle) = self.app_handle.get().cloned() else {
-            warn!("app_handle 尚未注入，浏览器/终端能力将缺失");
+        let Some(_app_handle) = self.app_handle.get().cloned() else {
+            tracing::warn!("app_handle 尚未注入，桌面插件构造中止");
             return plugins;
         };
-        let browser_available =
-            if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
-                plugins.push(browser);
-                true
-            } else {
-                warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
-                false
-            };
-        let terminal_available =
-            if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle) {
-                plugins.push(terminal);
-                true
-            } else {
-                warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
-                false
-            };
-        // 所有媒体插件（image/video/tts/stt/attachment）由 load_installed_plugins 自动加载。
-        // fs（基础文件工具）也由 load_installed_plugins 自动加载（issue #330）。
+        // 终端/浏览器/媒体/fs 等工具均由 load_installed_plugins 按已安装插件
+        // 自动加载（issue #330），宿主不再无条件注入进程内工具插件。
         let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
             &self.storage_root,
             tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
         );
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
-        // skill/analyze-attachment 等 WASM 插件由上面的 load_installed_plugins 自动加载。
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
-            let app_handle = app_handle.clone();
             let storage_root = storage_root.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-                if browser_available {
-                    if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
-                        child_plugins.push(browser);
-                    }
-                }
-                if terminal_available {
-                    if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle) {
-                        child_plugins.push(terminal);
-                    }
-                }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
                     tiangong_plugin_runtime::registry::RuntimeKind::Desktop,

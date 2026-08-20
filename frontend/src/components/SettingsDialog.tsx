@@ -102,11 +102,7 @@ export function SettingsDialog() {
   useEffect(() => {
     if (!open) {
       window.dispatchEvent(new Event('tiangong:restore-browser-panel'));
-      return;
     }
-
-    const sid = useStore.getState().activeSessionId || useStore.getState().newConversationId;
-    if (sid) api.browserHide(sid).catch(console.error);
   }, [open]);
 
   return (

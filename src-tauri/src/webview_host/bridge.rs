@@ -1,6 +1,6 @@
-pub const BRIDGE_SCRIPT: &str = include_str!("../js/bridge.js");
-pub const DOCUMENT_STATE_SCRIPT: &str = include_str!("../js/document-state.js");
-pub const PAGE_SNAPSHOT_SCRIPT: &str = include_str!("../js/page-snapshot.js");
+pub const BRIDGE_SCRIPT: &str = include_str!("js/bridge.js");
+pub const DOCUMENT_STATE_SCRIPT: &str = include_str!("js/document-state.js");
+pub const PAGE_SNAPSHOT_SCRIPT: &str = include_str!("js/page-snapshot.js");
 
 // ── webview 容器原语（阶段 3）：宿主中立服务 ──
 //
@@ -9,7 +9,7 @@ pub const PAGE_SNAPSHOT_SCRIPT: &str = include_str!("../js/page-snapshot.js");
 // 属浏览器插件）。
 
 pub fn handle_webview_primitive(
-    state: &crate::BrowserPluginState,
+    state: &crate::webview_host::WebviewHostState,
     app: &tauri::AppHandle,
     plugin_id: &str,
     method: &str,
@@ -27,7 +27,8 @@ pub fn handle_webview_primitive(
         .map(|session| format!("{plugin_id}:{session}"))
         .unwrap_or_else(|| plugin_id.to_string());
     let scope = format!("webview:{session_scope}");
-    let manager = crate::BrowserManager::from_state(state.registry.session_state(&scope));
+    let manager =
+        crate::webview_host::BrowserManager::from_state(state.registry.session_state(&scope));
     let result = match method {
         // 创建 webview 实例：真实创建（open 复用现有基础设施，含默认 tab）
         // → { view_id, tabs, active_tab_id }
@@ -221,14 +222,13 @@ pub fn handle_webview_primitive(
         }
         "webview.tabHistory" => {
             let tab_id = request.get("tab_id").and_then(|value| value.as_str());
-            let history =
-                manager
-                    .get_tab_history(tab_id)
-                    .unwrap_or(crate::types::TabHistoryResult {
-                        tab_id: String::new(),
-                        entries: Vec::new(),
-                        current_index: -1,
-                    });
+            let history = manager.get_tab_history(tab_id).unwrap_or(
+                crate::webview_host::types::TabHistoryResult {
+                    tab_id: String::new(),
+                    entries: Vec::new(),
+                    current_index: -1,
+                },
+            );
             serde_json::to_value(history)?
         }
         "webview.globalHistory" => {
@@ -258,9 +258,12 @@ pub fn handle_webview_primitive(
             let result = manager
                 .eval_result_text("window.__tiangong_bridge.annotation.extractAnnotatedElements()")
                 .and_then(|raw| {
-                    serde_json::from_str::<crate::types::AnnotationExtractResult>(&raw).ok()
+                    serde_json::from_str::<crate::webview_host::types::AnnotationExtractResult>(
+                        &raw,
+                    )
+                    .ok()
                 })
-                .unwrap_or(crate::types::AnnotationExtractResult {
+                .unwrap_or(crate::webview_host::types::AnnotationExtractResult {
                     elements: Vec::new(),
                     count: 0,
                 });
@@ -332,7 +335,7 @@ pub fn handle_webview_primitive(
             if let Some(map) = scoped.as_object_mut() {
                 map.insert("_scope".to_string(), serde_json::json!(session_scope));
             }
-            crate::bridge::dispatch_collaboration(state, method, &scoped)?
+            crate::webview_host::bridge::dispatch_collaboration(state, method, &scoped)?
         }
         other => anyhow::bail!("未知 webview 原语方法：{other}"),
     };
@@ -349,11 +352,11 @@ pub fn handle_webview_primitive(
 const COLLABORATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn dispatch_collaboration(
-    state: &crate::BrowserPluginState,
+    state: &crate::webview_host::WebviewHostState,
     method: &str,
     request: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    use crate::types::BrowserCommand;
+    use crate::webview_host::types::BrowserCommand;
     use tokio::sync::oneshot;
 
     // 协作命令走调用方插件隔离的作用域（与 webview 原语一致）

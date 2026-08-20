@@ -209,12 +209,6 @@ pub fn migrate_legacy_tabs() -> Result<()> {
         let Some(session_id) = value.get("id").and_then(Value::as_str) else {
             continue;
         };
-        tiangong_plugin_browser::session_store::BrowserSessionStore::migrate_legacy_value(
-            session_id, &value,
-        )?;
-        tiangong_plugin_terminal::session_store::TerminalSessionStore::migrate_legacy_value(
-            session_id, &value,
-        )?;
         migrate_legacy_layout_at(&root, session_id, &value)?;
     }
     Ok(())

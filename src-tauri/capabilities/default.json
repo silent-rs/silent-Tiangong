@@ -23,8 +23,6 @@
     "dialog:default",
     "notification:default",
     "process:default",
-    "updater:default",
-    "browser:default",
-    "terminal:default"
+    "updater:default"
   ]
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiangong_core::session::atomic_replace_file;
 
-use crate::types::{BrowserTab, BrowserTabSource};
+use crate::webview_host::types::{BrowserTab, BrowserTabSource};
 
 /// 单个 session 的持久化浏览器状态。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

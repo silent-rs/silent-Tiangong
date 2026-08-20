@@ -47,23 +47,9 @@ export interface LoadedSession {
   reasoning_effort: string;
 }
 
+/** 拓展区 App tab 类型。browser/terminal 为旧内置时代的存量值（布局
+ *  反序列化兼容），新生 tab 一律为 plugin（App 全部插件化）。 */
 export type TabKind = 'browser' | 'terminal' | 'plugin';
-export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
-
-/** 内置 App 的打开模式：浏览器与终端均为多实例（每次新建标签页）；
- *  plugin（三方 App）按贡献声明的 open_mode。 */
-export const BUILTIN_TAB_KIND_MULTI: Record<TabKind, boolean> = {
-  browser: true,
-  terminal: true,
-  plugin: false,
-};
-
-/** 内置 App 展示名。 */
-export const TAB_KIND_NAME: Record<TabKind, string> = {
-  browser: '浏览器',
-  terminal: '终端',
-  plugin: '应用',
-};
 
 export interface TabState {
   id: string;
@@ -71,7 +57,6 @@ export interface TabState {
   title: string;
   url: string;
   created_at: string;
-  phase?: TerminalPhase;
   /** plugin tab 专属：贡献来源插件（三方 App 实例）。 */
   plugin_id?: string;
   /** plugin tab 专属：extension.tab 贡献 ID。 */
@@ -82,21 +67,6 @@ export interface TabState {
 
 export interface SessionTabs {
   tabs: TabState[];
-  active_tab_id: string | null;
-}
-
-export interface TerminalTabInfo {
-  id: string;
-  title: string;
-  created_at: string;
-  alive: boolean;
-  cwd: string;
-  shell: string;
-  phase: TerminalPhase;
-}
-
-export interface TerminalTabListResponse {
-  tabs: TerminalTabInfo[];
   active_tab_id: string | null;
 }
 
@@ -1104,192 +1074,6 @@ export const api = {
 
   webhookListRuns: (id: string, limit?: number): Promise<WebhookRun[]> =>
     invoke('webhook_list_runs', { id, limit }),
-
-  // ----------------------------------------------------------------
-  // 浏览器面板（通过 plugin:browser）
-  // ----------------------------------------------------------------
-  browserClose: (sessionId: string): Promise<void> =>
-    invoke('plugin:browser|browser_close', { sessionId }),
-
-  browserSetPosition: (sessionId: string, x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('plugin:browser|browser_set_position', { sessionId, x, y, width, height }),
-
-  browserNavigate: (sessionId: string, url: string): Promise<void> =>
-    invoke('plugin:browser|browser_navigate', { sessionId, url }),
-
-  browserEval: (sessionId: string, js: string): Promise<void> =>
-    invoke('plugin:browser|browser_eval', { sessionId, js }),
-
-  browserHide: (sessionId: string): Promise<void> =>
-    invoke('plugin:browser|browser_hide', { sessionId }),
-
-  browserGoBack: (sessionId: string): Promise<void> =>
-    invoke('plugin:browser|browser_go_back', { sessionId }),
-
-  browserGoForward: (sessionId: string): Promise<void> =>
-    invoke('plugin:browser|browser_go_forward', { sessionId }),
-
-  browserReload: (sessionId: string): Promise<void> =>
-    invoke('plugin:browser|browser_reload', { sessionId }),
-
-  browserSetZoom: (sessionId: string, scale: number): Promise<number> =>
-    invoke('plugin:browser|browser_set_zoom', { sessionId, scale }),
-
-  browserGetZoom: (sessionId: string): Promise<number> =>
-    invoke('plugin:browser|browser_get_zoom', { sessionId }),
-
-  browserResetZoom: (sessionId: string): Promise<number> =>
-    invoke('plugin:browser|browser_reset_zoom', { sessionId }),
-
-  browserTabList: (sessionId: string): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
-    invoke('plugin:browser|browser_tab_list', { sessionId }),
-
-  browserSnapshotTabs: (sessionId: string): Promise<{
-    session_id: string | null;
-    tabs: Array<{ id: string; url: string; title: string }>;
-    active_tab_id: string | null;
-  }> =>
-    invoke('plugin:browser|browser_snapshot_tabs', { sessionId }),
-
-  browserSwitchSession: (
-    sessionId: string,
-    activeTabId?: string | null,
-  ): Promise<{
-    session_id: string | null;
-    tabs: Array<{ id: string; url: string; title: string }>;
-    active_tab_id: string | null;
-  }> =>
-    invoke('plugin:browser|browser_switch_session', {
-      sessionId,
-      activeTabId: activeTabId ?? null,
-    }),
-
-  browserTabNew: (sessionId: string, url: string): Promise<string> =>
-    invoke('plugin:browser|browser_tab_new', { sessionId, url }),
-
-  browserTabSwitch: (sessionId: string, tabId: string): Promise<void> =>
-    invoke('plugin:browser|browser_tab_switch', { sessionId, tabId }),
-
-  browserTabClose: (sessionId: string, tabId: string): Promise<void> =>
-    invoke('plugin:browser|browser_tab_close', { sessionId, tabId }),
-
-  browserAnnotationExtract: (sessionId: string): Promise<{
-    elements: Array<{
-      annotation_index: number;
-      rect: { x: number; y: number; width: number; height: number };
-      elements: Array<{
-        tag: string;
-        text: string;
-        attributes: Record<string, string>;
-        selector: string;
-        rect: { x: number; y: number; width: number; height: number };
-        overlap_ratio: number;
-        area: number;
-      }>;
-    }>;
-    count: number;
-  }> =>
-    invoke('plugin:browser|browser_annotation_extract', { sessionId }),
-
-  browserTabHistory: (sessionId: string, tabId?: string): Promise<{
-    tab_id: string;
-    entries: Array<{ url: string; title: string; timestamp: number }>;
-    current_index: number;
-  }> =>
-    invoke('plugin:browser|browser_tab_history', { sessionId, tabId: tabId ?? null }),
-
-  browserGlobalHistory: (offset: number, limit: number): Promise<
-    Array<{ url: string; title: string; timestamp: number }>
-  > =>
-    invoke('plugin:browser|browser_global_history', { offset, limit }),
-
-  browserGlobalHistoryClear: (): Promise<void> =>
-    invoke('plugin:browser|browser_global_history_clear'),
-
-  browserGlobalHistoryDelete: (url: string): Promise<void> =>
-    invoke('plugin:browser|browser_global_history_delete', { url }),
-
-  // 终端面板（通过 plugin:terminal，按对话 session 路由）
-  terminalEnsureSession: (sessionId: string, cwd: string): Promise<boolean> =>
-    invoke('plugin:terminal|terminal_ensure_session', { sessionId, cwd }),
-
-  terminalSessionSendInput: (sessionId: string, input: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_session_send_input', { sessionId, input }),
-
-  // 上报用户在终端提交的完整命令行（回车截断后上报，供注入 Agent 对话链）
-  terminalReportUserCommand: (sessionId: string, command: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_report_user_command', { sessionId, command }),
-
-  terminalSessionRecentOutput: (sessionId: string, lines?: number): Promise<string> =>
-    invoke('plugin:terminal|terminal_session_recent_output', { sessionId, lines: lines ?? null }),
-
-  terminalSessionResize: (sessionId: string, cols: number, rows: number): Promise<void> =>
-    invoke('plugin:terminal|terminal_session_resize', { sessionId, cols, rows }),
-
-  terminalSessionStatus: (sessionId: string): Promise<{
-    session_id: string;
-    alive: boolean;
-    cwd: string;
-    shell: string;
-    phase: string;
-  }> => invoke('plugin:terminal|terminal_session_status', { sessionId }),
-
-  terminalSessionSetCwd: (sessionId: string, cwd: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_session_set_cwd', { sessionId, cwd }),
-
-  terminalSessionReset: (sessionId: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_session_reset', { sessionId }),
-
-  // 前端 xterm.js 把当前屏幕可见区域序列化回传后端（供 handle_exec_interactive 返回给 Agent）
-  terminalSessionUpdateScreen: (sessionId: string, snapshot: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_session_update_screen', { sessionId, snapshot }),
-
-  terminalDestroySession: (sessionId: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_destroy_session', { sessionId }),
-
-  terminalPanelSetSession: (sessionId: string | null): Promise<void> =>
-    invoke('plugin:terminal|terminal_panel_set_session', { sessionId }),
-
-  terminalListStatuses: (): Promise<Array<{
-    session_id: string;
-    alive: boolean;
-    cwd: string;
-    shell: string;
-    phase: string;
-  }>> => invoke('plugin:terminal|terminal_list_statuses'),
-
-  terminalTabList: (sessionId: string): Promise<TerminalTabListResponse> =>
-    invoke('plugin:terminal|terminal_tab_list', { sessionId }),
-
-  terminalTabNew: (
-    sessionId: string,
-    title?: string | null,
-    cwd?: string | null,
-  ): Promise<string> =>
-    invoke('plugin:terminal|terminal_tab_new', {
-      sessionId,
-      title: title ?? null,
-      cwd: cwd ?? null,
-    }),
-
-  terminalTabRestore: (
-    sessionId: string,
-    tabId: string,
-    title?: string | null,
-    cwd?: string | null,
-  ): Promise<void> =>
-    invoke('plugin:terminal|terminal_tab_restore', {
-      sessionId,
-      tabId,
-      title: title ?? null,
-      cwd: cwd ?? null,
-    }),
-
-  terminalTabSwitch: (sessionId: string, tabId: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_tab_switch', { sessionId, tabId }),
-
-  terminalTabClose: (sessionId: string, tabId: string): Promise<void> =>
-    invoke('plugin:terminal|terminal_tab_close', { sessionId, tabId }),
 
   // ── 插件 UI 桥接（WASM 插件动态 UI）──
   // 天工只提供通用桥接，不处理具体插件业务。

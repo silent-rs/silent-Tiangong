@@ -1124,9 +1124,6 @@ export const useStore = create<AppState>((set, get) => ({
         api.removeInputCache(previousCacheId).catch((error) =>
           console.error('清理旧输入缓存失败:', error),
         );
-        api.terminalDestroySession(previousCacheId).catch((error) =>
-          console.error('销毁旧新对话终端失败:', error),
-        );
       }
       const initialCache = emptyInputCache();
       set((state) => {

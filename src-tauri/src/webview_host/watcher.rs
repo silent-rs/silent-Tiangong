@@ -13,8 +13,8 @@
 //!
 //! ## session 隔离
 //!
-//! [`BrowserWatcher`](crate::watcher::BrowserWatcher) 是 session-scoped，随
-//! [`BrowserPlugin`](crate::plugin::BrowserPlugin) 生命周期存在：每个 Core/session 构造
+//! [`BrowserWatcher`](crate::webview_host::watcher::BrowserWatcher) 是 session-scoped，随
+//! [`BrowserPlugin`](crate::webview_host::plugin::BrowserPlugin) 生命周期存在：每个 Core/session 构造
 //! 自己的 watcher，只向当前 plugin 持有的 feedback channel 注入 `browser_data`。
 //! 不做跨 session 广播——后台/历史 session 不会被无关页面污染。
 
@@ -26,8 +26,8 @@ use serde_json::json;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tokio::time::sleep;
 
-use crate::capability::PageFetcher;
-use crate::types::{format_browser_events, PageStatus};
+use crate::webview_host::capability::PageFetcher;
+use crate::webview_host::types::{format_browser_events, PageStatus};
 
 /// 两次自动观察之间的最小间隔。
 const MIN_OBSERVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -46,7 +46,7 @@ const BACKOFF_MULTIPLIER: u64 = 4;
 /// 浏览器页面观察器：持有 fetcher 与当前 session 的 feedback 通道，后台周期性观察，
 /// 变化时只向自己的通道投递 `browser_data`。
 ///
-/// 生命周期由 [`BrowserPlugin`](crate::plugin::BrowserPlugin) 管理：
+/// 生命周期由 [`BrowserPlugin`](crate::webview_host::plugin::BrowserPlugin) 管理：
 /// - 构造时创建，但不立即 spawn；
 /// - `set_feedback_tx` 注入当前 session 通道时懒启动后台任务（同一实例只启动一次）；
 /// - 通道关闭后后台任务检测到并自然跳过（空转等待下次注入）。

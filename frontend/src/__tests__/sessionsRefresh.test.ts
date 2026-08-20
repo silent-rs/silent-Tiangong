@@ -12,7 +12,6 @@ vi.mock('@/api/tauri', () => {
     switchSession: vi.fn(),
     setInputCache: vi.fn(),
     removeInputCache: vi.fn(),
-    terminalDestroySession: vi.fn(),
   };
   return { api };
 });
@@ -27,7 +26,6 @@ const getInputCacheMock = vi.mocked(api.getInputCache);
 const switchSessionMock = vi.mocked(api.switchSession);
 const setInputCacheMock = vi.mocked(api.setInputCache);
 const removeInputCacheMock = vi.mocked(api.removeInputCache);
-const terminalDestroySessionMock = vi.mocked(api.terminalDestroySession);
 const initialState = useStore.getInitialState();
 
 type StoreState = ReturnType<typeof useStore.getState>;
@@ -98,7 +96,6 @@ describe('loadSessions refresh contract', () => {
     switchSessionMock.mockReset();
     setInputCacheMock.mockReset();
     removeInputCacheMock.mockReset();
-    terminalDestroySessionMock.mockReset();
     getReasoningEffortMock.mockResolvedValue('medium');
     newSessionIdMock.mockResolvedValue('new-session');
     getInputCacheMock.mockResolvedValue({
@@ -110,7 +107,6 @@ describe('loadSessions refresh contract', () => {
     switchSessionMock.mockResolvedValue(undefined);
     setInputCacheMock.mockImplementation(async (_cacheKey, cache) => cache);
     removeInputCacheMock.mockResolvedValue(undefined);
-    terminalDestroySessionMock.mockResolvedValue(undefined);
     resetStore();
   });
 

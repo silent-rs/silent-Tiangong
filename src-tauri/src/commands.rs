@@ -12,9 +12,7 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::AgentInputKind;
 use tracing::warn;
 
-use crate::workspace_tabs::{
-    WorkspaceTabKind as TabKind, WorkspaceTabRef, WorkspaceTabState as TabState,
-};
+use crate::workspace_tabs::WorkspaceTabState as TabState;
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -257,68 +255,16 @@ pub async fn get_session_tabs(
             return Err(anyhow::anyhow!("会话不存在：{session_id}"));
         }
 
-        let browser =
-            tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id)?;
-        let browser_active = browser.active_tab_id.clone();
-        let browser_tabs: Vec<_> = browser
-            .tabs
-            .iter()
-            .map(|tab| TabState {
-                id: tab.id.clone(),
-                kind: TabKind::Browser,
-                title: tab.title.clone(),
-                url: tab.url.clone(),
-                created_at: String::new(),
-                plugin_id: None,
-                contribution_id: None,
-                sandbox: None,
-            })
-            .collect();
-        let terminal =
-            tiangong_plugin_terminal::session_store::TerminalSessionStore::load_or_migrate_legacy(
-                &session_id,
-            )?;
-        let terminal_active = terminal.active_tab_id.clone();
-        let terminal_tabs: Vec<_> = terminal
-            .tabs
-            .into_iter()
-            .map(|tab| TabState {
-                id: tab.id,
-                kind: TabKind::Terminal,
-                title: tab.title,
-                url: String::new(),
-                created_at: tab.created_at,
-                plugin_id: None,
-                contribution_id: None,
-                sandbox: None,
-            })
-            .collect();
+        // 终端/浏览器标签由各自插件持有并恢复；这里只合并布局层的
+        // plugin App 实例元数据（无插件侧存储，布局层是唯一真源）。
         let layout = crate::workspace_tabs::load_layout(&session_id);
-        let available = terminal_tabs
-            .into_iter()
-            .chain(browser_tabs)
-            // 三方 App 实例元数据由布局层持有（无插件侧存储）
-            .chain(layout.plugin_tabs.iter().filter_map(|tab| {
-                if tab.kind == crate::workspace_tabs::WorkspaceTabKind::Plugin {
-                    Some(tab.clone())
-                } else {
-                    None
-                }
-            }))
-            .collect::<Vec<_>>();
-        let fallback_active = browser_active
-            .map(|id| WorkspaceTabRef {
-                kind: TabKind::Browser,
-                id,
-            })
-            .into_iter()
-            .chain(terminal_active.map(|id| WorkspaceTabRef {
-                kind: TabKind::Terminal,
-                id,
-            }))
-            .collect::<Vec<_>>();
-        let (tabs, active_tab_id) =
-            crate::workspace_tabs::reconcile_tabs(available, layout, &fallback_active);
+        let available: Vec<_> = layout
+            .plugin_tabs
+            .iter()
+            .filter(|tab| tab.kind == crate::workspace_tabs::WorkspaceTabKind::Plugin)
+            .cloned()
+            .collect();
+        let (tabs, active_tab_id) = crate::workspace_tabs::reconcile_tabs(available, layout, &[]);
         if let Err(error) =
             crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
         {
@@ -2333,13 +2279,10 @@ pub async fn purge_all_deleted_sessions(
         if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
             error_msg = Some(format!("删除布局失败：{e}"));
         }
-        // PTY/browser
+        // webview 引擎
         if error_msg.is_none() {
-            tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
-            if let Some(browser_state) =
-                app.try_state::<tiangong_plugin_browser::BrowserPluginState>()
-            {
-                browser_state.registry.destroy_session(session_id);
+            if let Some(host_state) = app.try_state::<crate::webview_host::WebviewHostState>() {
+                host_state.registry.destroy_session(session_id);
             }
         }
         // media/teams（占用空间最大，必须删成功）
@@ -2440,7 +2383,6 @@ pub async fn get_workspace_dir(state: State<'_, TiangongApp>) -> Result<String, 
 /// 设置 Desktop 工作空间目录
 #[tauri::command]
 pub async fn set_workspace_dir(
-    app: tauri::AppHandle,
     workspace_dir: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
@@ -2463,10 +2405,6 @@ pub async fn set_workspace_dir(
             )
         })
         .await?;
-
-    // 同步终端：更新终端默认 cwd（后续懒创建的 PTY），并对所有存活 PTY
-    // 发送 cd 使已打开的终端进入新 workspace。
-    tiangong_plugin_terminal::sync_workspace_cwd(&app, &workspace_dir);
 
     // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 

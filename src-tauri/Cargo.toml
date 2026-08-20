@@ -17,9 +17,7 @@ tiangong-bots = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
-tiangong-plugin-browser = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-terminal = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-plugin-index-protocol = { workspace = true }
@@ -32,6 +30,8 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 base64 = { workspace = true }
+base64-url = "2"
+psl = "2"
 chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

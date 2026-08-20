@@ -5,21 +5,21 @@ use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::manager::{default_browser_rect, BrowserManager, POLL_EVAL_TIMEOUT};
+use crate::webview_host::manager::{default_browser_rect, BrowserManager, POLL_EVAL_TIMEOUT};
 
 /// Agent 命令严格按 session_id 解析：空 session_id 返回 None（调用方应跳过/报错）。
 /// 不 fallback active/bootstrap——空 session_id 是调用方错误。
 fn resolve_agent_state(
-    registry: &Arc<crate::session_registry::BrowserSessionRegistry>,
+    registry: &Arc<crate::webview_host::session_registry::BrowserSessionRegistry>,
     session_id: &str,
-) -> Option<Arc<std::sync::Mutex<crate::manager::BrowserState>>> {
+) -> Option<Arc<std::sync::Mutex<crate::webview_host::manager::BrowserState>>> {
     if session_id.trim().is_empty() {
         return None;
     }
     Some(registry.session_state(session_id))
 }
 
-use crate::types::{
+use crate::webview_host::types::{
     format_browser_events, AnnotationExtractResult, BrowserAgentActiveEvent, BrowserCommand,
     BrowserEvent, BrowserOpenEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
     FillFieldResult, FormExtractResult, LocateElementResult, PageStatus, QueryDomResult,
@@ -115,7 +115,7 @@ fn merge_diff_and_events(page_diff: &Option<String>, events: &[BrowserEvent]) ->
 /// 浏览器命令处理循环
 pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
-    registry: Arc<crate::session_registry::BrowserSessionRegistry>,
+    registry: Arc<crate::webview_host::session_registry::BrowserSessionRegistry>,
     app: AppHandle<Wry>,
 ) {
     while let Some(cmd) = rx.recv().await {
