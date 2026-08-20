@@ -363,6 +363,7 @@ pub fn bridge_subscribe(plugin_id: &str, channel: &str) -> Result<()> {
     let channels = subscriptions.entry(plugin_id.to_string()).or_default();
     *channels.entry(channel.to_string()).or_default() += 1;
     drop(subscriptions);
+    tracing::info!(plugin_id, channel, "插件订阅建立（将重放等待中的调用）");
 
     // 工具调用可能早于插件页面完成订阅。订阅生效后重放仍在等待的调用；
     // invocation_id 保持不变，插件可据此幂等处理并忽略重复投递。
@@ -445,6 +446,12 @@ pub fn bridge_emit_to(plugin_id: &str, channel: &str, payload: &str) {
         .unwrap_or(false);
     if subscribed {
         emitter(plugin_id, channel, payload);
+    } else if channel == "tool.requested" {
+        tracing::info!(
+            plugin_id,
+            channel,
+            "定向事件无订阅者，暂不投递（等待后台挂载后重放）"
+        );
     }
 }
 

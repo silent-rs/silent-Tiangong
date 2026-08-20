@@ -41,8 +41,15 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     last_by_plugin.insert(plugin_id.to_string(), now);
     drop(last_by_plugin);
     let payload = serde_json::json!({ "session_id": session_id, "mode": "background" }).to_string();
-    if let Err(error) = crate::bridge::open_app_for_plugin(plugin_id, &payload) {
-        tracing::debug!(%error, plugin_id, "请求后台挂载插件实例失败");
+    match crate::bridge::open_app_for_plugin(plugin_id, &payload) {
+        Ok(_) => tracing::info!(
+            plugin_id,
+            session_id,
+            "已请求后台挂载插件实例（app.open mode=background）"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, plugin_id, "请求后台挂载插件实例失败")
+        }
     }
 }
 
@@ -157,9 +164,18 @@ pub async fn execute(
     };
     emit_requested(&plugin_id, &invocation);
 
-    // 无人接应时请求宿主拉起插件 App（通用能力，不区分官方与三方插件）：
-    // 实例挂载后 shell 订阅 tool.requested，bridge_subscribe 会重放本调用。
-    if !crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested") {
+    // 无人接应时请求宿主后台挂载插件实例（通用能力，不区分官方与三方
+    // 插件）：实例挂载后 shell 订阅 tool.requested，bridge_subscribe 会
+    // 重放本调用。
+    let subscribed = crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested");
+    tracing::info!(
+        plugin_id = %plugin_id,
+        invocation_id = %invocation_id,
+        tool = %invocation.name,
+        subscribed,
+        "TS 工具等待接应（无订阅者时请求后台挂载插件实例）"
+    );
+    if !subscribed {
         request_plugin_ui(&plugin_id, &session_id);
     }
 

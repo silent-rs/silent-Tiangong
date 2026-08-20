@@ -377,6 +377,13 @@ fn run_gui() {
                             .ok()
                             .and_then(|value| value["mode"].as_str().map(str::to_string))
                             .is_some_and(|mode| mode == "background");
+                        tracing::info!(
+                            plugin_id,
+                            method,
+                            background,
+                            session_id,
+                            "app 原语调用"
+                        );
                         if method == "app.close" {
                             // 关闭目标必须显式声明：instance_id 精确关一个实例，
                             // all=true 才允许关闭该插件全部实例，避免误全关。
