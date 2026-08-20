@@ -1,6 +1,6 @@
-# 终端插件（Terminal Handler）
+# 终端插件（Terminal）
 
-终端能力的 manifest v2 插件化（参考 `plugins/interaction-handler` 模式）：
+终端能力的 manifest v2 插件化（参考 `plugins/tiangong-plugin-interaction` 模式）：
 工具声明（run_command / run_shell / terminal_send）与 prompt 引导来自本清单，
 经 TsPluginAdapter 注入 Core；工具执行策略在 `src/shell.ts`（TS 壳）——
 收到 tool.requested 后经宿主桥接 `terminal.*` 原生服务（PTY）执行并回传。

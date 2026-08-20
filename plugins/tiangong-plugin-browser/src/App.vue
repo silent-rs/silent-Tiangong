@@ -248,7 +248,7 @@ async function navigateTo(raw: string): Promise<void> {
 function requestNewTab(): void {
   if (!ready.value) return;
   window.dispatchEvent(new CustomEvent('tiangong:plugin-request-new', {
-    detail: { plugin_id: 'browser-handler', contribution_id: 'browser' },
+    detail: { plugin_id: 'browser', contribution_id: 'browser' },
   }));
 }
 
@@ -410,7 +410,7 @@ function handleHistoryScroll(event: Event): void {
 }
 
 function expectedScope(): string {
-  return `webview:browser-handler:${currentScope}`;
+  return `webview:browser:${currentScope}`;
 }
 
 async function handleWebviewEvent(raw: string): Promise<void> {

@@ -11646,6 +11646,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-terminal-sidecar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vte",
+]
+
+[[package]]
 name = "tiangong-plugin-text-to-speech-protocol"
 version = "0.1.0"
 dependencies = [
@@ -11734,23 +11751,6 @@ dependencies = [
  "tiangong-types",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "tiangong-terminal-handler-sidecar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "portable-pty",
- "serde",
- "serde_json",
- "tiangong-plugin-runtime",
- "tiangong-plugin-sidecar",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "vte",
 ]
 
 [[package]]

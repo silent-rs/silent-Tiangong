@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-`plugins/interaction-handler` 是仅供 Desktop 使用的纯 TypeScript 插件，不包含 WASM，也不扩展 `plugin.wit`。
+`plugins/tiangong-plugin-interaction` 是仅供 Desktop 使用的纯 TypeScript 插件，不包含 WASM，也不扩展 `plugin.wit`。
 
 - 插件清单声明 `request_user` 工具规格和提示词；
 - 插件 TypeScript 代码接收工具调用，负责六类参数语义、操作框和 Tool Result；
@@ -59,7 +59,7 @@ Core 与公共运行时不得按 `request_user` 工具名分支，也不得维�
 ```json
 {
   "schema_version": 2,
-  "id": "interaction-handler",
+  "id": "interaction",
   "entrypoints": ["desktop"],
   "permissions": ["tool.provide"],
   "capabilities": {
@@ -79,7 +79,7 @@ Core 与公共运行时不得按 `request_user` 工具名分支，也不得维�
     "sandbox": "iframe",
     "contributions": [{
       "slot": "session.interaction",
-      "id": "interaction-handler",
+      "id": "interaction",
       "entry": "dist/index.html",
       "context": ["session"]
     }]

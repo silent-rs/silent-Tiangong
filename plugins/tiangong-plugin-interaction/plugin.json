@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "id": "interaction-handler",
+  "id": "interaction",
   "version": "0.3.1",
   "entrypoints": [
     "desktop"
@@ -21,7 +21,7 @@
     "contributions": [
       {
         "slot": "session.interaction",
-        "id": "interaction-handler",
+        "id": "interaction",
         "title": "交互处理器",
         "description": "默认交互处理器：审批、确认、选择、输入与表单",
         "entry": "dist/index.html",

@@ -110,7 +110,7 @@ tools.onClosed((closed) => console.log(closed.invocation_id, closed.status));
 
 `status` 可为 `answered`、`expired` 或 `cancelled`。宿主保证调用只能闭合一次，
 拒绝错插件、迟到和重复提交，并在插件未响应时按 manifest 的 `timeout_ms` 兜底。
-默认交互处理器见 `plugins/interaction-handler`，它只是在这套通用协议上实现的一个
+默认交互处理器见 `plugins/tiangong-plugin-interaction`，它只是在这套通用协议上实现的一个
 Desktop TS 工具插件。
 
 ## 主题

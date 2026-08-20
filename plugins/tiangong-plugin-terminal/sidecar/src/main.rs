@@ -16,9 +16,9 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    tracing::info!("terminal-handler sidecar 启动中...");
+    tracing::info!("terminal sidecar 启动中...");
 
-    let config = tiangong_plugin_sidecar::SidecarConfig::new("terminal-handler");
+    let config = tiangong_plugin_sidecar::SidecarConfig::new("terminal");
     tiangong_plugin_sidecar::run(config, || {
         Ok(std::sync::Arc::new(service::TerminalService::new()))
     })

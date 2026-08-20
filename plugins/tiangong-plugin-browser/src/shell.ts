@@ -47,7 +47,7 @@ function releaseInvocation(invocationId: string): void {
 function requestOpenInstance(instanceId: string, sessionId: string): void {
   window.dispatchEvent(new CustomEvent('tiangong:plugin-request-open-instance', {
     detail: {
-      plugin_id: 'browser-handler',
+      plugin_id: 'browser',
       contribution_id: 'browser',
       instance_id: instanceId,
       session_id: sessionId,

@@ -22,7 +22,7 @@ cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
 // sidecar 制品随插件包分发：优先取 release/ 已有制品（build-sidecar.sh 已放）；
 // 不存在时自动构建（确保 yarn package 一步产出完整可导入的包）。
-const sidecarName = 'terminal-handler-sidecar';
+const sidecarName = 'tiangong-terminal-sidecar';
 const releaseSidecar = join(release, sidecarName);
 if (!existsSync(releaseSidecar)) {
   execSync('bash scripts/build-sidecar.sh', { cwd: pluginRoot, stdio: 'inherit' });

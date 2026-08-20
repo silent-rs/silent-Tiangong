@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "id": "browser-handler",
+  "id": "browser",
   "version": "0.1.0",
   "entrypoints": [
     "desktop"

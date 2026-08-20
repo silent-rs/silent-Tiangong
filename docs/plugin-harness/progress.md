@@ -1,13 +1,13 @@
 # 插件 Harness 开发进度记录
 
 > 关联：需求 `./requirements.md`、设计 `../plugin-harness-design.md`、任务总览 `./tasks/README.md`
-> 开发分支：`fix/interaction-handler-popup`
+> 开发分支：`feature/plugin-name-alignment`
 
 ## 当前状态
 
 - **阶段**：Desktop 纯 TypeScript 交互处理器已完成自动验证。
 - **当前实现**：`request_user` 的六类语义、界面、结果和 15 秒时限均在
-  `plugins/interaction-handler`；Core 与公共运行时不保存审批挑战或授权，也不解释用户意见。
+  `plugins/tiangong-plugin-interaction`；Core 与公共运行时不保存审批挑战或授权，也不解释用户意见。
 - **决策归属**：插件把用户意见作为普通 Tool Result 返回，Agent 自行决定后续步骤。
 - **当前阻塞**：无。
 - **下一步**：由用户在 Desktop 中验证实际交互体验。
@@ -102,7 +102,7 @@
 
 ### 交互插件 GUI 验证清单（2026-08-18）
 
-- 完整手动验证脚本：`./interaction-handler-verification.md`（六种交互逐项、
+- 完整手动验证脚本：`./interaction-verification.md`（六种交互逐项、
   超时/竞态/中断、导入校验、已知边界），供后续逐项执行。
 - 自动化已覆盖：manifest 解析（含错误细节链）、Core 89 项、runtime 65 项、
   前端 204 项全绿；interaction.ts 单测（六 kind 解析/状态）。
@@ -238,7 +238,7 @@
   Slot、interaction.resolve 桥接（权限双校验+宿主注入）、interaction.requested/closed 事件、
   request_id 权威会话路由、deadline 锁内原子判定、approval 强制显式 challenge、
   InteractionPluginHost 替换内置卡片、SDK createInteractionHandler、CLI/Server 宿主接口、
-  交互处理器插件为正式默认处理器：plugins/interaction-handler（id: interaction-handler，文档路径引导，非示例标记）。
+  交互处理器插件为正式默认处理器：plugins/tiangong-plugin-interaction（id: interaction，文档路径引导，非示例标记）。
   验收测试补 4 项；Core 102 / runtime 42 / 前端 204 全绿（steering 为 origin 既有 flaky）；
   另修 tiangong-llm 测试构造缺 Message 耗时字段的既有编译失败。
 
@@ -247,7 +247,7 @@
 - 删除 Core 内的交互请求管理、审批挑战、授权表和工具放行判断；
 - 删除公共运行时的审批专用桥接，`tool.requested` / `tool.closed` / `tool.resolve`
   只处理通用 TS 工具调用；
-- `interaction-handler` 独立实现六类参数、界面、15 秒超时和普通 Tool Result；
+- `interaction` 独立实现六类参数、界面、15 秒超时和普通 Tool Result；
 - 用户意见返回 Agent，后续是否调用其他工具完全由 Agent 决定。
 
 最终自动验证（2026-08-18）：
@@ -273,6 +273,12 @@
 
 - `cargo test -p tiangong-plugin-runtime` 58 项全绿（新增 extension.tab 聚合用例：multi 显式/singleton 缺省、descriptor 名作为 App 名、settings 贡献不进入 App 列表）。
 - clippy 零警告；前端 `tsc --noEmit`、`yarn build` 通过。
+
+### 官方 Desktop 插件命名统一（2026-08-20）
+
+- 终端、审批征询、嵌入式浏览器插件 ID 统一为 `terminal`、`interaction`、`browser`。
+- 项目目录和工程名统一为 `tiangong-plugin-terminal`、`tiangong-plugin-interaction`、`tiangong-plugin-browser`，宿主引用与终端 sidecar 同步更新。
+- 三个插件完整构建与打包通过，终端导入包完成签名；插件测试 7 项、宿主前端测试 210 项、Rust 全工作区检查通过，旧项目名称扫描无残留。
 
 ## 更新规则
 

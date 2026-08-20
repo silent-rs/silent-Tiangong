@@ -139,7 +139,7 @@ async function reconcileWebviewPluginTabs(
       const app: NonNullable<AppTabCommand['app']> = {
         pluginId: sample.plugin_id,
         contributionId: sample.contribution_id,
-        title: sample.plugin_id === 'browser-handler' ? '浏览器' : sample.title,
+        title: sample.plugin_id === 'browser' ? '浏览器' : sample.title,
         sandbox: 'webview',
         multi: true,
       };
@@ -1150,7 +1150,7 @@ export function TabsContainer({
                         void openWebviewPluginTab({
                           pluginId: tab.plugin_id,
                           contributionId: tab.contribution_id,
-                          title: tab.plugin_id === 'browser-handler' ? '浏览器' : tab.title,
+                          title: tab.plugin_id === 'browser' ? '浏览器' : tab.title,
                           sandbox: 'webview',
                           multi: true,
                         });
@@ -1242,7 +1242,7 @@ export function TabsContainer({
                   ? () => void openWebviewPluginTab({
                     pluginId: tab.plugin_id!,
                     contributionId: tab.contribution_id!,
-                    title: tab.plugin_id === 'browser-handler' ? '浏览器' : tab.title,
+                    title: tab.plugin_id === 'browser' ? '浏览器' : tab.title,
                     sandbox: 'webview',
                     multi: true,
                   })

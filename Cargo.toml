@@ -61,7 +61,7 @@ members = [
     "plugins/tiangong-plugin-scheduler/protocol",
     "plugins/tiangong-plugin-scheduler/wasm",
     "plugins/tiangong-plugin-scheduler/sidecar",
-    "plugins/terminal-handler/sidecar",
+    "plugins/tiangong-plugin-terminal/sidecar",
     "crates/plugins/tiangong-plugin-terminal",
     "plugins/tiangong-plugin-analyze-attachment/protocol",
     "plugins/tiangong-plugin-analyze-attachment/sidecar",

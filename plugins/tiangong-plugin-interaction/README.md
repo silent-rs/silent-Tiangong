@@ -1,4 +1,4 @@
-# 交互处理器插件（Interaction Handler）
+# 审批征询插件（Interaction）
 
 天工默认交互处理器：处理 `request_user` 工具发起的审批、确认、选择、输入与
 表单请求。它是 Desktop 专用纯 TypeScript 插件，不包含 WASM，也不修改
@@ -37,7 +37,7 @@
 ## 目录结构
 
 ```text
-plugins/interaction-handler/
+plugins/tiangong-plugin-interaction/
 ├── plugin.json      # v2 清单：TS 工具、提示词、权限与 session.interaction Slot
 ├── index.html       # Vite 入口
 ├── src/

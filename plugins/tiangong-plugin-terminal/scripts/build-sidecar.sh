@@ -4,11 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../sidecar"
 cargo build --release
-binary="tiangong-terminal-handler-sidecar"
+binary="tiangong-plugin-terminal-sidecar"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) binary="${binary}.exe" ;;
 esac
 target_dir="$(cargo metadata --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['target_directory'])")"
 mkdir -p ../release
-cp "${target_dir}/release/${binary}" "../release/terminal-handler-sidecar"
+cp "${target_dir}/release/${binary}" "../release/tiangong-terminal-sidecar"
 echo "sidecar 已复制到 release/: ${binary}"
