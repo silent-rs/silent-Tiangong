@@ -1,6 +1,7 @@
 import {
   createTiangongBridge,
   createToolProvider,
+  getShadowHostRuntime,
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
 import { tabsModel } from './tabs-model';
@@ -25,11 +26,56 @@ const TOOL_METHOD: Record<string, string> = {
   web_locate_element: 'webview.locate',
 };
 
+type BrowserToolWindow = Window & {
+  __tiangongBrowserToolClaims?: Set<string>;
+};
+
+function claimInvocation(invocationId: string): boolean {
+  const sharedWindow = window as BrowserToolWindow;
+  const claims = sharedWindow.__tiangongBrowserToolClaims
+    ?? (sharedWindow.__tiangongBrowserToolClaims = new Set());
+  if (claims.has(invocationId)) return false;
+  claims.add(invocationId);
+  return true;
+}
+
+function releaseInvocation(invocationId: string): void {
+  const claims = (window as BrowserToolWindow).__tiangongBrowserToolClaims;
+  window.setTimeout(() => claims?.delete(invocationId), 5_000);
+}
+
+function requestOpenInstance(instanceId: string, sessionId: string): void {
+  window.dispatchEvent(new CustomEvent('tiangong:plugin-request-open-instance', {
+    detail: {
+      plugin_id: 'browser-handler',
+      contribution_id: 'browser',
+      instance_id: instanceId,
+      session_id: sessionId,
+    },
+  }));
+}
+
 async function main() {
   const bridge = await createTiangongBridge();
+  await tabsModel.attach(bridge);
+  const runtime = getShadowHostRuntime();
+  tabsModel.scope = runtime?.context.session?.id ?? '__global__';
+  await tabsModel.restore().catch(() => {});
+  if (runtime) {
+    const stop = runtime.onContextChange((context) => {
+      const nextScope = context.session?.id ?? '__global__';
+      if (nextScope === tabsModel.scope) return;
+      tabsModel.scope = nextScope;
+      void tabsModel.restore().catch(() => {});
+    });
+    runtime.registerCleanup(stop);
+  }
   const tools = createToolProvider(bridge);
 
   tools.onRequested((invocation: ToolInvocation) => {
+    // multi 模式下每个浏览器顶部标签都会挂载一个页面。宿主事件会送达
+    // 所有实例，按 invocation_id 只允许其中一个实例执行工具。
+    if (!claimInvocation(invocation.invocation_id)) return;
     void (async () => {
       const method = TOOL_METHOD[invocation.name];
       if (!method) {
@@ -41,8 +87,8 @@ async function main() {
         return;
       }
       try {
-        // 打开/导航经共享标签模型（与面板同源，阶段 3 标签语义在插件）；
-        // 发起会话与面板当前会话一致时走模型，否则退回原语直调（后台会话）。
+        // 发起会话与当前页面作用域一致时先刷新宿主页面快照；其他会话
+        // 直接调用原语。可见标签仍统一由 App 拓展区顶部标签维护。
         if (
           (invocation.name === 'browser_open' || invocation.name === 'browser_navigate') &&
           tabsModel.scope === invocation.session_id &&
@@ -50,7 +96,10 @@ async function main() {
         ) {
           const target = (invocation.arguments as { url: string }).url;
           if (invocation.name === 'browser_open' || tabsModel.tabs.length === 0) {
-            await tabsModel.newTab(target);
+            const opened = await tabsModel.newTab(target);
+            if (opened) {
+              requestOpenInstance(opened.id, invocation.session_id);
+            }
           } else {
             await tabsModel.navigate(target);
           }
@@ -80,6 +129,9 @@ async function main() {
           active_tab_id?: string | null;
           result?: string | null;
         };
+        if (invocation.name === 'browser_open' && parsed.active_tab_id) {
+          requestOpenInstance(parsed.active_tab_id, invocation.session_id);
+        }
         // 真实结果摘要：按工具类别格式化（策略层职责）
         let summary: string;
         if (invocation.name === 'browser_eval') {
@@ -117,7 +169,7 @@ async function main() {
           result: { ok: false, summary: `webview 调用失败：${String(error)}`, exit_code: 1 },
         });
       }
-    })();
+    })().finally(() => releaseInvocation(invocation.invocation_id));
   });
 }
 

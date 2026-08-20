@@ -1162,34 +1162,84 @@ fn install_staged_plugin_inner(
     staged_path: &Path,
     allow_same_version: bool,
 ) -> Result<PluginStatus> {
+    let total_started = Instant::now();
+    let lock_started = Instant::now();
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
-    let staged = validate_staged_plugin(storage_root, staged_path)?;
-    let destination = plugin_directory(storage_root, &staged.manifest.id);
-    let current = discover_installed_plugins(storage_root)
-        .into_iter()
-        .find(|installed| installed.manifest.id == staged.manifest.id);
+    let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
 
-    let status = if let Some(current) = current {
-        if current.directory != destination {
-            bail!(
-                "插件 {} 安装目录与 ID 不一致: {}",
-                staged.manifest.id,
-                current.directory.display()
+    let validation_started = Instant::now();
+    let staged_result = validate_staged_plugin(storage_root, staged_path);
+    let staged_validation_ms = validation_started.elapsed().as_millis() as u64;
+    let staged = match staged_result {
+        Ok(staged) => staged,
+        Err(error) => {
+            tracing::warn!(
+                lock_wait_ms,
+                staged_validation_ms,
+                total_ms = total_started.elapsed().as_millis() as u64,
+                %error,
+                "插件安装目标校验失败"
             );
+            return Err(error);
         }
-        ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
-        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
-    } else {
-        install_new_plugin(storage_root, staged_path, staged.manifest.clone())
     };
+    let plugin_id = staged.manifest.id.clone();
+    let destination = plugin_directory(storage_root, &staged.manifest.id);
+    let lookup_started = Instant::now();
+    let current = if destination.exists() {
+        match find_installed_plugin(storage_root, &plugin_id) {
+            Ok(installed) => Some(installed),
+            Err(error) => {
+                // 保留旧行为：无效残留目录交给 install_new_plugin 的恢复路径处理。
+                tracing::warn!(
+                    plugin_id,
+                    %error,
+                    "目标插件现有目录无效，按残留目录恢复路径处理"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let target_lookup_ms = lookup_started.elapsed().as_millis() as u64;
+
+    let switch_started = Instant::now();
+    let status = (|| {
+        if let Some(current) = current {
+            if current.directory != destination {
+                bail!(
+                    "插件 {} 安装目录与 ID 不一致: {}",
+                    staged.manifest.id,
+                    current.directory.display()
+                );
+            }
+            ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
+            replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
+        } else {
+            install_new_plugin(storage_root, staged_path, staged.manifest.clone())
+        }
+    })();
+    let switch_ms = switch_started.elapsed().as_millis() as u64;
     // sidecar 二进制是新落盘文件：macOS 首次执行有一次性的安全评估
     // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
     // 业务调用（打开终端 / 首次工具执行）上。
     if status.is_ok() {
         prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
     }
+    tracing::info!(
+        plugin_id,
+        allow_same_version,
+        lock_wait_ms,
+        staged_validation_ms,
+        target_lookup_ms,
+        switch_ms,
+        total_ms = total_started.elapsed().as_millis() as u64,
+        success = status.is_ok(),
+        "插件安装运行时阶段完成"
+    );
     status
 }
 

@@ -903,6 +903,52 @@ impl BrowserManager {
         true
     }
 
+    fn handle_page_load_finished(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        observed_navigation_id: u64,
+        event_url: &str,
+        snapshot: WebDocumentSnapshot,
+    ) {
+        if snapshot.document_id.is_empty()
+            || snapshot.url.is_empty()
+            || snapshot.internal_error
+            || (!event_url.is_empty()
+                && normalize_url_for_compare(event_url) != normalize_url_for_compare(&snapshot.url))
+        {
+            return;
+        }
+
+        let expected_document_id = snapshot.document_id.clone();
+        let accepted = {
+            let state = match state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+                return;
+            };
+            let mut navigation = match signal.state.lock() {
+                Ok(navigation) => navigation,
+                Err(error) => error.into_inner(),
+            };
+            accept_loading_document(&mut navigation, observed_navigation_id, &snapshot)
+        };
+        if !accepted {
+            return;
+        }
+
+        Self::complete_navigation_for_tab(
+            app,
+            state,
+            tab_id,
+            observed_navigation_id,
+            &expected_document_id,
+            snapshot,
+        );
+    }
+
     /// 为指定标签创建独立的 WebView 实例
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_webview_for_tab(
@@ -1005,7 +1051,7 @@ impl BrowserManager {
                 }
 
                 if payload.event() == PageLoadEvent::Finished {
-                    let (navigation_id, expected_document_id) = {
+                    let navigation_id = {
                         let state = match state_clone_holder.lock() {
                             Ok(state) => state,
                             Err(error) => error.into_inner(),
@@ -1024,23 +1070,13 @@ impl BrowserManager {
                         {
                             return;
                         }
-                        let Some(expected_url) = navigation.started_url.as_deref() else {
-                            return;
-                        };
-                        if normalize_url_for_compare(expected_url)
-                            != normalize_url_for_compare(&event_url)
-                        {
-                            return;
-                        }
-                        let Some(document_id) = navigation.document_id.clone() else {
-                            return;
-                        };
-                        (navigation.navigation_id, document_id)
+                        navigation.navigation_id
                     };
 
                     let state_for_finished = state_clone_holder.clone();
                     let tab_id_for_finished = tab_id_for_closure.clone();
                     let app_for_finished = app_clone.clone();
+                    let event_url_for_finished = event_url.clone();
                     if let Err(error) = webview.eval_with_callback(
                         PAGE_SNAPSHOT_SCRIPT,
                         move |result| {
@@ -1048,12 +1084,12 @@ impl BrowserManager {
                                 debug!("browser finished page snapshot parse failed");
                                 return;
                             };
-                            Self::complete_navigation_for_tab(
+                            Self::handle_page_load_finished(
                                 &app_for_finished,
                                 state_for_finished.clone(),
                                 &tab_id_for_finished,
                                 navigation_id,
-                                &expected_document_id,
+                                &event_url_for_finished,
                                 snapshot,
                             );
                         },

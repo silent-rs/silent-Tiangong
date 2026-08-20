@@ -8,8 +8,7 @@
   "permissions": [
     "tool.provide",
     "webview.use",
-    "bridge.call",
-    "storage.private"
+    "bridge.call"
   ],
   "capabilities": {
     "tools": true,
@@ -208,7 +207,7 @@
         "description": "嵌入式浏览器（webview 容器原语 + 插件管理界面）",
         "icon": "globe",
         "entry": "dist/index.html",
-        "open_mode": "singleton",
+        "open_mode": "multi",
         "context": [
           "session"
         ]

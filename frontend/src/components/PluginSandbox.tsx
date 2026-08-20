@@ -25,6 +25,10 @@ export interface PluginSandboxProps {
   sessionId?: string | null;
   /** 当前会话工作目录（无活跃会话时为全局工作区）。 */
   workspace?: string | null;
+  /** extension.tab 顶部标签实例编号。 */
+  instanceId?: string;
+  /** 当前实例是否是拓展区正在显示的标签。 */
+  visible?: boolean;
 }
 
 export function PluginSandbox({
@@ -35,6 +39,8 @@ export function PluginSandbox({
   className,
   sessionId,
   workspace,
+  instanceId,
+  visible,
 }: PluginSandboxProps) {
   // webview 贡献（如浏览器插件）：管理界面（地址栏/工具栏）跑 shadow 容器——
   // 页面本体是宿主原生 webview 实例，管理界面需要主文档坐标同步其位置，
@@ -48,6 +54,8 @@ export function PluginSandbox({
         className={className}
         sessionId={sessionId}
         workspace={workspace}
+        instanceId={instanceId}
+        visible={visible}
       />
     );
   }
@@ -58,7 +66,16 @@ export function PluginSandbox({
       </div>
     );
   }
-  return <PluginIframe pluginId={pluginId} html={html} sessionId={sessionId} workspace={workspace} />;
+  return (
+    <PluginIframe
+      pluginId={pluginId}
+      html={html}
+      sessionId={sessionId}
+      workspace={workspace}
+      instanceId={instanceId}
+      visible={visible}
+    />
+  );
 }
 
 /** 宿主注入插件脚本的桥接对象（设计文档 6.3 的 Shadow 容器子集）。 */
@@ -72,7 +89,15 @@ interface DisposableHostBridge extends HostBridge {
 }
 
 type ShadowCleanup = () => void;
+type ShadowBeforeClose = () => void | Promise<void>;
 type HostContextHandler = (context: PluginHostContext) => void;
+
+const beforeCloseHandlersByInstance = new Map<string, Set<ShadowBeforeClose>>();
+
+export async function runPluginBeforeClose(instanceId: string): Promise<void> {
+  const handlers = [...(beforeCloseHandlersByInstance.get(instanceId) ?? [])];
+  await Promise.all(handlers.map((handler) => handler()));
+}
 
 interface ShadowRuntimeState {
   updateContext(context: PluginHostContext): void;
@@ -172,6 +197,8 @@ function ShadowContainer({
   className,
   sessionId,
   workspace,
+  instanceId,
+  visible,
 }: Omit<PluginSandboxProps, 'sandbox'>) {
   const hostRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<ShadowRuntimeState | null>(null);
@@ -188,9 +215,14 @@ function ShadowContainer({
       `shadow:${pluginId}:${contributionId}`,
       sessionId,
       workspace,
+      instanceId && typeof visible === 'boolean'
+        ? { instance_id: instanceId, visible }
+        : undefined,
     );
     const contextHandlers = new Set<HostContextHandler>();
     const cleanups: ShadowCleanup[] = [];
+    const beforeCloseHandlers = new Set<ShadowBeforeClose>();
+    if (instanceId) beforeCloseHandlersByInstance.set(instanceId, beforeCloseHandlers);
 
     const runCleanup = (cleanup: ShadowCleanup) => {
       try {
@@ -208,6 +240,10 @@ function ShadowContainer({
       cleanups.push(cleanup);
     };
 
+    const registerBeforeClose = (handler: ShadowBeforeClose) => {
+      if (!cancelled) beforeCloseHandlers.add(handler);
+    };
+
     const onHostContextChange = (handler: HostContextHandler) => {
       if (cancelled) return () => {};
       contextHandlers.add(handler);
@@ -218,7 +254,9 @@ function ShadowContainer({
     const runtime: ShadowRuntimeState = {
       updateContext(context) {
         const contextChanged = currentContext.session?.id !== context.session?.id
-          || currentContext.session?.workspace !== context.session?.workspace;
+          || currentContext.session?.workspace !== context.session?.workspace
+          || currentContext.app?.instance_id !== context.app?.instance_id
+          || currentContext.app?.visible !== context.app?.visible;
         currentContext = context;
         if (!contextChanged) return;
         contextHandlers.forEach((handler) => handler(context));
@@ -235,12 +273,17 @@ function ShadowContainer({
       () => currentContext,
       onHostContextChange,
       registerCleanup,
+      registerBeforeClose,
       () => cancelled,
     );
 
     return () => {
       cancelled = true;
       if (runtimeRef.current === runtime) runtimeRef.current = null;
+      if (instanceId && beforeCloseHandlersByInstance.get(instanceId) === beforeCloseHandlers) {
+        beforeCloseHandlersByInstance.delete(instanceId);
+      }
+      beforeCloseHandlers.clear();
       for (const cleanup of cleanups.reverse()) runCleanup(cleanup);
       contextHandlers.clear();
       bridge.dispose();
@@ -253,9 +296,17 @@ function ShadowContainer({
   // 会话切换时刷新运行时上下文；主题样式由 CSS 继承自动更新。
   useEffect(() => {
     runtimeRef.current?.updateContext(
-      hostContext(currentRootTheme(), `shadow:${pluginId}:${contributionId}`, sessionId, workspace),
+      hostContext(
+        currentRootTheme(),
+        `shadow:${pluginId}:${contributionId}`,
+        sessionId,
+        workspace,
+        instanceId && typeof visible === 'boolean'
+          ? { instance_id: instanceId, visible }
+          : undefined,
+      ),
     );
-  }, [contributionId, pluginId, sessionId, workspace]);
+  }, [contributionId, instanceId, pluginId, sessionId, visible, workspace]);
 
   return (
     <div
@@ -285,6 +336,7 @@ async function mountShadowContent(
   getHostContext: () => PluginHostContext,
   onHostContextChange: (handler: HostContextHandler) => () => void,
   registerCleanup: (cleanup: ShadowCleanup) => void,
+  registerBeforeClose: (handler: ShadowBeforeClose) => void,
   isCancelled: () => boolean,
 ) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -344,6 +396,7 @@ async function mountShadowContent(
       'hostContext',
       'onHostContextChange',
       'registerCleanup',
+      'registerBeforeClose',
       `"use strict";\n${combined}`,
     );
     const returnedCleanup = runner.call(
@@ -353,6 +406,7 @@ async function mountShadowContent(
       getHostContext(),
       onHostContextChange,
       registerCleanup,
+      registerBeforeClose,
     );
     if (typeof returnedCleanup === 'function') registerCleanup(returnedCleanup as ShadowCleanup);
   } catch (error) {

@@ -108,6 +108,12 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
   };
 }
 
+function browserPluginSessionId(sessionId?: string | null): string {
+  if (!sessionId) return '';
+  const prefix = 'webview:browser-handler:';
+  return sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId;
+}
+
 export function MainApp() {
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -537,16 +543,25 @@ export function MainApp() {
       // fetcher 抓取与插件面板是不同作用域实例，在插件会话内重新打开同
       // 一 URL 展示（core 工具全面切插件工具后自然消除双开）。
       track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
-        const { session_id, url } = event.payload;
-        if (!session_id || useStore.getState().activeSessionId !== session_id) return;
+        const { url } = event.payload;
+        const sessionId = browserPluginSessionId(event.payload.session_id);
+        if (!sessionId || useStore.getState().activeSessionId !== sessionId) return;
+        let instanceId: string | undefined;
         if (url) {
-          await api
+          const raw = await api
             .bridgeCall(
               'browser-handler',
               'webview.navigate',
-              JSON.stringify({ url, session_id }),
+              JSON.stringify({ url, session_id: sessionId }),
             )
-            .catch(error => console.error('打开浏览器页面失败:', error));
+            .catch((error) => {
+              console.error('打开浏览器页面失败:', error);
+              return null;
+            });
+          if (raw) {
+            const result = JSON.parse(raw) as { active_tab_id?: string | null };
+            instanceId = result.active_tab_id ?? undefined;
+          }
         }
         setAppTabCommand({
           kind: 'plugin',
@@ -557,7 +572,8 @@ export function MainApp() {
             contributionId: 'browser',
             title: '浏览器',
             sandbox: 'webview',
-            multi: false,
+            multi: true,
+            instanceId,
           },
         });
         await openWorkspacePanel('plugin');
@@ -668,12 +684,15 @@ export function MainApp() {
       }
       // 阶段 4 退役内置浏览器：链接打开走浏览器插件（插件×会话实例，
       // 面板 attach 后自动对齐显示），再聚焦插件浏览器标签
+      let instanceId: string | undefined;
       try {
-        await api.bridgeCall(
+        const raw = await api.bridgeCall(
           'browser-handler',
           'webview.navigate',
           JSON.stringify({ url, session_id: sessionId }),
         );
+        const result = JSON.parse(raw) as { active_tab_id?: string | null };
+        instanceId = result.active_tab_id ?? undefined;
       } catch (error) {
         console.error('打开浏览器地址失败:', error);
       }
@@ -686,12 +705,45 @@ export function MainApp() {
           contributionId: 'browser',
           title: '浏览器',
           sandbox: 'webview',
-          multi: false,
+          multi: true,
+          instanceId,
         },
       });
       await openWorkspacePanel('plugin');
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
+
+    const onOpenPluginInstance = async (event: Event) => {
+      const detail = (event as CustomEvent<{
+        plugin_id?: string;
+        contribution_id?: string;
+        instance_id?: string;
+        session_id?: string;
+      }>).detail;
+      if (
+        detail?.plugin_id !== 'browser-handler'
+        || detail.contribution_id !== 'browser'
+        || !detail.instance_id
+      ) return;
+      const store = useStore.getState();
+      const currentSessionId = store.activeSessionId || store.newConversationId;
+      if (!currentSessionId || detail.session_id !== currentSessionId) return;
+      setAppTabCommand({
+        kind: 'plugin',
+        action: 'open-plugin',
+        version: Date.now(),
+        app: {
+          pluginId: 'browser-handler',
+          contributionId: 'browser',
+          title: '浏览器',
+          sandbox: 'webview',
+          multi: true,
+          instanceId: detail.instance_id,
+        },
+      });
+      await openWorkspacePanel('plugin');
+    };
+    window.addEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
 
     return () => {
       // 先标记本轮 disposed，使尚未完成的异步注册流程在后续 guard 处自行放弃；
@@ -711,6 +763,7 @@ export function MainApp() {
         sessionsRefreshTimerRef.current = null;
       }
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
+      window.removeEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
     };
   }, [
     setSidebarOpenByLayout,

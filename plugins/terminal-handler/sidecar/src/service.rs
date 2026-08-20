@@ -143,6 +143,14 @@ struct SessionIdRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CloseRequest {
+    #[serde(default)]
+    session_id: Option<String>,
+    scope_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FindRequest {
     scope_id: String,
 }
@@ -365,6 +373,20 @@ impl TerminalService {
         }
     }
 
+    fn close_session(&self, request: CloseRequest) -> Result<OkResponse> {
+        let removed = request.session_id.as_deref().and_then(|session_id| {
+            self.sessions
+                .lock()
+                .expect("会话表锁损坏")
+                .remove(session_id)
+        });
+        if let Some(mut session) = removed {
+            let _ = session.killer.kill();
+        }
+        persist::clear_scope_log(&request.scope_id).context("清理终端恢复记录失败")?;
+        Ok(OkResponse { ok: true })
+    }
+
     /// 按宿主会话标识找最近创建的活跃终端：UI 跟随会话切换时先恢复
     /// 既有 PTY（含最近输出历史），没有再新建。无存活会话时返回磁盘
     /// 日志尾部（应用重启后回填历史，UI 据此新建 shell 并重放）。
@@ -504,6 +526,11 @@ async fn dispatch_operation(
             let request: SessionIdRequest =
                 serde_json::from_value(payload).context("terminalKill 参数无效")?;
             Ok(serde_json::to_value(service.kill_session(request)?)?)
+        }
+        "terminalClose" => {
+            let request: CloseRequest =
+                serde_json::from_value(payload).context("terminalClose 参数无效")?;
+            Ok(serde_json::to_value(service.close_session(request)?)?)
         }
         "terminalFind" => {
             let request: FindRequest =

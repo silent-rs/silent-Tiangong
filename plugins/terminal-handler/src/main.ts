@@ -8,8 +8,8 @@ import { sidecarCall, terminalSessions } from './shell';
  * pluginRoot 查询（document 查不到 shadow 内元素）。
  *
  * 终端跟会话走（对齐内置终端面板）：宿主上下文的会话变化驱动切换，
- * 每个会话一个独立 PTY；切走再切回、关闭面板再打开都恢复原终端
- * （进程保留在 sidecar，输出历史重放）。
+ * 每个会话一个独立 PTY；切走再切回保持原终端，明确关闭 App 标签时
+ * 结束旧终端并清除恢复记录。
  */
 
 let bridgeRef: HostBridge | null = null;
@@ -21,6 +21,7 @@ const GLOBAL_SCOPE = '__global__';
 let currentScope = '';
 /** 切换防抖序号：异步恢复中会话再变时丢弃过期结果。 */
 let switchTicket = 0;
+const switchTasks = new Set<Promise<void>>();
 
 /** 等容器完成布局（有实际尺寸）再启动会话；容器异常时最多等 500ms。 */
 function waitSized(host: HTMLElement): Promise<void> {
@@ -135,7 +136,11 @@ async function switchScope(
    * 内容时视图自身显示启动占位（见 terminal-view attach）。 */
   async function spawnAndAttach(baseline?: string): Promise<void> {
     const { sessionId, boot } = await spawnDefault(bridge, view, host, scopeId, workspace);
-    if (ticket !== switchTicket) return;
+    if (ticket !== switchTicket) {
+      terminalSessions.delete(sessionId);
+      await sidecarCall(bridge, 'terminalKill', { session_id: sessionId }).catch(() => {});
+      return;
+    }
     view.attach(sessionId, [baseline, boot].filter(Boolean).join('') || undefined);
   }
 }
@@ -159,16 +164,39 @@ async function bootstrap() {
     terminalView?.dispose();
     terminalView = null;
   });
+  runtime?.registerBeforeClose(async () => {
+    const scopeId = currentScope;
+    ++switchTicket;
+    currentScope = '';
+    await Promise.allSettled([...switchTasks]);
+    const sessionId = terminalView?.sessionId();
+    if (!scopeId) return;
+    await sidecarCall(bridge, 'terminalClose', {
+      scope_id: scopeId,
+      ...(sessionId ? { session_id: sessionId } : {}),
+    });
+    if (sessionId) terminalSessions.delete(sessionId);
+  });
 
   // 会话上下文驱动终端跟随：无活跃会话时挂全局终端，会话出现后切换。
   const follow = (session: { id?: string; workspace?: string } | undefined) => {
     if (!terminalView) return;
     const scope = session?.id ?? GLOBAL_SCOPE;
     if (scope === currentScope) return;
-    void switchScope(bridge, terminalView, host, scope, session?.workspace);
+    const task = switchScope(bridge, terminalView, host, scope, session?.workspace);
+    switchTasks.add(task);
+    void task.finally(() => switchTasks.delete(task));
   };
-  follow(runtime?.context.session);
-  runtime?.onContextChange((context) => follow(context.session));
+  const applyContext = (context: NonNullable<typeof runtime>['context']) => {
+    follow(context.session);
+    if (context.app?.visible) terminalView?.reveal();
+  };
+  if (runtime) {
+    applyContext(runtime.context);
+    runtime.onContextChange(applyContext);
+  } else {
+    follow(undefined);
+  }
 }
 
 /** 会话创建失败时把原因显示在终端区域（黑框静默失败无法排查）。 */

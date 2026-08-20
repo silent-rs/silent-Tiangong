@@ -21,8 +21,14 @@ import {
   createTiangongBridge,
   getShadowHostRuntime,
   type HostBridge,
+  type HostContext,
 } from '@tiangong/plugin-sdk';
-import { tabsModel, type BrowserTab } from './tabs-model';
+
+interface BrowserTab {
+  id: string;
+  url: string;
+  title: string;
+}
 
 interface HistoryEntry {
   url: string;
@@ -55,6 +61,7 @@ interface WebviewEvent {
 }
 
 const DEFAULT_URL = 'about:blank';
+const GLOBAL_SCOPE = '__global__';
 const HISTORY_PAGE_SIZE = 20;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 5;
@@ -62,8 +69,8 @@ const MAX_ZOOM = 5;
 const bridge = ref<HostBridge | null>(null);
 const ready = ref(false);
 const url = ref('');
-const tabs = ref<BrowserTab[]>([]);
-const activeTabId = ref<string | null>(null);
+const page = ref<BrowserTab | null>(null);
+const instanceId = ref<string | null>(null);
 const tabHistory = ref<TabHistory>({ tab_id: '', entries: [], current_index: -1 });
 const zoom = ref(1);
 const annotationActive = ref(false);
@@ -83,11 +90,12 @@ let observer: ResizeObserver | null = null;
 let syncTimer = 0;
 let noticeTimer = 0;
 let cleaned = false;
-let panelVisible = true;
+let panelVisible = false;
+let currentScope = GLOBAL_SCOPE;
+let contextTicket = 0;
 const cleanups: Array<() => void> = [];
 
-const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null);
-const hasPage = computed(() => Boolean(activeTab.value && !isBlankBrowserUrl(activeTab.value.url)));
+const hasPage = computed(() => Boolean(page.value && !isBlankBrowserUrl(page.value.url)));
 const canGoBack = computed(() => tabHistory.value.current_index > 0);
 const canGoForward = computed(() => (
   tabHistory.value.current_index >= 0
@@ -111,12 +119,6 @@ function normalizeBrowserUrl(raw: string): string {
   return `https://${value}`;
 }
 
-function tabLabel(tab: BrowserTab): string {
-  if (tab.title) return tab.title;
-  if (isBlankBrowserUrl(tab.url)) return '新标签页';
-  return tab.url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
-}
-
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp);
   const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60_000);
@@ -137,23 +139,44 @@ function showNotice(text: string, kind: 'error' | 'info' = 'error'): void {
   }, 5_000);
 }
 
-function modelToUi(): void {
-  tabs.value = [...tabsModel.tabs];
-  activeTabId.value = tabsModel.activeTabId;
-  const current = tabsModel.tabs.find((tab) => tab.id === tabsModel.activeTabId);
+interface WebviewSnapshot {
+  tabs?: BrowserTab[];
+  active_tab_id?: string | null;
+}
+
+async function callWebview<T>(
+  method: string,
+  payload: Record<string, unknown> = {},
+  scope = currentScope,
+): Promise<T> {
+  if (!bridge.value) throw new Error('浏览器桥接尚未就绪');
+  const raw = await bridge.value.call(
+    method,
+    JSON.stringify({ session_id: scope, ...payload }),
+  );
+  return JSON.parse(raw) as T;
+}
+
+function applySnapshot(snapshot: WebviewSnapshot): void {
+  const current = snapshot.tabs?.find((tab) => tab.id === instanceId.value) ?? null;
+  page.value = current ? { ...current } : null;
   url.value = displayUrl(current?.url ?? '');
 }
 
-async function refreshTabHistory(tabId = tabsModel.activeTabId): Promise<void> {
+async function refreshPage(): Promise<void> {
+  applySnapshot(await callWebview<WebviewSnapshot>('webview.tabs'));
+}
+
+async function refreshTabHistory(tabId = instanceId.value): Promise<void> {
   if (!tabId) {
     tabHistory.value = { tab_id: '', entries: [], current_index: -1 };
     return;
   }
   try {
-    const result = await tabsModel.call<TabHistory>('webview.tabHistory', { tab_id: tabId });
-    if (tabId === tabsModel.activeTabId) tabHistory.value = result;
+    const result = await callWebview<TabHistory>('webview.tabHistory', { tab_id: tabId });
+    if (tabId === instanceId.value) tabHistory.value = result;
   } catch {
-    if (tabId === tabsModel.activeTabId) {
+    if (tabId === instanceId.value) {
       tabHistory.value = { tab_id: tabId, entries: [], current_index: -1 };
     }
   }
@@ -161,24 +184,39 @@ async function refreshTabHistory(tabId = tabsModel.activeTabId): Promise<void> {
 
 async function refreshZoom(): Promise<void> {
   try {
-    const result = await tabsModel.call<{ scale?: number }>('webview.getZoom', {});
+    const result = await callWebview<{ scale?: number }>('webview.getZoom');
     zoom.value = typeof result.scale === 'number' ? result.scale : 1;
   } catch {
     zoom.value = 1;
   }
 }
 
-async function syncPosition(): Promise<void> {
+async function hideInstance(
+  tabId = instanceId.value,
+  scope = currentScope,
+): Promise<void> {
+  if (!tabId || !bridge.value) return;
+  await callWebview('webview.instanceHide', { tab_id: tabId }, scope).catch(() => {});
+}
+
+async function showInstance(): Promise<boolean> {
   const host = contentRef.value;
-  if (!host || !bridge.value || !tabsModel.activeTabId || showHistoryModal.value || !panelVisible) return;
+  const tabId = instanceId.value;
+  if (!host || !bridge.value || !tabId || !panelVisible || showHistoryModal.value) return false;
   const rect = host.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return;
-  await tabsModel.showTab(tabsModel.activeTabId, {
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  await callWebview('webview.instanceShow', {
+    tab_id: tabId,
     x: rect.x,
     y: rect.y,
     width: rect.width,
     height: rect.height,
-  }).catch(() => {});
+  });
+  return true;
+}
+
+async function syncPosition(): Promise<void> {
+  await showInstance().catch(() => {});
 }
 
 function scheduleSync(): void {
@@ -193,12 +231,12 @@ async function navigateTo(raw: string): Promise<void> {
   isLoading.value = true;
   notice.value = null;
   try {
-    if (tabsModel.tabs.length === 0) {
-      await tabsModel.newTab(target);
-    } else {
-      await tabsModel.navigate(target);
+    if (!await showInstance()) {
+      isLoading.value = false;
+      return;
     }
-    modelToUi();
+    const snapshot = await callWebview<WebviewSnapshot>('webview.navigate', { url: target });
+    applySnapshot(snapshot);
     if (isBlankBrowserUrl(target)) isLoading.value = false;
     scheduleSync();
   } catch (error) {
@@ -207,74 +245,33 @@ async function navigateTo(raw: string): Promise<void> {
   }
 }
 
-async function newTab(): Promise<void> {
+function requestNewTab(): void {
   if (!ready.value) return;
-  try {
-    await tabsModel.newTab(DEFAULT_URL);
-    annotationActive.value = false;
-    extractedElements.value = null;
-    modelToUi();
-    await refreshTabHistory();
-    scheduleSync();
-  } catch (error) {
-    showNotice(`新建标签失败：${String(error)}`);
-  }
+  window.dispatchEvent(new CustomEvent('tiangong:plugin-request-new', {
+    detail: { plugin_id: 'browser-handler', contribution_id: 'browser' },
+  }));
 }
 
 async function stopAnnotation(): Promise<void> {
   if (!annotationActive.value) return;
-  await tabsModel.call('webview.eval', {
+  const tabId = instanceId.value;
+  if (!tabId) return;
+  await callWebview('webview.instanceEval', {
+    tab_id: tabId,
     js: 'window.__tiangong_bridge?.annotation?.stop()',
   }).catch(() => {});
   annotationActive.value = false;
 }
 
-async function switchTab(tabId: string): Promise<void> {
-  if (tabId === tabsModel.activeTabId) return;
-  await stopAnnotation();
-  extractedElements.value = null;
-  const host = contentRef.value;
-  const rect = host?.getBoundingClientRect();
-  try {
-    if (rect && rect.width > 0 && rect.height > 0) {
-      await tabsModel.showTab(tabId, {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      });
-    }
-    modelToUi();
-    await refreshTabHistory(tabId);
-  } catch (error) {
-    showNotice(`切换标签失败：${String(error)}`);
-  }
-}
-
-async function closeTab(tabId: string): Promise<void> {
-  if (tabId === tabsModel.activeTabId) await stopAnnotation();
-  try {
-    await tabsModel.closeTab(tabId);
-    extractedElements.value = null;
-    modelToUi();
-    await refreshTabHistory();
-    if (tabsModel.tabs.length === 0) {
-      window.dispatchEvent(new CustomEvent('tiangong:plugin-request-close', {
-        detail: { plugin_id: 'browser-handler', contribution_id: 'browser' },
-      }));
-      return;
-    }
-    scheduleSync();
-  } catch (error) {
-    showNotice(`关闭标签失败：${String(error)}`);
-  }
-}
-
 async function navigationAction(method: 'webview.back' | 'webview.forward' | 'webview.reload'): Promise<void> {
-  if (!ready.value || !tabsModel.activeTabId) return;
+  if (!ready.value || !instanceId.value) return;
   isLoading.value = true;
   try {
-    await tabsModel.call(method, {});
+    if (!await showInstance()) {
+      isLoading.value = false;
+      return;
+    }
+    await callWebview(method);
     scheduleSync();
   } catch (error) {
     isLoading.value = false;
@@ -285,7 +282,8 @@ async function navigationAction(method: 'webview.back' | 'webview.forward' | 'we
 async function setZoom(scale: number): Promise<void> {
   await stopAnnotation();
   try {
-    const result = await tabsModel.call<{ scale?: number }>('webview.setZoom', { scale });
+    if (!await showInstance()) return;
+    const result = await callWebview<{ scale?: number }>('webview.setZoom', { scale });
     zoom.value = result.scale ?? scale;
   } catch (error) {
     showNotice(`调整缩放失败：${String(error)}`);
@@ -295,7 +293,8 @@ async function setZoom(scale: number): Promise<void> {
 async function resetZoom(): Promise<void> {
   await stopAnnotation();
   try {
-    const result = await tabsModel.call<{ scale?: number }>('webview.resetZoom', {});
+    if (!await showInstance()) return;
+    const result = await callWebview<{ scale?: number }>('webview.resetZoom');
     zoom.value = result.scale ?? 1;
   } catch (error) {
     showNotice(`重置缩放失败：${String(error)}`);
@@ -308,7 +307,8 @@ async function toggleAnnotation(): Promise<void> {
     if (annotationActive.value) {
       await stopAnnotation();
     } else {
-      await tabsModel.call('webview.eval', {
+      if (!await showInstance()) return;
+      await callWebview('webview.eval', {
         js: 'window.__tiangong_bridge.annotation.start("rect")',
       });
       annotationActive.value = true;
@@ -320,9 +320,10 @@ async function toggleAnnotation(): Promise<void> {
 
 async function extractAnnotations(): Promise<void> {
   try {
-    const result = await tabsModel.call<{
+    if (!await showInstance()) return;
+    const result = await callWebview<{
       elements?: Array<{ elements?: ExtractedElement[] }>;
-    }>('webview.annotationExtract', {});
+    }>('webview.annotationExtract');
     const elements = (result.elements ?? []).flatMap((entry) => entry.elements ?? []);
     extractedElements.value = elements;
     if (elements.length === 0) showNotice('没有提取到框选元素', 'info');
@@ -335,7 +336,7 @@ async function loadGlobalHistory(offset: number): Promise<void> {
   if (globalHistoryLoading.value) return;
   globalHistoryLoading.value = true;
   try {
-    const entries = await tabsModel.call<HistoryEntry[]>('webview.globalHistory', {
+    const entries = await callWebview<HistoryEntry[]>('webview.globalHistory', {
       offset,
       limit: HISTORY_PAGE_SIZE,
     });
@@ -354,7 +355,7 @@ async function loadGlobalHistory(offset: number): Promise<void> {
 
 async function openHistoryModal(): Promise<void> {
   if (!ready.value) return;
-  await tabsModel.hideCurrent().catch(() => {});
+  await hideInstance();
   globalHistoryEntries.value = [];
   globalHistoryOffset.value = 0;
   globalHistoryHasMore.value = true;
@@ -379,7 +380,7 @@ async function jumpToHistory(targetUrl: string): Promise<void> {
 async function deleteHistoryEntry(targetUrl: string, event: Event): Promise<void> {
   event.stopPropagation();
   try {
-    await tabsModel.call('webview.globalHistoryDelete', { url: targetUrl });
+    await callWebview('webview.globalHistoryDelete', { url: targetUrl });
     globalHistoryEntries.value = globalHistoryEntries.value.filter((entry) => entry.url !== targetUrl);
   } catch (error) {
     showNotice(`删除历史失败：${String(error)}`);
@@ -388,7 +389,7 @@ async function deleteHistoryEntry(targetUrl: string, event: Event): Promise<void
 
 async function clearGlobalHistory(): Promise<void> {
   try {
-    await tabsModel.call('webview.globalHistoryClear', {});
+    await callWebview('webview.globalHistoryClear');
     globalHistoryEntries.value = [];
     globalHistoryOffset.value = 0;
     globalHistoryHasMore.value = false;
@@ -409,7 +410,7 @@ function handleHistoryScroll(event: Event): void {
 }
 
 function expectedScope(): string {
-  return `webview:browser-handler:${tabsModel.scope}`;
+  return `webview:browser-handler:${currentScope}`;
 }
 
 async function handleWebviewEvent(raw: string): Promise<void> {
@@ -422,44 +423,40 @@ async function handleWebviewEvent(raw: string): Promise<void> {
   if (event.scope !== expectedScope() || !event.payload) return;
 
   const { tab_id: tabId, url: eventUrl, title } = event.payload;
+  if (!tabId || tabId !== instanceId.value) return;
   if (event.event === 'navigation_started') {
-    if (!tabsModel.tabs.some((tab) => tab.id === tabId)) {
-      await tabsModel.refresh().catch(() => {});
+    if (eventUrl) {
+      page.value = { id: tabId, url: eventUrl, title: page.value?.title ?? '' };
+      url.value = displayUrl(eventUrl);
     }
-    if (tabId && eventUrl) tabsModel.applyPageLoaded(tabId, eventUrl);
-    modelToUi();
-    if (tabId === tabsModel.activeTabId) {
-      annotationActive.value = false;
-      extractedElements.value = null;
-      isLoading.value = true;
-    }
+    annotationActive.value = false;
+    extractedElements.value = null;
+    isLoading.value = true;
     return;
   }
 
   if (event.event === 'navigation_failed') {
-    if (tabId === tabsModel.activeTabId) {
-      isLoading.value = false;
-      showNotice('页面加载失败');
-      await refreshTabHistory(tabId);
-    }
+    isLoading.value = false;
+    showNotice('页面加载失败');
+    await refreshTabHistory(tabId);
     return;
   }
 
-  if (event.event === 'page_loaded' && tabId) {
-    if (!tabsModel.tabs.some((tab) => tab.id === tabId)) {
-      await tabsModel.refresh().catch(() => {});
-    }
-    tabsModel.applyPageLoaded(tabId, eventUrl, title);
-    modelToUi();
-    if (tabId === tabsModel.activeTabId) {
-      isLoading.value = false;
-      await refreshTabHistory(tabId);
-      scheduleSync();
-    }
+  if (event.event === 'page_loaded') {
+    page.value = {
+      id: tabId,
+      url: eventUrl ?? page.value?.url ?? DEFAULT_URL,
+      title: title || page.value?.title || '',
+    };
+    url.value = displayUrl(page.value.url);
+    isLoading.value = false;
+    await refreshTabHistory(tabId);
+    scheduleSync();
   }
 }
 
 function handleKeyDown(event: KeyboardEvent): void {
+  if (!panelVisible) return;
   if (event.key === 'Escape' && showHistoryModal.value) {
     event.preventDefault();
     closeHistoryModal();
@@ -478,19 +475,55 @@ function handleKeyDown(event: KeyboardEvent): void {
   }
 }
 
-function handleVisibilityChange(event: Event): void {
-  const detail = (event as CustomEvent<{
-    plugin_id?: string;
-    contribution_id?: string;
-    visible?: boolean;
-  }>).detail;
-  if (detail?.plugin_id !== 'browser-handler' || detail?.contribution_id !== 'browser') return;
-  panelVisible = detail.visible !== false;
-  if (panelVisible) {
+async function applyHostContext(context: HostContext): Promise<void> {
+  const ticket = ++contextTicket;
+  const previousScope = currentScope;
+  const previousInstanceId = instanceId.value;
+  const nextScope = context.session?.id ?? GLOBAL_SCOPE;
+  const nextInstanceId = context.app?.instance_id ?? null;
+  const nextVisible = context.app?.visible === true;
+
+  panelVisible = false;
+  if (
+    previousInstanceId
+    && (
+      previousScope !== nextScope
+      || previousInstanceId !== nextInstanceId
+      || !nextVisible
+    )
+  ) {
+    await hideInstance(previousInstanceId, previousScope);
+  }
+  if (cleaned || ticket !== contextTicket) return;
+
+  currentScope = nextScope;
+  instanceId.value = nextInstanceId;
+  panelVisible = Boolean(nextInstanceId && nextVisible);
+  showHistoryModal.value = false;
+  annotationActive.value = false;
+  extractedElements.value = null;
+  isLoading.value = false;
+
+  if (!nextInstanceId) {
+    page.value = null;
+    url.value = '';
+    ready.value = false;
+    return;
+  }
+  if (!panelVisible) {
+    ready.value = true;
+    return;
+  }
+
+  try {
+    await refreshPage();
+    if (cleaned || ticket !== contextTicket) return;
+    ready.value = true;
+    await showInstance();
+    await Promise.all([refreshZoom(), refreshTabHistory(nextInstanceId)]);
     scheduleSync();
-  } else {
-    showHistoryModal.value = false;
-    void tabsModel.hideCurrent();
+  } catch (error) {
+    if (ticket === contextTicket) showNotice(`浏览器初始化失败：${String(error)}`);
   }
 }
 
@@ -505,48 +538,33 @@ function cleanup(): void {
   window.removeEventListener('resize', scheduleSync);
   window.removeEventListener('scroll', scheduleSync, true);
   window.removeEventListener('keydown', handleKeyDown, true);
-  window.removeEventListener('tiangong:plugin-visibility-change', handleVisibilityChange);
-  void tabsModel.suspend();
+  panelVisible = false;
+  void hideInstance();
 }
 
 onMounted(async () => {
   try {
     bridge.value = await createTiangongBridge();
-    await tabsModel.attach(bridge.value);
     const runtime = getShadowHostRuntime();
-    tabsModel.scope = runtime?.context.session?.id ?? '__global__';
-    cleanups.push(tabsModel.subscribe(modelToUi));
-    await tabsModel.restore();
-    if (tabsModel.tabs.length === 0) await tabsModel.newTab(DEFAULT_URL);
-    modelToUi();
-    await Promise.all([refreshZoom(), refreshTabHistory()]);
-    ready.value = true;
-    scheduleSync();
 
     cleanups.push(bridge.value.on('webview.event', (raw) => {
       void handleWebviewEvent(raw);
     }));
     if (runtime) {
-      cleanups.push(runtime.onContextChange((context) => {
-        const nextScope = context.session?.id ?? '__global__';
-        void (async () => {
-          try {
-            const changed = await tabsModel.switchScope(nextScope);
-            if (!changed) return;
-            showHistoryModal.value = false;
-            annotationActive.value = false;
-            extractedElements.value = null;
-            isLoading.value = false;
-            if (tabsModel.tabs.length === 0) await tabsModel.newTab(DEFAULT_URL);
-            modelToUi();
-            await Promise.all([refreshZoom(), refreshTabHistory()]);
-            scheduleSync();
-          } catch (error) {
-            showNotice(`切换会话失败：${String(error)}`);
-          }
-        })();
-      }));
+      cleanups.push(runtime.onContextChange((context) => void applyHostContext(context)));
       runtime.registerCleanup(cleanup);
+    } else {
+      currentScope = GLOBAL_SCOPE;
+      const snapshot = await callWebview<WebviewSnapshot>('webview.tabs');
+      instanceId.value = snapshot.active_tab_id ?? snapshot.tabs?.[0]?.id ?? null;
+      panelVisible = Boolean(instanceId.value);
+      applySnapshot(snapshot);
+      ready.value = Boolean(instanceId.value);
+      if (ready.value) {
+        await showInstance();
+        await Promise.all([refreshZoom(), refreshTabHistory()]);
+        scheduleSync();
+      }
     }
 
     observer = new ResizeObserver(scheduleSync);
@@ -554,7 +572,6 @@ onMounted(async () => {
     window.addEventListener('resize', scheduleSync);
     window.addEventListener('scroll', scheduleSync, true);
     window.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('tiangong:plugin-visibility-change', handleVisibilityChange);
   } catch (error) {
     showNotice(`浏览器初始化失败：${String(error)}`);
   }
@@ -565,45 +582,10 @@ onBeforeUnmount(cleanup);
 
 <template>
   <div class="browser-shell">
-    <div class="tab-strip" role="tablist" aria-label="浏览器标签">
-      <div
-        v-for="tab in tabs"
-        :key="tab.id"
-        role="tab"
-        tabindex="0"
-        class="browser-tab"
-        :class="{ active: tab.id === activeTabId }"
-        :aria-selected="tab.id === activeTabId"
-        :title="tabLabel(tab)"
-        @click="switchTab(tab.id)"
-        @keydown.enter.prevent="switchTab(tab.id)"
-        @keydown.space.prevent="switchTab(tab.id)"
-      >
-        <span class="tab-label">{{ tabLabel(tab) }}</span>
-        <button
-          type="button"
-          class="tab-close"
-          title="关闭标签"
-          aria-label="关闭标签"
-          @click.stop="closeTab(tab.id)"
-        >
-          <X />
-        </button>
-      </div>
-      <button
-        type="button"
-        class="icon-button new-tab"
-        title="新建标签"
-        aria-label="新建标签"
-        :disabled="!ready"
-        @click="newTab"
-      >
-        <Plus />
-      </button>
-    </div>
-
     <div class="toolbar">
       <div class="toolbar-controls">
+        <button type="button" class="icon-button" title="新建标签" aria-label="新建标签" :disabled="!ready" @click="requestNewTab"><Plus /></button>
+        <span class="toolbar-divider" />
         <button type="button" class="icon-button" title="后退" aria-label="后退" :disabled="!ready || !canGoBack" @click="navigationAction('webview.back')"><ArrowLeft /></button>
         <button type="button" class="icon-button" title="前进" aria-label="前进" :disabled="!ready || !canGoForward" @click="navigationAction('webview.forward')"><ArrowRight /></button>
         <button type="button" class="icon-button" title="刷新" aria-label="刷新" :disabled="!ready || !hasPage" @click="navigationAction('webview.reload')">
@@ -706,42 +688,6 @@ button { color: inherit; }
   font-size: 12px;
 }
 
-.tab-strip {
-  display: flex;
-  min-height: 35px;
-  flex: 0 0 35px;
-  align-items: center;
-  gap: 2px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%));
-  padding: 4px 8px;
-  scrollbar-width: thin;
-}
-
-.browser-tab {
-  display: flex;
-  width: 150px;
-  min-width: 80px;
-  max-width: 150px;
-  height: 26px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  border-radius: 4px;
-  padding: 0 6px 0 8px;
-  background: transparent;
-  color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
-  cursor: pointer;
-  text-align: left;
-}
-
-.browser-tab:hover { background: hsl(var(--muted, 210 40% 96.1%) / 0.55); }
-.browser-tab.active { background: hsl(var(--muted, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
-.tab-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.tab-close,
 .history-delete {
   display: inline-flex;
   width: 18px;
@@ -757,11 +703,8 @@ button { color: inherit; }
   cursor: pointer;
 }
 
-.tab-close:hover,
 .history-delete:hover { background: hsl(var(--destructive, 0 84.2% 60.2%) / 0.12); color: hsl(var(--destructive, 0 84.2% 60.2%)); }
-.tab-close svg,
 .history-delete svg { width: 12px; height: 12px; }
-.new-tab { flex: 0 0 28px; }
 
 .toolbar {
   display: flex;
@@ -865,7 +808,6 @@ input:focus-visible,
   .address-group { width: 100%; flex-basis: 100%; }
   .go-button span { display: none; }
   .go-button { width: 28px; padding: 0; }
-  .browser-tab { width: 128px; max-width: 128px; }
 }
 
 @media (hover: none) {
