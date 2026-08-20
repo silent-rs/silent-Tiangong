@@ -1192,6 +1192,8 @@ export interface AvailablePlugin {
   supported: boolean;
   installed_version: string | null;
   update_available: boolean;
+  /** 已安装插件的启用状态（未安装时为 false）。 */
+  installed_enabled: boolean;
   is_default: boolean;
   /// 场景分类标签（多标签，`daily` / `coding` 的任意组合）。
   categories: string[];

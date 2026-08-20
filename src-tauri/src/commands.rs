@@ -4467,7 +4467,13 @@ pub async fn check_default_plugins(
     let missing: Vec<_> = available
         .into_iter()
         .filter(|plugin| {
-            plugin.is_default && plugin.supported && plugin.installed_version.is_none()
+            plugin.is_default
+                && plugin.supported
+                && plugin.installed_version.is_none()
+                // 核心插件（终端/浏览器/审批征询）由启动时的自动维护任务
+                // 负责安装，首启推荐引导不再重复推荐。
+                && !tiangong_plugin_runtime::artifacts::AUTO_INSTALL_PLUGIN_IDS
+                    .contains(&plugin.id.as_str())
         })
         .collect();
 
@@ -4497,7 +4503,7 @@ fn notify_plugins_changed(app: &AppHandle) {
     let _ = app.emit("plugins_changed", &());
 }
 
-async fn download_and_install_plugin(
+pub(crate) async fn download_and_install_plugin(
     storage_root: std::path::PathBuf,
     plugin_id: String,
     app: AppHandle,
