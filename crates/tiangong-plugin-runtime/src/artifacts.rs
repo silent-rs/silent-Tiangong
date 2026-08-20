@@ -23,13 +23,15 @@ const FIRST_LAUNCH_MARKER: &str = ".first_launch_completed";
 /// 默认插件 ID 列表。
 ///
 /// 这些插件提供 Agent 的基础能力（系统提示词、文件操作、命令执行、网络获取、
-/// 索引搜索、技能管理、MCP 工具桥接），确保用户安装后即可获得基本体验。
-pub const DEFAULT_PLUGIN_IDS: &[&str] =
-    &["prompt", "fs", "command", "fetch", "index", "skill", "mcp"];
+/// 索引搜索、技能管理、MCP 工具桥接、终端与浏览器），确保用户安装后即可
+/// 获得基本体验。
+pub const DEFAULT_PLUGIN_IDS: &[&str] = &[
+    "prompt", "fs", "command", "fetch", "index", "skill", "mcp", "terminal", "browser",
+];
 
 /// 场景分类常量：日常工作。
 pub const CATEGORY_DAILY: &str = "daily";
-/// 场景分类常量：编程开发。
+/// 场景分类：编程开发。
 pub const CATEGORY_CODING: &str = "coding";
 
 /// 返回某插件的场景分类标签（多标签，可同时属于多个分类）。
@@ -38,7 +40,8 @@ pub const CATEGORY_CODING: &str = "coding";
 pub fn plugin_categories(id: &str) -> Vec<&'static str> {
     match id {
         // 基础能力：日常与编程通用。
-        "prompt" | "fs" | "command" | "fetch" | "index" | "skill" | "mcp" | "memory" => {
+        "prompt" | "fs" | "command" | "fetch" | "index" | "skill" | "mcp" | "memory"
+        | "terminal" | "browser" => {
             vec![CATEGORY_DAILY, CATEGORY_CODING]
         }
         // 编程开发专属。

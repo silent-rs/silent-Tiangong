@@ -21,29 +21,29 @@ const TRAY_STATUS_ID: &str = "server_status";
 const TRAY_QUIT_ID: &str = "quit";
 
 fn browser_events_to_feedback(
-    events: Vec<tiangong_plugin_browser::types::BrowserEvent>,
-) -> Option<(Vec<tiangong_plugin_browser::types::BrowserEvent>, String)> {
+    events: Vec<tiangong_app::webview_host::types::BrowserEvent>,
+) -> Option<(Vec<tiangong_app::webview_host::types::BrowserEvent>, String)> {
     let network_events: Vec<_> = events
         .into_iter()
         .filter(|event| {
             matches!(
                 event,
-                tiangong_plugin_browser::types::BrowserEvent::NetworkResponse { .. }
+                tiangong_app::webview_host::types::BrowserEvent::NetworkResponse { .. }
             )
         })
         .collect();
-    let feedback = tiangong_plugin_browser::types::format_browser_events(&network_events)?;
+    let feedback = tiangong_app::webview_host::types::format_browser_events(&network_events)?;
     Some((network_events, feedback))
 }
 
 async fn observe_browser_snapshot_for_injection(
     app: tauri::AppHandle,
     session_id: String,
-) -> Option<tiangong_plugin_browser::types::BrowserPageSnapshot> {
+) -> Option<tiangong_app::webview_host::types::BrowserPageSnapshot> {
     let manager = {
-        let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
+        let state = app.state::<tiangong_app::webview_host::WebviewHostState>();
         let browser_state = state.registry.existing_session_state(&session_id)?;
-        tiangong_plugin_browser::manager::BrowserManager::from_state(browser_state)
+        tiangong_app::webview_host::manager::BrowserManager::from_state(browser_state)
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -72,14 +72,14 @@ fn injection_target_session(scope: &str) -> Option<String> {
 async fn ack_browser_events(
     app: tauri::AppHandle,
     session_id: String,
-    events: Vec<tiangong_plugin_browser::types::BrowserEvent>,
+    events: Vec<tiangong_app::webview_host::types::BrowserEvent>,
 ) {
     let removed = {
-        let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
+        let state = app.state::<tiangong_app::webview_host::WebviewHostState>();
         state
             .registry
             .existing_session_state(&session_id)
-            .map(tiangong_plugin_browser::manager::BrowserManager::from_state)
+            .map(tiangong_app::webview_host::manager::BrowserManager::from_state)
             .map(|manager| manager.ack_events(&events))
             .unwrap_or(0)
     };
@@ -149,16 +149,9 @@ fn run_gui() {
             // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
 
-            // 将 workspace 目录设为系统 PTY 默认 cwd（独立于插件实例化的全局状态）。
-            let app_handle = app.handle().clone();
-            let core_state = state.state.clone();
-            tauri::async_runtime::spawn(async move {
-                let workspace = {
-                    let guard = core_state.lock().await;
-                    guard.workspace_dir.clone()
-                };
-                tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
-            });
+            // 初始化 webview 引擎宿主（共享状态 + 协作命令通道），供 webview.*
+            // 桥接原语驱动；须在任何原语接线之前完成。
+            tiangong_app::webview_host::init(app.handle());
 
             // 媒体生成/转换插件（generate_image / generate_video / text_to_speech /
             // speech_to_text）在 app.rs 的 create_core_if_absent 中统一组装（与其他
@@ -178,7 +171,7 @@ fn run_gui() {
             app.listen("browser:page_loaded", move |event| {
                 let payload = event.payload().to_string();
                 let Ok(data) = serde_json::from_str::<
-                    tiangong_plugin_browser::types::BrowserPageLoadedEvent,
+                    tiangong_app::webview_host::types::BrowserPageLoadedEvent,
                 >(&payload) else {
                     warn!("浏览器页面事件 payload 解析失败");
                     return;
@@ -187,19 +180,19 @@ fn run_gui() {
                     return;
                 }
                 let browser_state =
-                    inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                    inject_handle.state::<tiangong_app::webview_host::WebviewHostState>();
                 let Some(source_state) = browser_state
                     .registry
                     .existing_session_state(&data.session_id)
                 else {
                     return;
                 };
-                if !tiangong_plugin_browser::manager::BrowserManager::from_state(source_state)
+                if !tiangong_app::webview_host::manager::BrowserManager::from_state(source_state)
                     .is_visible()
                 {
                     return;
                 }
-                use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                use tiangong_app::webview_host::page_fetcher::BrowserContent;
                 let Some(target_session) = injection_target_session(&data.session_id) else {
                     debug!("浏览器页面事件来自非会话作用域，跳过注入");
                     return;
@@ -224,20 +217,20 @@ fn run_gui() {
             app.listen("browser:events", move |event| {
                 let payload = event.payload().to_string();
                 let Ok(payload) = serde_json::from_str::<
-                    tiangong_plugin_browser::types::BrowserEventsEvent,
+                    tiangong_app::webview_host::types::BrowserEventsEvent,
                 >(&payload) else {
                     warn!("浏览器事件 payload 解析失败");
                     return;
                 };
                 let browser_state =
-                    event_inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                    event_inject_handle.state::<tiangong_app::webview_host::WebviewHostState>();
                 let Some(source_state) = browser_state
                     .registry
                     .existing_session_state(&payload.session_id)
                 else {
                     return;
                 };
-                if !tiangong_plugin_browser::manager::BrowserManager::from_state(source_state)
+                if !tiangong_app::webview_host::manager::BrowserManager::from_state(source_state)
                     .is_visible()
                 {
                     return;
@@ -268,12 +261,14 @@ fn run_gui() {
                         .map(|s| s.url.clone())
                         .filter(|u| !u.is_empty())
                         .or_else(|| {
-                            network_events.iter().find_map(|event| match event {
-                                tiangong_plugin_browser::types::BrowserEvent::NetworkResponse {
+                            network_events.iter().find_map(|event| {
+                                match event {
+                                tiangong_app::webview_host::types::BrowserEvent::NetworkResponse {
                                     url,
                                     ..
                                 } => Some(url.clone()),
                                 _ => None,
+                            }
                             })
                         })
                         .unwrap_or_default();
@@ -295,11 +290,11 @@ fn run_gui() {
                     if page_url.is_empty() {
                         // 尝试从活跃标签的 WebView 获取当前页面 URL
                         let browser_state =
-                            app_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                            app_handle.state::<tiangong_app::webview_host::WebviewHostState>();
                         page_url = browser_state
                             .registry
                             .existing_session_state(&session_id)
-                            .map(tiangong_plugin_browser::manager::BrowserManager::from_state)
+                            .map(tiangong_app::webview_host::manager::BrowserManager::from_state)
                             .and_then(|manager| manager.current_url())
                             .unwrap_or_default();
                     }
@@ -311,7 +306,7 @@ fn run_gui() {
                         return;
                     }
 
-                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                    use tiangong_app::webview_host::page_fetcher::BrowserContent;
                     // 插件作用域反解对话 id（见 injection_target_session）
                     let Some(target_session) = injection_target_session(&session_id) else {
                         debug!("浏览器网络事件来自非会话作用域，跳过注入");
@@ -338,24 +333,6 @@ fn run_gui() {
                     if queued {
                         ack_browser_events(app_handle, session_id, network_events).await;
                     }
-                });
-            });
-
-            // 监听终端用户命令提交事件，push 到注入 channel（消费者统一处理 + 刷新前端）。
-            let tx3 = injection_tx.clone();
-            app.listen("terminal:user_command", move |event| {
-                let payload = event.payload().to_string();
-                let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) else {
-                    return;
-                };
-                let command = data["command"].as_str().unwrap_or("").to_string();
-                if command.trim().is_empty() {
-                    return;
-                }
-                use tiangong_plugin_terminal::collaboration::TerminalUserInput;
-                let _ = tx3.send(tiangong_app::ToolInjection {
-                    session_id: data["session_id"].as_str().map(|s| s.to_string()),
-                    tool: Box::new(TerminalUserInput { command }),
                 });
             });
 
@@ -406,9 +383,9 @@ fn run_gui() {
                 tiangong_plugin_runtime::set_webview_handler(Arc::new(
                     move |plugin_id: &str, method: &str, payload: &str| {
                         let state = app_handle
-                            .try_state::<tiangong_plugin_browser::BrowserPluginState>()
+                            .try_state::<tiangong_app::webview_host::WebviewHostState>()
                             .ok_or_else(|| anyhow::anyhow!("webview 引擎未初始化"))?;
-                        tiangong_plugin_browser::bridge::handle_webview_primitive(
+                        tiangong_app::webview_host::bridge::handle_webview_primitive(
                             &state,
                             &app_handle,
                             plugin_id,
@@ -423,7 +400,7 @@ fn run_gui() {
             // 状态变化（加载完成/失败）经 runtime 订阅表投递给持有对应
             // webview 作用域的插件，插件订阅 webview.event 实时刷新。
             {
-                tiangong_plugin_browser::set_plugin_event_forwarder(Arc::new(
+                tiangong_app::webview_host::set_plugin_event_forwarder(Arc::new(
                     |plugin_id: &str, channel: &str, payload: &str| {
                         tiangong_plugin_runtime::bridge::bridge_emit_to(
                             plugin_id, channel, payload,
@@ -512,8 +489,13 @@ fn run_gui() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let plugin_state = window.state::<tiangong_plugin_browser::BrowserPluginState>();
-                plugin_state.manager().set_visible(false);
+                // 隐藏窗口时把可见的 webview 作用域标记为不可见（页面事件
+                // 注入据此跳过后台会话），实例本身不销毁。
+                let host_state = window.state::<tiangong_app::webview_host::WebviewHostState>();
+                if let Some(state) = host_state.registry.active_state() {
+                    tiangong_app::webview_host::manager::BrowserManager::from_state(state)
+                        .set_visible(false);
+                }
                 let _ = window.hide();
             }
         })
@@ -633,13 +615,6 @@ fn run_gui() {
             tiangong_app::commands::bot_upgrade,
             tiangong_app::commands::resolve_model_context_window,
         ])
-        .plugin(tiangong_plugin_browser::init())
-        .plugin(tiangong_plugin_terminal::init(
-            std::env::var("TIANGONG_WORKSPACE")
-                .ok()
-                .or_else(|| std::env::var("HOME").ok())
-                .unwrap_or_else(|| "/tmp".to_string()),
-        ))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -897,8 +872,11 @@ fn handle_tray_menu_event(
 fn show_main_window(app: &tauri::AppHandle) {
     use tauri::Manager;
 
-    let browser_state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-    browser_state.manager().set_visible(true);
+    // 恢复窗口时同步 webview 可见标记（实际位置由插件 UI 经原语重新对齐）。
+    let host_state = app.state::<tiangong_app::webview_host::WebviewHostState>();
+    if let Some(state) = host_state.registry.active_state() {
+        tiangong_app::webview_host::manager::BrowserManager::from_state(state).set_visible(true);
+    }
 
     let Some(window) = app.get_webview_window("main") else {
         // 尝试用 get_window 作为后备

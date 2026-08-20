@@ -15,12 +15,12 @@ use std::sync::{Arc, Mutex};
 
 use tracing::warn;
 
-use crate::manager::{BrowserSharedState, BrowserState};
+use crate::webview_host::manager::{BrowserSharedState, BrowserState};
 
 /// 浏览器 per-session 状态注册表。
 ///
 /// 持有所有 session 的 `BrowserState`，以及当前 active session id。
-/// 由 `BrowserPluginState` 单例持有，`BrowserManager` / handler / commands 经它路由。
+/// 由 `WebviewHostState` 单例持有，`BrowserManager` / handler / commands 经它路由。
 ///
 /// global_history / zoom 由 `shared` 在进程内共享并统一持久化。
 pub struct BrowserSessionRegistry {
@@ -58,7 +58,9 @@ impl BrowserSessionRegistry {
                 if let Ok(mut s) = state.lock() {
                     if s.tabs.is_empty() {
                         if let Ok(persisted) =
-                            crate::session_store::BrowserSessionStore::load(session_id)
+                            crate::webview_host::session_store::BrowserSessionStore::load(
+                                session_id,
+                            )
                         {
                             if !persisted.tabs.is_empty() {
                                 s.tabs = persisted.tabs;
@@ -158,7 +160,9 @@ impl BrowserSessionRegistry {
             *active = sessions.keys().next().cloned();
         }
         // 删除持久化文件
-        if let Err(error) = crate::session_store::BrowserSessionStore::remove(session_id) {
+        if let Err(error) =
+            crate::webview_host::session_store::BrowserSessionStore::remove(session_id)
+        {
             warn!(%error, session_id, "删除浏览器会话状态失败");
         }
     }

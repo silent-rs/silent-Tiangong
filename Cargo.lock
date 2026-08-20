@@ -2967,12 +2967,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "descape"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "700357d9fb22b5232a85e34a413c1a76ae649f532c31107e402dc84e9c03bfb2"
-
-[[package]]
 name = "dialoguer"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9619,15 +9613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "strip-ansi-escapes"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a8f8038e7e7969abb3f1b7c2a811225e9296da208539e0f79c5251d6cac0025"
-dependencies = [
- "vte",
-]
-
-[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10622,10 +10607,12 @@ dependencies = [
  "async-openai",
  "async-trait",
  "base64 0.22.1",
+ "base64-url",
  "chrono",
  "clap",
  "futures-util",
  "http",
+ "psl",
  "reqwest 0.13.4",
  "rmcp",
  "scru128",
@@ -10654,12 +10641,10 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-browser",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-terminal",
  "tiangong-server",
  "tiangong-toolkit",
  "tiangong-types",
@@ -10965,26 +10950,6 @@ dependencies = [
  "tiangong-plugin-analyze-attachment-protocol",
  "tiangong-types",
  "wit-bindgen 0.46.0",
-]
-
-[[package]]
-name = "tiangong-plugin-browser"
-version = "0.14.4"
-dependencies = [
- "anyhow",
- "base64-url",
- "psl",
- "scru128",
- "serde",
- "serde_json",
- "tauri",
- "tauri-plugin",
- "tempfile",
- "tiangong-config",
- "tiangong-core",
- "tiangong-types",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -11619,30 +11584,6 @@ dependencies = [
  "serde_json",
  "tiangong-plugin-speech-to-text-protocol",
  "wit-bindgen 0.46.0",
-]
-
-[[package]]
-name = "tiangong-plugin-terminal"
-version = "0.14.4"
-dependencies = [
- "anyhow",
- "descape",
- "libc",
- "portable-pty",
- "scru128",
- "serde",
- "serde_json",
- "strip-ansi-escapes",
- "tauri",
- "tauri-plugin",
- "tempfile",
- "tiangong-config",
- "tiangong-core",
- "tiangong-toolkit",
- "tiangong-types",
- "tokio",
- "tracing",
- "vte",
 ]
 
 [[package]]

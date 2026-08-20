@@ -10,8 +10,8 @@ use tauri::{
     WebviewUrl, Wry,
 };
 
-use crate::bridge::{BRIDGE_SCRIPT, DOCUMENT_STATE_SCRIPT, PAGE_SNAPSHOT_SCRIPT};
-use crate::types::{
+use crate::webview_host::bridge::{BRIDGE_SCRIPT, DOCUMENT_STATE_SCRIPT, PAGE_SNAPSHOT_SCRIPT};
+use crate::webview_host::types::{
     BrowserEvent, BrowserEventsEvent, BrowserNavigationStateEvent, BrowserNavigationStateKind,
     BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabSource,
     BrowserTabsSnapshot, HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
@@ -296,7 +296,7 @@ impl BrowserSharedState {
 impl BrowserState {
     /// 构造一个空的 per-session 状态（不含 webview/tab/历史）。
     ///
-    /// `shared` 由 [`BrowserSessionRegistry`](crate::session_registry::BrowserSessionRegistry)
+    /// `shared` 由 [`BrowserSessionRegistry`](crate::webview_host::session_registry::BrowserSessionRegistry)
     /// 创建并注入，所有 session 共用同一份全局历史和缩放设置。
     pub(crate) fn new_empty(session_id: String, shared: Arc<BrowserSharedState>) -> Self {
         Self {
@@ -400,9 +400,9 @@ impl BrowserManager {
             .as_ref()
             .filter(|id| tabs.iter().any(|t| &t.id == *id))
             .cloned();
-        if let Err(error) = crate::session_store::BrowserSessionStore::save(
+        if let Err(error) = crate::webview_host::session_store::BrowserSessionStore::save(
             &state.session_id,
-            &crate::session_store::BrowserSessionPersisted {
+            &crate::webview_host::session_store::BrowserSessionPersisted {
                 tabs,
                 active_tab_id,
             },
@@ -422,9 +422,9 @@ impl BrowserManager {
                 .as_ref()
                 .filter(|id| tabs.iter().any(|t| &t.id == *id))
                 .cloned();
-            if let Err(error) = crate::session_store::BrowserSessionStore::save(
+            if let Err(error) = crate::webview_host::session_store::BrowserSessionStore::save(
                 &s.session_id,
-                &crate::session_store::BrowserSessionPersisted {
+                &crate::webview_host::session_store::BrowserSessionPersisted {
                     tabs,
                     active_tab_id,
                 },
@@ -562,7 +562,7 @@ impl BrowserManager {
                 message: None,
             },
         );
-        crate::emit_plugin_event(
+        crate::webview_host::emit_plugin_event(
             &session_id,
             "navigation_started",
             &serde_json::json!({
@@ -670,7 +670,7 @@ impl BrowserManager {
             serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
         );
         // 阶段 1 事件通道：导航失败（超时）定向投递给插件 UI
-        crate::emit_plugin_event(
+        crate::webview_host::emit_plugin_event(
             &session_id,
             "navigation_failed",
             &serde_json::json!({ "tab_id": tab_id, "url": &requested_url }),
@@ -884,7 +884,7 @@ impl BrowserManager {
             serde_json::json!({ "session_id": session_id.clone(), "tab_id": tab_id }),
         );
         // 阶段 1 事件通道：页面加载完成（标题/URL 就绪）定向投递给插件 UI
-        crate::emit_plugin_event(
+        crate::webview_host::emit_plugin_event(
             &session_id,
             "page_loaded",
             &serde_json::json!({ "tab_id": tab_id, "title": title, "url": final_url }),
@@ -1594,7 +1594,7 @@ impl BrowserManager {
                             continue;
                         }
                         if let Ok(events) =
-                            serde_json::from_str::<Vec<crate::types::BrowserEvent>>(&raw)
+                            serde_json::from_str::<Vec<crate::webview_host::types::BrowserEvent>>(&raw)
                         {
                             if !events.is_empty() {
                                 if let Ok(mut s) = state.lock() {

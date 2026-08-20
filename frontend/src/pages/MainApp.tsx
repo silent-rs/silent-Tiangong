@@ -5,8 +5,6 @@ import {
   type AvailablePlugin,
   type SessionStreamEvent,
   type TabKind,
-  type TabState,
-  type TerminalTabInfo,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
@@ -97,17 +95,6 @@ async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
   return { browserW, logicalH };
 }
 
-function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
-  return {
-    id: tab.id,
-    kind: 'terminal',
-    title: tab.title || '终端',
-    url: '',
-    created_at: tab.created_at || new Date().toISOString(),
-    phase: tab.phase,
-  };
-}
-
 function browserPluginSessionId(sessionId?: string | null): string {
   if (!sessionId) return '';
   const prefix = 'webview:browser:';
@@ -128,15 +115,9 @@ export function MainApp() {
   const [workspaceMode, setWorkspaceMode] = useState<'app' | 'matrix'>('matrix');
   // 矩阵右键菜单下发的 App 实例命令（新建实例/关闭全部），version 递增触发。
   const [appTabCommand, setAppTabCommand] = useState<AppTabCommand | null>(null);
-  // 当前会话各类 App 是否存在已打开实例（浏览器/终端分开维护）：
-  // 拓展区按钮高亮（任一存在）与矩阵图标的「在用」绿点（按 App）共用数据源。
-  const [sessionBrowserTabs, setSessionBrowserTabs] = useState(false);
-  const [sessionTerminalTabs, setSessionTerminalTabs] = useState(false);
   // 已打开的 plugin App 键集合（`plugin_id:contribution_id`）：矩阵绿点数据源。
   const [runningPluginApps, setRunningPluginApps] = useState<string[]>([]);
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
-  const [requestedTerminalTabId, setRequestedTerminalTabId] = useState<string | null>(null);
-  const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // 首次启动推荐安装的缺失默认插件列表；为 null 时不显示引导对话框。
@@ -214,28 +195,22 @@ export function MainApp() {
     setChatPanelWidth(MIN_CHAT_WIDTH);
   }, [lockResize, unlockResize]);
 
-  const openWorkspacePanel = useCallback(async (kind: TabKind, terminalTabId?: string | null) => {
+  const openWorkspacePanel = useCallback(async (kind: TabKind) => {
     const requestId = workspaceOpenRequestIdRef.current + 1;
     workspaceOpenRequestIdRef.current = requestId;
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
     setWorkspaceMode('app');
-    setRequestedTerminalTabId(kind === 'terminal' ? terminalTabId ?? null : null);
     setWorkspaceOpenRequestVersion((version) => version + 1);
     setSidebarOpenByLayout(false);
 
     await ensureWorkspacePanelExpanded();
     if (workspaceOpenRequestIdRef.current !== requestId) return;
-
-    if (kind === 'terminal') {
-      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
-    }
   }, [ensureWorkspacePanelExpanded, setSidebarOpenByLayout]);
 
   // 刷新会话内各类 App 的"已打开实例"标记（拓展区按钮绿点 + 矩阵图标绿点）。
-  // 数据源用持久化的 getSessionTabs（而非各插件的 runtime tab_list）：
-  // 历史会话切回来时 runtime state 尚未重建，runtime 查询会返回空，
-  // 而持久化数据真实记录了该会话拥有的 browser/terminal tab。
+  // 数据源用持久化的 getSessionTabs：历史会话切回来时插件 runtime state 尚未
+  // 重建，持久化数据真实记录了该会话拥有的插件 App 实例。
   // 拓展区面板挂载期间以 TabsContainer 的内存 tab 集合（onTabKindsChanged）
   // 为唯一事实源：持久化读取可能撞上落盘竞态（新对话打开/首条消息落盘前
   // 读到空），用它覆盖会把绿点误灭。本刷新只服务「面板从未挂载」的恢复。
@@ -245,14 +220,12 @@ export function MainApp() {
     if (workspacePanelMountedRef.current) return;
     try {
       const result = await api.getSessionTabs(sessionId);
-      let hasBrowser = false;
-      let hasTerminal = false;
-      for (const tab of result.tabs) {
-        if (tab.kind === 'browser') hasBrowser = true;
-        else if (tab.kind === 'terminal') hasTerminal = true;
-      }
-      setSessionBrowserTabs(hasBrowser);
-      setSessionTerminalTabs(hasTerminal);
+      const pluginApps = Array.from(new Set(
+        result.tabs
+          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
+          .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
+      ));
+      setRunningPluginApps(pluginApps);
     } catch {
       // 会话 tabs 未就绪时静默
     }
@@ -265,7 +238,6 @@ export function MainApp() {
     savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
-    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     if (restoreSize && workspaceExpandedForBrowserRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -323,54 +295,15 @@ export function MainApp() {
   }, [closeWorkspacePanel, ensureWorkspacePanelExpanded, openWorkspacePanel, setSidebarOpenByLayout]);
 
   /// 启动台按钮：App 态切回矩阵态（面板保持展开，App 实例隐藏保活）。
+  /// 矩阵态下插件 webview 实例的隐藏由 TabsContainer 的 mode effect 处理。
   const handleShowMatrix = useCallback(() => {
     setWorkspaceMode('matrix');
-    // 矩阵态不显示浏览器表面，避免后台 webview 覆盖矩阵
-    const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
-    if (sessionId) {
-      void api.browserHide(sessionId).catch(console.error);
-    }
   }, []);
 
   const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
     if (!kind) return;
     workspaceTabKindRef.current = kind;
     setWorkspaceTabKind(kind);
-  }, []);
-
-  const syncTerminalRuntimeTabsToSession = useCallback(async (
-    sessionId: string,
-    preferredTabId?: string | null,
-  ): Promise<boolean> => {
-    const [sessionTabs, runtimeTabs] = await Promise.all([
-      api.getSessionTabs(sessionId),
-      api.terminalTabList(sessionId),
-    ]);
-    if (runtimeTabs.tabs.length === 0) return false;
-
-    const terminalTabs = runtimeTabs.tabs.map(terminalRuntimeTabToState);
-    const terminalById = new Map(terminalTabs.map((tab) => [tab.id, tab]));
-    const nextExistingTabs = sessionTabs.tabs
-      .filter((tab) => tab.kind !== 'terminal' || terminalById.has(tab.id))
-      .map((tab) => (
-        tab.kind === 'terminal' && terminalById.has(tab.id)
-          ? terminalById.get(tab.id)!
-          : tab
-      ));
-    const existingIds = new Set(nextExistingTabs.map((tab) => tab.id));
-    const nextTabs = [
-      ...nextExistingTabs,
-      ...terminalTabs.filter((tab) => !existingIds.has(tab.id)),
-    ];
-    const nextActiveTabId = [
-      preferredTabId,
-      runtimeTabs.active_tab_id,
-      sessionTabs.active_tab_id,
-      nextTabs[0]?.id,
-    ].find((tabId) => tabId && nextTabs.some((tab) => tab.id === tabId)) || null;
-
-    await api.setSessionTabs(sessionId, nextTabs, nextActiveTabId);
-    return true;
   }, []);
 
   const handleDividerDrag = useCallback((e: React.MouseEvent) => {
@@ -414,8 +347,7 @@ export function MainApp() {
   // 离开会话（新对话）时清零，避免绿点残留。
   useEffect(() => {
     if (!activeSessionId) {
-      setSessionBrowserTabs(false);
-      setSessionTerminalTabs(false);
+      setRunningPluginApps([]);
       return;
     }
     void refreshAgentActiveMarkers(activeSessionId);
@@ -590,43 +522,6 @@ export function MainApp() {
         void refreshAgentActiveMarkers(target);
       }));
       guard();
-      track(await listen<{
-        session_id: string;
-        active_tab_id?: string | null;
-        source?: string | null;
-      }>('terminal:tab_updated', async (event) => {
-        const { session_id, active_tab_id, source } = event.payload;
-        const store = useStore.getState();
-        const terminalSessionId = store.activeSessionId || store.newConversationId;
-        const isCurrentTerminalSession = Boolean(terminalSessionId && session_id === terminalSessionId);
-        const isNewConversationTerminalSession = Boolean(store.newConversationId && session_id === store.newConversationId);
-        let synced = false;
-        if (!isNewConversationTerminalSession) {
-          synced = await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null)
-            .catch((error) => {
-              console.error('同步终端 Tab 到会话失败：', error);
-              return false;
-            });
-        }
-        if (synced && isCurrentTerminalSession) {
-          setWorkspacePanelMounted(true);
-          setTerminalSyncVersion((version) => version + 1);
-        }
-        // 当前会话的终端 tab 发生变化时刷新"使用中"标记
-        if (isCurrentTerminalSession) {
-          void refreshAgentActiveMarkers(session_id);
-        }
-        if (!isCurrentTerminalSession) {
-          return;
-        }
-        if (source === 'restore' || source === 'agent_command') {
-          return;
-        }
-        if (showWorkspacePanelRef.current && workspaceTabKindRef.current === 'terminal' && active_tab_id) {
-          await openWorkspacePanel('terminal', active_tab_id);
-        }
-      }));
-      guard();
 
       track(await getCurrentWindow().onResized(async () => {
         if (programmaticResizeRef.current) return;
@@ -773,7 +668,6 @@ export function MainApp() {
     lockResize,
     unlockResize,
     refreshAgentActiveMarkers,
-    syncTerminalRuntimeTabsToSession,
   ]);
 
   return (
@@ -782,7 +676,7 @@ export function MainApp() {
         <LazyStatusPanel
           // 高亮 = 拓展区面板展开中；绿点 = 会话存在已打开的 App 实例（在用标记）
           extensionActive={showWorkspacePanel}
-          extensionAgentActive={sessionBrowserTabs || sessionTerminalTabs}
+          extensionAgentActive={runningPluginApps.length > 0}
           onToggleExtension={handleToggleExtension}
         />
 
@@ -822,8 +716,6 @@ export function MainApp() {
                     initialTabKind={workspaceTabKind}
                     isVisible={showWorkspacePanel}
                     openRequestVersion={workspaceOpenRequestVersion}
-                    requestedTerminalTabId={requestedTerminalTabId}
-                    terminalSyncVersion={terminalSyncVersion}
                     mode={workspaceMode}
                     matrix={
                       <ExtensionMatrix
@@ -850,9 +742,7 @@ export function MainApp() {
                     appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
-                    onTabKindsChanged={(kinds, pluginApps) => {
-                      setSessionBrowserTabs(kinds.includes('browser'));
-                      setSessionTerminalTabs(kinds.includes('terminal'));
+                    onTabKindsChanged={(_kinds, pluginApps) => {
                       setRunningPluginApps(pluginApps);
                     }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}

@@ -3,17 +3,17 @@
 //! 原 `tiangong-core::browser_trait`，随能力下沉重构迁入本插件（#225）。
 //! `PageFetcher` 的唯一定义方、实现方、调用方都在本插件内：
 //! - 定义：本模块
-//! - 实现：[`crate::page_fetcher::BrowserPageFetcher`]
-//! - 调用：[`crate::page_fetcher::BrowserToolOverride`] + [`crate::watcher::BrowserWatcher`]
+//! - 实现：[`crate::webview_host::page_fetcher::BrowserPageFetcher`]
+//! - 调用：[`crate::webview_host::page_fetcher::BrowserToolOverride`] + [`crate::webview_host::watcher::BrowserWatcher`]
 //!
-//! trait 方法返回类型直接复用 [`crate::types`] 中已有的自有类型
+//! trait 方法返回类型直接复用 [`crate::webview_host::types`] 中已有的自有类型
 //!（`BrowserPageSnapshot` / `BrowserTab` / `FormExtractResult` 等），
 //! 无需额外的转换层。core 不再感知浏览器能力。
 
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::types::{
+use crate::webview_host::types::{
     BrowserPageSnapshot, BrowserResponse, BrowserTab, ClickElementResult, ElementCandidate,
     FillFieldResult, FormExtractResult, LocateElementResult, QueryDomResult,
 };

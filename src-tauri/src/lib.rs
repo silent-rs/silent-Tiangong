@@ -7,6 +7,7 @@ mod embedded_server;
 mod session_ops;
 mod state_ops;
 pub mod view;
+pub mod webview_host;
 pub mod workspace_tabs;
 
 pub use app::{TiangongApp, ToolInjection};

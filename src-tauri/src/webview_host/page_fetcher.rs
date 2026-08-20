@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::capability::PageFetcher;
-use crate::types::{
+use crate::webview_host::capability::PageFetcher;
+use crate::webview_host::types::{
     BrowserCommand, BrowserPageSnapshot, BrowserResponse, ClickElementResult, ElementCandidate,
     FillFieldResult, FormExtractResult, LocateElementResult, QueryDomResult,
 };
@@ -114,7 +114,10 @@ impl PageFetcher for BrowserPageFetcher {
     fn list_tabs(
         &self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<Vec<crate::types::BrowserTab>>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<Vec<crate::webview_host::types::BrowserTab>>>
+                + Send,
+        >,
     > {
         let tx = self.cmd_tx.clone();
         let Some(session_id) = self.session_id() else {
@@ -122,7 +125,7 @@ impl PageFetcher for BrowserPageFetcher {
         };
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let tabs: Vec<crate::types::BrowserTab> = send_and_wait!(
+            let tabs: Vec<crate::webview_host::types::BrowserTab> = send_and_wait!(
                 tx,
                 BrowserCommand::TabList {
                     session_id: session_id.clone(),
