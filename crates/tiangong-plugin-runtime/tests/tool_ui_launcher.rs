@@ -32,13 +32,18 @@ fn init_globals() {
                 if method != "app.open" && method != "app.close" {
                     anyhow::bail!("app 原语不支持方法 {method}");
                 }
-                let session_id = serde_json::from_str::<serde_json::Value>(payload)
-                    .ok()
-                    .and_then(|value| value["session_id"].as_str().map(str::to_string))
+                let value = serde_json::from_str::<serde_json::Value>(payload).ok();
+                let session_id = value
+                    .as_ref()
+                    .and_then(|item| item["session_id"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let mode = value
+                    .as_ref()
+                    .and_then(|item| item["mode"].as_str().map(str::to_string))
                     .unwrap_or_default();
                 APP_HITS.lock().unwrap().push((
                     plugin_id.to_string(),
-                    method.to_string(),
+                    format!("{method}#{mode}"),
                     session_id,
                 ));
                 Ok(r#"{"ok":true}"#.to_string())
@@ -146,7 +151,7 @@ fn 无订阅者时请求拉起且订阅后重放并闭合() {
         assert!(
             app_hits().iter().any(
                 |(plugin_id, method, session_arg)| plugin_id == "tool-ui-demo-a"
-                    && method == "app.open"
+                    && method == "app.open#background"
                     && session_arg == &session_id
             ),
             "无订阅者时应经 app.open 请求打开插件 App"
@@ -309,7 +314,7 @@ fn 插件经桥接调用app原语需声明权限且只能操作自己() {
         hits[before],
         (
             "tool-ui-demo-c".to_string(),
-            "app.open".to_string(),
+            "app.open#".to_string(),
             "sess-1".to_string()
         )
     );
@@ -317,7 +322,7 @@ fn 插件经桥接调用app原语需声明权限且只能操作自己() {
         hits[before + 1],
         (
             "tool-ui-demo-c".to_string(),
-            "app.close".to_string(),
+            "app.close#".to_string(),
             "sess-1".to_string()
         )
     );

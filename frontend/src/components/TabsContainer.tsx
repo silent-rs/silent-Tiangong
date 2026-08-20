@@ -221,7 +221,12 @@ export function TabsContainer({
         terminalSessionId,
         'webview.tabs',
       );
-      if (!requestedInstanceId && (app.multi || (snapshot.tabs ?? []).length === 0)) {
+      // 已有页面（如 Agent 后台操作中的标签）时直接聚焦（协同观察）；
+      // 仅在无页面或矩阵「新建实例」（multi 且非聚焦语义）时新建空白页。
+      if (
+        !requestedInstanceId
+        && ((snapshot.tabs ?? []).length === 0 || (app.multi && !app.focusExisting))
+      ) {
         snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
           app.pluginId,
           terminalSessionId,
@@ -619,25 +624,30 @@ export function TabsContainer({
     if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
     lastAppCommandVersionRef.current = appCommand.version;
     if (appCommand.action === 'open-plugin' && appCommand.app) {
-      const { pluginId, contributionId, title, sandbox, multi, instanceId } = appCommand.app;
+      const { pluginId, contributionId, title, sandbox, multi, instanceId, focusExisting } =
+        appCommand.app;
       if (sandbox === 'webview') {
         void openWebviewPluginTab(appCommand.app, instanceId);
         return;
       }
-      const existing = multi && !appCommand.app.focusExisting
-        ? null
-        : tabsRef.current.find(
-          (tab) => tab.kind === 'plugin'
-            && tab.plugin_id === pluginId
-            && tab.contribution_id === contributionId,
-        );
+      // 调用方指定了实例编号时按编号幂等聚焦（重开同一实例）；未指定时
+      // multi 且非聚焦语义（矩阵新建实例）才跳过查重直接新建。
+      const existing = instanceId
+        ? tabsRef.current.find((tab) => tab.id === instanceId)
+        : multi && !focusExisting
+          ? null
+          : tabsRef.current.find(
+            (tab) => tab.kind === 'plugin'
+              && tab.plugin_id === pluginId
+              && tab.contribution_id === contributionId,
+          );
       if (existing) {
         activeTabIdRef.current = existing.id;
         setActiveTabId(existing.id);
         return;
       }
       const nextTab: TabState = {
-        id: `plugin-${crypto.randomUUID()}`,
+        id: instanceId ?? `plugin-${crypto.randomUUID()}`,
         kind: 'plugin',
         title,
         url: '',

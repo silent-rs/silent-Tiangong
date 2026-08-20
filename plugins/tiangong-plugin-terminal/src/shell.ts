@@ -19,6 +19,19 @@ const TOOL_TO_OPERATION: Record<string, string> = {
   terminal_send: 'terminalSend',
 };
 
+// multi 模式下每个终端顶部标签都挂载一个 shell 实例，宿主事件只由其中
+// 一个处理；会话→最近打开实例的记录挂主文档 window 共享（与浏览器插件
+// 的 invocation 去重同模式），保证 open/close 可落到不同实例。
+type TerminalToolWindow = Window & {
+  __tiangongTerminalLastOpened?: Map<string, string>;
+};
+
+function lastOpenedBySession(): Map<string, string> {
+  const shared = window as TerminalToolWindow;
+  return shared.__tiangongTerminalLastOpened
+    ?? (shared.__tiangongTerminalLastOpened = new Map());
+}
+
 /** 插件内共享的 PTY 会话注册表（工具执行与 UI 共用）。 */
 export interface TerminalSessionInfo {
   session_id: string;
@@ -39,24 +52,55 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
 
   tools.onRequested((invocation: ToolInvocation) => {
     void (async () => {
-      // 面板开关走 app.* 宿主原语（不经 sidecar）：terminal_open 打开
-      // 本会话的终端面板；terminal_close 收起面板（实例级会话隔离，
-      // PTY 继续运行）。
+      // 面板开关走 app.* 宿主原语（不经 sidecar）。打开时生成实例编号
+      // 并在结果中报告（app.open 幂等重开同一实例）；关闭按编号精确关
+      // 一个实例，缺省回落本会话最近由 Agent 打开的实例（PTY 继续运行）。
       if (invocation.name === 'terminal_open' || invocation.name === 'terminal_close') {
-        const method = invocation.name === 'terminal_open' ? 'app.open' : 'app.close';
-        const payload = invocation.name === 'terminal_open'
-          ? { session_id: invocation.session_id }
-          : { session_id: invocation.session_id, all: true };
+        const isClose = invocation.name === 'terminal_close';
+        const closeArgs = (invocation.arguments ?? {}) as { tab_id?: string };
+        const closeTarget = closeArgs.tab_id
+          ?? lastOpenedBySession().get(invocation.session_id);
+        if (isClose && !closeTarget) {
+          await tools.resolve({
+            invocation_id: invocation.invocation_id,
+            status: 'answered',
+            result: {
+              ok: false,
+              summary: '没有可关闭的终端面板：请传 tab_id（terminal_open 返回的实例编号），'
+                + '且本会话没有 Agent 打开的实例',
+              exit_code: 1,
+            },
+          });
+          return;
+        }
+        const instanceId = isClose
+          ? closeTarget!
+          : `terminal-${crypto.randomUUID()}`;
+        const method = isClose ? 'app.close' : 'app.open';
         try {
-          await bridge.call(method, JSON.stringify(payload));
+          await bridge.call(
+            method,
+            JSON.stringify({
+              session_id: invocation.session_id,
+              instance_id: instanceId,
+            }),
+          );
+          if (isClose) {
+            const opened = lastOpenedBySession();
+            if (opened.get(invocation.session_id) === instanceId) {
+              opened.delete(invocation.session_id);
+            }
+          } else {
+            lastOpenedBySession().set(invocation.session_id, instanceId);
+          }
           await tools.resolve({
             invocation_id: invocation.invocation_id,
             status: 'answered',
             result: {
               ok: true,
-              summary: invocation.name === 'terminal_open'
-                ? '已打开终端面板'
-                : '已关闭终端面板（后台命令继续运行）',
+              summary: isClose
+                ? `已关闭终端面板（实例 ${instanceId}，后台命令继续运行）`
+                : `已打开终端面板（实例 ${instanceId}；关闭时调 terminal_close 传 tab_id=${instanceId}）`,
               exit_code: 0,
             },
           });

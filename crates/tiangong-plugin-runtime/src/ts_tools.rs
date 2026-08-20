@@ -21,8 +21,11 @@ const MAX_RESULT_FIELD_BYTES: usize = 2_000_000;
 static UI_LAUNCH_LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 const UI_LAUNCH_COOLDOWN: Duration = Duration::from_secs(3);
 
-/// 经 `app.open` 原语请求宿主打开插件 App（Desktop 注入处理器后生效；
-/// CLI / Server 未注入，行为退化为等待超时）。
+/// 经 `app.open` 原语请求宿主以**后台模式**挂载插件实例（不弹拓展区面
+/// 板、不打扰用户；Desktop 注入处理器后生效，CLI / Server 未注入时行为
+/// 退化为等待超时）。插件 UI 挂载完成订阅后由重放机制继续执行调用；
+/// 用户明确要求展示的场景（如 web_fetch open=true、browser_open、
+/// terminal_open）由插件工具自行调用前台 `app.open` 弹出面板。
 fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     let cooldowns = UI_LAUNCH_LAST.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut last_by_plugin) = cooldowns.lock() else {
@@ -37,9 +40,9 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     }
     last_by_plugin.insert(plugin_id.to_string(), now);
     drop(last_by_plugin);
-    let payload = serde_json::json!({ "session_id": session_id }).to_string();
+    let payload = serde_json::json!({ "session_id": session_id, "mode": "background" }).to_string();
     if let Err(error) = crate::bridge::open_app_for_plugin(plugin_id, &payload) {
-        tracing::debug!(%error, plugin_id, "请求打开插件 App 失败");
+        tracing::debug!(%error, plugin_id, "请求后台挂载插件实例失败");
     }
 }
 

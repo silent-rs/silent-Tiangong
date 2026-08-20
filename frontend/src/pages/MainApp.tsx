@@ -3,10 +3,12 @@ import { useStore } from '@/store/useStore';
 import {
   api,
   type AvailablePlugin,
+  type SandboxKind,
   type SessionStreamEvent,
   type TabKind,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
+import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -115,6 +117,8 @@ export function MainApp() {
   const [workspaceMode, setWorkspaceMode] = useState<'app' | 'matrix'>('matrix');
   // 矩阵右键菜单下发的 App 实例命令（新建实例/关闭全部），version 递增触发。
   const [appTabCommand, setAppTabCommand] = useState<AppTabCommand | null>(null);
+  // 工具接应的后台插件实例（app.open mode=background）：隐藏挂载不弹面板。
+  const [bgPluginInstances, setBgPluginInstances] = useState<BackgroundPluginInstance[]>([]);
   // 已打开的 plugin App 键集合（`plugin_id:contribution_id`）：矩阵绿点数据源。
   const [runningPluginApps, setRunningPluginApps] = useState<string[]>([]);
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
@@ -511,9 +515,12 @@ export function MainApp() {
         await openWorkspacePanel('plugin');
       }));
       guard();
-      // app.open 原语落地：宿主请求打开插件 App（工具调用无 UI 接应时
-      // 拉起实例等场景，官方与三方插件一致）。实例挂载后 shell 订阅
-      // tool.requested，宿主重放挂起调用，工具继续执行。
+      // app.open 原语落地：宿主请求打开插件 App（官方与三方插件一致）。
+      // mode=background 为工具接应的隐性挂载：不弹拓展区面板，Agent 操作
+      // 的页面照常在插件作用域进行，用户可随时自行打开拓展区观察（协同）。
+      // 前台模式（用户明确要求展示，如 web_fetch open=true / browser_open）
+      // 弹出并聚焦面板。实例挂载后 shell 订阅 tool.requested，宿主重放
+      // 挂起调用，工具继续执行。
       track(await listen<{
         plugin_id: string;
         contribution_id: string;
@@ -521,9 +528,38 @@ export function MainApp() {
         sandbox?: string;
         multi?: boolean;
         session_id?: string;
+        background?: boolean;
+        instance_id?: string | null;
       }>('app:open_plugin', (event) => {
         const payload = event.payload;
-        // 后台会话的工具调用不弹面板，避免打断当前对话。
+        const normalizeSandbox = (): SandboxKind => (
+          payload.sandbox === 'webview'
+            || payload.sandbox === 'iframe'
+            || payload.sandbox === 'native'
+            ? payload.sandbox
+            : 'shadow'
+        );
+        if (payload.background) {
+          // 跟随发起工具调用的会话（含后台会话），不弹面板、不打扰用户。
+          const sessionId = payload.session_id
+            || useStore.getState().activeSessionId
+            || '';
+          if (!sessionId) return;
+          setBgPluginInstances((prev) => {
+            const exists = prev.some((item) => item.pluginId === payload.plugin_id
+              && item.contributionId === payload.contribution_id
+              && item.sessionId === sessionId);
+            if (exists) return prev;
+            return [...prev, {
+              pluginId: payload.plugin_id,
+              contributionId: payload.contribution_id,
+              sandbox: normalizeSandbox(),
+              sessionId,
+            }];
+          });
+          return;
+        }
+        // 前台：后台会话的工具调用不弹面板，避免打断当前对话。
         if (
           payload.session_id
           && useStore.getState().activeSessionId !== payload.session_id
@@ -536,13 +572,10 @@ export function MainApp() {
             pluginId: payload.plugin_id,
             contributionId: payload.contribution_id,
             title: payload.title || payload.plugin_id,
-            sandbox: payload.sandbox === 'webview'
-              || payload.sandbox === 'iframe'
-              || payload.sandbox === 'native'
-              ? payload.sandbox
-              : 'shadow',
+            sandbox: normalizeSandbox(),
             multi: Boolean(payload.multi),
             focusExisting: true,
+            instanceId: payload.instance_id ?? undefined,
           },
         });
         void openWorkspacePanel('plugin');
@@ -705,6 +738,8 @@ export function MainApp() {
 
   return (
     <SidebarProvider open={sidebarOpen} onOpenChange={handleSidebarChange}>
+      {/* 工具接应的后台插件实例：隐藏挂载，仅保证插件工具有人执行 */}
+      <BackgroundPluginHost instances={bgPluginInstances} />
       <div className="flex flex-col h-screen w-full overflow-hidden">
         <LazyStatusPanel
           // 高亮 = 拓展区面板展开中；绿点 = 会话存在已打开的 App 实例（在用标记）
