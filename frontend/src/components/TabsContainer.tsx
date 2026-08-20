@@ -931,6 +931,7 @@ export function TabsContainer({
                 key={`${terminalSessionId}:${tab.id}`}
                 tab={tab}
                 isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
+                onRequestClose={() => handleCloseTab(tab.id)}
               />
             )
           ) : (

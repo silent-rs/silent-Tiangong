@@ -10,8 +10,9 @@
     "package": "node scripts/package.mjs"
   },
   "dependencies": {
-    "vue": "^3.5.13",
-    "@tiangong/plugin-sdk": "file:../sdk"
+    "@tiangong/plugin-sdk": "file:../sdk",
+    "lucide-vue-next": "^0.577.0",
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",

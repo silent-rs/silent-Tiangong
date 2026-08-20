@@ -1,109 +1,242 @@
 <script setup lang="ts">
-/**
- * 浏览器插件管理界面（shadow 容器，阶段 3 模型驱动）：
- * 标签模型（tabs-model）是唯一状态源——UI 与 Agent 工具壳共用；宿主只
- * 按模型指令调整 webview 实例（显示/隐藏/导航）。本组件负责渲染与把
- * webview 位置持续对齐到内容区（窗口逻辑坐标）。
- */
-import { onBeforeUnmount, onMounted, ref } from 'vue';
-import { createTiangongBridge, getShadowHostRuntime, type HostBridge } from '@tiangong/plugin-sdk';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Clock,
+  CornerDownRight,
+  Globe,
+  History,
+  LoaderCircle,
+  PenTool,
+  Plus,
+  RotateCw,
+  ScanSearch,
+  Trash2,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-vue-next';
+import {
+  createTiangongBridge,
+  getShadowHostRuntime,
+  type HostBridge,
+} from '@tiangong/plugin-sdk';
 import { tabsModel, type BrowserTab } from './tabs-model';
+
+interface HistoryEntry {
+  url: string;
+  title: string;
+  timestamp: number;
+}
+
+interface TabHistory {
+  tab_id: string;
+  entries: HistoryEntry[];
+  current_index: number;
+}
+
+interface ExtractedElement {
+  tag: string;
+  text: string;
+  selector: string;
+  attributes: Record<string, string>;
+}
+
+interface WebviewEvent {
+  event?: 'navigation_started' | 'navigation_failed' | 'page_loaded';
+  scope?: string;
+  payload?: {
+    tab_id?: string;
+    url?: string;
+    title?: string;
+    navigation_id?: number;
+  };
+}
+
+const DEFAULT_URL = 'about:blank';
+const HISTORY_PAGE_SIZE = 20;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 5;
 
 const bridge = ref<HostBridge | null>(null);
 const ready = ref(false);
 const url = ref('');
 const tabs = ref<BrowserTab[]>([]);
 const activeTabId = ref<string | null>(null);
-const status = ref('初始化…');
+const tabHistory = ref<TabHistory>({ tab_id: '', entries: [], current_index: -1 });
+const zoom = ref(1);
+const annotationActive = ref(false);
+const extractedElements = ref<ExtractedElement[] | null>(null);
+const isLoading = ref(false);
+const notice = ref<{ kind: 'error' | 'info'; text: string } | null>(null);
+
+const showHistoryModal = ref(false);
+const globalHistoryEntries = ref<HistoryEntry[]>([]);
+const globalHistoryOffset = ref(0);
+const globalHistoryHasMore = ref(true);
+const globalHistoryLoading = ref(false);
+const historyCloseRef = ref<HTMLButtonElement | null>(null);
 
 const contentRef = ref<HTMLElement | null>(null);
 let observer: ResizeObserver | null = null;
 let syncTimer = 0;
+let noticeTimer = 0;
+let cleaned = false;
+let panelVisible = true;
+const cleanups: Array<() => void> = [];
 
-/** 模型状态同步到界面。 */
+const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null);
+const hasPage = computed(() => Boolean(activeTab.value && !isBlankBrowserUrl(activeTab.value.url)));
+const canGoBack = computed(() => tabHistory.value.current_index > 0);
+const canGoForward = computed(() => (
+  tabHistory.value.current_index >= 0
+  && tabHistory.value.current_index < tabHistory.value.entries.length - 1
+));
+
+function isBlankBrowserUrl(value: string): boolean {
+  return !value || value === DEFAULT_URL;
+}
+
+function displayUrl(value: string): string {
+  return isBlankBrowserUrl(value) ? '' : value;
+}
+
+function normalizeBrowserUrl(raw: string): string {
+  const value = raw.trim();
+  if (!value) return '';
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//i.test(value)) return value;
+  if (/^about:/i.test(value)) return value;
+  if (/^\//.test(value)) return `file://${value}`;
+  return `https://${value}`;
+}
+
+function tabLabel(tab: BrowserTab): string {
+  if (tab.title) return tab.title;
+  if (isBlankBrowserUrl(tab.url)) return '新标签页';
+  return tab.url.replace(/^https?:\/\//, '').split('/')[0] || '新标签页';
+}
+
+function formatTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+  if (diffMinutes < 1) return '刚刚';
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} 小时前`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays} 天前`;
+  return date.toLocaleDateString();
+}
+
+function showNotice(text: string, kind: 'error' | 'info' = 'error'): void {
+  window.clearTimeout(noticeTimer);
+  notice.value = { kind, text };
+  noticeTimer = window.setTimeout(() => {
+    notice.value = null;
+  }, 5_000);
+}
+
 function modelToUi(): void {
   tabs.value = [...tabsModel.tabs];
   activeTabId.value = tabsModel.activeTabId;
-  const active = tabsModel.tabs.find((tab) => tab.id === tabsModel.activeTabId);
-  url.value = active?.url ?? '';
+  const current = tabsModel.tabs.find((tab) => tab.id === tabsModel.activeTabId);
+  url.value = displayUrl(current?.url ?? '');
 }
 
-/** 显示当前活跃标签并对齐内容区矩形。 */
+async function refreshTabHistory(tabId = tabsModel.activeTabId): Promise<void> {
+  if (!tabId) {
+    tabHistory.value = { tab_id: '', entries: [], current_index: -1 };
+    return;
+  }
+  try {
+    const result = await tabsModel.call<TabHistory>('webview.tabHistory', { tab_id: tabId });
+    if (tabId === tabsModel.activeTabId) tabHistory.value = result;
+  } catch {
+    if (tabId === tabsModel.activeTabId) {
+      tabHistory.value = { tab_id: tabId, entries: [], current_index: -1 };
+    }
+  }
+}
+
+async function refreshZoom(): Promise<void> {
+  try {
+    const result = await tabsModel.call<{ scale?: number }>('webview.getZoom', {});
+    zoom.value = typeof result.scale === 'number' ? result.scale : 1;
+  } catch {
+    zoom.value = 1;
+  }
+}
+
 async function syncPosition(): Promise<void> {
   const host = contentRef.value;
-  if (!host || !bridge.value || !tabsModel.activeTabId) return;
+  if (!host || !bridge.value || !tabsModel.activeTabId || showHistoryModal.value || !panelVisible) return;
   const rect = host.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
-  await tabsModel
-    .showTab(tabsModel.activeTabId, {
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    })
-    .catch(() => {});
-  modelToUi();
+  await tabsModel.showTab(tabsModel.activeTabId, {
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+  }).catch(() => {});
 }
 
 function scheduleSync(): void {
   void syncPosition();
-  // 布局晚一拍稳定（标签条增减/窗口拖拽），延迟复测兜底
   window.clearTimeout(syncTimer);
   syncTimer = window.setTimeout(() => void syncPosition(), 120);
 }
 
-function normalizeUrl(raw: string): string {
-  const value = raw.trim();
-  if (!value) return '';
-  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
-  return `https://${value}`;
-}
-
 async function navigateTo(raw: string): Promise<void> {
-  const target = normalizeUrl(raw);
-  if (!target) return;
-  status.value = '导航中…';
+  const target = normalizeBrowserUrl(raw);
+  if (!target || !ready.value) return;
+  isLoading.value = true;
+  notice.value = null;
   try {
-    // 无标签时导航即建首个标签
     if (tabsModel.tabs.length === 0) {
       await tabsModel.newTab(target);
     } else {
       await tabsModel.navigate(target);
     }
-    status.value = '就绪';
     modelToUi();
+    if (isBlankBrowserUrl(target)) isLoading.value = false;
+    scheduleSync();
   } catch (error) {
-    status.value = `导航失败：${String(error)}`;
+    isLoading.value = false;
+    showNotice(`无法打开页面：${String(error)}`);
   }
-  scheduleSync();
-}
-
-async function action(method: 'webview.back' | 'webview.forward' | 'webview.reload'): Promise<void> {
-  try {
-    await tabsModel.call(method, {});
-  } catch (error) {
-    status.value = String(error);
-  }
-  scheduleSync();
 }
 
 async function newTab(): Promise<void> {
+  if (!ready.value) return;
   try {
-    await tabsModel.newTab('about:blank');
+    await tabsModel.newTab(DEFAULT_URL);
+    annotationActive.value = false;
+    extractedElements.value = null;
     modelToUi();
-    status.value = '新标签页';
+    await refreshTabHistory();
+    scheduleSync();
   } catch (error) {
-    status.value = String(error);
+    showNotice(`新建标签失败：${String(error)}`);
   }
-  scheduleSync();
+}
+
+async function stopAnnotation(): Promise<void> {
+  if (!annotationActive.value) return;
+  await tabsModel.call('webview.eval', {
+    js: 'window.__tiangong_bridge?.annotation?.stop()',
+  }).catch(() => {});
+  annotationActive.value = false;
 }
 
 async function switchTab(tabId: string): Promise<void> {
   if (tabId === tabsModel.activeTabId) return;
+  await stopAnnotation();
+  extractedElements.value = null;
   const host = contentRef.value;
   const rect = host?.getBoundingClientRect();
   try {
-    if (rect && rect.width > 0) {
+    if (rect && rect.width > 0 && rect.height > 0) {
       await tabsModel.showTab(tabId, {
         x: rect.x,
         y: rect.y,
@@ -112,25 +245,268 @@ async function switchTab(tabId: string): Promise<void> {
       });
     }
     modelToUi();
+    await refreshTabHistory(tabId);
   } catch (error) {
-    status.value = String(error);
+    showNotice(`切换标签失败：${String(error)}`);
   }
 }
 
 async function closeTab(tabId: string): Promise<void> {
+  if (tabId === tabsModel.activeTabId) await stopAnnotation();
   try {
     await tabsModel.closeTab(tabId);
+    extractedElements.value = null;
     modelToUi();
-    if (tabsModel.tabs.length === 0) status.value = '当前会话还没有页面，点 + 或输入网址开始';
+    await refreshTabHistory();
+    if (tabsModel.tabs.length === 0) {
+      window.dispatchEvent(new CustomEvent('tiangong:plugin-request-close', {
+        detail: { plugin_id: 'browser-handler', contribution_id: 'browser' },
+      }));
+      return;
+    }
+    scheduleSync();
   } catch (error) {
-    status.value = String(error);
+    showNotice(`关闭标签失败：${String(error)}`);
   }
+}
+
+async function navigationAction(method: 'webview.back' | 'webview.forward' | 'webview.reload'): Promise<void> {
+  if (!ready.value || !tabsModel.activeTabId) return;
+  isLoading.value = true;
+  try {
+    await tabsModel.call(method, {});
+    scheduleSync();
+  } catch (error) {
+    isLoading.value = false;
+    showNotice(`页面操作失败：${String(error)}`);
+  }
+}
+
+async function setZoom(scale: number): Promise<void> {
+  await stopAnnotation();
+  try {
+    const result = await tabsModel.call<{ scale?: number }>('webview.setZoom', { scale });
+    zoom.value = result.scale ?? scale;
+  } catch (error) {
+    showNotice(`调整缩放失败：${String(error)}`);
+  }
+}
+
+async function resetZoom(): Promise<void> {
+  await stopAnnotation();
+  try {
+    const result = await tabsModel.call<{ scale?: number }>('webview.resetZoom', {});
+    zoom.value = result.scale ?? 1;
+  } catch (error) {
+    showNotice(`重置缩放失败：${String(error)}`);
+  }
+}
+
+async function toggleAnnotation(): Promise<void> {
+  if (!hasPage.value) return;
+  try {
+    if (annotationActive.value) {
+      await stopAnnotation();
+    } else {
+      await tabsModel.call('webview.eval', {
+        js: 'window.__tiangong_bridge.annotation.start("rect")',
+      });
+      annotationActive.value = true;
+    }
+  } catch (error) {
+    showNotice(`批注操作失败：${String(error)}`);
+  }
+}
+
+async function extractAnnotations(): Promise<void> {
+  try {
+    const result = await tabsModel.call<{
+      elements?: Array<{ elements?: ExtractedElement[] }>;
+    }>('webview.annotationExtract', {});
+    const elements = (result.elements ?? []).flatMap((entry) => entry.elements ?? []);
+    extractedElements.value = elements;
+    if (elements.length === 0) showNotice('没有提取到框选元素', 'info');
+  } catch (error) {
+    showNotice(`提取批注失败：${String(error)}`);
+  }
+}
+
+async function loadGlobalHistory(offset: number): Promise<void> {
+  if (globalHistoryLoading.value) return;
+  globalHistoryLoading.value = true;
+  try {
+    const entries = await tabsModel.call<HistoryEntry[]>('webview.globalHistory', {
+      offset,
+      limit: HISTORY_PAGE_SIZE,
+    });
+    globalHistoryEntries.value = offset === 0
+      ? entries
+      : [...globalHistoryEntries.value, ...entries];
+    globalHistoryHasMore.value = entries.length >= HISTORY_PAGE_SIZE;
+    globalHistoryOffset.value = offset + entries.length;
+  } catch (error) {
+    globalHistoryHasMore.value = false;
+    showNotice(`加载历史失败：${String(error)}`);
+  } finally {
+    globalHistoryLoading.value = false;
+  }
+}
+
+async function openHistoryModal(): Promise<void> {
+  if (!ready.value) return;
+  await tabsModel.hideCurrent().catch(() => {});
+  globalHistoryEntries.value = [];
+  globalHistoryOffset.value = 0;
+  globalHistoryHasMore.value = true;
+  showHistoryModal.value = true;
+  void loadGlobalHistory(0);
+  await nextTick();
+  historyCloseRef.value?.focus();
+}
+
+function closeHistoryModal(): void {
+  if (!showHistoryModal.value) return;
+  showHistoryModal.value = false;
   scheduleSync();
 }
 
-async function hide(): Promise<void> {
-  await tabsModel.hideCurrent().catch(() => {});
-  status.value = '已隐藏（页面仍在后台）';
+async function jumpToHistory(targetUrl: string): Promise<void> {
+  showHistoryModal.value = false;
+  url.value = targetUrl;
+  await navigateTo(targetUrl);
+}
+
+async function deleteHistoryEntry(targetUrl: string, event: Event): Promise<void> {
+  event.stopPropagation();
+  try {
+    await tabsModel.call('webview.globalHistoryDelete', { url: targetUrl });
+    globalHistoryEntries.value = globalHistoryEntries.value.filter((entry) => entry.url !== targetUrl);
+  } catch (error) {
+    showNotice(`删除历史失败：${String(error)}`);
+  }
+}
+
+async function clearGlobalHistory(): Promise<void> {
+  try {
+    await tabsModel.call('webview.globalHistoryClear', {});
+    globalHistoryEntries.value = [];
+    globalHistoryOffset.value = 0;
+    globalHistoryHasMore.value = false;
+  } catch (error) {
+    showNotice(`清空历史失败：${String(error)}`);
+  }
+}
+
+function handleHistoryScroll(event: Event): void {
+  const element = event.currentTarget as HTMLElement;
+  if (
+    element.scrollHeight - element.scrollTop - element.clientHeight < 100
+    && globalHistoryHasMore.value
+    && !globalHistoryLoading.value
+  ) {
+    void loadGlobalHistory(globalHistoryOffset.value);
+  }
+}
+
+function expectedScope(): string {
+  return `webview:browser-handler:${tabsModel.scope}`;
+}
+
+async function handleWebviewEvent(raw: string): Promise<void> {
+  let event: WebviewEvent;
+  try {
+    event = JSON.parse(raw) as WebviewEvent;
+  } catch {
+    return;
+  }
+  if (event.scope !== expectedScope() || !event.payload) return;
+
+  const { tab_id: tabId, url: eventUrl, title } = event.payload;
+  if (event.event === 'navigation_started') {
+    if (!tabsModel.tabs.some((tab) => tab.id === tabId)) {
+      await tabsModel.refresh().catch(() => {});
+    }
+    if (tabId && eventUrl) tabsModel.applyPageLoaded(tabId, eventUrl);
+    modelToUi();
+    if (tabId === tabsModel.activeTabId) {
+      annotationActive.value = false;
+      extractedElements.value = null;
+      isLoading.value = true;
+    }
+    return;
+  }
+
+  if (event.event === 'navigation_failed') {
+    if (tabId === tabsModel.activeTabId) {
+      isLoading.value = false;
+      showNotice('页面加载失败');
+      await refreshTabHistory(tabId);
+    }
+    return;
+  }
+
+  if (event.event === 'page_loaded' && tabId) {
+    if (!tabsModel.tabs.some((tab) => tab.id === tabId)) {
+      await tabsModel.refresh().catch(() => {});
+    }
+    tabsModel.applyPageLoaded(tabId, eventUrl, title);
+    modelToUi();
+    if (tabId === tabsModel.activeTabId) {
+      isLoading.value = false;
+      await refreshTabHistory(tabId);
+      scheduleSync();
+    }
+  }
+}
+
+function handleKeyDown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && showHistoryModal.value) {
+    event.preventDefault();
+    closeHistoryModal();
+    return;
+  }
+  if (!(event.metaKey || event.ctrlKey) || showHistoryModal.value) return;
+  if (event.key === '=' || event.key === '+') {
+    event.preventDefault();
+    if (zoom.value < MAX_ZOOM) void setZoom(+(zoom.value + 0.1).toFixed(2));
+  } else if (event.key === '-') {
+    event.preventDefault();
+    if (zoom.value > MIN_ZOOM) void setZoom(+(zoom.value - 0.1).toFixed(2));
+  } else if (event.key === '0') {
+    event.preventDefault();
+    void resetZoom();
+  }
+}
+
+function handleVisibilityChange(event: Event): void {
+  const detail = (event as CustomEvent<{
+    plugin_id?: string;
+    contribution_id?: string;
+    visible?: boolean;
+  }>).detail;
+  if (detail?.plugin_id !== 'browser-handler' || detail?.contribution_id !== 'browser') return;
+  panelVisible = detail.visible !== false;
+  if (panelVisible) {
+    scheduleSync();
+  } else {
+    showHistoryModal.value = false;
+    void tabsModel.hideCurrent();
+  }
+}
+
+function cleanup(): void {
+  if (cleaned) return;
+  cleaned = true;
+  window.clearTimeout(syncTimer);
+  window.clearTimeout(noticeTimer);
+  observer?.disconnect();
+  observer = null;
+  cleanups.splice(0).reverse().forEach((stop) => stop());
+  window.removeEventListener('resize', scheduleSync);
+  window.removeEventListener('scroll', scheduleSync, true);
+  window.removeEventListener('keydown', handleKeyDown, true);
+  window.removeEventListener('tiangong:plugin-visibility-change', handleVisibilityChange);
+  void tabsModel.suspend();
 }
 
 onMounted(async () => {
@@ -139,149 +515,360 @@ onMounted(async () => {
     await tabsModel.attach(bridge.value);
     const runtime = getShadowHostRuntime();
     tabsModel.scope = runtime?.context.session?.id ?? '__global__';
+    cleanups.push(tabsModel.subscribe(modelToUi));
     await tabsModel.restore();
+    if (tabsModel.tabs.length === 0) await tabsModel.newTab(DEFAULT_URL);
     modelToUi();
+    await Promise.all([refreshZoom(), refreshTabHistory()]);
     ready.value = true;
-    status.value = tabsModel.tabs.length > 0 ? '就绪' : '当前会话还没有页面，点 + 或输入网址开始';
-    if (tabsModel.activeTabId) scheduleSync();
+    scheduleSync();
 
-    // 会话上下文变化 → 浏览器跟随切换（旧会话隐藏保留，新会话恢复）
-    runtime?.onContextChange((context) => {
-      const next = context.session?.id ?? '__global__';
-      void (async () => {
-        status.value = '切换会话…';
-        const changed = await tabsModel.switchScope(next);
-        if (!changed) return;
-        modelToUi();
-        status.value =
-          tabsModel.tabs.length > 0 ? '就绪' : '当前会话还没有页面，点 + 或输入网址开始';
-        if (tabsModel.activeTabId) scheduleSync();
-      })();
-    });
+    cleanups.push(bridge.value.on('webview.event', (raw) => {
+      void handleWebviewEvent(raw);
+    }));
+    if (runtime) {
+      cleanups.push(runtime.onContextChange((context) => {
+        const nextScope = context.session?.id ?? '__global__';
+        void (async () => {
+          try {
+            const changed = await tabsModel.switchScope(nextScope);
+            if (!changed) return;
+            showHistoryModal.value = false;
+            annotationActive.value = false;
+            extractedElements.value = null;
+            isLoading.value = false;
+            if (tabsModel.tabs.length === 0) await tabsModel.newTab(DEFAULT_URL);
+            modelToUi();
+            await Promise.all([refreshZoom(), refreshTabHistory()]);
+            scheduleSync();
+          } catch (error) {
+            showNotice(`切换会话失败：${String(error)}`);
+          }
+        })();
+      }));
+      runtime.registerCleanup(cleanup);
+    }
 
-    // 页面事件通道：标题/地址变化实时回填模型与界面
-    bridge.value.on('webview.event', (raw) => {
-      try {
-        const event = JSON.parse(raw) as {
-          event?: string;
-          scope?: string;
-          payload?: { tab_id?: string; url?: string; title?: string };
-        };
-        const expected =
-          tabsModel.scope === '__global__'
-            ? 'webview:browser-handler'
-            : `webview:browser-handler:${tabsModel.scope}`;
-        if (event.scope !== expected || !event.payload) return;
-        if (event.event === 'navigation_failed') {
-          status.value = '页面加载失败';
-          return;
-        }
-        if (event.event === 'page_loaded' && event.payload.tab_id) {
-          tabsModel.applyPageLoaded(
-            event.payload.tab_id,
-            event.payload.url,
-            event.payload.title,
-          );
-          modelToUi();
-        }
-      } catch {
-        /* 忽略坏帧 */
-      }
-    });
-
-    observer = new ResizeObserver(() => scheduleSync());
+    observer = new ResizeObserver(scheduleSync);
     if (contentRef.value) observer.observe(contentRef.value);
     window.addEventListener('resize', scheduleSync);
     window.addEventListener('scroll', scheduleSync, true);
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('tiangong:plugin-visibility-change', handleVisibilityChange);
   } catch (error) {
-    status.value = `初始化失败：${String(error)}`;
+    showNotice(`浏览器初始化失败：${String(error)}`);
   }
 });
 
-onBeforeUnmount(() => {
-  window.clearTimeout(syncTimer);
-  window.removeEventListener('resize', scheduleSync);
-  window.removeEventListener('scroll', scheduleSync, true);
-  observer?.disconnect();
-  observer = null;
-  void tabsModel.suspend();
-});
-
-// shadow 容器卸载回调（面板关闭/重建）同样隐藏并落盘
-getShadowHostRuntime()?.registerCleanup(() => {
-  void tabsModel.suspend();
-});
-
-function tabLabel(tab: BrowserTab): string {
-  if (tab.title) return tab.title;
-  try {
-    return new URL(tab.url).hostname;
-  } catch {
-    return tab.url || '新标签页';
-  }
-}
+onBeforeUnmount(cleanup);
 </script>
 
 <template>
-  <div class="browser">
-    <!-- 标签条 -->
-    <div v-if="tabs.length > 0" class="tabs">
+  <div class="browser-shell">
+    <div class="tab-strip" role="tablist" aria-label="浏览器标签">
       <div
         v-for="tab in tabs"
         :key="tab.id"
-        class="tab"
+        role="tab"
+        tabindex="0"
+        class="browser-tab"
         :class="{ active: tab.id === activeTabId }"
+        :aria-selected="tab.id === activeTabId"
+        :title="tabLabel(tab)"
         @click="switchTab(tab.id)"
+        @keydown.enter.prevent="switchTab(tab.id)"
+        @keydown.space.prevent="switchTab(tab.id)"
       >
         <span class="tab-label">{{ tabLabel(tab) }}</span>
-        <span class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+        <button
+          type="button"
+          class="tab-close"
+          title="关闭标签"
+          aria-label="关闭标签"
+          @click.stop="closeTab(tab.id)"
+        >
+          <X />
+        </button>
       </div>
-      <button class="tab-new" title="新建标签" @click="newTab">+</button>
-    </div>
-
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <button class="nav" title="后退" :disabled="!ready" @click="action('webview.back')">‹</button>
-      <button class="nav" title="前进" :disabled="!ready" @click="action('webview.forward')">›</button>
-      <button class="nav" title="刷新" :disabled="!ready" @click="action('webview.reload')">⟳</button>
-      <input
-        v-model="url"
-        type="text"
-        placeholder="输入网址，回车打开"
+      <button
+        type="button"
+        class="icon-button new-tab"
+        title="新建标签"
+        aria-label="新建标签"
         :disabled="!ready"
-        @keyup.enter="navigateTo(url)"
-      />
-      <button class="nav" title="隐藏页面（保留会话）" :disabled="!ready" @click="hide">—</button>
-      <span class="status">{{ status }}</span>
+        @click="newTab"
+      >
+        <Plus />
+      </button>
     </div>
 
-    <!-- 内容区：原生 webview 叠放在此区域之上，仅作占位与位置锚点 -->
-    <div ref="contentRef" class="content">
-      <div v-if="!ready || tabs.length === 0" class="placeholder">
-        {{ ready ? '当前会话还没有页面，点 + 或输入网址开始' : status }}
+    <div class="toolbar">
+      <div class="toolbar-controls">
+        <button type="button" class="icon-button" title="后退" aria-label="后退" :disabled="!ready || !canGoBack" @click="navigationAction('webview.back')"><ArrowLeft /></button>
+        <button type="button" class="icon-button" title="前进" aria-label="前进" :disabled="!ready || !canGoForward" @click="navigationAction('webview.forward')"><ArrowRight /></button>
+        <button type="button" class="icon-button" title="刷新" aria-label="刷新" :disabled="!ready || !hasPage" @click="navigationAction('webview.reload')">
+          <LoaderCircle v-if="isLoading" class="spin" />
+          <RotateCw v-else />
+        </button>
+        <span class="toolbar-divider" />
+        <button type="button" class="icon-button" title="缩小 (Cmd/Ctrl -)" aria-label="缩小" :disabled="!ready || zoom <= MIN_ZOOM + 1e-6" @click="setZoom(+(zoom - 0.1).toFixed(2))"><ZoomOut /></button>
+        <button type="button" class="zoom-value" title="双击重置为 100% (Cmd/Ctrl 0)" @dblclick="resetZoom">{{ Math.round(zoom * 100) }}%</button>
+        <button type="button" class="icon-button" title="放大 (Cmd/Ctrl +)" aria-label="放大" :disabled="!ready || zoom >= MAX_ZOOM - 1e-6" @click="setZoom(+(zoom + 0.1).toFixed(2))"><ZoomIn /></button>
+        <button type="button" class="icon-button" title="浏览历史" aria-label="浏览历史" :disabled="!ready" @click="openHistoryModal"><History /></button>
       </div>
+
+      <div class="address-group">
+        <Globe class="address-icon" aria-hidden="true" />
+        <input v-model="url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="输入 URL..." aria-label="页面地址" :disabled="!ready" @keydown.enter.prevent="navigateTo(url)" />
+        <button type="button" class="go-button" title="进入" :disabled="!ready || !url.trim()" @click="navigateTo(url)"><CornerDownRight /><span>进入</span></button>
+        <button type="button" class="icon-button" :class="{ selected: annotationActive }" :title="annotationActive ? '关闭批注' : '开启批注'" :aria-label="annotationActive ? '关闭批注' : '开启批注'" :aria-pressed="annotationActive" :disabled="!ready || !hasPage" @click="toggleAnnotation"><PenTool /></button>
+        <button v-if="annotationActive" type="button" class="icon-button" title="提取框选元素" aria-label="提取框选元素" @click="extractAnnotations"><ScanSearch /></button>
+      </div>
+    </div>
+
+    <div v-if="notice" class="notice" :class="notice.kind" role="status">
+      <span>{{ notice.text }}</span>
+      <button type="button" title="关闭" aria-label="关闭提示" @click="notice = null"><X /></button>
+    </div>
+
+    <div v-if="extractedElements && extractedElements.length > 0" class="annotation-results">
+      <div class="annotation-header">
+        <span>提取到 {{ extractedElements.length }} 个元素</span>
+        <button type="button" title="关闭" aria-label="关闭提取结果" @click="extractedElements = null"><X /></button>
+      </div>
+      <div v-for="(element, index) in extractedElements" :key="`${element.selector}-${index}`" class="annotation-row">
+        <span class="element-tag">&lt;{{ element.tag }}&gt;</span>
+        <span v-if="element.text" class="element-text">{{ element.text }}</span>
+        <div class="element-selector">{{ element.selector }}</div>
+      </div>
+    </div>
+
+    <div ref="contentRef" class="content-anchor" />
+
+    <div v-if="showHistoryModal" class="modal-backdrop" role="presentation" @mousedown.self="closeHistoryModal">
+      <section class="history-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <header class="dialog-header">
+          <h2 id="history-title"><Clock />浏览历史</h2>
+          <button ref="historyCloseRef" type="button" class="icon-button" title="关闭" aria-label="关闭浏览历史" @click="closeHistoryModal"><X /></button>
+        </header>
+        <div class="history-list" @scroll="handleHistoryScroll">
+          <div v-if="globalHistoryEntries.length === 0 && !globalHistoryLoading" class="history-empty">暂无浏览历史</div>
+          <div v-for="(entry, index) in globalHistoryEntries" :key="`${entry.url}-${entry.timestamp}-${index}`" role="button" tabindex="0" class="history-entry" @click="jumpToHistory(entry.url)" @keydown.enter.prevent="jumpToHistory(entry.url)" @keydown.space.prevent="jumpToHistory(entry.url)">
+            <span class="history-copy">
+              <strong>{{ entry.title || entry.url }}</strong>
+              <span class="history-meta"><span>{{ entry.url.replace(/^https?:\/\//, '').split('/')[0] }}</span><span>{{ formatTime(entry.timestamp) }}</span></span>
+            </span>
+            <button type="button" class="history-delete" title="删除" aria-label="删除历史记录" @click="deleteHistoryEntry(entry.url, $event)"><X /></button>
+          </div>
+          <div v-if="globalHistoryLoading" class="history-loading"><LoaderCircle class="spin" /><span>加载中...</span></div>
+        </div>
+        <footer v-if="globalHistoryEntries.length > 0" class="dialog-footer">
+          <button type="button" class="clear-history" @click="clearGlobalHistory"><Trash2 /><span>清空全部历史</span></button>
+        </footer>
+      </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-.browser { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--background, #1e1e2e); color: var(--foreground, #cdd6f4); font-size: 12px; }
+:global(#app) {
+  height: 100%;
+  min-height: 0;
+}
 
-.tabs { display: flex; align-items: center; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--border, #8884); min-height: 30px; overflow-x: auto; }
-.tab { display: flex; align-items: center; gap: 6px; max-width: 180px; padding: 4px 8px; border: 1px solid var(--border, #8884); border-bottom: 0; border-radius: 6px 6px 0 0; opacity: 0.65; cursor: pointer; white-space: nowrap; }
-.tab.active { opacity: 1; background: var(--accent, #8882); }
-.tab-label { overflow: hidden; text-overflow: ellipsis; }
-.tab-close { padding: 0 2px; border-radius: 3px; }
-.tab-close:hover { background: var(--destructive, #f8717188); color: white; }
-.tab-new { border: 0; background: transparent; color: inherit; font-size: 14px; cursor: pointer; padding: 2px 8px; }
+:host,
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  letter-spacing: 0;
+}
 
-.toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border, #8884); }
-.nav { border: 0; border-radius: 4px; padding: 4px 9px; background: var(--accent, #8883); color: inherit; cursor: pointer; font-size: 13px; }
-.nav:disabled { opacity: 0.4; cursor: default; }
-.nav:not(:disabled):hover { background: var(--accent-foreground, #8885); }
-.toolbar input { flex: 1; min-width: 0; padding: 5px 10px; border: 1px solid var(--border, #8886); border-radius: 999px; background: transparent; color: inherit; font: inherit; }
-.status { font-size: 11px; color: var(--muted-foreground, #888); white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+button,
+input {
+  font: inherit;
+  letter-spacing: 0;
+}
 
-.content { position: relative; flex: 1; min-height: 0; }
-.placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted-foreground, #888); }
+button { color: inherit; }
+
+.browser-shell {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: hsl(var(--background, 0 0% 100%));
+  color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.tab-strip {
+  display: flex;
+  min-height: 35px;
+  flex: 0 0 35px;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%));
+  padding: 4px 8px;
+  scrollbar-width: thin;
+}
+
+.browser-tab {
+  display: flex;
+  width: 150px;
+  min-width: 80px;
+  max-width: 150px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 6px 0 8px;
+  background: transparent;
+  color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+  cursor: pointer;
+  text-align: left;
+}
+
+.browser-tab:hover { background: hsl(var(--muted, 210 40% 96.1%) / 0.55); }
+.browser-tab.active { background: hsl(var(--muted, 210 40% 96.1%)); color: hsl(var(--foreground, 222.2 47.4% 11.2%)); }
+.tab-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tab-close,
+.history-delete {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  padding: 0;
+  background: transparent;
+  color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+  cursor: pointer;
+}
+
+.tab-close:hover,
+.history-delete:hover { background: hsl(var(--destructive, 0 84.2% 60.2%) / 0.12); color: hsl(var(--destructive, 0 84.2% 60.2%)); }
+.tab-close svg,
+.history-delete svg { width: 12px; height: 12px; }
+.new-tab { flex: 0 0 28px; }
+
+.toolbar {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%));
+  padding: 7px 8px;
+}
+
+.toolbar-controls,
+.address-group { display: flex; min-width: 0; align-items: center; gap: 4px; }
+.toolbar-controls { flex: 0 0 auto; }
+.address-group { flex: 1 1 320px; }
+.toolbar-divider { width: 1px; height: 18px; margin: 0 2px; background: hsl(var(--border, 214.3 31.8% 91.4%)); }
+
+.icon-button,
+.zoom-value,
+.go-button,
+.annotation-header button,
+.notice button {
+  display: inline-flex;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.icon-button { width: 28px; padding: 0; }
+.icon-button svg,
+.go-button svg,
+.annotation-header svg,
+.notice svg,
+.dialog-header svg,
+.clear-history svg,
+.history-loading svg { width: 14px; height: 14px; stroke-width: 1.8; }
+.icon-button:hover:not(:disabled),
+.zoom-value:hover:not(:disabled) { background: hsl(var(--muted, 210 40% 96.1%)); }
+.icon-button.selected { background: hsl(var(--primary, 222.2 47.4% 11.2%)); color: hsl(var(--primary-foreground, 210 40% 98%)); }
+.icon-button:disabled,
+.go-button:disabled { cursor: default; opacity: 0.38; }
+.zoom-value { width: 42px; padding: 0 4px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-variant-numeric: tabular-nums; }
+
+.address-icon { width: 16px; height: 16px; flex: 0 0 16px; margin-left: 2px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); stroke-width: 1.8; }
+.address-group input { width: 100%; min-width: 120px; height: 28px; flex: 1 1 auto; border: 1px solid hsl(var(--input, 214.3 31.8% 91.4%)); border-radius: 6px; outline: none; padding: 0 9px; background: transparent; color: hsl(var(--foreground, 222.2 47.4% 11.2%)); font-size: 13px; }
+.address-group input::placeholder { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+.address-group input:focus { border-color: hsl(var(--ring, 222.2 47.4% 11.2%)); box-shadow: 0 0 0 1px hsl(var(--ring, 222.2 47.4% 11.2%) / 0.35); }
+.go-button { gap: 4px; padding: 0 8px; }
+.go-button:hover:not(:disabled) { background: hsl(var(--muted, 210 40% 96.1%)); }
+
+.notice { display: flex; min-height: 30px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); padding: 5px 10px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+.notice.error { background: hsl(var(--destructive, 0 84.2% 60.2%) / 0.08); color: hsl(var(--destructive, 0 84.2% 60.2%)); }
+.notice span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notice button,
+.annotation-header button { width: 24px; height: 24px; padding: 0; }
+
+.annotation-results { max-height: 160px; flex: 0 0 auto; overflow-y: auto; border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); padding: 7px 8px; background: hsl(var(--muted, 210 40% 96.1%) / 0.2); }
+.annotation-header { display: flex; align-items: center; justify-content: space-between; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-weight: 500; }
+.annotation-row { min-width: 0; border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%) / 0.3); padding: 5px 0; }
+.annotation-row:last-child { border-bottom: 0; }
+.element-tag { color: hsl(var(--primary, 222.2 47.4% 11.2%)); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.element-text { display: inline-block; max-width: 60%; margin-left: 5px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; white-space: nowrap; }
+.element-selector { overflow: hidden; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+.content-anchor { position: relative; min-width: 0; min-height: 0; flex: 1 1 auto; background: hsl(var(--muted, 210 40% 96.1%) / 0.3); }
+.modal-backdrop { position: fixed; z-index: 1000; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgb(0 0 0 / 0.48); }
+.history-dialog { display: flex; width: min(560px, 100%); max-height: min(640px, calc(100vh - 32px)); flex-direction: column; overflow: hidden; border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); border-radius: 8px; background: hsl(var(--popover, 0 0% 100%)); color: hsl(var(--popover-foreground, 222.2 47.4% 11.2%)); box-shadow: 0 18px 48px rgb(0 0 0 / 0.28); }
+.dialog-header { display: flex; min-height: 52px; flex: 0 0 auto; align-items: center; justify-content: space-between; border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); padding: 10px 14px; }
+.dialog-header h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; font-weight: 600; }
+.history-list { min-height: 120px; flex: 1 1 auto; overflow-y: auto; padding: 0 14px; }
+.history-empty { padding: 48px 12px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); text-align: center; }
+.history-entry { display: flex; width: 100%; min-width: 0; align-items: flex-start; gap: 12px; border: 0; border-bottom: 1px solid hsl(var(--border, 214.3 31.8% 91.4%) / 0.55); border-radius: 4px; padding: 10px 8px; background: transparent; cursor: pointer; text-align: left; }
+.history-entry:hover { background: hsl(var(--muted, 210 40% 96.1%) / 0.55); }
+.history-copy { display: block; min-width: 0; flex: 1; }
+.history-copy strong { display: block; overflow: hidden; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.history-meta { display: flex; min-width: 0; gap: 8px; margin-top: 3px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+.history-meta span:first-child { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-delete { opacity: 0; }
+.history-entry:hover .history-delete,
+.history-delete:focus-visible { opacity: 1; }
+.history-loading { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 16px; color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+.dialog-footer { flex: 0 0 auto; border-top: 1px solid hsl(var(--border, 214.3 31.8% 91.4%)); padding: 12px 14px; }
+.clear-history { display: inline-flex; width: 100%; height: 32px; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 4px; background: hsl(var(--destructive, 0 84.2% 60.2%)); color: hsl(var(--destructive-foreground, 210 40% 98%)); cursor: pointer; }
+.clear-history:hover { opacity: 0.9; }
+
+.spin { animation: spin 0.9s linear infinite; }
+button:focus-visible,
+input:focus-visible,
+[role='button']:focus-visible { outline: 2px solid hsl(var(--ring, 222.2 47.4% 11.2%) / 0.65); outline-offset: 1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 760px) {
+  .toolbar { flex-wrap: wrap; gap: 5px; }
+  .toolbar-controls { width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .toolbar-controls::-webkit-scrollbar { display: none; }
+  .address-group { width: 100%; flex-basis: 100%; }
+  .go-button span { display: none; }
+  .go-button { width: 28px; padding: 0; }
+  .browser-tab { width: 128px; max-width: 128px; }
+}
+
+@media (hover: none) {
+  .history-delete { opacity: 1; }
+}
 </style>

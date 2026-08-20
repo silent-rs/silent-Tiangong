@@ -11,12 +11,47 @@ import { PluginSandbox } from './PluginSandbox';
  * 会话上下文（sessionId + workspace）随当前活跃会话注入：终端等
  * 插件以 workspace 作为默认初始目录，与内置终端面板行为一致。
  */
-export function PluginAppTabContent({ tab, isActive }: { tab: TabState; isActive: boolean }) {
+interface PluginAppTabContentProps {
+  tab: TabState;
+  isActive: boolean;
+  onRequestClose?: () => void;
+}
+
+export function PluginAppTabContent({ tab, isActive, onRequestClose }: PluginAppTabContentProps) {
   const [html, setHtml] = useState('');
   const [error, setError] = useState<string | null>(null);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
+
+  useEffect(() => {
+    if (!isActive || !onRequestClose) return;
+    const handleRequestClose = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        plugin_id?: string;
+        contribution_id?: string;
+      }>).detail;
+      if (
+        detail?.plugin_id === tab.plugin_id
+        && detail?.contribution_id === tab.contribution_id
+      ) {
+        onRequestClose();
+      }
+    };
+    window.addEventListener('tiangong:plugin-request-close', handleRequestClose);
+    return () => window.removeEventListener('tiangong:plugin-request-close', handleRequestClose);
+  }, [isActive, onRequestClose, tab.contribution_id, tab.plugin_id]);
+
+  useEffect(() => {
+    if (!html) return;
+    window.dispatchEvent(new CustomEvent('tiangong:plugin-visibility-change', {
+      detail: {
+        plugin_id: tab.plugin_id,
+        contribution_id: tab.contribution_id,
+        visible: isActive,
+      },
+    }));
+  }, [html, isActive, tab.contribution_id, tab.plugin_id]);
 
   useEffect(() => {
     let active = true;

@@ -1,8 +1,7 @@
 /**
  * 浏览器标签模型（阶段 3：标签语义上移插件）：
- * - 本地权威状态：标签列表与活跃标签由插件维护，宿主只持有 webview 实例；
- * - 持久化：插件私有存储（bridge storage.*，按会话作用域分键），应用或
- *   面板重开后按存储重建标签（页面重新加载）；
+ * - 宿主快照是真源，插件维护对应的界面状态与活跃偏好；
+ * - 持久化：宿主持久化真实标签，插件私有存储按会话记录界面偏好；
  * - UI（App.vue）与 Agent 工具壳（shell.ts）共用同一模型，所有标签操作
  *   必经模型，保证状态与存储一致。
  */
@@ -27,12 +26,9 @@ function storageKey(scope: string): string {
   return `tabs:${scope}`;
 }
 
-function newTabId(): string {
-  return crypto.randomUUID();
-}
-
 export class TabsModel {
   private bridge: HostBridge | null = null;
+  private readonly listeners = new Set<() => void>();
   /** 当前会话作用域（'__global__' 表示无活跃会话）。 */
   scope = GLOBAL_SCOPE;
   tabs: BrowserTab[] = [];
@@ -42,6 +38,15 @@ export class TabsModel {
 
   async attach(bridge: HostBridge): Promise<void> {
     this.bridge = bridge;
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(): void {
+    this.listeners.forEach((listener) => listener());
   }
 
   async call<T>(method: string, payload: Record<string, unknown>): Promise<T> {
@@ -60,14 +65,10 @@ export class TabsModel {
     return JSON.parse(raw) as T;
   }
 
-  /** 恢复标签模型：宿主实例列表为准（真源），插件存储记忆活跃偏好与
-   * 标题补充；宿主自身也持久化标签（双保险，应用重启后同样对齐）。 */
-  async restore(): Promise<void> {
-    const saved = await this.readSaved();
-    const snapshot = await this.call<{ tabs?: BrowserTab[]; active_tab_id?: string | null }>(
-      'webview.tabs',
-      {},
-    );
+  private applySnapshot(
+    snapshot: { tabs?: BrowserTab[]; active_tab_id?: string | null },
+    saved?: { tabs?: BrowserTab[]; active_tab_id?: string | null } | null,
+  ): void {
     const hostTabs = snapshot.tabs ?? [];
     this.tabs = hostTabs.map((tab) => {
       const remembered = saved?.tabs?.find((item) => item.id === tab.id);
@@ -85,6 +86,25 @@ export class TabsModel {
       snapshot.active_tab_id ??
       this.tabs[0]?.id ??
       null;
+    this.notify();
+  }
+
+  /** 恢复标签模型：宿主实例列表为准（真源），插件存储只补充活跃偏好。 */
+  async restore(): Promise<void> {
+    const [saved, snapshot] = await Promise.all([
+      this.readSaved(),
+      this.call<{ tabs?: BrowserTab[]; active_tab_id?: string | null }>('webview.tabs', {}),
+    ]);
+    this.applySnapshot(snapshot, saved);
+  }
+
+  /** 从宿主刷新标签快照，供页面事件和 Agent 操作后同步界面。 */
+  async refresh(): Promise<void> {
+    const snapshot = await this.call<{ tabs?: BrowserTab[]; active_tab_id?: string | null }>(
+      'webview.tabs',
+      {},
+    );
+    this.applySnapshot(snapshot);
   }
 
   private async readSaved(): Promise<{
@@ -112,40 +132,44 @@ export class TabsModel {
     await pluginStorage.set(this.bridge!, storageKey(this.scope), payload).catch(() => {});
   }
 
-  /** 新建标签（本地生成编号，宿主按编号建 webview）。 */
+  /** 新建标签；编号由宿主按项目统一的 SCRU128 规则生成。 */
   async newTab(url: string): Promise<BrowserTab | null> {
-    const id = newTabId();
-    await this.call('webview.tabNew', { url, tab_id: id });
-    const tab: BrowserTab = { id, url, title: '' };
-    this.tabs.push(tab);
-    this.activeTabId = id;
+    const snapshot = await this.call<{
+      tab_id?: string;
+      tabs?: BrowserTab[];
+      active_tab_id?: string | null;
+    }>('webview.tabNew', { url });
+    this.applySnapshot(snapshot);
     this.schedulePersist();
-    return tab;
+    return this.tabs.find((tab) => tab.id === snapshot.tab_id) ?? null;
   }
 
   /** 关闭标签；关闭的是活跃标签时活跃转移到相邻标签。 */
   async closeTab(tabId: string): Promise<void> {
-    await this.call('webview.tabClose', { tab_id: tabId });
-    const index = this.tabs.findIndex((tab) => tab.id === tabId);
-    if (index >= 0) this.tabs.splice(index, 1);
-    if (this.activeTabId === tabId) {
-      this.activeTabId = this.tabs[Math.min(index, this.tabs.length - 1)]?.id ?? null;
-    }
+    const snapshot = await this.call<{ tabs?: BrowserTab[]; active_tab_id?: string | null }>(
+      'webview.tabClose',
+      { tab_id: tabId },
+    );
+    this.applySnapshot(snapshot);
     this.schedulePersist();
   }
 
   /** 显示指定标签到给定矩形（宿主按指令调整 webview；显示语义互斥）。 */
   async showTab(tabId: string, rect: Rect): Promise<void> {
     await this.call('webview.instanceShow', { tab_id: tabId, ...rect });
+    const changed = this.activeTabId !== tabId;
     this.activeTabId = tabId;
+    if (changed) this.notify();
     this.schedulePersist();
   }
 
   /** 导航当前活跃标签。 */
   async navigate(url: string): Promise<void> {
-    await this.call('webview.navigate', { url });
-    const active = this.tabs.find((tab) => tab.id === this.activeTabId);
-    if (active) active.url = url;
+    const snapshot = await this.call<{ tabs?: BrowserTab[]; active_tab_id?: string | null }>(
+      'webview.navigate',
+      { url },
+    );
+    this.applySnapshot(snapshot);
     this.schedulePersist();
   }
 
@@ -155,6 +179,7 @@ export class TabsModel {
     if (!tab) return;
     if (url) tab.url = url;
     if (title) tab.title = title;
+    this.notify();
     this.schedulePersist();
   }
 

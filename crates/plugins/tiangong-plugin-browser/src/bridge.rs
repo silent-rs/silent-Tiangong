@@ -4,9 +4,9 @@ pub const PAGE_SNAPSHOT_SCRIPT: &str = include_str!("../js/page-snapshot.js");
 
 // ── webview 容器原语（阶段 3）：宿主中立服务 ──
 //
-// 方法：webview.create / webview.navigate / webview.eval / webview.hide /
-// webview.close。首版直接映射到现有会话/标签管理（中立包装，不含浏览器
-// 业务语义——tab 策略/协作逻辑属浏览器插件）。
+// 方法覆盖实例、标签、导航、缩放、历史与页面批注。直接映射到现有
+// 会话/标签管理（中立包装，不含浏览器业务语义——tab 策略与界面逻辑
+// 属浏览器插件）。
 
 pub fn handle_webview_primitive(
     state: &crate::BrowserPluginState,
@@ -198,6 +198,73 @@ pub fn handle_webview_primitive(
                 .reload(app)
                 .map_err(|error| anyhow::anyhow!("刷新失败：{error}"))?;
             serde_json::json!({ "view_id": scope })
+        }
+        "webview.getZoom" => serde_json::json!({
+            "view_id": scope,
+            "scale": manager.zoom(),
+        }),
+        "webview.setZoom" => {
+            let scale = request
+                .get("scale")
+                .and_then(|value| value.as_f64())
+                .ok_or_else(|| anyhow::anyhow!("webview.setZoom 缺少 scale 参数"))?;
+            let scale = manager
+                .set_zoom(scale)
+                .map_err(|error| anyhow::anyhow!("设置缩放失败：{error}"))?;
+            serde_json::json!({ "view_id": scope, "scale": scale })
+        }
+        "webview.resetZoom" => {
+            let scale = manager
+                .reset_zoom()
+                .map_err(|error| anyhow::anyhow!("重置缩放失败：{error}"))?;
+            serde_json::json!({ "view_id": scope, "scale": scale })
+        }
+        "webview.tabHistory" => {
+            let tab_id = request.get("tab_id").and_then(|value| value.as_str());
+            let history =
+                manager
+                    .get_tab_history(tab_id)
+                    .unwrap_or(crate::types::TabHistoryResult {
+                        tab_id: String::new(),
+                        entries: Vec::new(),
+                        current_index: -1,
+                    });
+            serde_json::to_value(history)?
+        }
+        "webview.globalHistory" => {
+            let offset = request
+                .get("offset")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
+            let limit = request
+                .get("limit")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(20) as usize;
+            serde_json::to_value(manager.get_global_history(offset, limit))?
+        }
+        "webview.globalHistoryClear" => {
+            manager.clear_global_history();
+            serde_json::json!({ "view_id": scope })
+        }
+        "webview.globalHistoryDelete" => {
+            let url = request
+                .get("url")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow::anyhow!("webview.globalHistoryDelete 缺少 url 参数"))?;
+            manager.delete_global_history_entry(url);
+            serde_json::json!({ "view_id": scope })
+        }
+        "webview.annotationExtract" => {
+            let result = manager
+                .eval_result_text("window.__tiangong_bridge.annotation.extractAnnotatedElements()")
+                .and_then(|raw| {
+                    serde_json::from_str::<crate::types::AnnotationExtractResult>(&raw).ok()
+                })
+                .unwrap_or(crate::types::AnnotationExtractResult {
+                    elements: Vec::new(),
+                    count: 0,
+                });
+            serde_json::to_value(result)?
         }
         // ── 实例直达原语（阶段 2）：插件按标签编号编排显示与求值 ──
         "webview.instanceShow" => {

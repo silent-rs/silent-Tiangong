@@ -562,6 +562,15 @@ impl BrowserManager {
                 message: None,
             },
         );
+        crate::emit_plugin_event(
+            &session_id,
+            "navigation_started",
+            &serde_json::json!({
+                "tab_id": tab_id,
+                "navigation_id": navigation_id,
+                "url": url,
+            }),
+        );
 
         let app_for_timeout = app.clone();
         let state_for_timeout = state.clone();
