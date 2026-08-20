@@ -2,6 +2,9 @@ name: Bot CI
 
 on:
   pull_request:
+    paths:
+      - "bots/**"
+      - ".github/workflows/bot-ci.yml"
   workflow_dispatch:
 
 concurrency:
