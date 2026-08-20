@@ -289,10 +289,16 @@ fn 插件经桥接调用app原语需声明权限且只能操作自己() {
     load_plugin(root.path(), "tool-ui-demo-c");
     load_plugin(root.path(), "tool-ui-demo-no-perm");
 
-    // 声明 app.use 权限的插件可以打开/关闭自己的 App。
+    // 声明 app.use 权限的插件可以打开/关闭自己的 App（关闭需显式指定
+    // instance_id 或 all，宿主侧校验）。
     let before = app_hits().len();
     bridge_call("tool-ui-demo-c", "app.open", r#"{"session_id":"sess-1"}"#).unwrap();
-    bridge_call("tool-ui-demo-c", "app.close", r#"{"session_id":"sess-1"}"#).unwrap();
+    bridge_call(
+        "tool-ui-demo-c",
+        "app.close",
+        r#"{"session_id":"sess-1","all":true}"#,
+    )
+    .unwrap();
     let hits = app_hits();
     assert_eq!(
         hits.len(),

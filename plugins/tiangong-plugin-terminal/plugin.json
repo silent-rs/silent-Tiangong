@@ -9,7 +9,8 @@
     "tool.provide",
     "sidecar.invoke",
     "bridge.call",
-    "bridge.events"
+    "bridge.events",
+    "app.use"
   ],
   "tools": [
     {
@@ -96,10 +97,28 @@
         ]
       },
       "timeout_ms": 120000
+    },
+    {
+      "name": "terminal_open",
+      "description": "打开终端面板（向用户展示命令执行、跟踪长任务时使用）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "name": "terminal_close",
+      "description": "关闭终端面板（用户要求收起终端或任务完成时使用；后台命令继续运行）。",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "timeout_ms": 30000
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；需要在运行中的终端输入内容时用 terminal_send。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；需要在运行中的终端输入内容时用 terminal_send；向用户展示终端或跟踪长任务时用 terminal_open 打开终端面板，用户要求收起时用 terminal_close（后台命令不受影响）。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
   ],
   "ui": {
     "sandbox": "shadow",

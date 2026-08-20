@@ -39,6 +39,40 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
 
   tools.onRequested((invocation: ToolInvocation) => {
     void (async () => {
+      // 面板开关走 app.* 宿主原语（不经 sidecar）：terminal_open 打开
+      // 本会话的终端面板；terminal_close 收起面板（实例级会话隔离，
+      // PTY 继续运行）。
+      if (invocation.name === 'terminal_open' || invocation.name === 'terminal_close') {
+        const method = invocation.name === 'terminal_open' ? 'app.open' : 'app.close';
+        const payload = invocation.name === 'terminal_open'
+          ? { session_id: invocation.session_id }
+          : { session_id: invocation.session_id, all: true };
+        try {
+          await bridge.call(method, JSON.stringify(payload));
+          await tools.resolve({
+            invocation_id: invocation.invocation_id,
+            status: 'answered',
+            result: {
+              ok: true,
+              summary: invocation.name === 'terminal_open'
+                ? '已打开终端面板'
+                : '已关闭终端面板（后台命令继续运行）',
+              exit_code: 0,
+            },
+          });
+        } catch (error) {
+          await tools.resolve({
+            invocation_id: invocation.invocation_id,
+            status: 'answered',
+            result: {
+              ok: false,
+              summary: `终端面板操作失败：${String(error)}`,
+              exit_code: 1,
+            },
+          });
+        }
+        return;
+      }
       const operation = TOOL_TO_OPERATION[invocation.name];
       if (!operation) {
         await tools.resolve({

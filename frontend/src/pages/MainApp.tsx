@@ -548,11 +548,13 @@ export function MainApp() {
         void openWorkspacePanel('plugin');
       }));
       guard();
-      // app.close 原语落地：宿主请求关闭插件 App（Agent/插件在必要时
-      // 收起对应 tab，官方与三方插件一致）。
+      // app.close 原语落地：宿主请求关闭插件 App 实例（Agent/插件在必要
+      // 时收起对应 tab）。instance_id 精确关一个实例，all 收起全部。
       track(await listen<{
         plugin_id: string;
         session_id?: string;
+        instance_id?: string | null;
+        all?: boolean;
       }>('app:close_plugin', (event) => {
         const payload = event.payload;
         if (
@@ -563,13 +565,14 @@ export function MainApp() {
           kind: 'plugin',
           action: 'close-plugin',
           version: Date.now(),
-          // close-plugin 只消费 pluginId，其余字段为类型占位。
+          // close-plugin 只消费 pluginId / instanceId，其余字段为类型占位。
           app: {
             pluginId: payload.plugin_id,
             contributionId: '',
             title: '',
             sandbox: 'shadow',
             multi: false,
+            instanceId: payload.instance_id ?? undefined,
           },
         });
       }));
@@ -671,38 +674,6 @@ export function MainApp() {
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 
-    const onOpenPluginInstance = async (event: Event) => {
-      const detail = (event as CustomEvent<{
-        plugin_id?: string;
-        contribution_id?: string;
-        instance_id?: string;
-        session_id?: string;
-      }>).detail;
-      if (
-        detail?.plugin_id !== 'browser'
-        || detail.contribution_id !== 'browser'
-        || !detail.instance_id
-      ) return;
-      const store = useStore.getState();
-      const currentSessionId = store.activeSessionId || store.newConversationId;
-      if (!currentSessionId || detail.session_id !== currentSessionId) return;
-      setAppTabCommand({
-        kind: 'plugin',
-        action: 'open-plugin',
-        version: Date.now(),
-        app: {
-          pluginId: 'browser',
-          contributionId: 'browser',
-          title: '浏览器',
-          sandbox: 'webview',
-          multi: true,
-          instanceId: detail.instance_id,
-        },
-      });
-      await openWorkspacePanel('plugin');
-    };
-    window.addEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
-
     return () => {
       // 先标记本轮 disposed，使尚未完成的异步注册流程在后续 guard 处自行放弃；
       // 再释放本轮已收纳的监听，避免遗留孤儿监听导致事件被重复消费。
@@ -721,7 +692,6 @@ export function MainApp() {
         sessionsRefreshTimerRef.current = null;
       }
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
-      window.removeEventListener('tiangong:plugin-request-open-instance', onOpenPluginInstance);
     };
   }, [
     setSidebarOpenByLayout,

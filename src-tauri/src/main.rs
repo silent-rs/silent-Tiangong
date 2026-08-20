@@ -372,11 +372,29 @@ fn run_gui() {
                             .and_then(|value| value["session_id"].as_str().map(str::to_string))
                             .unwrap_or_default();
                         if method == "app.close" {
+                            // 关闭目标必须显式声明：instance_id 精确关一个实例，
+                            // all=true 才允许关闭该插件全部实例，避免误全关。
+                            let payload_value =
+                                serde_json::from_str::<serde_json::Value>(payload).ok();
+                            let instance_id = payload_value.as_ref().and_then(|value| {
+                                value["instance_id"].as_str().map(str::to_string)
+                            });
+                            let close_all = payload_value
+                                .as_ref()
+                                .and_then(|value| value["all"].as_bool())
+                                .unwrap_or(false);
+                            if instance_id.is_none() && !close_all {
+                                anyhow::bail!(
+                                    "app.close 需要指定 instance_id（精确关闭）或 all=true（全部关闭）"
+                                );
+                            }
                             let _ = app_handle.emit(
                                 "app:close_plugin",
                                 serde_json::json!({
                                     "plugin_id": plugin_id,
                                     "session_id": session_id,
+                                    "instance_id": instance_id,
+                                    "all": close_all,
                                 }),
                             );
                             return Ok(r#"{"ok":true}"#.to_string());

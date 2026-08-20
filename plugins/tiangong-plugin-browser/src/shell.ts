@@ -44,15 +44,16 @@ function releaseInvocation(invocationId: string): void {
   window.setTimeout(() => claims?.delete(invocationId), 5_000);
 }
 
-function requestOpenInstance(instanceId: string, sessionId: string): void {
-  window.dispatchEvent(new CustomEvent('tiangong:plugin-request-open-instance', {
-    detail: {
-      plugin_id: 'browser',
-      contribution_id: 'browser',
-      instance_id: instanceId,
-      session_id: sessionId,
-    },
-  }));
+/** 打开浏览器插件 App（app.open 宿主原语，聚焦/恢复本会话面板实例）。 */
+async function requestOpenInstance(
+  bridge: { call(method: string, payload: string): Promise<string> },
+  sessionId: string,
+): Promise<void> {
+  try {
+    await bridge.call('app.open', JSON.stringify({ session_id: sessionId }));
+  } catch (error) {
+    console.error('打开浏览器面板失败:', error);
+  }
 }
 
 async function main() {
@@ -87,6 +88,29 @@ async function main() {
         return;
       }
       try {
+        // browser_close（面板开关，app.* 原语）：带 tab_id 精确关闭一个
+        // 页面，不带则收起整个浏览器面板（用户明确要求或任务完成时）。
+        if (invocation.name === 'browser_close') {
+          const args = (invocation.arguments ?? {}) as { tab_id?: string };
+          await bridge.call(
+            'app.close',
+            JSON.stringify(
+              args.tab_id
+                ? { session_id: invocation.session_id, instance_id: args.tab_id }
+                : { session_id: invocation.session_id, all: true },
+            ),
+          );
+          await tools.resolve({
+            invocation_id: invocation.invocation_id,
+            status: 'answered',
+            result: {
+              ok: true,
+              summary: args.tab_id ? `已关闭页面 ${args.tab_id}` : '已收起浏览器面板',
+              exit_code: 0,
+            },
+          });
+          return;
+        }
         // 发起会话与当前页面作用域一致时先刷新宿主页面快照；其他会话
         // 直接调用原语。可见标签仍统一由 App 拓展区顶部标签维护。
         if (
@@ -98,7 +122,7 @@ async function main() {
           if (invocation.name === 'browser_open' || tabsModel.tabs.length === 0) {
             const opened = await tabsModel.newTab(target);
             if (opened) {
-              requestOpenInstance(opened.id, invocation.session_id);
+              void requestOpenInstance(bridge, invocation.session_id);
             }
           } else {
             await tabsModel.navigate(target);
@@ -130,7 +154,7 @@ async function main() {
           result?: string | null;
         };
         if (invocation.name === 'browser_open' && parsed.active_tab_id) {
-          requestOpenInstance(parsed.active_tab_id, invocation.session_id);
+          void requestOpenInstance(bridge, invocation.session_id);
         }
         // 真实结果摘要：按工具类别格式化（策略层职责）
         let summary: string;

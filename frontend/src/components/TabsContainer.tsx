@@ -654,11 +654,18 @@ export function TabsContainer({
       return;
     }
     if (appCommand.action === 'close-plugin' && appCommand.app?.pluginId) {
-      // 按插件关闭其在本会话的全部 App 实例（app.close 原语落地）。
+      // app.close 原语落地：instanceId 精确关一个实例，缺省关闭该插件在
+      // 本会话的全部实例（宿主已校验调用方显式声明 all）。
       const pluginId = appCommand.app.pluginId;
-      const targetIds = tabsRef.current
-        .filter((tab) => tab.kind === 'plugin' && tab.plugin_id === pluginId)
-        .map((tab) => tab.id);
+      const targetIds = appCommand.app.instanceId
+        ? tabsRef.current
+          .filter((tab) => tab.id === appCommand.app!.instanceId
+            && tab.kind === 'plugin'
+            && tab.plugin_id === pluginId)
+          .map((tab) => tab.id)
+        : tabsRef.current
+          .filter((tab) => tab.kind === 'plugin' && tab.plugin_id === pluginId)
+          .map((tab) => tab.id);
       void (async () => {
         for (const tabId of targetIds) {
           await handleCloseTab(tabId);
