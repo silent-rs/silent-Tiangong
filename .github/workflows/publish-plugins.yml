@@ -120,6 +120,9 @@ jobs:
   build-plugin:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
     needs: [resolve-plugin, build-wasm, build-ui]
+    # 纯 UI 插件会跳过 build-wasm；显式判定 needs 结果，避免
+    # skipped 状态传播导致整条发布链被跳过。
+    if: ${{ !cancelled() && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
