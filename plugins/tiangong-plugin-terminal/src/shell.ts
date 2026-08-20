@@ -52,9 +52,10 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
 
   tools.onRequested((invocation: ToolInvocation) => {
     void (async () => {
-      // 面板开关走 app.* 宿主原语（不经 sidecar）。打开时生成实例编号
-      // 并在结果中报告（app.open 幂等重开同一实例）；关闭按编号精确关
-      // 一个实例，缺省回落本会话最近由 Agent 打开的实例（PTY 继续运行）。
+      // 面板开关走 app.* 宿主原语（不经 sidecar）。实例编号由插件自行
+      // 生成与管理（app.open 幂等重开同一实例），Agent 无需传入——结果
+      // 中告知实际面板编号，多面板需要精确关闭时可引用（tab_id 可选），
+      // 缺省关闭本会话最近由 Agent 打开的面板（PTY 继续运行）。
       if (invocation.name === 'terminal_open' || invocation.name === 'terminal_close') {
         const isClose = invocation.name === 'terminal_close';
         const closeArgs = (invocation.arguments ?? {}) as { tab_id?: string };
@@ -66,8 +67,7 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
             status: 'answered',
             result: {
               ok: false,
-              summary: '没有可关闭的终端面板：请传 tab_id（terminal_open 返回的实例编号），'
-                + '且本会话没有 Agent 打开的实例',
+              summary: '本会话没有 Agent 打开的终端面板可关闭（如需关闭指定面板可传 tab_id）',
               exit_code: 1,
             },
           });
@@ -99,8 +99,8 @@ async function main(bridgePromise: Awaitable<HostBridgeLike>) {
             result: {
               ok: true,
               summary: isClose
-                ? `已关闭终端面板（实例 ${instanceId}，后台命令继续运行）`
-                : `已打开终端面板（实例 ${instanceId}；关闭时调 terminal_close 传 tab_id=${instanceId}）`,
+                ? `已关闭终端面板（${instanceId}，后台命令继续运行）`
+                : `已打开终端面板（${instanceId}）`,
               exit_code: 0,
             },
           });
@@ -178,6 +178,7 @@ async function executeTool(
     // 创建 PTY 会话执行命令/脚本；工具结果由 exit 通知驱动（简化版：
     // spawn 成功即返回会话信息，完整版等待 exit 或超时聚合输出）。
     // scope_id 绑定宿主会话：终端面板跟随会话切换时能恢复工具会话。
+    // 终端归属由插件路由，结果中告知实际执行的终端（PTY 会话编号）。
     const spawnPayload = {
       scope_id: invocation.session_id,
       ...(operation === 'runShell'
@@ -197,20 +198,27 @@ async function executeTool(
     });
     return {
       ok: true,
-      summary: `已在终端会话 ${spawned.session_id} 启动执行（输出见终端面板）`,
+      summary: `命令已交由终端 ${spawned.session_id} 执行（输出见终端面板）`,
       exit_code: 0,
     };
   }
-  // terminalSend：写入最近创建的活跃会话
-  const latest = [...sessions.values()].pop();
-  if (!latest) {
-    return { ok: false, summary: '没有活跃的终端会话', exit_code: 1 };
+  // terminalSend：默认写入最近创建的活跃会话；指定 terminal_id 时定向
+  // 发送，结果始终告知实际送达的终端。
+  const requested = typeof args.terminal_id === 'string' ? args.terminal_id : '';
+  const target = (requested && sessions.get(requested))
+    || [...sessions.values()].pop();
+  if (!target) {
+    return { ok: false, summary: '没有活跃的终端会话可发送输入', exit_code: 1 };
   }
   await sidecarCall(bridge, 'terminalWrite', {
-    session_id: latest.session_id,
+    session_id: target.session_id,
     data: String(args.input ?? ''),
   });
-  return { ok: true, summary: '已发送输入', exit_code: 0 };
+  return {
+    ok: true,
+    summary: `已发送输入到终端 ${target.session_id}`,
+    exit_code: 0,
+  };
 }
 
 void main(createTiangongBridge());

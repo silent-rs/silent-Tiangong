@@ -78,13 +78,17 @@
     },
     {
       "name": "terminal_send",
-      "description": "向终端发送按键/文本输入。",
+      "description": "向终端发送按键/文本输入。默认发送到最近执行的终端；结果会告知实际送达的终端编号。",
       "input_schema": {
         "type": "object",
         "properties": {
           "input": {
             "type": "string",
             "description": "要发送的按键/文本"
+          },
+          "terminal_id": {
+            "type": "string",
+            "description": "可选：定向发送的终端编号（run_command / terminal_send 结果中告知的编号）"
           },
           "wait": {
             "type": "integer",
@@ -100,7 +104,7 @@
     },
     {
       "name": "terminal_open",
-      "description": "打开终端面板（向用户展示命令执行、跟踪长任务时使用）。返回实例编号，关闭对应面板时传给 terminal_close。",
+      "description": "打开终端面板（向用户展示命令执行、跟踪长任务时使用）。面板编号由插件管理并在结果中告知。",
       "input_schema": {
         "type": "object",
         "properties": {}
@@ -109,13 +113,13 @@
     },
     {
       "name": "terminal_close",
-      "description": "关闭指定的终端面板（后台命令继续运行）。传 terminal_open 返回的实例编号；缺省关闭本会话最近由 Agent 打开的面板。",
+      "description": "关闭终端面板（后台命令继续运行）。默认关闭 Agent 最近打开的面板；多面板时可传面板编号精确关闭。",
       "input_schema": {
         "type": "object",
         "properties": {
           "tab_id": {
             "type": "string",
-            "description": "要关闭的面板实例编号（terminal_open 的返回值；可选）"
+            "description": "可选：要关闭的面板编号（terminal_open 结果中告知的编号）"
           }
         }
       },
@@ -123,7 +127,7 @@
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；需要在运行中的终端输入内容时用 terminal_send；向用户展示终端或跟踪长任务时用 terminal_open 打开面板（返回实例编号），用户要求收起时用 terminal_close 传该编号精确关闭（后台命令不受影响）。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell，结果会告知实际执行的终端编号；向运行中的终端输入内容用 terminal_send（缺省发到最近执行的终端，可用 terminal_id 定向）；向用户展示终端或跟踪长任务时用 terminal_open 打开面板，用户要求收起时用 terminal_close（默认关闭 Agent 最近打开的面板，后台命令不受影响）。长命令设置 timeout（秒）；只在有明确时间边界时设置。"
   ],
   "ui": {
     "sandbox": "shadow",
