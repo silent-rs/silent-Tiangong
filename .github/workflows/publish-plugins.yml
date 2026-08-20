@@ -265,6 +265,9 @@ jobs:
   prepare-release:
     name: Prepare independent plugin release
     needs: [resolve-plugin, build-plugin]
+    # skipped 沿依赖图传播：上游 build-wasm 被纯 UI 插件跳过后，
+    # 下游也必须显式判定结果，否则整条发布链静默跳过。
+    if: ${{ !cancelled() && needs.build-plugin.result == 'success' }}
     runs-on: ubuntu-22.04
     outputs:
       plugin_id: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -306,6 +309,7 @@ jobs:
   publish-plugin:
     name: Publish independent plugin
     needs: [resolve-plugin, prepare-release]
+    if: ${{ !cancelled() && needs.prepare-release.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     concurrency:
