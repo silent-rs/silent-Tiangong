@@ -82,6 +82,7 @@ export function createTerminalView(
   fitToHost();
 
   let attached: string | null = null;
+  let preparing: string | null = null;
   let disposers: Array<() => void> = [];
   let lastSyncedSize = '';
   let lastSnapshotAt = 0;
@@ -148,8 +149,9 @@ export function createTerminalView(
   };
 
   const prepare = (sessionId: string) => {
-    if (attached === sessionId) return;
-    attached = sessionId;
+    if (attached === sessionId || preparing === sessionId) return;
+    preparing = sessionId;
+    attached = null;
     lastSyncedSize = '';
     terminal.reset();
     terminal.focus();
@@ -161,6 +163,7 @@ export function createTerminalView(
     prepare,
     attach(sessionId: string, history?: string) {
       attached = sessionId;
+      preparing = null;
       lastSyncedSize = '';
       terminal.reset();
       terminal.focus();
@@ -187,7 +190,7 @@ export function createTerminalView(
       return { cols: terminal.cols, rows: terminal.rows };
     },
     sessionId() {
-      return attached;
+      return attached ?? preparing;
     },
     reveal() {
       if (fitToHost()) syncSize();

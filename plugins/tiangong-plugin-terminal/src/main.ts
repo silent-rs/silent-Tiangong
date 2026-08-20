@@ -103,6 +103,25 @@ async function switchScope(
   if (requestedSessionId) view.prepare(requestedSessionId);
 
   try {
+    // 工具在打开 App 前已经创建并登记了精确 PTY。直接用幂等 spawn
+    // 取回该终端的完整当前内容，避免前台再经过通用恢复查找而停在占位。
+    const knownSession = requestedSessionId
+      ? terminalSessions.get(requestedSessionId)
+      : undefined;
+    if (knownSession?.scope_id === scopeId) {
+      const { sessionId, boot } = await spawnDefault(
+        bridge,
+        view,
+        host,
+        scopeId,
+        workspace,
+        requestedSessionId,
+      );
+      if (ticket !== switchTicket) return;
+      view.attach(sessionId, boot);
+      return;
+    }
+
     const found = (await sidecarCall(bridge, 'terminalFind', {
       scope_id: scopeId,
       ...(requestedSessionId ? { session_id: requestedSessionId } : {}),

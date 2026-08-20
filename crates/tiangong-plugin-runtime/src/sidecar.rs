@@ -156,7 +156,7 @@ pub struct ProcessSidecarConnection {
     config: SidecarConfig,
     start_lock: Mutex<()>,
     exec_env: Mutex<std::collections::BTreeMap<String, String>>,
-    notification_started: std::sync::atomic::AtomicBool,
+    notification_started: Mutex<bool>,
 }
 
 impl ProcessSidecarConnection {
@@ -165,7 +165,7 @@ impl ProcessSidecarConnection {
             config,
             start_lock: Mutex::new(()),
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
-            notification_started: std::sync::atomic::AtomicBool::new(false),
+            notification_started: Mutex::new(false),
         }
     }
 
@@ -191,23 +191,25 @@ impl ProcessSidecarConnection {
 
     /// sidecar 就绪后启动一次常驻通知监听（幂等）。
     fn ensure_notification_listener(&self) {
-        if self
-            .notification_started
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
+        let Ok(mut started) = self.notification_started.lock() else {
+            tracing::warn!(
+                plugin_id = %self.config.plugin_id,
+                "sidecar 通知监听状态锁已损坏"
+            );
+            return;
+        };
+        if *started {
             return;
         }
-        if let (Ok(endpoint_json), Ok(token)) = (
-            std::fs::read_to_string(&self.config.endpoint),
-            load_endpoint(&self.config.endpoint).map(|endpoint| endpoint.token),
+        let Ok(token) = load_endpoint(&self.config.endpoint).map(|endpoint| endpoint.token) else {
+            return;
+        };
+        if spawn_sidecar_notification_listener(
+            self.config.plugin_id.clone(),
+            self.config.endpoint.clone(),
+            token,
         ) {
-            let _ = endpoint_json;
-            let endpoint_path = self.config.endpoint.clone();
-            spawn_sidecar_notification_listener(
-                self.config.plugin_id.clone(),
-                endpoint_path,
-                token,
-            );
+            *started = true;
         }
     }
 
@@ -661,13 +663,13 @@ pub fn spawn_sidecar_notification_listener(
     plugin_id: String,
     endpoint_path: std::path::PathBuf,
     token: String,
-) {
+) -> bool {
     let forwarder = SIDECAR_NOTIFICATION_FORWARDER.get().cloned();
     // 常驻任务需要 tokio reactor；无 runtime 上下文（同步宿主/测试环境）时
     // 跳过监听（sidecar 请求-响应不受影响，仅无主动通知推送）。
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::debug!(plugin_id = %plugin_id, "无 tokio 上下文，跳过 sidecar 通知监听");
-        return;
+        return false;
     };
     let task = handle.spawn(async move {
         let mut backoff_ms = 250u64;
@@ -694,6 +696,7 @@ pub fn spawn_sidecar_notification_listener(
         }
     });
     std::mem::forget(task);
+    true
 }
 
 async fn run_notification_connection(
