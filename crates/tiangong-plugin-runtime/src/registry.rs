@@ -1325,17 +1325,6 @@ fn install_staged_plugin_inner(
     // 业务调用（打开终端 / 首次工具执行）上。
     if status.is_ok() {
         prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
-        // 安装成功即解除卸载记录：用户主动重装（或自动维护安装）代表
-        // 该插件回到已安装状态，此前的主动卸载意图失效。
-        if let Err(error) =
-            crate::artifacts::clear_uninstalled_plugin(storage_root, &staged.manifest.id)
-        {
-            tracing::warn!(
-                plugin_id = %staged.manifest.id,
-                %error,
-                "插件安装成功，但清除卸载记录失败"
-            );
-        }
     }
     tracing::info!(
         plugin_id,
@@ -1594,11 +1583,6 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
         {
             adapter.set_enabled(false);
         }
-    }
-    // 卸载成功即记录：自动升级跳过用户主动移除的插件，
-    // 用户重新手动安装成功后记录在安装路径中清除。
-    if let Err(error) = crate::artifacts::record_uninstalled_plugin(storage_root, plugin_id) {
-        tracing::warn!(plugin_id, %error, "插件已卸载，但写入卸载记录失败");
     }
     Ok(())
 }

@@ -38,14 +38,6 @@ pub const DEFAULT_PLUGIN_IDS: &[&str] = &[
     "browser",
 ];
 
-/// 用户主动卸载的插件记录文件（位于存储根目录）。
-///
-/// 记录中的插件不会被自动升级；用户重新手动安装成功后记录清除。
-const UNINSTALLED_PLUGINS_FILE: &str = "uninstalled_plugins.json";
-
-/// 卸载记录文件结构版本。
-const UNINSTALLED_PLUGINS_VERSION: u32 = 1;
-
 /// 与 `registry::DISABLED_MARKER` 保持一致的禁用标记文件名。
 const DISABLED_MARKER_FILE: &str = ".disabled";
 
@@ -700,98 +692,6 @@ fn installed_plugin_states(storage_root: &Path) -> HashMap<String, InstalledPlug
                 },
             ))
         })
-        .collect()
-}
-
-/// 读取用户主动卸载的插件 ID 集合。
-///
-/// 文件不存在视为空集合；损坏时同样按空集合处理并告警——卸载记录缺失
-/// 最坏结果是多余的自动重装，不应阻断启动维护任务。
-pub fn read_uninstalled_plugins(storage_root: &Path) -> BTreeSet<String> {
-    let path = storage_root.join(UNINSTALLED_PLUGINS_FILE);
-    let Ok(content) = std::fs::read(&path) else {
-        return BTreeSet::new();
-    };
-    #[derive(serde::Deserialize)]
-    struct UninstalledRecord {
-        version: u32,
-        uninstalled: BTreeSet<String>,
-    }
-    match serde_json::from_slice::<UninstalledRecord>(&content) {
-        Ok(record) if record.version == UNINSTALLED_PLUGINS_VERSION => record.uninstalled,
-        Ok(record) => {
-            tracing::warn!(
-                version = record.version,
-                path = %path.display(),
-                "卸载记录版本不兼容，按空集合处理"
-            );
-            BTreeSet::new()
-        }
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "卸载记录损坏，按空集合处理");
-            BTreeSet::new()
-        }
-    }
-}
-
-/// 记录一个用户主动卸载的插件（temp + rename 原子写）。
-pub fn record_uninstalled_plugin(storage_root: &Path, plugin_id: &str) -> Result<()> {
-    let mut uninstalled = read_uninstalled_plugins(storage_root);
-    if !uninstalled.insert(plugin_id.to_string()) {
-        return Ok(());
-    }
-    write_uninstalled_plugins(storage_root, &uninstalled)
-}
-
-/// 清除插件的卸载记录（重新安装成功后调用，用户改主意即失效）。
-pub fn clear_uninstalled_plugin(storage_root: &Path, plugin_id: &str) -> Result<()> {
-    let mut uninstalled = read_uninstalled_plugins(storage_root);
-    if uninstalled.remove(plugin_id) {
-        write_uninstalled_plugins(storage_root, &uninstalled)?;
-    }
-    Ok(())
-}
-
-fn write_uninstalled_plugins(storage_root: &Path, uninstalled: &BTreeSet<String>) -> Result<()> {
-    std::fs::create_dir_all(storage_root)
-        .with_context(|| format!("创建存储目录失败: {}", storage_root.display()))?;
-    let path = storage_root.join(UNINSTALLED_PLUGINS_FILE);
-    let temp = storage_root.join(format!(
-        ".{UNINSTALLED_PLUGINS_FILE}.tmp-{}",
-        std::process::id()
-    ));
-    let content = serde_json::json!({
-        "version": UNINSTALLED_PLUGINS_VERSION,
-        "uninstalled": uninstalled,
-    });
-    std::fs::write(&temp, serde_json::to_vec_pretty(&content)?)?;
-    if let Err(error) = std::fs::rename(&temp, &path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        let _ = std::fs::remove_file(&temp);
-        return Err(anyhow!(error))
-            .with_context(|| format!("写入卸载记录失败: {}", path.display()));
-    }
-    Ok(())
-}
-
-/// 计算启动时需要自动升级的插件 ID 列表。
-///
-/// 条件：已安装、启用、目录声明了更新版本且不在卸载记录中
-/// （禁用插件尊重用户意愿，保持现状，可手动升级）。
-pub fn plan_auto_upgrades(
-    available: &[AvailablePlugin],
-    uninstalled: &BTreeSet<String>,
-) -> Vec<String> {
-    available
-        .iter()
-        .filter(|plugin| {
-            plugin.installed_version.is_some()
-                && plugin.installed_enabled
-                && plugin.update_available
-                && !uninstalled.contains(&plugin.id)
-        })
-        .map(|plugin| plugin.id.clone())
         .collect()
 }
 

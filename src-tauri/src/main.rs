@@ -557,8 +557,8 @@ fn run_gui() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
 
-            // 插件自动升级：后台升级有新版本的已启用插件，用户主动
-            // 卸载过的插件跳过；离线或失败仅记日志。
+            // 插件自动升级：后台按可更新状态升级已启用插件；
+            // 离线或失败仅记日志。
             state.start_plugin_auto_updater(app.handle().clone());
 
             #[cfg(debug_assertions)]

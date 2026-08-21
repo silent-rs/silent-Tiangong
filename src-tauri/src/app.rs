@@ -434,9 +434,9 @@ impl TiangongApp {
 
     /// 启动插件自动升级任务（main.rs setup 阶段调用一次）。
     ///
-    /// 启动后后台检查一次 OSS 插件目录，自动升级有新版本的已启用插件；
-    /// 用户主动卸载过的插件跳过。全程无弹窗，离线或失败仅记日志，
-    /// 留待下次启动重试。插件的安装由首启推荐引导与插件市场负责。
+    /// 启动后后台检查一次 OSS 插件目录的可更新状态，对已启用且有
+    /// 新版本的插件直接触发升级。全程无弹窗，离线或失败仅记日志，
+    /// 留待下次启动重试；插件的安装由首启推荐引导与插件市场负责。
     pub fn start_plugin_auto_updater(&self, app_handle: tauri::AppHandle) {
         tauri::async_runtime::spawn(async move {
             if let Err(error) = run_plugin_auto_upgrade(app_handle).await {
@@ -855,8 +855,9 @@ impl TiangongApp {
     }
 }
 
-/// 插件自动升级一轮：拉取 OSS 目录 → 结合卸载记录计算待升级插件 →
-/// 串行升级（复用手动升级的事务与回滚链路）→ 成功后广播 plugins_changed。
+/// 插件自动升级一轮：拉取 OSS 目录获得各插件的可更新状态 →
+/// 对已启用且有新版本的插件直接触发升级（复用手动升级的事务与
+/// 回滚链路）→ 成功后广播 plugins_changed。禁用插件不动，可手动升级。
 async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
     use tauri::Emitter;
     use tiangong_plugin_runtime::artifacts;
@@ -876,8 +877,11 @@ async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result
             return Ok(());
         }
     };
-    let uninstalled = artifacts::read_uninstalled_plugins(&storage_root);
-    let upgrades = artifacts::plan_auto_upgrades(&available, &uninstalled);
+    let upgrades: Vec<String> = available
+        .into_iter()
+        .filter(|plugin| plugin.update_available && plugin.installed_enabled)
+        .map(|plugin| plugin.id)
+        .collect();
     if upgrades.is_empty() {
         tracing::debug!("插件无需自动升级");
         return Ok(());
