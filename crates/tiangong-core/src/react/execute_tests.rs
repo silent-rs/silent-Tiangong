@@ -529,7 +529,6 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
 async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     let server = MockServer::start().await;
     mount_request_error(&server, "context_window_exceeded").await;
-    mount_request_error(&server, "context_window_exceeded").await;
     mount_completion(
         &server,
         "[[CURRENT_TASK]]\n继续处理最近工具结果\n[[SUMMARY]]\n较早历史摘要",
@@ -598,10 +597,10 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     }));
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     let first_body = String::from_utf8_lossy(&requests[0].body);
-    let compression_body = String::from_utf8_lossy(&requests[2].body);
-    let retry_body = String::from_utf8_lossy(&requests[3].body);
+    let compression_body = String::from_utf8_lossy(&requests[1].body);
+    let retry_body = String::from_utf8_lossy(&requests[2].body);
     assert!(first_body.contains("recent-tool-output"));
     assert!(!compression_body.contains("recent-tool-output"));
     assert!(compression_body.contains("较早回答"));

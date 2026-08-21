@@ -151,6 +151,6 @@ async fn steer_during_manual_compression_cancels_and_starts_turn() {
         "压缩被用户消息取消，未应用任何结果"
     );
     routes["manual-compression"].assert_hits(1);
-    routes["deferred-steer"].assert_hits(2);
+    routes["deferred-steer"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }

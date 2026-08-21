@@ -402,10 +402,9 @@ async fn llm_failure_propagates_failed_status() {
     events.assert_single_failure_terminal("fail");
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2, "流式失败后应出现一次非流式回退");
+    assert_eq!(requests.len(), 1, "400 确定性失败不回退非流式重发");
     assert!(chat_request_at(&server, 0).await.is_stream());
-    assert!(!chat_request_at(&server, 1).await.is_stream());
-    routes["forced-failure"].assert_hits(2);
+    routes["forced-failure"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
 
