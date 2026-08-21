@@ -61,7 +61,11 @@ const remainingText = computed(() => {
   if (request.value.status === 'cancelled') return '已取消';
   if (request.value.status === 'submitting') return '正在提交';
   if (remainingMs.value <= 0) return '已到期限';
-  return `剩余 ${Math.ceil(remainingMs.value / 1000)} 秒`;
+  const seconds = Math.ceil(remainingMs.value / 1000);
+  if (seconds >= 60) {
+    return `剩余 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+  }
+  return `剩余 ${seconds} 秒`;
 });
 
 const locked = computed(() => !request.value || request.value.status !== 'pending');

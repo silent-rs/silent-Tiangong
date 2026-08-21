@@ -21,14 +21,14 @@ function invocation(argumentsValue: Record<string, unknown>): ToolInvocation {
 }
 
 describe('interaction 业务边界', () => {
-  it('由插件按调用创建时间独立计算 15 秒截止时间', () => {
+  it('由插件按调用创建时间独立计算 2 分钟截止时间', () => {
     const request = parseInvocation(invocation({
       kind: 'approval',
       title: '是否继续',
     }));
 
     expect(request.deadlineMs - request.createdAtMs).toBe(USER_TIMEOUT_MS);
-    expect(USER_TIMEOUT_MS).toBe(15_000);
+    expect(USER_TIMEOUT_MS).toBe(120_000);
   });
 
   it('审批不需要宿主挑战并以普通工具结果返回用户意见', () => {

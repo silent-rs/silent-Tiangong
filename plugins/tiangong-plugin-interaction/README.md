@@ -11,7 +11,7 @@
 
 - 支持审批、确认、单选、多选、文本输入和完整表单六类交互
 - 交互期间覆盖并锁定会话输入区，避免同时提交其他消息
-- 每次请求提供 15 秒处理时间；关闭、超时和提交结果都会明确反馈给 Agent
+- 每次请求提供 2 分钟处理时间；关闭、超时和提交结果都会明确反馈给 Agent
 - 弹层高度随内容自适应，只有超长说明、选项或表单内容会在中间区域滚动
 
 ## 功能展示
@@ -42,7 +42,7 @@ plugins/tiangong-plugin-interaction/
 ├── index.html       # Vite 入口
 ├── src/
 │   ├── main.ts
-│   ├── interaction.ts       # 参数解析、15 秒时限与完整工具结果
+│   ├── interaction.ts       # 参数解析、2 分钟时限与完整工具结果
 │   ├── interaction.test.ts  # 插件业务边界单元测试
 │   └── App.vue              # 六种界面、倒计时与提交处理
 ├── dist/index.html  # 构建产物（清单 entry 指向此处）
@@ -76,7 +76,7 @@ yarn package        # 开发期打包：构建 + 组装 release/ 插件包
 - manifest 声明 `request_user` 工具与提示词，使用 `tool.provide`、
   `capabilities.events: ["tool.*"]`
 - 订阅 `tool.requested` / `tool.closed`，通过 `tool.resolve` 提交完整工具结果
-- 插件按调用创建时间独立执行 15 秒用户时限，宿主只按 `timeout_ms: 20000` 处理插件失联
+- 插件按调用创建时间独立执行 2 分钟用户时限，宿主只按 `timeout_ms: 125000` 处理插件失联
 - approval 将用户选择作为普通工具结果返回 Agent，由 Agent 决定后续步骤；Core 不解释或保存该选择
 - 交互界面作为会话区域独立 Shadow 弹层覆盖并锁定输入区，高度随内容增长、最高 520px；超长文本、选项或表单仅滚动中间内容区，关闭界面会向 Agent 返回明确的取消原因
 - 插件按宿主注入的当前会话显示请求，并保存其他运行中会话的待处理项
