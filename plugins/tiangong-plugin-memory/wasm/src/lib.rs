@@ -514,7 +514,15 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
     let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
         .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
 
-    let idx = turn_start_idx as usize;
+    // 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退 idx。
+    let idx = match &session.turn_start_message_id {
+        Some(id) => session
+            .messages
+            .iter()
+            .position(|msg| &msg.id == id)
+            .unwrap_or(turn_start_idx as usize),
+        None => turn_start_idx as usize,
+    };
     let all_messages = &session.messages;
 
     // 校验起点：必须是 User 且非 CompressedResume。

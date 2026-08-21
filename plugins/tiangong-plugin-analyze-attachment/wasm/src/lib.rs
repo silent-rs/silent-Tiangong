@@ -31,6 +31,13 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
 // 缓存的会话消息（thread-local，生命周期钩子注入）。
 thread_local! {
     static SESSION_MESSAGES: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    // 主 Chat 模型是否多模态（on_config_updated 注入）。
+    static CHAT_MULTIMODAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 主模型可直接看图时本插件没有存在意义：工具与提示段都不再提供。
+fn chat_is_multimodal() -> bool {
+    CHAT_MULTIMODAL.with(|flag| flag.get())
 }
 
 struct Component;
@@ -45,6 +52,9 @@ impl Guest for Component {
     }
 
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
+        if chat_is_multimodal() {
+            return Ok(Vec::new());
+        }
         Ok(vec![ToolSpec {
             name: TOOL_ANALYZE_ATTACHMENT.to_string(),
             description: "按需调用多模态模型解析用户上传的图片附件。只有当用户问题确实需要查看图片内容时才调用；文档和其他文件应使用对应文件工具。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
@@ -54,6 +64,9 @@ impl Guest for Component {
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
+        if chat_is_multimodal() {
+            return Ok(Vec::new());
+        }
         Ok(vec![format!(
             "## 附件分析工具\n\
              当用户消息明确列出需要分析的图片资源，且回答确实需要查看图片内容时，可调用 `{TOOL_ANALYZE_ATTACHMENT}`。\n\
@@ -63,6 +76,18 @@ impl Guest for Component {
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
+        if chat_is_multimodal() {
+            return Ok(ToolResult {
+                ok: false,
+                summary: "主模型已具备多模态能力，本插件未注册工具；请直接根据对话中的图片内容回答"
+                    .to_string(),
+                stdout: String::new(),
+                stderr: "chat model is multimodal; analyze_attachment is not registered"
+                    .to_string(),
+                exit_code: 1,
+                execution: None,
+            });
+        }
         match call.name.as_str() {
             TOOL_ANALYZE_ATTACHMENT => handle_analyze(&call),
             other => Err(plugin_err(format!("未知的 Attachment 工具: {other}"))),
@@ -77,7 +102,13 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
+    fn on_config_updated(config_json: String) -> Result<(), PluginError> {
+        let config: Value = serde_json::from_str(&config_json).unwrap_or(Value::Null);
+        let multimodal = config
+            .get("chat_capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("multimodal")));
+        CHAT_MULTIMODAL.with(|flag| flag.set(multimodal));
         Ok(())
     }
 
@@ -173,47 +204,39 @@ fn find_attachment_source(
     message_id: Option<&str>,
     attachment_index: Option<usize>,
 ) -> (String, Vec<String>) {
-    // 定位消息：优先按 message_id，否则取最后一条带附件的用户消息。
-    let source = if let Some(id) = message_id {
-        messages
+    // 定位消息：明确提供 message_id 时严格精确匹配——ID 不存在或该消息
+    // 没有图片都视为定位失败并报错，绝不回退到其他消息（避免误用历史图片
+    // 生成看似正常但内容错误的分析）。仅省略 ID 时取最近一条带图用户消息。
+    let source = match message_id {
+        Some(id) => messages
             .iter()
-            .find(|msg| msg.get("id").and_then(Value::as_str) == Some(id))
-    } else {
-        messages
+            .find(|msg| msg.get("id").and_then(Value::as_str) == Some(id)),
+        None => messages
             .iter()
             .rev()
-            .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+            .find(|msg| is_user_message_with_image(msg)),
     };
 
     let Some(source) = source else {
         return (String::new(), Vec::new());
     };
 
-    // 提取文本内容。
+    // 提取文本内容：用户文本在 content 数组的 text 块中。
     let user_text = source
-        .get("text_content")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-
-    // 从 content blocks 提取图片路径。
-    let content = source.get("content").and_then(Value::as_array);
-    let mut all_images = Vec::new();
-    if let Some(content) = content {
-        for block in content {
-            // ContentBlock::Image { asset: { local_path } }
-            if let Some(asset) = block
-                .get("asset")
-                .or_else(|| block.get("AssetReference").and_then(|a| a.get("asset")))
-                && let Some(path) = asset.get("local_path").and_then(Value::as_str)
-                && !path.is_empty()
-            {
-                all_images.push(path.to_string());
-            }
-        }
-    }
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
 
     // 按序号筛选或返回全部。
+    let all_images = message_image_paths(source);
     let images = match attachment_index {
         Some(index) => all_images
             .get(index)
@@ -224,6 +247,32 @@ fn find_attachment_source(
     };
 
     (user_text, images)
+}
+
+/// 消息是否为带图片附件的用户消息。
+fn is_user_message_with_image(msg: &Value) -> bool {
+    msg.get("role").and_then(Value::as_str) == Some("user") && !message_image_paths(msg).is_empty()
+}
+
+/// 从消息 content blocks 提取图片本地路径。
+fn message_image_paths(msg: &Value) -> Vec<String> {
+    msg.get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                // ContentBlock::Image { asset: { local_path } }
+                .filter_map(|block| {
+                    block
+                        .get("asset")
+                        .or_else(|| block.get("AssetReference").and_then(|a| a.get("asset")))
+                        .and_then(|asset| asset.get("local_path").and_then(Value::as_str))
+                        .filter(|path| !path.is_empty())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl UiGuest for Component {
@@ -246,3 +295,106 @@ impl UiGuest for Component {
     }
 }
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn user_message_with_image(id: &str, text: &str, path: &str) -> Value {
+        json!({
+            "id": id,
+            "role": "user",
+            "content": [
+                { "type": "text", "text": text },
+                { "type": "image", "asset": { "local_path": path } }
+            ]
+        })
+    }
+
+    #[test]
+    fn message_id_命中时提取文本与图片路径() {
+        let messages = vec![user_message_with_image("msg-1", "看这张图", "/tmp/a.png")];
+        let (text, images) = find_attachment_source(&messages, Some("msg-1"), Some(0));
+        assert_eq!(text, "看这张图");
+        assert_eq!(images, vec!["/tmp/a.png".to_string()]);
+    }
+
+    #[test]
+    fn message_id_未命中时返回空() {
+        let messages = vec![
+            user_message_with_image("msg-1", "第一张", "/tmp/a.png"),
+            json!({ "id": "msg-2", "role": "assistant", "content": [{ "type": "text", "text": "收到" }] }),
+        ];
+        // 模型编造的 ID 在会话中不存在：严格失败，不回退到历史图片。
+        let (text, images) = find_attachment_source(&messages, Some("made-up-id"), Some(0));
+        assert_eq!(text, "");
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn 省略_message_id_时取最近带图用户消息() {
+        let messages = vec![
+            user_message_with_image("msg-1", "第一张", "/tmp/a.png"),
+            user_message_with_image("msg-2", "第二张", "/tmp/b.png"),
+        ];
+        let (text, images) = find_attachment_source(&messages, None, None);
+        assert_eq!(text, "第二张");
+        assert_eq!(images, vec!["/tmp/b.png".to_string()]);
+    }
+
+    #[test]
+    fn message_id_命中但无图时图片为空() {
+        let messages = vec![json!({
+            "id": "msg-1",
+            "role": "user",
+            "content": [{ "type": "text", "text": "纯文本" }]
+        })];
+        // 严格匹配：消息找得到（文本正常提取），但没有图片可解析。
+        let (text, images) = find_attachment_source(&messages, Some("msg-1"), Some(0));
+        assert_eq!(text, "纯文本");
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn chat_多模态时工具与提示段为空() {
+        Component::on_config_updated(
+            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
+        )
+        .unwrap();
+        assert!(Component::tool_specs().unwrap().is_empty());
+        assert!(Component::prompt_sections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_非多模态时正常提供工具与提示段() {
+        Component::on_config_updated(r#"{"llm":{},"chat_capabilities":["chat"]}"#.to_string())
+            .unwrap();
+        assert_eq!(Component::tool_specs().unwrap().len(), 1);
+        assert_eq!(Component::prompt_sections().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn 主模型切换时工具与提示段跟随变化() {
+        // 多模态主模型：不提供工具。
+        Component::on_config_updated(
+            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
+        )
+        .unwrap();
+        assert!(Component::tool_specs().unwrap().is_empty());
+
+        // 切换到非多模态主模型：恢复工具与提示段。
+        Component::on_config_updated(r#"{"llm":{},"chat_capabilities":["chat"]}"#.to_string())
+            .unwrap();
+        assert_eq!(Component::tool_specs().unwrap().len(), 1);
+        assert_eq!(Component::prompt_sections().unwrap().len(), 1);
+
+        // 再切回多模态主模型：再次隐藏。
+        Component::on_config_updated(
+            r#"{"llm":{},"chat_capabilities":["chat","multimodal"]}"#.to_string(),
+        )
+        .unwrap();
+        assert!(Component::tool_specs().unwrap().is_empty());
+        assert!(Component::prompt_sections().unwrap().is_empty());
+    }
+}

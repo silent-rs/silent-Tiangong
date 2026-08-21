@@ -327,7 +327,15 @@ fn handle_search_code(call: &ToolCall) -> Result<ToolResult, PluginError> {
 fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: PluginSession = serde_json::from_str(session_json)
         .map_err(|e| plugin_err(format!("解析 session 失败: {e}")))?;
-    let start = turn_start_idx as usize;
+    // 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退 idx。
+    let start = match &session.turn_start_message_id {
+        Some(id) => session
+            .messages
+            .iter()
+            .position(|msg| &msg.id == id)
+            .unwrap_or(turn_start_idx as usize),
+        None => turn_start_idx as usize,
+    };
     let turns: Vec<TurnData> = session
         .messages
         .get(start..)

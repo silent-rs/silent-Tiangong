@@ -23,6 +23,12 @@ pub struct PluginSession {
     /// 父会话 ID（子 Agent 时存在）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// 本轮起始用户消息 ID（on_turn_started / on_turn_finished 钩子填充）。
+    ///
+    /// 插件按 ID 定位本轮起点，不受快照消息增删（如剔除 Notice）影响；
+    /// 其余钩子（会话就绪/结束）无本轮概念，不填充。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_message_id: Option<String>,
     /// 思考强度。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,

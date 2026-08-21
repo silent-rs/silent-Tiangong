@@ -188,7 +188,7 @@ impl Plugin for WasmPluginAdapter {
     /// CoreConfig 变更：序列化为 JSON 转发到 WASM 组件的 on-config-updated。
     /// 序列化失败（不应发生）或 WASM 调用失败时仅记录 warning，不阻断 core 流程。
     fn on_config_updated(&self, config: &CoreConfig) {
-        let config_json = match serde_json::to_string(config) {
+        let config_json = match plugin_config_payload(config) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!("序列化 CoreConfig 失败，跳过 wasm 插件通知: {e}");
@@ -350,7 +350,12 @@ impl WasmPluginAdapter {
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let plugin_session = tiangong_types::PluginSession::from(session);
+        let mut plugin_session = tiangong_types::PluginSession::from(session);
+        // 本轮起点同时以消息 ID 提供：插件按 ID 定位不受快照消息增删影响。
+        plugin_session.turn_start_message_id = session
+            .messages
+            .get(turn_start_idx)
+            .map(|message| message.id.clone());
         let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
@@ -364,7 +369,8 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        let idx = turn_start_idx as u32;
+        // idx 兼容仍按位置定位的旧版插件；快照剔除 Notice 后位置前移，同步换算。
+        let idx = tiangong_core::session::plugin_turn_start_idx(session, turn_start_idx) as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
@@ -495,4 +501,34 @@ where
             .map_err(|e| anyhow::anyhow!("wasm 插件锁中毒: {e}"))?;
         call(&mut plugin)
     })
+}
+
+/// 序列化 CoreConfig 为插件配置载荷，并附加主 Chat 模型的能力声明。
+///
+/// CoreConfig 只含端点信息（base_url/model 等），不含能力路由；插件需要
+/// 能力信息判断自身是否需要注册（如多模态主模型直接内联图片时，
+/// 附件分析插件无需再提供工具）。配置尚未初始化时附加空列表（保守保留插件工具）。
+fn plugin_config_payload(config: &CoreConfig) -> anyhow::Result<String> {
+    let mut value = serde_json::to_value(config)?;
+    let chat_capabilities: Vec<String> = tiangong_config::registry::try_models()
+        .and_then(|models| {
+            models
+                .routing
+                .get(&tiangong_llm::models_config::RoutingSlot::Chat)
+                .map(|entry| {
+                    entry
+                        .capabilities
+                        .iter()
+                        .map(|cap| cap.key().to_string())
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "chat_capabilities".to_string(),
+            serde_json::json!(chat_capabilities),
+        );
+    }
+    Ok(serde_json::to_string(&value)?)
 }
