@@ -25,16 +25,6 @@ pub(crate) fn rebuild_system_prompt_for_session(
     session.rebuild_system_prompt(&config);
 }
 
-/// 思考控制：直接采用 AgentConfig 的思考强度档位（None 关闭思考）。
-/// 思考量/预算由各 provider 按自身协议决定，天工层不限制。
-pub(crate) fn build_thinking_config(ctx: &TurnContext) -> crate::model::ReasoningEffort {
-    ctx.agent_config.reasoning_effort
-}
-
-pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
-    ContextOrganizer::new(context_limit).token_threshold()
-}
-
 pub(crate) fn emit_token_usage(
     stream_tx: &StdSender<StreamEvent>,
     usage: &TokenUsage,
@@ -73,7 +63,7 @@ pub(crate) fn emit_token_usage(
     let _ = stream_tx.send(StreamEvent::TokenUsage {
         usage: usage.clone(),
         current_tokens,
-        compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
+        compression_threshold_tokens: Some(ContextOrganizer::new(context_limit).token_threshold()),
         context_limit_tokens: Some(context_limit),
         source,
         agent_id: agent_id.map(|s| s.to_string()),

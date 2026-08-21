@@ -17,9 +17,7 @@ use crate::model::{
     ToolSpec,
 };
 use crate::permission::TrustMode;
-use crate::react::context::{
-    build_thinking_config, emit_token_usage, persist_error, select_client_for_request,
-};
+use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessagePhase, MessageRole};
@@ -542,7 +540,7 @@ fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     ModelRequest {
         user_input: String::new(),
         context: ctx.session.context(),
-        reasoning_effort: build_thinking_config(ctx),
+        reasoning_effort: ctx.agent_config.reasoning_effort,
         max_output_tokens: None,
     }
 }
