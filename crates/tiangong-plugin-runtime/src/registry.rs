@@ -1595,7 +1595,7 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
             adapter.set_enabled(false);
         }
     }
-    // 卸载成功即记录：自动安装/自动维护跳过用户主动移除的插件，
+    // 卸载成功即记录：自动升级跳过用户主动移除的插件，
     // 用户重新手动安装成功后记录在安装路径中清除。
     if let Err(error) = crate::artifacts::record_uninstalled_plugin(storage_root, plugin_id) {
         tracing::warn!(plugin_id, %error, "插件已卸载，但写入卸载记录失败");

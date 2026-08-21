@@ -1,12 +1,12 @@
-//! 插件自动维护验证：
-//! 卸载记录读写往返 → 自动维护计划决策（核心插件自动安装、启用插件自动
-//! 升级、黑名单与禁用跳过）→ 卸载写入记录与重新安装清除记录的 registry 集成。
+//! 插件自动升级验证：
+//! 卸载记录读写往返 → 自动升级计划决策（启用升级、黑名单与禁用跳过、
+//! 未安装不自动装）→ 卸载写入记录与重新安装清除记录的 registry 集成。
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use tiangong_plugin_runtime::artifacts::{
-    AvailablePlugin, clear_uninstalled_plugin, plan_auto_maintenance, read_uninstalled_plugins,
+    AvailablePlugin, clear_uninstalled_plugin, plan_auto_upgrades, read_uninstalled_plugins,
     record_uninstalled_plugin,
 };
 use tiangong_plugin_runtime::registry::{install_staged_plugin, uninstall_plugin};
@@ -136,15 +136,11 @@ fn 损坏的卸载记录按空集合处理() {
 }
 
 #[test]
-fn 自动维护计划_核心安装_启用升级_黑名单与禁用跳过() {
+fn 自动升级计划_启用升级_黑名单与禁用跳过() {
     let available = vec![
-        // 核心插件未安装 → 自动安装。
+        // 未安装插件（含核心插件）→ 不属于自动升级，安装走首启引导与插件市场。
         available_plugin("terminal", "0.1.0", true, None, false),
-        // 核心插件未安装但在卸载黑名单 → 跳过。
-        available_plugin("browser", "0.1.0", true, None, false),
-        // 核心插件平台不支持 → 跳过。
-        available_plugin("interaction", "0.3.1", false, None, false),
-        // 核心插件已安装且无更新 → 不动。
+        // 已安装且无更新 → 不动。
         available_plugin("interaction", "0.3.1", true, Some(("0.3.1", true)), false),
         // 已安装、启用、有更新 → 自动升级。
         available_plugin("memory", "0.2.0", true, Some(("0.1.0", true)), true),
@@ -152,35 +148,21 @@ fn 自动维护计划_核心安装_启用升级_黑名单与禁用跳过() {
         available_plugin("prompt", "0.2.0", true, Some(("0.1.0", false)), true),
         // 已安装、启用、无更新 → 不动。
         available_plugin("fetch", "0.1.0", true, Some(("0.1.0", true)), false),
-        // 非核心未安装 → 不自动安装。
+        // 未安装 → 不动。
         available_plugin("skill", "0.1.0", true, None, false),
         // 已安装、启用、有更新但在黑名单 → 不升级。
         available_plugin("mcp", "0.2.0", true, Some(("0.1.0", true)), true),
     ];
     let uninstalled = uninstalled_set(&["browser", "mcp"]);
-    let plan = plan_auto_maintenance(&available, &uninstalled);
-
-    assert_eq!(plan.install, vec!["terminal".to_string()]);
-    assert_eq!(plan.upgrade, vec!["memory".to_string()]);
+    assert_eq!(
+        plan_auto_upgrades(&available, &uninstalled),
+        vec!["memory".to_string()]
+    );
 }
 
 #[test]
-fn 空目录或全黑名单时计划为空() {
-    assert!(
-        plan_auto_maintenance(&[], &BTreeSet::new())
-            .install
-            .is_empty()
-    );
-    assert!(
-        plan_auto_maintenance(&[], &BTreeSet::new())
-            .upgrade
-            .is_empty()
-    );
-
-    let available = vec![available_plugin("terminal", "0.1.0", true, None, false)];
-    let uninstalled = uninstalled_set(&["terminal"]);
-    let plan = plan_auto_maintenance(&available, &uninstalled);
-    assert!(plan.install.is_empty() && plan.upgrade.is_empty());
+fn 空目录时升级计划为空() {
+    assert!(plan_auto_upgrades(&[], &BTreeSet::new()).is_empty());
 }
 
 #[test]

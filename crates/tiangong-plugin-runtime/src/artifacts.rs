@@ -38,15 +38,9 @@ pub const DEFAULT_PLUGIN_IDS: &[&str] = &[
     "browser",
 ];
 
-/// 启动时自动安装的核心插件 ID 列表（终端、浏览器、审批征询）。
-///
-/// 属于默认插件集合的子集：未安装且未被用户主动卸载时，宿主启动后台任务
-/// 会自动从 OSS 目录安装，不依赖首启推荐引导。
-pub const AUTO_INSTALL_PLUGIN_IDS: &[&str] = &["terminal", "browser", "interaction"];
-
 /// 用户主动卸载的插件记录文件（位于存储根目录）。
 ///
-/// 记录中的插件不会被自动安装或自动升级；用户重新手动安装成功后记录清除。
+/// 记录中的插件不会被自动升级；用户重新手动安装成功后记录清除。
 const UNINSTALLED_PLUGINS_FILE: &str = "uninstalled_plugins.json";
 
 /// 卸载记录文件结构版本。
@@ -781,42 +775,24 @@ fn write_uninstalled_plugins(storage_root: &Path, uninstalled: &BTreeSet<String>
     Ok(())
 }
 
-/// 启动时自动维护决策结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoMaintenancePlan {
-    /// 需要自动安装的核心插件 ID。
-    pub install: Vec<String>,
-    /// 需要自动升级的已启用插件 ID。
-    pub upgrade: Vec<String>,
-}
-
-/// 计算启动时的自动维护计划。
+/// 计算启动时需要自动升级的插件 ID 列表。
 ///
-/// - 自动安装：核心插件（`AUTO_INSTALL_PLUGIN_IDS`）在目录中存在、平台支持、
-///   未安装且不在卸载记录中；
-/// - 自动升级：已安装、启用、目录声明了更新版本且不在卸载记录中
-///   （禁用插件尊重用户意愿，保持现状，可手动升级）。
-pub fn plan_auto_maintenance(
+/// 条件：已安装、启用、目录声明了更新版本且不在卸载记录中
+/// （禁用插件尊重用户意愿，保持现状，可手动升级）。
+pub fn plan_auto_upgrades(
     available: &[AvailablePlugin],
     uninstalled: &BTreeSet<String>,
-) -> AutoMaintenancePlan {
-    let mut install = Vec::new();
-    let mut upgrade = Vec::new();
-    for plugin in available {
-        if uninstalled.contains(&plugin.id) {
-            continue;
-        }
-        let is_core = AUTO_INSTALL_PLUGIN_IDS.contains(&plugin.id.as_str());
-        if is_core && plugin.supported && plugin.installed_version.is_none() {
-            install.push(plugin.id.clone());
-        } else if plugin.installed_version.is_some()
-            && plugin.installed_enabled
-            && plugin.update_available
-        {
-            upgrade.push(plugin.id.clone());
-        }
-    }
-    AutoMaintenancePlan { install, upgrade }
+) -> Vec<String> {
+    available
+        .iter()
+        .filter(|plugin| {
+            plugin.installed_version.is_some()
+                && plugin.installed_enabled
+                && plugin.update_available
+                && !uninstalled.contains(&plugin.id)
+        })
+        .map(|plugin| plugin.id.clone())
+        .collect()
 }
 
 fn version_is_newer(installed: &str, available: &str) -> bool {
