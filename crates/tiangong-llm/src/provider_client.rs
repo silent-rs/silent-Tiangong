@@ -708,6 +708,10 @@ impl SingleProviderClient {
         {
             Ok(response) => Ok(response),
             Err(err) => {
+                // 确定性失败（400/401 等）换非流式重发同样失败，直接失败不再回退。
+                if is_deterministic_llm_error(&err) {
+                    return Err(err);
+                }
                 if let Some(on_retry) = &self.on_retry {
                     on_retry(1, MAX_RETRIES, 0, &err.to_string());
                 }
@@ -945,6 +949,7 @@ impl SingleProviderClient {
                 on_delta,
             ) {
                 Ok(resp) => Ok(resp),
+                Err(err) if is_deterministic_llm_error(&err) => Err(err),
                 Err(_) => {
                     // 流式失败，回退到非流式，一次性推送 reasoning + content
                     let resp =
@@ -1888,7 +1893,23 @@ fn block_on_provider_stream(
 }
 
 fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
-    anyhow!(error.to_string())
+    anyhow::Error::new(error)
+}
+
+/// 判断错误是否为确定性失败（配置、认证、请求无效类）。
+///
+/// 这类错误与调用方式（流式/非流式）无关，换非流式重发同样失败，
+/// 流式失败后不应回退非流式重试。
+fn is_deterministic_llm_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<crate::error::LlmError>()
+        .is_some_and(|error| {
+            matches!(
+                error,
+                crate::error::LlmError::Configuration(_)
+                    | crate::error::LlmError::Authentication(_)
+                    | crate::error::LlmError::InvalidRequest(_)
+            )
+        })
 }
 
 // ── 重试相关 ──────────────────────────────────────────────
