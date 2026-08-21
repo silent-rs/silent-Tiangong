@@ -380,6 +380,12 @@ export function MessageList() {
     const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const lastMsg = messages[messages.length - 1];
     const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
+    // 用户发起对话（发送或编辑重发）时重新进入自动跟随模式；
+    // 用户翻动页面离开底部后跟随自动关闭，拉回最底部时由滚动事件重新开启
+    if (isUserSelfSent) {
+      isAtBottomRef.current = true;
+      setIsAtBottom(true);
+    }
     // 用户离开底部时，新消息/流式 id 变化不强制拉回；tab 切换与用户主动发送始终跟随
     const shouldScroll =
       tabChanged
@@ -390,14 +396,16 @@ export function MessageList() {
       if (completedGroups.length > 0 && !streamingGroup) {
         // 滚动到虚拟列表最后一项
         requestAnimationFrame(() => {
+          // 跟随滚动用瞬时定位：平滑动画期间内容持续增长会让滚动事件
+          // 误判"离开底部"而中断跟随
           virtualizer.scrollToIndex(completedGroups.length - 1, {
-            behavior: tabChanged ? "auto" : "smooth",
+            behavior: "auto",
             align: "end",
           });
         });
       } else if (streamingGroup) {
         requestAnimationFrame(() => {
-          scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+          scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
         });
       }
     }
@@ -419,7 +427,9 @@ export function MessageList() {
       ticking = true;
       requestAnimationFrame(() => {
         if (isAtBottomRef.current) {
-          el.scrollIntoView({ behavior: "smooth", block: "end" });
+          // 瞬时贴底：流式内容增长期间保持视口贴底，滚动事件判定不受
+          // 平滑动画与内容增长的竞态影响；用户翻离底部后自动停止跟随
+          el.scrollIntoView({ behavior: "auto", block: "end" });
         }
         ticking = false;
       });
@@ -432,11 +442,12 @@ export function MessageList() {
     return () => observer.disconnect();
   }, [streamingMessageId]);
 
-  // 滚动到底部
+  // 滚动到底部：瞬时贴底并重新进入跟随模式。平滑动画期间内容增长
+  // 会让落点偏离底部导致跟随开不上来
   const scrollToBottom = useCallback(() => {
     const el = viewportRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
     isAtBottomRef.current = true;
     setIsAtBottom(true);
   }, []);
