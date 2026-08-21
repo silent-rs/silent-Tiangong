@@ -192,7 +192,9 @@ mod tests {
         );
 
         let calls = finished
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|events| match (&events[0], &events[1]) {
                 (
                     ProviderStreamEvent::ToolCallStart(call),
