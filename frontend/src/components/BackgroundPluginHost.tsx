@@ -12,10 +12,10 @@ export interface BackgroundPluginInstance {
 }
 
 /**
- * 工具接应的隐性后台实例（app.open mode=background 落地）：
- * 隐藏挂载插件 UI，只为订阅 tool.requested 让工具调用有人执行；
- * 不弹拓展区面板、不打扰用户。用户明确要求展示时由插件工具自行
- * 前台 app.open 弹出面板，与此互不影响。
+ * 后台会话（Sub Agent/Bot 等）工具接应的隐性挂载：隐藏挂载插件 UI，
+ * 只为订阅 tool.requested 让其工具有人执行；不弹拓展区面板、不进入
+ * 前台标签与绿点。当前会话的工具拉起一律建立可见标签（MainApp
+ * app:open_plugin 分流），此处仅兜底无法进入标签栏的后台会话。
  */
 export function BackgroundPluginHost({
   instances,

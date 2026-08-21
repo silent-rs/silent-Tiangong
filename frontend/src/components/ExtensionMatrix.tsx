@@ -14,14 +14,15 @@ import {
  *
  * 统一 App 目录：完全由已安装插件的 extension.tab 贡献驱动（浏览器/
  * 终端等官方能力同样以插件形态注册），数据源 listExtensionApps，插件
- * 状态变化时广播刷新。图标右上角绿点 = 该 App 存在已打开实例；左键
- * 打开；右键菜单按实例模式区分。
+ * 状态变化时广播刷新。图标右上角绿点 = 该 App 存在已打开实例（含工具
+ * 静默建立的标签）；左键有则聚焦无则新建；右键菜单按实例模式区分，
+ * 多实例 App 提供"新建实例"入口。
  */
 export interface ExtensionMatrixProps {
   /** 当前会话存在已打开实例的 plugin App 键（`plugin_id:contribution_id`）。 */
   runningPluginApps?: string[];
-  /** 打开 App（按 open_mode 分派：单例聚焦/多例新建）。 */
-  onOpenPluginApp?: (app: AppEntry) => void;
+  /** 打开 App：默认聚焦已有实例（无则按 open_mode 新建），newInstance 强制新建。 */
+  onOpenPluginApp?: (app: AppEntry, opts?: { newInstance?: boolean }) => void;
 }
 
 /** App 图标：按 icon 标识映射（插件贡献声明），未识别用拼图。 */
@@ -65,15 +66,15 @@ export function ExtensionMatrix({
         const appKey = `${app.plugin_id}:${app.contribution_id}`;
         const running = runningPluginApps.includes(appKey);
         const multi = app.open_mode === 'multi';
-        const open = () => {
-          onOpenPluginApp?.(app);
+        const open = (opts?: { newInstance?: boolean }) => {
+          onOpenPluginApp?.(app, opts);
         };
         return (
           <ContextMenu key={appKey}>
             <ContextMenuTrigger asChild>
               <button
                 type="button"
-                onClick={open}
+                onClick={() => open()}
                 className="group flex w-full cursor-default flex-col items-center gap-1"
                 title={`${app.title}${running ? '（已打开）' : ''}（${multi ? '多实例' : '单实例'}）—— ${app.description}`}
               >
@@ -93,9 +94,14 @@ export function ExtensionMatrix({
               </button>
             </ContextMenuTrigger>
             <ContextMenuContent>
-              <ContextMenuItem onClick={open}>
+              <ContextMenuItem onClick={() => open()}>
                 {running ? `聚焦${app.title}` : `打开${app.title}`}
               </ContextMenuItem>
+              {multi && (
+                <ContextMenuItem onClick={() => open({ newInstance: true })}>
+                  新建{app.title}实例
+                </ContextMenuItem>
+              )}
             </ContextMenuContent>
           </ContextMenu>
         );

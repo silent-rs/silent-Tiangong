@@ -373,8 +373,10 @@ fn run_gui() {
                             .as_ref()
                             .and_then(|value| value["session_id"].as_str().map(str::to_string))
                             .unwrap_or_default();
-                        // mode=background：工具接应的隐性挂载（不弹拓展区面板）；
-                        // 缺省 focus：弹出并聚焦面板（插件工具显式请求展示时）。
+                        // mode=background：带实例编号的为工具静默拉起（建立
+                        // 可见标签但不自动展开面板），无编号的为无订阅兜底
+                        // （前端挂隐藏执行壳）；缺省 focus：建立标签并弹出
+                        // 聚焦面板（用户明确请求展示时）。
                         let background = payload_value
                             .as_ref()
                             .and_then(|value| value["mode"].as_str().map(str::to_string))

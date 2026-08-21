@@ -247,7 +247,8 @@ export async function createTiangongBridge(): Promise<HostBridge> {
  * 打开本插件声明的 `extension.tab` App。
  *
  * 仅声明了 `extension.tab` 贡献及 `app.use` 权限的插件可用，宿主会再次校验。
- * `showPanel=false` 只建立后台实例，不会自动展开拓展区。
+ * 实例统一建立拓展区顶部标签（可见、可关闭、计入在用绿点）；
+ * `showPanel=false` 仅表示不自动展开拓展区面板（工具静默拉起）。
  */
 export async function openExtensionApp(
   bridge: HostBridge,
