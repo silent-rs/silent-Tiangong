@@ -25,52 +25,10 @@ pub(crate) fn rebuild_system_prompt_for_session(
     session.rebuild_system_prompt(&config);
 }
 
-pub(crate) fn build_thinking_config(
-    ctx: &TurnContext,
-) -> (
-    Option<crate::model::ThinkingConfig>,
-    Option<crate::model::ReasoningEffort>,
-    bool,
-) {
-    let effort = ctx.agent_config.reasoning_effort.trim().to_lowercase();
-    match effort.as_str() {
-        "none" | "" => (None, None, true),
-        "low" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Low),
-            false,
-        ),
-        "medium" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-        "high" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 8192,
-            }),
-            Some(crate::model::ReasoningEffort::High),
-            false,
-        ),
-        "max" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 16384,
-            }),
-            Some(crate::model::ReasoningEffort::Max),
-            false,
-        ),
-        _ => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-    }
+/// 思考控制：直接采用 AgentConfig 的思考强度档位（None 关闭思考）。
+/// 思考量/预算由各 provider 按自身协议决定，天工层不限制。
+pub(crate) fn build_thinking_config(ctx: &TurnContext) -> crate::model::ReasoningEffort {
+    ctx.agent_config.reasoning_effort
 }
 
 pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {

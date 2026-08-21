@@ -664,7 +664,7 @@ impl TiangongApp {
         let mut template = app_config.to_core_config();
         template.trust_mode = app_config.default_trust_mode;
         template.default_trust_mode = app_config.default_trust_mode;
-        template.reasoning_effort = agent_config.reasoning_effort.clone();
+        template.reasoning_effort = agent_config.reasoning_effort;
         let session_configs = self
             .core_manager
             .list_session_metadata()
@@ -674,11 +674,7 @@ impl TiangongApp {
                 config.trust_mode = metadata.trust_mode;
                 config.reasoning_effort = metadata
                     .reasoning_effort
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|effort| !effort.is_empty())
-                    .unwrap_or(&agent_config.reasoning_effort)
-                    .to_string();
+                    .unwrap_or(agent_config.reasoning_effort);
                 (metadata.id.clone(), config)
             })
             .collect::<HashMap<_, _>>();
@@ -720,7 +716,7 @@ impl TiangongApp {
         session_id: &str,
         workspace_dir: Option<String>,
         initial_trust_mode: Option<tiangong_types::TrustMode>,
-        initial_reasoning_effort: Option<String>,
+        initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
         let (app_config, agent_config, default_workspace_dir) = self
@@ -743,16 +739,11 @@ impl TiangongApp {
             session_config.trust_mode = session.trust_mode;
             session_config.reasoning_effort = session
                 .reasoning_effort
-                .as_deref()
-                .map(str::trim)
-                .filter(|effort| !effort.is_empty())
-                .unwrap_or(&agent_config.reasoning_effort)
-                .to_string();
+                .unwrap_or(agent_config.reasoning_effort);
         } else {
             session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
-            session_config.reasoning_effort = initial_reasoning_effort
-                .filter(|effort| !effort.trim().is_empty())
-                .unwrap_or(agent_config.reasoning_effort);
+            session_config.reasoning_effort =
+                initial_reasoning_effort.unwrap_or(agent_config.reasoning_effort);
         }
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，

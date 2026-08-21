@@ -14,6 +14,7 @@ use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
 use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
 use crate::request::ProviderRequest;
+use crate::request::ReasoningEffort;
 
 #[derive(Debug, Clone)]
 pub struct LlmEndpointConfig {
@@ -81,9 +82,7 @@ pub async fn complete_text_with_usage(
         top_p: None,
         stop_sequences: Vec::new(),
         metadata: None,
-        thinking: None,
-        reasoning_effort: None,
-        thinking_disabled: false,
+        reasoning_effort: ReasoningEffort::None,
     };
     let response = provider.complete(request).await?;
     Ok((message_text(&response.assistant_message), response.usage))

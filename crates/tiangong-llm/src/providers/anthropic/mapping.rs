@@ -72,12 +72,12 @@ pub(super) fn to_anthropic_request(
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
+    // reasoning_effort 有值即开启思考；预算是 Anthropic 协议自身细节，
+    // 由 tiangong-anthropic 库的 ThinkingConfig 决定（默认不限制）。
     request
-        .thinking
-        .as_ref()
-        .map(|thinking| ThinkingConfig::Enabled {
-            budget_tokens: thinking.budget_tokens,
-        })
+        .reasoning_effort
+        .is_thinking_enabled()
+        .then(ThinkingConfig::enabled)
 }
 
 fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmError>> {

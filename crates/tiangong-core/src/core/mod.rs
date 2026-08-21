@@ -118,9 +118,9 @@ impl TiangongCore {
     /// 设置会话思考强度。
     ///
     /// 已经发出的模型请求不变；活跃 turn 会在下一次构建模型请求时使用新值。
-    pub fn set_reasoning_effort(&self, effort: String) {
+    pub fn set_reasoning_effort(&self, effort: crate::model::ReasoningEffort) {
         self.config
-            .update(|config| config.reasoning_effort = effort.clone());
+            .update(|config| config.reasoning_effort = effort);
         if self.is_busy() {
             let _ = crate::shared_runtime::send_command(
                 &self.session_id,
@@ -199,7 +199,7 @@ impl TiangongCore {
                     .trust_mode
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                session.reasoning_effort = Some(config.reasoning_effort.clone());
+                session.reasoning_effort = Some(config.reasoning_effort);
                 session.cwd = self.workspace_dir.clone();
                 session.cwd_mode = crate::session::SessionCwdMode::Custom;
                 session.bind_storage_root(self.storage_root.clone());
@@ -275,7 +275,7 @@ impl TiangongCore {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
                 custom_system_prompt: config.custom_system_prompt.clone(),
-                reasoning_effort: config.reasoning_effort.clone(),
+                reasoning_effort: config.reasoning_effort,
             })
             .trust_mode(trust_mode)
             .observer(crate::observe::Observer::new(self.storage_root.clone()))

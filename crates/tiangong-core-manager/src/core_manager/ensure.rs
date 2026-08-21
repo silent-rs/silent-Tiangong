@@ -137,7 +137,11 @@ impl CoreManager {
     }
 
     /// 设置指定会话 Core 的思考强度（下一次尚未发出的模型请求生效）。
-    pub fn set_core_reasoning_effort(&self, session_id: &str, effort: String) {
+    pub fn set_core_reasoning_effort(
+        &self,
+        session_id: &str,
+        effort: tiangong_llm::request::ReasoningEffort,
+    ) {
         let registry = self.registry();
         if let Some(core) = registry.get(session_id) {
             core.set_reasoning_effort(effort);

@@ -20,7 +20,7 @@ pub struct SessionMetadata {
     pub trust_mode: TrustMode,
     /// 会话级思考强度；为空时使用应用级默认值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
     /// 会话级工作目录（工具执行时的根目录）。
     #[serde(default)]
     pub cwd: String,
@@ -92,7 +92,7 @@ impl SessionMetadata {
             reasoning_effort: value
                 .get("reasoning_effort")
                 .and_then(|item| item.as_str())
-                .map(str::to_string),
+                .map(tiangong_llm::request::ReasoningEffort::parse_flexible),
             cwd: pick_str("cwd"),
             cwd_mode: value
                 .get("cwd_mode")
@@ -124,7 +124,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-02T00:00:00Z".into(),
             trust_mode: TrustMode::FullTrust,
-            reasoning_effort: Some("high".into()),
+            reasoning_effort: Some(tiangong_llm::request::ReasoningEffort::High),
             cwd: "/tmp".into(),
             cwd_mode: SessionCwdMode::Inherit,
             message_count: 3,

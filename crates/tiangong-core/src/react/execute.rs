@@ -539,13 +539,10 @@ impl AgentLoopState {
 // 阶段数据类型统一定义在 super::phase。
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
-    let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     ModelRequest {
         user_input: String::new(),
         context: ctx.session.context(),
-        thinking,
-        reasoning_effort,
-        thinking_disabled,
+        reasoning_effort: build_thinking_config(ctx),
         max_output_tokens: None,
     }
 }
@@ -966,7 +963,7 @@ pub(super) async fn execute_turn(
     // 运行配置即时生效，Session 在本轮唯一出口接收最终值。
     ctx.trust_mode = trust_mode;
     ctx.session.trust_mode = trust_mode;
-    ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort.clone());
+    ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort);
     injections.commit(ctx);
     result
 }

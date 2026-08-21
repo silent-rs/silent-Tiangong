@@ -64,19 +64,14 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     // 思考/推理配置：优先 reasoning_effort，其次 thinking。
     // 注意：Responses API 的 reasoning summary 必须显式请求（summary: "auto"），
     // 否则服务端不会返回可展示的思考摘要，前端 thinking 链路将无内容。
-    if let Some(effort) = &req.reasoning_effort {
+    if req.reasoning_effort.is_thinking_enabled() {
         payload.insert(
             "reasoning".to_string(),
-            build_reasoning(effort_to_str(effort)),
-        );
-    } else if req.thinking_disabled {
-        // Responses API 没有 disabled 语义，省略 reasoning 字段即不强制思考。
-    } else if let Some(thinking) = &req.thinking {
-        payload.insert(
-            "reasoning".to_string(),
-            build_reasoning(budget_to_effort(thinking.budget_tokens)),
+            build_reasoning(effort_to_str(req.reasoning_effort)),
         );
     }
+    // ReasoningEffort::None 关闭思考：Responses API 没有 disabled 语义，
+    // 省略 reasoning 字段即不强制思考。
 
     Ok(Value::Object(payload))
 }
@@ -89,25 +84,15 @@ fn build_reasoning(effort: &str) -> Value {
     json!({ "effort": effort, "summary": "auto" })
 }
 
-fn effort_to_str(effort: &ReasoningEffort) -> &'static str {
+fn effort_to_str(effort: ReasoningEffort) -> &'static str {
     match effort {
+        ReasoningEffort::None => "medium",
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
         // Responses API 的 reasoning.effort 目前仅支持 low/medium/high，
         // Max 暂降级为 high；若 OpenAI 后续开放 "max" 级别需同步更新此处。
         ReasoningEffort::Max => "high",
-    }
-}
-
-/// 根据 thinking budget_tokens 粗略映射到 reasoning effort。
-fn budget_to_effort(budget_tokens: u32) -> &'static str {
-    if budget_tokens >= 16_384 {
-        "high"
-    } else if budget_tokens >= 4_096 {
-        "medium"
-    } else {
-        "low"
     }
 }
 
@@ -506,9 +491,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, true).unwrap();
         assert_eq!(payload["stream"], true);
@@ -634,9 +617,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, false).unwrap();
         let input = payload["input"].as_array().unwrap();
@@ -668,9 +649,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, false).unwrap();
         let input = payload["input"].as_array().unwrap();
@@ -693,9 +672,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, false).unwrap();
         assert_eq!(payload["model"], "gpt-4o");
@@ -725,9 +702,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, false).unwrap();
         let instructions = payload["instructions"].as_str().unwrap();
@@ -756,9 +731,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, true).unwrap();
         assert_eq!(payload["tools"][0]["type"], "function");
@@ -781,9 +754,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: Some(ReasoningEffort::High),
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::High,
         };
         let payload = build_request_json(&req, false).unwrap();
         assert_eq!(payload["reasoning"]["effort"], "high");
@@ -792,7 +763,7 @@ mod tests {
 
     #[test]
     fn thinking_budget_requests_summary_auto() {
-        // thinking 分支（通过 budget_tokens 映射 effort）同样必须带上 summary。
+        // thinking 分支（默认 medium effort）同样必须带上 summary。
         let req = ProviderRequest {
             model: "o3".to_string(),
             system: None,
@@ -804,11 +775,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: Some(crate::request::ThinkingConfig {
-                budget_tokens: 8_192,
-            }),
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::Medium,
         };
         let payload = build_request_json(&req, false).unwrap();
         assert_eq!(payload["reasoning"]["effort"], "medium");
@@ -828,9 +795,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: true,
+            reasoning_effort: ReasoningEffort::None,
         };
         let payload = build_request_json(&req, false).unwrap();
         assert!(payload.get("reasoning").is_none());

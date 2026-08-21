@@ -231,8 +231,8 @@ fn handle_ambient_command(
             set_runtime_trust_mode(trust_mode, plugins, mode);
         }
         Command::SetReasoningEffort(effort) => {
-            ctx.agent_config.reasoning_effort = effort.clone();
-            ctx.session.reasoning_effort = Some(effort);
+            ctx.agent_config.reasoning_effort = effort;
+            ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort);
         }
         Command::SetTitle {
             title,

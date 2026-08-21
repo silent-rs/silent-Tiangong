@@ -15,11 +15,12 @@ pub struct AgentConfig {
     /// 用户自定义特色 Prompt，会注入到 system prompt。
     #[serde(default)]
     pub custom_system_prompt: String,
-    /// 思考强度设置：none/low/medium/high/max，默认 medium
+    /// 思考强度设置：None 关闭思考，默认 Medium
     #[serde(default = "default_reasoning_effort")]
-    pub reasoning_effort: String,
+    #[serde(deserialize_with = "crate::model::deserialize_reasoning_effort_flexible")]
+    pub reasoning_effort: crate::model::ReasoningEffort,
 }
 
-fn default_reasoning_effort() -> String {
-    "medium".to_string()
+fn default_reasoning_effort() -> crate::model::ReasoningEffort {
+    crate::model::ReasoningEffort::Medium
 }
