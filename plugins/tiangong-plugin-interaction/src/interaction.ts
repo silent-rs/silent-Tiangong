@@ -34,7 +34,7 @@ export interface InteractionRequest {
   values: Record<string, string | boolean>;
 }
 
-export const USER_TIMEOUT_MS = 15_000;
+export const USER_TIMEOUT_MS = 120_000;
 export const USER_CLOSED_MESSAGE = '用户关闭了相关操作';
 
 export function approvalOpinion(decision: ApprovalOpinion) {
