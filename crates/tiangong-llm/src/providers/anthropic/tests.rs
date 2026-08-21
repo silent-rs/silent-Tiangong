@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::request::ReasoningEffort;
+
 use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::json;
@@ -13,7 +15,7 @@ use crate::provider::LlmProvider;
 use crate::providers::anthropic::client::{AnthropicClient, AnthropicTransport};
 use crate::providers::anthropic::config::AnthropicConfig;
 use crate::providers::anthropic::provider::AnthropicProvider;
-use crate::request::{ProviderRequest, ThinkingConfig};
+use crate::request::ProviderRequest;
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolChoice, ToolResult, ToolResultContent, ToolSpec};
 
@@ -97,11 +99,7 @@ fn sample_request() -> ProviderRequest {
         top_p: None,
         stop_sequences: vec!["STOP".to_string()],
         metadata: None,
-        thinking: Some(ThinkingConfig {
-            budget_tokens: 4096,
-        }),
-        reasoning_effort: None,
-        thinking_disabled: false,
+        reasoning_effort: ReasoningEffort::High,
     }
 }
 
@@ -115,7 +113,7 @@ fn test_request_mapping_with_system_and_tools() {
     assert!(matches!(
         mapped.thinking,
         Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
-            budget_tokens: 4096
+            budget_tokens: None
         })
     ));
     assert!(matches!(

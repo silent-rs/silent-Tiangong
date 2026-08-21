@@ -46,13 +46,12 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     if !req.tools.is_empty() {
         inject_function_tools(&mut payload, &req.tools, req.tool_choice.as_ref());
     }
-    if let Some(effort) = &req.reasoning_effort {
-        inject_reasoning_effort(&mut payload, effort);
-    }
-    if req.thinking_disabled {
-        inject_thinking_disabled(&mut payload);
-    } else if let Some(thinking) = &req.thinking {
-        inject_thinking_enabled(&mut payload, thinking.budget_tokens);
+    match req.reasoning_effort.is_thinking_enabled() {
+        true => {
+            inject_reasoning_effort(&mut payload, req.reasoning_effort);
+            inject_thinking_enabled(&mut payload);
+        }
+        false => inject_thinking_disabled(&mut payload),
     }
     Ok(payload)
 }
@@ -395,7 +394,7 @@ fn inject_function_tools(
     }
 }
 
-fn inject_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort) {
+fn inject_reasoning_effort(payload: &mut Value, effort: ReasoningEffort) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -404,6 +403,7 @@ fn inject_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort) {
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
         ReasoningEffort::Max => "max",
+        ReasoningEffort::None => return,
     };
     obj.insert("reasoning_effort".to_string(), json!(effort_str));
 }
@@ -415,14 +415,12 @@ fn inject_thinking_disabled(payload: &mut Value) {
     obj.insert("thinking".to_string(), json!({"type": "disabled"}));
 }
 
-fn inject_thinking_enabled(payload: &mut Value, budget_tokens: u32) {
+fn inject_thinking_enabled(payload: &mut Value) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
-    obj.insert(
-        "thinking".to_string(),
-        json!({"type": "enabled", "budget_tokens": budget_tokens}),
-    );
+    // 只表达"开启思考"，不带预算——思考强度由上游模型自行决定。
+    obj.insert("thinking".to_string(), json!({"type": "enabled"}));
 }
 
 pub fn strip_think_tags(text: &str) -> String {

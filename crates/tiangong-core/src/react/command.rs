@@ -128,8 +128,8 @@ pub(super) async fn handle_command(
             CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::SetReasoningEffort(effort)) => {
-            ctx.agent_config.reasoning_effort = effort.clone();
-            ctx.session.reasoning_effort = Some(effort);
+            ctx.agent_config.reasoning_effort = effort;
+            ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort);
             CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::InjectTool { tool_name, payload }) => {

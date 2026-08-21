@@ -164,9 +164,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: crate::request::ReasoningEffort::None,
         };
 
         let mut response_stream = provider.stream(request).await.unwrap();

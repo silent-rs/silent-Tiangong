@@ -17,9 +17,7 @@ use crate::model::{
     ToolSpec,
 };
 use crate::permission::TrustMode;
-use crate::react::context::{
-    build_thinking_config, emit_token_usage, persist_error, select_client_for_request,
-};
+use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessagePhase, MessageRole};
@@ -539,13 +537,10 @@ impl AgentLoopState {
 // 阶段数据类型统一定义在 super::phase。
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
-    let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     ModelRequest {
         user_input: String::new(),
         context: ctx.session.context(),
-        thinking,
-        reasoning_effort,
-        thinking_disabled,
+        reasoning_effort: ctx.agent_config.reasoning_effort,
         max_output_tokens: None,
     }
 }
@@ -966,7 +961,7 @@ pub(super) async fn execute_turn(
     // 运行配置即时生效，Session 在本轮唯一出口接收最终值。
     ctx.trust_mode = trust_mode;
     ctx.session.trust_mode = trust_mode;
-    ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort.clone());
+    ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort);
     injections.commit(ctx);
     result
 }

@@ -367,7 +367,7 @@ impl TestHarness {
         std::mem::forget(root);
 
         let agent_config = AgentConfig {
-            reasoning_effort: "none".to_string(),
+            reasoning_effort: crate::model::ReasoningEffort::None,
             ..Default::default()
         };
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
@@ -870,7 +870,9 @@ async fn returns_cancelled_on_cancel_command() {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = cmd_tx.send(Command::SetTrustMode(TrustMode::Supervised));
-        let _ = cmd_tx.send(Command::SetReasoningEffort("max".to_string()));
+        let _ = cmd_tx.send(Command::SetReasoningEffort(
+            crate::model::ReasoningEffort::Max,
+        ));
         let _ = cmd_tx.send(Command::InjectTool {
             tool_name: "cancelled_probe".to_string(),
             payload: serde_json::json!({"value": 1}),
@@ -888,8 +890,14 @@ async fn returns_cancelled_on_cancel_command() {
     assert_eq!(*trust_modes.lock().unwrap(), vec![TrustMode::Supervised]);
     assert_eq!(harness.ctx.trust_mode, TrustMode::Supervised);
     assert_eq!(harness.ctx.session.trust_mode, TrustMode::Supervised);
-    assert_eq!(harness.ctx.agent_config.reasoning_effort, "max");
-    assert_eq!(harness.ctx.session.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(
+        harness.ctx.agent_config.reasoning_effort,
+        crate::model::ReasoningEffort::Max
+    );
+    assert_eq!(
+        harness.ctx.session.reasoning_effort,
+        Some(crate::model::ReasoningEffort::Max)
+    );
     assert!(harness.ctx.session.deferred_tool_injections.is_empty());
     assert!(harness.ctx.session.messages.iter().any(|message| {
         message.role == MessageRole::Tool && message.text_content().contains("cancelled_probe")
@@ -1829,8 +1837,10 @@ async fn command_storm_is_processed_in_order_without_panicking() {
             payload: serde_json::json!({"k": 1}),
         })
         .unwrap();
-        tx.send(Command::SetReasoningEffort("high".to_string()))
-            .unwrap();
+        tx.send(Command::SetReasoningEffort(
+            crate::model::ReasoningEffort::High,
+        ))
+        .unwrap();
         tx.send(Command::EmitStreamEvent(Box::new(
             StreamEvent::TitleChanged {
                 title: "不应直接出现的标题".to_string(),
@@ -1853,8 +1863,8 @@ async fn command_storm_is_processed_in_order_without_panicking() {
     );
     assert_eq!(ctx.session.title, "风暴标题", "标题命令应已生效");
     assert_eq!(
-        ctx.session.reasoning_effort.as_deref(),
-        Some("high"),
+        ctx.session.reasoning_effort,
+        Some(crate::model::ReasoningEffort::High),
         "思考强度命令应已生效"
     );
     assert!(
@@ -1905,7 +1915,9 @@ async fn reasoning_effort_update_applies_to_next_model_request() {
             .await
             .expect("工具应在期限内开始执行");
         cmd_tx
-            .send(Command::SetReasoningEffort("max".to_string()))
+            .send(Command::SetReasoningEffort(
+                crate::model::ReasoningEffort::Max,
+            ))
             .expect("运行中的 turn 应接收思考强度更新");
         release.notify_one();
     });
@@ -1914,8 +1926,14 @@ async fn reasoning_effort_update_applies_to_next_model_request() {
     update_task.await.unwrap();
 
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
-    assert_eq!(harness.ctx.agent_config.reasoning_effort, "max");
-    assert_eq!(harness.ctx.session.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(
+        harness.ctx.agent_config.reasoning_effort,
+        crate::model::ReasoningEffort::Max
+    );
+    assert_eq!(
+        harness.ctx.session.reasoning_effort,
+        Some(crate::model::ReasoningEffort::Max)
+    );
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);

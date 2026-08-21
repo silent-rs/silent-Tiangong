@@ -40,7 +40,7 @@ use crate::usage::TokenUsageData;
 use tiangong_types::TokenUsage;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
-pub use crate::request::{ReasoningEffort, ThinkingConfig};
+pub use crate::request::ReasoningEffort;
 
 fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
     current.prompt_tokens = current.prompt_tokens.max(next.prompt_tokens);
@@ -103,9 +103,8 @@ fn append_stream_tool_call_arguments(raw_args: &mut String, partial_json: &str) 
 pub struct ModelRequest {
     pub user_input: String,
     pub context: Vec<Message>,
-    pub thinking: Option<ThinkingConfig>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub thinking_disabled: bool,
+    /// 思考强度：None 关闭思考，其余档位开启。
+    pub reasoning_effort: ReasoningEffort,
     /// 该请求允许的最大输出 token 数。
     ///
     /// `None` 时由 llm 层用默认上限（`MAX_TOKENS_MAIN`）。压缩等空间敏感请求
@@ -115,11 +114,6 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
-    pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
-        self.thinking = Some(ThinkingConfig { budget_tokens });
-        self
-    }
-
     pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
         self.max_output_tokens = Some(max_tokens);
         self
@@ -535,9 +529,7 @@ impl SingleProviderClient {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         let text = strip_think_tags(&collect_provider_text(&response))
@@ -635,9 +627,7 @@ impl SingleProviderClient {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
@@ -663,9 +653,7 @@ impl SingleProviderClient {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         if self.protocol() == ProviderProtocol::Anthropic {
             let provider = self.build_anthropic_provider(timeout_ms)?;
@@ -1155,7 +1143,6 @@ fn build_provider_request(
     tool_choice: Option<ToolChoice>,
 ) -> Result<ProviderRequest> {
     let (system, messages) = build_provider_messages(req)?;
-    let thinking = req.thinking.clone();
     Ok(ProviderRequest {
         model: model.to_string(),
         system: (!system.trim().is_empty()).then_some(system),
@@ -1167,9 +1154,7 @@ fn build_provider_request(
         top_p: None,
         stop_sequences: Vec::new(),
         metadata: None,
-        thinking,
         reasoning_effort: req.reasoning_effort,
-        thinking_disabled: req.thinking_disabled,
     })
 }
 
@@ -2038,9 +2023,7 @@ mod tests {
         let req = ModelRequest {
             user_input: String::new(),
             context: vec![user_msg],
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
         };
 
@@ -2319,9 +2302,7 @@ mod tests {
         let request = ModelRequest {
             user_input: "检查项目".to_string(),
             context: vec![Message::new(MessageRole::System, "system")],
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
         };
         let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
@@ -2702,9 +2683,7 @@ mod tests {
         let req = ModelRequest {
             user_input: String::new(),
             context: vec![system_msg, user_msg],
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
         };
 

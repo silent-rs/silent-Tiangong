@@ -98,8 +98,8 @@ pub(crate) fn update_trust_mode(
 pub(crate) fn update_reasoning_effort(
     manager: &CoreManager,
     session_id: &str,
-    reasoning_effort: Option<String>,
-) -> Result<Option<String>> {
+    reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+) -> Result<Option<tiangong_llm::request::ReasoningEffort>> {
     let mut session = manager
         .load_session(session_id)
         .map_err(|error| anyhow!("加载会话失败：{error}"))?;

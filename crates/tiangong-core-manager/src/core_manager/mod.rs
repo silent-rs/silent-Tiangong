@@ -333,7 +333,7 @@ impl CoreManager {
             if let Some(config) = session_configs.get(session_id) {
                 let _ = core.replace_config(config.clone());
                 core.set_trust_mode(config.trust_mode);
-                core.set_reasoning_effort(config.reasoning_effort.clone());
+                core.set_reasoning_effort(config.reasoning_effort);
             }
         }
     }

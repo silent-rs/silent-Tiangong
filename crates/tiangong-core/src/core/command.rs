@@ -7,7 +7,7 @@ pub enum Command {
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
     /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
-    SetReasoningEffort(String),
+    SetReasoningEffort(crate::model::ReasoningEffort),
     /// 更新会话标题。
     SetTitle {
         title: String,

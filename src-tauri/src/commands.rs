@@ -344,7 +344,7 @@ pub async fn load_session(
     } else {
         config.context_limit
     };
-    let default_reasoning_effort = config.reasoning_effort.clone();
+    let default_reasoning_effort = config.reasoning_effort;
     let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();
     let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
@@ -531,7 +531,7 @@ struct UserMessageDeliveryRequest {
     revision: u64,
     workspace_dir: Option<String>,
     initial_trust_mode: Option<tiangong_types::TrustMode>,
-    initial_reasoning_effort: Option<String>,
+    initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
     delivery_kind: UserMessageDeliveryKind,
     requires_input_claim: bool,
 }
@@ -559,7 +559,9 @@ pub async fn send_message(
             revision,
             workspace_dir: cwd,
             initial_trust_mode: trust_mode,
-            initial_reasoning_effort: reasoning_effort,
+            initial_reasoning_effort: reasoning_effort
+                .as_deref()
+                .map(tiangong_llm::request::ReasoningEffort::parse_flexible),
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: true,
         },
@@ -1470,7 +1472,7 @@ pub async fn get_reasoning_effort(
         .with_state_read(|core_state| {
             Ok((
                 session_id.unwrap_or_else(|| core_state.active_session_id.clone()),
-                core_state.agent_config.reasoning_effort.clone(),
+                core_state.agent_config.reasoning_effort,
             ))
         })
         .await?;
@@ -1480,9 +1482,9 @@ pub async fn get_reasoning_effort(
         .load_session(&target_id)
         .ok()
         .and_then(|session| session.reasoning_effort)
-        .map(|effort| effort.trim().to_string())
-        .filter(|effort| !effort.is_empty())
-        .unwrap_or(default_effort))
+        .unwrap_or(default_effort)
+        .as_str()
+        .to_string())
 }
 
 #[tauri::command]
@@ -1491,13 +1493,7 @@ pub async fn set_reasoning_effort(
     session_id: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let valid = ["none", "low", "medium", "high", "max"];
-    if !valid.contains(&effort.as_str()) {
-        return Err(format!(
-            "无效的思考强度: {effort}，可选值: {}",
-            valid.join("/")
-        ));
-    }
+    let effort = tiangong_llm::request::ReasoningEffort::parse_flexible(&effort);
     let session_id = match session_id {
         Some(session_id) => session_id,
         None => {
@@ -1509,7 +1505,7 @@ pub async fn set_reasoning_effort(
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
 
-    let next_effort = effort.clone();
+    let next_effort = effort;
     let previous_override =
         crate::session_ops::update_reasoning_effort(&state.core_manager, &session_id, Some(effort))
             .map_err(|error| error.to_string())?;
@@ -1529,7 +1525,7 @@ pub async fn set_reasoning_effort(
 async fn rollback_session_reasoning_effort(
     state: &TiangongApp,
     session_id: &str,
-    previous_override: Option<String>,
+    previous_override: Option<tiangong_llm::request::ReasoningEffort>,
 ) {
     if let Err(error) = crate::session_ops::update_reasoning_effort(
         &state.core_manager,

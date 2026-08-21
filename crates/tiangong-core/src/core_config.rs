@@ -83,7 +83,9 @@ pub struct CoreConfig {
     /// 用户自定义 system prompt
     pub custom_system_prompt: String,
     /// 思考强度设置
-    pub reasoning_effort: String,
+    #[serde(default = "default_reasoning_effort")]
+    #[serde(deserialize_with = "crate::model::deserialize_reasoning_effort_flexible")]
+    pub reasoning_effort: crate::model::ReasoningEffort,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
 }
@@ -95,7 +97,7 @@ impl Default for CoreConfig {
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
-            reasoning_effort: "medium".to_string(),
+            reasoning_effort: crate::model::ReasoningEffort::Medium,
             context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
@@ -214,6 +216,10 @@ impl std::fmt::Debug for CoreConfigProvider {
             .field("generation", &self.generation())
             .finish()
     }
+}
+
+fn default_reasoning_effort() -> crate::model::ReasoningEffort {
+    crate::model::ReasoningEffort::Medium
 }
 
 #[cfg(test)]

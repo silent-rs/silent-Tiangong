@@ -122,8 +122,31 @@ pub struct Tool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
-    Enabled { budget_tokens: u32 },
+    Enabled {
+        /// 思考预算。Anthropic 官方端点要求必填且须小于 max_tokens；
+        /// DeepSeek/GLM 等兼容实现可省略——省略时思考量由上游决定，
+        /// 且该字段不会序列化进请求。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        budget_tokens: Option<u32>,
+    },
     Disabled,
+}
+
+impl ThinkingConfig {
+    /// 开启思考且不限制预算：兼容 DeepSeek/GLM 等 Anthropic 兼容实现。
+    /// 接入官方 Anthropic 端点时改用 [`ThinkingConfig::with_budget`]。
+    pub fn enabled() -> Self {
+        Self::Enabled {
+            budget_tokens: None,
+        }
+    }
+
+    /// 开启思考并显式指定预算（官方 Anthropic 端点使用）。
+    pub fn with_budget(budget_tokens: u32) -> Self {
+        Self::Enabled {
+            budget_tokens: Some(budget_tokens),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

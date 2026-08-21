@@ -97,8 +97,12 @@ pub struct Session {
     #[serde(default)]
     pub trust_mode: TrustMode,
     /// 会话级思考强度；为空时使用应用级默认值。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::model::deserialize_reasoning_effort_option_flexible"
+    )]
+    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。
@@ -1374,7 +1378,9 @@ impl From<&Session> for tiangong_types::PluginSession {
             cwd: session.cwd.clone(),
             workspace_id,
             parent_session_id: session.parent_session_id.clone(),
-            reasoning_effort: session.reasoning_effort.clone(),
+            reasoning_effort: session
+                .reasoning_effort
+                .map(|effort| effort.as_str().to_string()),
             messages: session.messages.clone(),
             context_summary: session.context_summary.clone(),
             created_at: session.created_at.clone(),

@@ -10,6 +10,9 @@ pub use tiangong_llm::provider_client::{
     InvalidToolCall, ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse,
     ModelStreamChunk, OnRetryCallback, SingleProviderClient,
 };
-pub use tiangong_llm::request::{ReasoningEffort, ThinkingConfig};
+pub use tiangong_llm::request::{
+    ReasoningEffort, deserialize_reasoning_effort_flexible,
+    deserialize_reasoning_effort_option_flexible,
+};
 pub use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
 pub use tiangong_types::TokenUsage;

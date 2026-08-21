@@ -238,7 +238,7 @@ impl Coordinator {
             let mut child = Session::new(&label);
             let agent_id = child.id.clone();
             child.cwd = parent.cwd.clone();
-            child.reasoning_effort = parent.reasoning_effort.clone();
+            child.reasoning_effort = parent.reasoning_effort;
             child.trust_mode = TrustMode::FullTrust;
             child.parent_session_id = Some(parent.id.clone());
             let record = AgentRecord {
@@ -924,7 +924,7 @@ fn load_or_create_child_session(
     let mut child = Session::new(&record.descriptor.label);
     child.id = record.descriptor.agent_id.clone();
     child.cwd = parent.cwd.clone();
-    child.reasoning_effort = parent.reasoning_effort.clone();
+    child.reasoning_effort = parent.reasoning_effort;
     child.trust_mode = TrustMode::FullTrust;
     child.parent_session_id = Some(parent.id.clone());
     child.bind_storage_root(root);

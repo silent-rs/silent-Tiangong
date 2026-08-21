@@ -99,7 +99,7 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
                 let reasoning_content = extract_thinking(message).or_else(|| {
                     fallback_reasoning_content_for_internal_tool_calls(
                         &tool_calls,
-                        req.thinking_disabled,
+                        !req.reasoning_effort.is_thinking_enabled(),
                     )
                 });
                 if !text.is_empty() || reasoning_content.is_some() || !tool_calls.is_empty() {
@@ -278,18 +278,15 @@ fn build_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
 
 fn build_thinking(req: &ProviderRequest) -> Option<tiangong_deepseek::types::ThinkingConfig> {
     // 官方文档：思考模式由 thinking.type（enabled/disabled）+ reasoning_effort 控制，
-    // 不再使用 budget_tokens 字段。
-    if req.thinking_disabled {
-        Some(tiangong_deepseek::types::ThinkingConfig {
-            thinking_type: "disabled".to_string(),
-        })
-    } else {
-        req.thinking
-            .as_ref()
-            .map(|_| tiangong_deepseek::types::ThinkingConfig {
-                thinking_type: "enabled".to_string(),
-            })
-    }
+    // 不使用 budget_tokens 字段。reasoning_effort 有值即开启思考，无值即关闭。
+    Some(tiangong_deepseek::types::ThinkingConfig {
+        thinking_type: if req.reasoning_effort.is_thinking_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        }
+        .to_string(),
+    })
 }
 
 fn build_reasoning_effort(
@@ -297,13 +294,16 @@ fn build_reasoning_effort(
 ) -> Option<tiangong_deepseek::types::ReasoningEffort> {
     // 官方 reasoning_effort 取值：low / high / max。
     // 内部 Medium 无对应档位，统一映射到 high（官方默认档）。
-    req.reasoning_effort.map(|effort| match effort {
-        ReasoningEffort::Low => tiangong_deepseek::types::ReasoningEffort::Low,
-        ReasoningEffort::Medium | ReasoningEffort::High => {
-            tiangong_deepseek::types::ReasoningEffort::High
-        }
-        ReasoningEffort::Max => tiangong_deepseek::types::ReasoningEffort::Max,
-    })
+    req.reasoning_effort
+        .is_thinking_enabled()
+        .then(|| match req.reasoning_effort {
+            ReasoningEffort::Low => tiangong_deepseek::types::ReasoningEffort::Low,
+            ReasoningEffort::Medium | ReasoningEffort::High => {
+                tiangong_deepseek::types::ReasoningEffort::High
+            }
+            ReasoningEffort::Max => tiangong_deepseek::types::ReasoningEffort::Max,
+            ReasoningEffort::None => unreachable!("None 已被 is_thinking_enabled 过滤"),
+        })
 }
 
 fn extract_text(message: &ChatMessage) -> String {
@@ -438,7 +438,6 @@ mod tests {
     use super::*;
     use crate::message::ThinkingContent;
     use crate::message::{ImageContent, MessageContent};
-    use crate::request::ThinkingConfig;
     use crate::tool::ToolCall;
 
     #[test]
@@ -538,9 +537,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
 
         let request = to_deepseek_request(&req).expect("request");
@@ -590,9 +587,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::Medium,
         };
 
         let request = to_deepseek_request(&req).expect("request");
@@ -636,9 +631,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: true,
+            reasoning_effort: ReasoningEffort::None,
         };
 
         let request = to_deepseek_request(&req).expect("request");
@@ -717,9 +710,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let request = to_deepseek_request(&req).expect("request");
         let assistant = request
@@ -790,9 +781,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: Some(ReasoningEffort::Low),
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::Low,
         };
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(
@@ -815,9 +804,7 @@ mod tests {
                 top_p: None,
                 stop_sequences: Vec::new(),
                 metadata: None,
-                thinking: None,
-                reasoning_effort: Some(effort),
-                thinking_disabled: false,
+                reasoning_effort: effort,
             };
             let request = to_deepseek_request(&req).expect("request");
             request.reasoning_effort.expect("应产出 effort")
@@ -841,11 +828,7 @@ mod tests {
             top_p: Some(0.9),
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: Some(ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::High,
         };
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(request.temperature, None, "思考模式不应发送 temperature");
@@ -865,9 +848,7 @@ mod tests {
             top_p: Some(0.9),
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: true,
+            reasoning_effort: ReasoningEffort::None,
         };
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(request.temperature, Some(0.7));
@@ -892,9 +873,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: Some(metadata),
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(
@@ -916,9 +895,7 @@ mod tests {
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: ReasoningEffort::None,
         };
         let request = to_deepseek_request(&req).expect("request");
         assert_eq!(request.response_format, None);

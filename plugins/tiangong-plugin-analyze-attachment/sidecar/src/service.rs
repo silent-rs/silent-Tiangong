@@ -135,9 +135,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
     let request = ModelRequest {
         user_input: String::new(),
         context,
-        thinking: None,
-        reasoning_effort: None,
-        thinking_disabled: false,
+        reasoning_effort: tiangong_llm::request::ReasoningEffort::None,
         max_output_tokens: None,
     };
 

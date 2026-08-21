@@ -25,58 +25,6 @@ pub(crate) fn rebuild_system_prompt_for_session(
     session.rebuild_system_prompt(&config);
 }
 
-pub(crate) fn build_thinking_config(
-    ctx: &TurnContext,
-) -> (
-    Option<crate::model::ThinkingConfig>,
-    Option<crate::model::ReasoningEffort>,
-    bool,
-) {
-    let effort = ctx.agent_config.reasoning_effort.trim().to_lowercase();
-    match effort.as_str() {
-        "none" | "" => (None, None, true),
-        "low" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Low),
-            false,
-        ),
-        "medium" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-        "high" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 8192,
-            }),
-            Some(crate::model::ReasoningEffort::High),
-            false,
-        ),
-        "max" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 16384,
-            }),
-            Some(crate::model::ReasoningEffort::Max),
-            false,
-        ),
-        _ => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-    }
-}
-
-pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
-    ContextOrganizer::new(context_limit).token_threshold()
-}
-
 pub(crate) fn emit_token_usage(
     stream_tx: &StdSender<StreamEvent>,
     usage: &TokenUsage,
@@ -115,7 +63,7 @@ pub(crate) fn emit_token_usage(
     let _ = stream_tx.send(StreamEvent::TokenUsage {
         usage: usage.clone(),
         current_tokens,
-        compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
+        compression_threshold_tokens: Some(ContextOrganizer::new(context_limit).token_threshold()),
         context_limit_tokens: Some(context_limit),
         source,
         agent_id: agent_id.map(|s| s.to_string()),

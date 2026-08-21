@@ -139,9 +139,7 @@ impl ContextCompressor {
         ModelRequest {
             user_input: String::new(),
             context,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
+            reasoning_effort: crate::model::ReasoningEffort::None,
             max_output_tokens: Some(max_output_tokens),
         }
     }

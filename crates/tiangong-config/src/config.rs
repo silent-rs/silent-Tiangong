@@ -199,7 +199,7 @@ impl TiangongConfig {
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
-            reasoning_effort: "medium".to_string(),
+            reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
             context_limit,
         }
     }

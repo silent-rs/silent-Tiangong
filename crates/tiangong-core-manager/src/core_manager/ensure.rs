@@ -49,7 +49,7 @@ impl CoreManager {
             if let Some(core) = registry.get(session_id) {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
-                core.set_reasoning_effort(session_config.reasoning_effort.clone());
+                core.set_reasoning_effort(session_config.reasoning_effort);
                 return Ok(EnsuredCore {
                     session_id: session_id.to_string(),
                     is_new: false,
@@ -137,7 +137,11 @@ impl CoreManager {
     }
 
     /// 设置指定会话 Core 的思考强度（下一次尚未发出的模型请求生效）。
-    pub fn set_core_reasoning_effort(&self, session_id: &str, effort: String) {
+    pub fn set_core_reasoning_effort(
+        &self,
+        session_id: &str,
+        effort: tiangong_llm::request::ReasoningEffort,
+    ) {
         let registry = self.registry();
         if let Some(core) = registry.get(session_id) {
             core.set_reasoning_effort(effort);

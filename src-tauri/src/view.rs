@@ -61,7 +61,7 @@ impl LoadedSessionView {
     pub fn from_session(
         session: &tiangong_core::session::Session,
         context_limit_tokens: usize,
-        default_reasoning_effort: &str,
+        default_reasoning_effort: &tiangong_llm::request::ReasoningEffort,
     ) -> Self {
         let usage = session.total_usage();
         Self {
@@ -81,10 +81,8 @@ impl LoadedSessionView {
             cwd: session.cwd.clone(),
             reasoning_effort: session
                 .reasoning_effort
-                .as_deref()
-                .map(str::trim)
-                .filter(|effort| !effort.is_empty())
-                .unwrap_or(default_reasoning_effort)
+                .unwrap_or(*default_reasoning_effort)
+                .as_str()
                 .to_string(),
         }
     }
