@@ -68,6 +68,7 @@ const stateLabel: Record<PluginStatus['state'], string> = {
   disabled: '已停用',
   degraded: '运行异常',
   error: '加载失败',
+  invalid: '无效',
 };
 
 const PLUGIN_DEVELOPMENT_DOC_URL =
@@ -332,6 +333,7 @@ export function PluginManagerSettings({
   const confirmUninstall = async () => {
     if (!uninstallTarget) return;
     const target = uninstallTarget;
+    // 无效插件同样走卸载：后端识别登记表中的无效目录后按同一删除路径处理。
     const succeeded = await runOperation(
       target.id,
       'uninstall',
@@ -547,6 +549,7 @@ function InstalledPluginRow({
 }) {
   const working = activeOperation?.pluginId === plugin.id;
   const healthy = plugin.state === 'loaded';
+  const invalid = plugin.state === 'invalid';
   const canUpgrade = Boolean(release?.update_available && release.supported);
   const currentVersion = plugin.loaded_version ?? plugin.manifest_version;
   const sidecar = getSidecarPresentation(plugin);
@@ -575,16 +578,20 @@ function InstalledPluginRow({
                 发现新版本
               </Badge>
             )}
-            <span className="inline-flex items-center gap-1">
-              <span className="text-muted-foreground/70">v{currentVersion}</span>
-              {canUpgrade && release && (
-                <span className="font-medium text-primary">→ {release.version}</span>
-              )}
-            </span>
-            <span className={`inline-flex items-center gap-1 ${sidecar.className}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${sidecar.dotClassName}`} />
-              {sidecar.label}
-            </span>
+            {!invalid && (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-muted-foreground/70">v{currentVersion}</span>
+                {canUpgrade && release && (
+                  <span className="font-medium text-primary">→ {release.version}</span>
+                )}
+              </span>
+            )}
+            {!invalid && (
+              <span className={`inline-flex items-center gap-1 ${sidecar.className}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${sidecar.dotClassName}`} />
+                {sidecar.label}
+              </span>
+            )}
           </div>
 
           {plugin.last_error && (
@@ -601,53 +608,67 @@ function InstalledPluginRow({
           )}
 
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {canUpgrade && (
-              <Button
-                size="sm"
-                className="h-7 gap-1 px-2 text-xs"
-                onClick={() => void onUpgrade(plugin)}
+            {invalid ? (
+              <IconAction
+                label="卸载插件"
+                className="h-7 w-7"
+                onClick={() => onUninstall(plugin)}
                 disabled={disabled}
+                destructive
               >
-                {working && activeOperation?.operation === 'upgrade' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <ArrowUpCircle className="h-3.5 w-3.5" />
+                <Trash2 className="h-3.5 w-3.5" />
+              </IconAction>
+            ) : (
+              <>
+                {canUpgrade && (
+                  <Button
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs"
+                    onClick={() => void onUpgrade(plugin)}
+                    disabled={disabled}
+                  >
+                    {working && activeOperation?.operation === 'upgrade' ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ArrowUpCircle className="h-3.5 w-3.5" />
+                    )}
+                    升级
+                  </Button>
                 )}
-                升级
-              </Button>
+                <IconAction
+                  label="重新加载插件"
+                  className="h-7 w-7"
+                  onClick={() => void onReload(plugin)}
+                  disabled={disabled || !plugin.enabled}
+                  working={working && activeOperation?.operation === 'reload'}
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </IconAction>
+                <IconAction
+                  label="回滚到上一版本"
+                  className="h-7 w-7"
+                  onClick={() => void onRollback(plugin)}
+                  disabled={disabled || !plugin.can_rollback}
+                  working={working && activeOperation?.operation === 'rollback'}
+                >
+                  <Undo2 className="h-3.5 w-3.5" />
+                </IconAction>
+                <IconAction
+                  label="卸载插件"
+                  className="h-7 w-7"
+                  onClick={() => onUninstall(plugin)}
+                  disabled={disabled}
+                  destructive
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </IconAction>
+              </>
             )}
-            <IconAction
-              label="重新加载插件"
-              className="h-7 w-7"
-              onClick={() => void onReload(plugin)}
-              disabled={disabled || !plugin.enabled}
-              working={working && activeOperation?.operation === 'reload'}
-            >
-              <RotateCw className="h-3.5 w-3.5" />
-            </IconAction>
-            <IconAction
-              label="回滚到上一版本"
-              className="h-7 w-7"
-              onClick={() => void onRollback(plugin)}
-              disabled={disabled || !plugin.can_rollback}
-              working={working && activeOperation?.operation === 'rollback'}
-            >
-              <Undo2 className="h-3.5 w-3.5" />
-            </IconAction>
-            <IconAction
-              label="卸载插件"
-              className="h-7 w-7"
-              onClick={() => onUninstall(plugin)}
-              disabled={disabled}
-              destructive
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </IconAction>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2 pl-2">
-          {working && ['enable', 'disable'].includes(activeOperation?.operation ?? '') ? (
+          {invalid ? null : working && ['enable', 'disable'].includes(activeOperation?.operation ?? '') ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : (
             <Switch

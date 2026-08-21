@@ -22,6 +22,9 @@ use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
+/// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
+/// 随 `preload_installed_plugins` 全量刷新，供插件管理列表展示和清理。
+static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new();
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
@@ -302,8 +305,25 @@ pub struct PluginStatus {
     pub unavailable_reason: Option<String>,
 }
 
+/// 扫描时被忽略的无效插件记录。
+///
+/// `id` 为插件目录名（可能与清单 ID 不同，如部署残留的 `.terminal-staging-*`），
+/// 是清理操作的唯一标识；清单可读时附带名称与版本，便于界面展示。
+#[derive(Debug, Clone, Serialize)]
+pub struct InvalidPluginEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<String>,
+    pub reason: String,
+}
+
 fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
     LOADED_PLUGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
+    INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>> {
@@ -347,7 +367,10 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         return 0;
     };
 
-    let installed_plugins = discover_installed_plugins(storage_root);
+    let (installed_plugins, discovered_invalid) = discover_installed_plugins(storage_root);
+    if let Ok(mut registered) = invalid_plugins().lock() {
+        *registered = discovered_invalid;
+    }
     for installed in &installed_plugins {
         let exists = loaded_plugins()
             .lock()
@@ -364,6 +387,54 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
     }
 
     installed_plugins.len()
+}
+
+/// 若 `plugin_id` 是已登记的无效插件目录则删除它并返回 true。
+///
+/// 无效插件从未进入注册表，没有 sidecar 或 WASM 实例需要停止；但删除路径
+/// 与正常卸载一致（事务目录暂存、可选保留 data）。登记表中的 id 均来自
+/// 实际扫描到的目录名，天然不含路径分隔符，不会越出插件根目录。
+fn remove_invalid_plugin_if_registered(
+    storage_root: &Path,
+    plugin_id: &str,
+    keep_data: bool,
+) -> Result<bool> {
+    let registered = invalid_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("无效插件登记表已损坏"))?
+        .clone();
+    if !registered.iter().any(|entry| entry.id == plugin_id) {
+        return Ok(false);
+    }
+    let directory = plugins_directory(storage_root).join(plugin_id);
+    let removed = transaction_directory(storage_root, "uninstall-invalid")?;
+    let result = (|| -> Result<()> {
+        if !directory.is_dir() {
+            // 目录已不存在（如用户手动删除）：仅同步登记表。
+            return Ok(());
+        }
+        ensure_directory(&directory)?;
+        rename_with_retry(&directory, &removed)?;
+        let uninstall_result = if keep_data {
+            preserve_only_data(&removed, &directory)
+        } else {
+            remove_directory_if_exists(&removed)
+        };
+        if let Err(error) = uninstall_result {
+            // 无效插件无运行时状态，恢复目录即可让用户重试。
+            let _ = remove_directory_if_exists(&directory);
+            let _ = rename_with_retry(&removed, &directory);
+            return Err(error);
+        }
+        Ok(())
+    })();
+    invalid_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("无效插件登记表已损坏"))?
+        .retain(|entry| entry.id != plugin_id);
+    result?;
+    tracing::info!(plugin_id, keep_data, "已清理无效插件目录");
+    Ok(true)
 }
 
 /// 为一个 Core 创建独立实例。实例使用注册表已接受的同一份 WASM 字节快照。
@@ -455,6 +526,25 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
             }
         })
         .collect::<Vec<_>>();
+    // 无效插件（签名无效/沙箱越权/清单损坏）以 invalid 状态并列展示，供用户清理。
+    if let Ok(invalid) = invalid_plugins().lock() {
+        for entry in invalid.iter() {
+            statuses.push(PluginStatus {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                manifest_version: entry.manifest_version.clone().unwrap_or_default(),
+                loaded_version: None,
+                state: "invalid".to_string(),
+                generation: 0,
+                enabled: false,
+                can_rollback: false,
+                has_sidecar: false,
+                sidecar_running: false,
+                last_error: Some(entry.reason.clone()),
+                unavailable_reason: None,
+            });
+        }
+    }
     statuses.sort_by(|left, right| left.id.cmp(&right.id));
     statuses
 }
@@ -1520,10 +1610,16 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 }
 
 /// 卸载插件。保留数据时，安装目录中只留下 data 目录。
+///
+/// 无效插件目录（签名无效/沙箱越权/清单损坏）无法通过 `find_installed_plugin`
+/// 校验，先查无效插件登记表，命中则直接走同一删除路径后返回。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    if remove_invalid_plugin_if_registered(storage_root, plugin_id, keep_data)? {
+        return Ok(());
+    }
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     let expected = plugin_directory(storage_root, plugin_id);
     if installed.directory != expected {
@@ -2137,10 +2233,16 @@ fn remove_sidecar_connection(directory: &Path) {
     }
 }
 
-fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
+/// 扫描插件目录，返回可加载插件与被忽略的无效插件。
+///
+/// 无效插件不再静默丢弃：签名无效、沙箱声明越权、清单损坏的目录都会登记
+/// （含原因），随 `list_plugins` 展示，并支持经 `uninstall_plugin` 清理。
+fn discover_installed_plugins(
+    storage_root: &Path,
+) -> (Vec<InstalledPlugin>, Vec<InvalidPluginEntry>) {
     let plugins_dir = storage_root.join("plugins");
     let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut manifest_paths = entries
         .filter_map(Result::ok)
@@ -2149,35 +2251,61 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
         .collect::<Vec<_>>();
     manifest_paths.sort();
 
-    manifest_paths
-        .into_iter()
-        .filter_map(|path| match PluginManifest::load(&path) {
+    let mut installed_plugins = Vec::new();
+    let mut invalid_plugins = Vec::new();
+    for path in manifest_paths {
+        let Some(directory) = path.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        let directory_name = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match PluginManifest::load(&path) {
             Ok(manifest) => {
-                let directory = path.parent()?.to_path_buf();
                 let signed_release = match verify_signed_release(&directory, &manifest) {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::warn!(path = %path.display(), %error, "忽略签名无效的插件");
-                        return None;
+                        invalid_plugins.push(InvalidPluginEntry {
+                            id: directory_name,
+                            name: manifest.id.clone(),
+                            manifest_version: Some(manifest.version.clone()),
+                            reason: error.to_string(),
+                        });
+                        continue;
                     }
                 };
                 if let Err(error) = manifest.validate_ui_native_sandbox(signed_release.is_some()) {
                     tracing::warn!(path = %path.display(), %error, "忽略沙箱声明越权的插件");
-                    return None;
+                    invalid_plugins.push(InvalidPluginEntry {
+                        id: directory_name,
+                        name: manifest.id.clone(),
+                        manifest_version: Some(manifest.version.clone()),
+                        reason: error.to_string(),
+                    });
+                    continue;
                 }
-                Some(InstalledPlugin {
+                installed_plugins.push(InstalledPlugin {
                     enabled: !directory.join(DISABLED_MARKER).is_file(),
                     directory,
                     manifest,
                     signed_release,
-                })
+                });
             }
             Err(error) => {
                 tracing::warn!(path = %path.display(), error = %format!("{error:#}"), "忽略无效插件清单");
-                None
+                invalid_plugins.push(InvalidPluginEntry {
+                    id: directory_name.clone(),
+                    // 清单读不出来时用目录名作展示名。
+                    name: directory_name,
+                    manifest_version: None,
+                    reason: error.to_string(),
+                });
             }
-        })
-        .collect()
+        }
+    }
+    (installed_plugins, invalid_plugins)
 }
 
 fn find_installed_plugin(storage_root: &Path, plugin_id: &str) -> Result<InstalledPlugin> {

@@ -1175,7 +1175,7 @@ export interface PluginStatus {
   name: string;
   manifest_version: string;
   loaded_version: string | null;
-  state: 'loaded' | 'disabled' | 'degraded' | 'error';
+  state: 'loaded' | 'disabled' | 'degraded' | 'error' | 'invalid';
   generation: number;
   enabled: boolean;
   can_rollback: boolean;
