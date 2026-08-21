@@ -432,16 +432,15 @@ impl TiangongApp {
         });
     }
 
-    /// 启动插件自动维护任务（main.rs setup 阶段调用一次）。
+    /// 启动插件自动升级任务（main.rs setup 阶段调用一次）。
     ///
-    /// 启动后后台检查一次 OSS 插件目录：自动安装缺失的核心插件
-    /// （终端/浏览器/审批征询），自动升级有新版本的已启用插件；
-    /// 用户主动卸载过的插件跳过。全程无弹窗，离线或失败仅记日志，
-    /// 留待下次启动重试。
-    pub fn start_plugin_auto_maintainer(&self, app_handle: tauri::AppHandle) {
+    /// 启动后后台检查一次 OSS 插件目录的可更新状态，对已启用且有
+    /// 新版本的插件直接触发升级。全程无弹窗，离线或失败仅记日志，
+    /// 留待下次启动重试；插件的安装由首启推荐引导与插件市场负责。
+    pub fn start_plugin_auto_updater(&self, app_handle: tauri::AppHandle) {
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = run_plugin_auto_maintenance(app_handle).await {
-                tracing::warn!(%error, "插件自动维护任务异常结束");
+            if let Err(error) = run_plugin_auto_upgrade(app_handle).await {
+                tracing::warn!(%error, "插件自动升级任务异常结束");
             }
         });
     }
@@ -856,9 +855,10 @@ impl TiangongApp {
     }
 }
 
-/// 插件自动维护一轮：拉取 OSS 目录 → 结合卸载记录计算安装/升级计划 →
-/// 串行执行（复用手动安装的事务与回滚链路）→ 成功后广播 plugins_changed。
-async fn run_plugin_auto_maintenance(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
+/// 插件自动升级一轮：拉取 OSS 目录获得各插件的可更新状态 →
+/// 对已启用且有新版本的插件直接触发升级（复用手动升级的事务与
+/// 回滚链路）→ 成功后广播 plugins_changed。禁用插件不动，可手动升级。
+async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result<()> {
     use tauri::Emitter;
     use tiangong_plugin_runtime::artifacts;
 
@@ -873,22 +873,21 @@ async fn run_plugin_auto_maintenance(app_handle: tauri::AppHandle) -> anyhow::Re
         Ok(list) => list,
         Err(error) => {
             // 离线或 OSS 不可达：静默跳过，下次启动再试。
-            tracing::info!(%error, "插件目录拉取失败，跳过本次自动维护");
+            tracing::info!(%error, "插件目录拉取失败，跳过本次自动升级");
             return Ok(());
         }
     };
-    let uninstalled = artifacts::read_uninstalled_plugins(&storage_root);
-    let plan = artifacts::plan_auto_maintenance(&available, &uninstalled);
-    if plan.install.is_empty() && plan.upgrade.is_empty() {
-        tracing::debug!("插件无需自动维护");
+    let upgrades: Vec<String> = available
+        .into_iter()
+        .filter(|plugin| plugin.update_available && plugin.installed_enabled)
+        .map(|plugin| plugin.id)
+        .collect();
+    if upgrades.is_empty() {
+        tracing::debug!("插件无需自动升级");
         return Ok(());
     }
-    tracing::info!(
-        install = ?plan.install,
-        upgrade = ?plan.upgrade,
-        "开始插件自动维护"
-    );
-    for plugin_id in plan.install.iter().chain(plan.upgrade.iter()) {
+    tracing::info!(upgrades = ?upgrades, "开始插件自动升级");
+    for plugin_id in &upgrades {
         match crate::commands::download_and_install_plugin(
             storage_root.clone(),
             plugin_id.clone(),
@@ -900,16 +899,12 @@ async fn run_plugin_auto_maintenance(app_handle: tauri::AppHandle) -> anyhow::Re
                 tracing::info!(
                     plugin_id,
                     version = %status.manifest_version,
-                    "插件自动维护安装/升级完成"
+                    "插件自动升级完成"
                 );
                 let _ = app_handle.emit("plugins_changed", &());
             }
             Err(error) => {
-                tracing::warn!(
-                    plugin_id,
-                    %error,
-                    "插件自动维护安装/升级失败，下次启动重试"
-                );
+                tracing::warn!(plugin_id, %error, "插件自动升级失败，下次启动重试");
             }
         }
     }
