@@ -1381,10 +1381,46 @@ impl From<&Session> for tiangong_types::PluginSession {
             reasoning_effort: session
                 .reasoning_effort
                 .map(|effort| effort.as_str().to_string()),
-            messages: session.messages.clone(),
+            // Notice 是宿主与用户之间的系统通知，不属于对话历史；
+            // 插件快照始终剔除，旧版本插件的会话反序列化也不含该角色。
+            messages: session
+                .messages
+                .iter()
+                .filter(|message| message.role != MessageRole::Notice)
+                .cloned()
+                .collect(),
             context_summary: session.context_summary.clone(),
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_session_tests {
+    use super::*;
+
+    #[test]
+    fn plugin_session_转换剔除_notice_消息() {
+        let mut session = Session::new("含系统通知的会话");
+        session.append_message(MessageRole::User, "用户输入");
+        session.append_message(MessageRole::Notice, "系统通知");
+        session.append_message(MessageRole::Assistant, "回复");
+
+        let snapshot = tiangong_types::PluginSession::from(&session);
+        let roles: Vec<&str> = snapshot
+            .messages
+            .iter()
+            .map(|message| match message.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+                MessageRole::Notice => "notice",
+            })
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant"]);
+        // 原会话不受影响。
+        assert_eq!(session.messages.len(), 3);
     }
 }
