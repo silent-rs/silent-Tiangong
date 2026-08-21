@@ -1378,6 +1378,7 @@ impl From<&Session> for tiangong_types::PluginSession {
             cwd: session.cwd.clone(),
             workspace_id,
             parent_session_id: session.parent_session_id.clone(),
+            turn_start_message_id: None,
             reasoning_effort: session
                 .reasoning_effort
                 .map(|effort| effort.as_str().to_string()),

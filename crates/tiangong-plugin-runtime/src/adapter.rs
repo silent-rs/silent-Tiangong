@@ -350,7 +350,12 @@ impl WasmPluginAdapter {
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let plugin_session = tiangong_types::PluginSession::from(session);
+        let mut plugin_session = tiangong_types::PluginSession::from(session);
+        // 本轮起点同时以消息 ID 提供：插件按 ID 定位不受快照消息增删影响。
+        plugin_session.turn_start_message_id = session
+            .messages
+            .get(turn_start_idx)
+            .map(|message| message.id.clone());
         let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
@@ -364,7 +369,7 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        // 快照剔除 Notice 后位置前移，同步换算保证仍指向同一条消息。
+        // idx 兼容仍按位置定位的旧版插件；快照剔除 Notice 后位置前移，同步换算。
         let idx = tiangong_core::session::plugin_turn_start_idx(session, turn_start_idx) as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
