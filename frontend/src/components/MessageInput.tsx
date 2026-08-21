@@ -24,6 +24,9 @@ import {
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
+import { InputQueueBar } from './InputQueueBar';
+
+const MOD_KEY_LABEL = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd+Enter' : 'Ctrl+Enter';
 
 interface MentionCandidate {
   value: string;
@@ -65,6 +68,7 @@ export function MessageInput({
   const setInputCacheAttachments = useStore((state) => state.setInputCacheAttachments);
   const sendMessage = useStore((state) => state.sendMessage);
   const appendMessage = useStore((state) => state.appendMessage);
+  const enqueueInputMessage = useStore((state) => state.enqueueInputMessage);
   const cancelTurn = useStore((state) => state.cancelTurn);
   const beginContextManagement = useStore((state) => state.beginContextManagement);
   const endContextManagement = useStore((state) => state.endContextManagement);
@@ -595,7 +599,12 @@ export function MessageInput({
     }
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault();
-      handleSend();
+      // Cmd/Ctrl+Enter 立即投递（空闲发送、执行中引导）；执行中普通 Enter 排入队列。
+      if ((e.metaKey || e.ctrlKey) || isIdle) {
+        handleSend();
+      } else {
+        void handleEnqueue();
+      }
     }
   };
 
@@ -641,6 +650,19 @@ export function MessageInput({
   };
 
   const handleCancel = () => { cancelTurn(); };
+
+  // 执行中普通 Enter：当前输入（含附件）排入会话队列并清空草稿，等空闲后自动放行。
+  const handleEnqueue = async () => {
+    if (!canSend) return;
+    setMentionOpen(false);
+    const targetCacheKey = cacheKey;
+    if (!targetCacheKey) return;
+    // slash 命令不入队，直接执行（与发送行为一致）。
+    if (await executeSlashCommand(inputContent.trim())) {
+      return;
+    }
+    enqueueInputMessage(targetCacheKey);
+  };
 
   const handleAttachFiles = async () => {
     try {
@@ -957,6 +979,7 @@ export function MessageInput({
               </div>
             </div>
             <SessionInputPluginHost slot="session.before-input" />
+            <InputQueueBar cacheKey={cacheKey} isIdle={isIdle} />
             <div
               ref={inputAreaRef}
               className="relative"
@@ -1055,7 +1078,7 @@ export function MessageInput({
                     ? agents.length > 0
                       ? '输入消息... (Enter 发送，@ 引用 Agent/Skill/MCP)'
                       : '输入消息... (Enter 发送，@ 引用 Skill/MCP)'
-                    : '追加指示... (Enter 发送)'
+                    : `追加指示... (Enter 排队，${MOD_KEY_LABEL} 立即引导)`
                 }
                 className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"
               />
@@ -1110,7 +1133,7 @@ export function MessageInput({
                         : 'bg-blue-600 hover:bg-blue-700 text-white'
                       : 'bg-muted text-muted-foreground'
                   }`}
-                  title={isIdle ? '发送消息' : '追加指示'}
+                  title={isIdle ? '发送消息' : `立即引导 (${MOD_KEY_LABEL})`}
                 >
                   {isIdle ? (
                     <Send className="w-4 h-4" />
@@ -1184,7 +1207,11 @@ export function MessageInput({
                     <><ShieldOff className="w-3 h-3" /><span>信任</span></>
                   )}
                 </button>
-                <span>Enter 发送 · Shift+Enter 换行</span>
+                <span>
+                  {isIdle
+                    ? 'Enter 发送 · Shift+Enter 换行'
+                    : `Enter 排队 · ${MOD_KEY_LABEL} 立即引导 · Shift+Enter 换行`}
+                </span>
               </div>
               </div>
             </div>
