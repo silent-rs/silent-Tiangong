@@ -57,6 +57,28 @@ interface SessionViewCache {
 
 const sessionViewCaches = new Map<string, SessionViewCache>();
 
+/** 输入队列消息：执行期间暂存、等待空闲后按序投递的用户输入（含附件快照）。 */
+export interface QueuedInputMessage {
+  id: string;
+  text: string;
+  attachments: RawAttachment[];
+  queuedAt: number;
+}
+
+function newQueuedMessageId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 把当前草稿快照为一条队列消息（不修改草稿）。 */
+function queuedMessageFromCache(cache: InputCache): QueuedInputMessage {
+  return {
+    id: newQueuedMessageId(),
+    text: cache.text,
+    attachments: cache.attachments.map((attachment) => ({ ...attachment })),
+    queuedAt: Date.now(),
+  };
+}
+
 function commitSessionSwitch(sessionId: string, requestVersion: number): Promise<boolean> {
   const commit = switchCommitQueue.then(async () => {
     if (requestVersion !== switchRequestVersion) return false;
@@ -832,6 +854,20 @@ export interface AppState {
   // 多会话运行状态 (session_id -> status)
   sessionRunStatuses: Record<string, string>;
 
+  // 输入队列 (cacheKey -> 待投递消息，队首先行)
+  inputQueues: Record<string, QueuedInputMessage[]>;
+  /** 执行中 Enter：把当前草稿（文本+附件快照）排入会话队列并清空草稿。 */
+  enqueueInputMessage: (cacheKey: string) => void;
+  removeQueuedInputMessage: (cacheKey: string, messageId: string) => void;
+  /** 拖拽调整队列顺序；自动放行按调整后的顺序投递。 */
+  moveQueuedInputMessage: (cacheKey: string, fromIndex: number, toIndex: number) => void;
+  /** 编辑：消息内容（文本+附件）回填草稿并从队列移除；草稿非空时先转入队首。 */
+  editQueuedInputMessage: (cacheKey: string, messageId: string) => void;
+  /** 立即投递指定队列消息：空闲走 sendMessage 开新轮，执行中走 appendMessage 引导。 */
+  steerQueuedInputMessage: (cacheKey: string, messageId: string) => Promise<boolean>;
+  /** turn 结束（runStatus 回 idle）且草稿为空时自动放行队首；失败不自动重试。 */
+  dequeueNextQueuedInput: (cacheKey: string) => Promise<boolean>;
+
   // 流式消息状态
   streamingMessageId: string | null;
   streamingContent: string;
@@ -964,6 +1000,7 @@ export const useStore = create<AppState>((set, get) => ({
   workspaceDir: '',
   sessionCwd: '',
   sessionRunStatuses: {},
+  inputQueues: {},
   streamingMessageId: null,
   streamingContent: '',
   streamingReasoningContent: '',
@@ -1239,12 +1276,15 @@ export const useStore = create<AppState>((set, get) => ({
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
+        const inputQueues = { ...state.inputQueues };
         delete inputCaches[deletedSessionId];
         delete sessionRunStatuses[deletedSessionId];
+        delete inputQueues[deletedSessionId];
         return {
           sessions: state.sessions.filter((s) => s.id !== deletedSessionId),
           inputCaches,
           sessionRunStatuses,
+          inputQueues,
         };
       });
 
@@ -1277,14 +1317,17 @@ export const useStore = create<AppState>((set, get) => ({
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
+        const inputQueues = { ...state.inputQueues };
         for (const sessionId of succeededIds) {
           delete inputCaches[sessionId];
           delete sessionRunStatuses[sessionId];
+          delete inputQueues[sessionId];
         }
         return {
           sessions: remainingSessions,
           inputCaches,
           sessionRunStatuses,
+          inputQueues,
         };
       });
 
@@ -1590,6 +1633,137 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // ===== 输入队列 =====
+  // 执行中 Enter 不再直接追加引导，而是把当前草稿排入会话队列；投递统一走
+  // "写回草稿 + 标准 sendMessage/appendMessage"路径，天然满足 revision/claim
+  // 校验与防重复投递，且成功后由 settle 正常清空草稿。
+
+  enqueueInputMessage: (cacheKey) => {
+    const cache = get().inputCaches[cacheKey];
+    if (!cache || (cache.text.trim().length === 0 && cache.attachments.length === 0)) return;
+    const message = queuedMessageFromCache(cache);
+    set((state) => ({
+      inputQueues: {
+        ...state.inputQueues,
+        [cacheKey]: [...(state.inputQueues[cacheKey] ?? []), message],
+      },
+    }));
+    get().setInputCacheText(cacheKey, '');
+    get().setInputCacheAttachments(cacheKey, []);
+  },
+
+  removeQueuedInputMessage: (cacheKey, messageId) => {
+    set((state) => {
+      const queue = state.inputQueues[cacheKey];
+      if (!queue?.some((message) => message.id === messageId)) return state;
+      return {
+        inputQueues: {
+          ...state.inputQueues,
+          [cacheKey]: queue.filter((message) => message.id !== messageId),
+        },
+      };
+    });
+  },
+
+  moveQueuedInputMessage: (cacheKey, fromIndex, toIndex) => {
+    set((state) => {
+      const queue = state.inputQueues[cacheKey];
+      if (
+        !queue
+        || fromIndex === toIndex
+        || fromIndex < 0 || fromIndex >= queue.length
+        || toIndex < 0 || toIndex >= queue.length
+      ) {
+        return state;
+      }
+      const next = queue.slice();
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return { inputQueues: { ...state.inputQueues, [cacheKey]: next } };
+    });
+  },
+
+  editQueuedInputMessage: (cacheKey, messageId) => {
+    const state = get();
+    const message = (state.inputQueues[cacheKey] ?? []).find((item) => item.id === messageId);
+    if (!message) return;
+    // 草稿非空时先转入队首，避免回填覆盖丢失。
+    const cache = state.inputCaches[cacheKey];
+    const draftMessage = cache && (cache.text.trim().length > 0 || cache.attachments.length > 0)
+      ? queuedMessageFromCache(cache)
+      : null;
+    set((current) => {
+      const remaining = (current.inputQueues[cacheKey] ?? []).filter((item) => item.id !== messageId);
+      return {
+        inputQueues: {
+          ...current.inputQueues,
+          [cacheKey]: draftMessage ? [draftMessage, ...remaining] : remaining,
+        },
+      };
+    });
+    get().setInputCacheText(cacheKey, message.text);
+    get().setInputCacheAttachments(cacheKey, message.attachments);
+  },
+
+  steerQueuedInputMessage: async (cacheKey, messageId) => {
+    const state = get();
+    const queue = state.inputQueues[cacheKey] ?? [];
+    const index = queue.findIndex((message) => message.id === messageId);
+    if (index < 0) return false;
+    const message = queue[index];
+    // 草稿非空时先入队保底，避免被队列消息覆盖丢失；排到队首，本轮投递后最先放行。
+    const cache = state.inputCaches[cacheKey];
+    const draftMessage = cache && (cache.text.trim().length > 0 || cache.attachments.length > 0)
+      ? queuedMessageFromCache(cache)
+      : null;
+    set((current) => {
+      const remaining = (current.inputQueues[cacheKey] ?? []).filter((item) => item.id !== messageId);
+      return {
+        inputQueues: {
+          ...current.inputQueues,
+          [cacheKey]: draftMessage ? [draftMessage, ...remaining] : remaining,
+        },
+      };
+    });
+
+    get().setInputCacheText(cacheKey, message.text);
+    get().setInputCacheAttachments(cacheKey, message.attachments);
+    const latest = get().inputCaches[cacheKey];
+    if (!latest) return false;
+    const content = message.text.trim()
+      || (message.attachments.length > 0 ? '请处理这些附件。' : message.text);
+    const isIdle = !get().sessionRunStatuses[cacheKey];
+    const delivered = isIdle
+      ? await get().sendMessage(cacheKey, content, latest.attachments, latest.revision)
+      : await get().appendMessage(cacheKey, content, latest.attachments, latest.revision);
+    if (!delivered) {
+      // 失败回插队首并清空草稿（内容仍在队列，不丢失）。
+      set((current) => {
+        const currentQueue = current.inputQueues[cacheKey] ?? [];
+        if (currentQueue.some((item) => item.id === message.id)) return current;
+        return {
+          inputQueues: { ...current.inputQueues, [cacheKey]: [message, ...currentQueue] },
+        };
+      });
+      get().setInputCacheText(cacheKey, '');
+      get().setInputCacheAttachments(cacheKey, []);
+      return false;
+    }
+    return true;
+  },
+
+  dequeueNextQueuedInput: async (cacheKey) => {
+    const state = get();
+    if (state.sessionRunStatuses[cacheKey]) return false;
+    const cache = state.inputCaches[cacheKey];
+    if (cache && (cache.text.trim().length > 0 || cache.attachments.length > 0 || cache.is_sending)) {
+      return false;
+    }
+    const first = state.inputQueues[cacheKey]?.[0];
+    if (!first) return false;
+    return get().steerQueuedInputMessage(cacheKey, first.id);
+  },
+
   // 编辑态有自己的 revision；这里只按显式 session_id 更新该会话发送状态。
   editAndResend: async (
     sessionId,
@@ -1828,6 +2002,10 @@ export const useStore = create<AppState>((set, get) => ({
         sessionRunStatuses: nextStatuses,
       };
     });
+    // 上下文管理结束回到空闲：若之前积累了输入队列，继续放行队首。
+    if (activeSessionId) {
+      void get().dequeueNextQueuedInput(activeSessionId);
+    }
   },
 
   applyStreamEvents: (events) => {
@@ -1905,10 +2083,15 @@ export const useStore = create<AppState>((set, get) => ({
     const nextState = get();
     const appIsForeground = document.visibilityState === 'visible' && document.hasFocus();
     for (const sessionId of Object.keys(previousStatuses)) {
-      if (!nextState.sessionRunStatuses[sessionId]
-        && (sessionId !== nextState.activeSessionId || !appIsForeground)) {
-        const session = nextState.sessions.find((item) => item.id === sessionId);
-        notifyBackgroundSessionCompleted(session?.title || '对话', sessionId).catch(console.warn);
+      if (!nextState.sessionRunStatuses[sessionId]) {
+        // 执行结束的会话若留有输入队列且草稿为空，自动放行队首。
+        if ((nextState.inputQueues[sessionId]?.length ?? 0) > 0) {
+          void get().dequeueNextQueuedInput(sessionId);
+        }
+        if (sessionId !== nextState.activeSessionId || !appIsForeground) {
+          const session = nextState.sessions.find((item) => item.id === sessionId);
+          notifyBackgroundSessionCompleted(session?.title || '对话', sessionId).catch(console.warn);
+        }
       }
     }
   },
