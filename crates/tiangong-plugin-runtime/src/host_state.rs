@@ -150,24 +150,16 @@ fn build_wasi_ctx(plugin_id: &str, storage_access: bool) -> WasiCtx {
     let mut builder = WasiCtxBuilder::new();
     let dir = plugin_config_dir(plugin_id);
     let _ = std::fs::create_dir_all(&dir);
-    if let Err(e) = builder.preopened_dir(
-        &dir,
-        ".",
-        wasmtime_wasi::DirPerms::all(),
-        wasmtime_wasi::FilePerms::all(),
-    ) {
+    if let Err(e) = builder.preopened_dir(&dir, ".", wasmtime_wasi::FsPerms::ReadWrite) {
         tracing::debug!("preopen 插件配置目录失败（{e}），配置读写将不可用");
     }
     if storage_access {
         let storage_root = plugin_storage_root();
         if let Some(root) = &storage_root {
             let _ = std::fs::create_dir_all(root);
-            if let Err(e) = builder.preopened_dir(
-                root,
-                "/storage",
-                wasmtime_wasi::DirPerms::all(),
-                wasmtime_wasi::FilePerms::all(),
-            ) {
+            if let Err(e) =
+                builder.preopened_dir(root, "/storage", wasmtime_wasi::FsPerms::ReadWrite)
+            {
                 tracing::debug!("preopen 存储根目录失败（{e}），存储根访问将不可用");
             }
         }

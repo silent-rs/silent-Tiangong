@@ -249,7 +249,7 @@ fn finish_download(
         )
     })?;
 
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = hex::encode(hasher.finalize());
     let output = DownloadOutput {
         mode: "download",
         url: original_url.to_string(),

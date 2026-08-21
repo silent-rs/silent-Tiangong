@@ -172,15 +172,15 @@ fn filter_invalid_openai_tool_calls(
                         .iter_errors(&call.arguments)
                         .take(3)
                         .map(|error| {
-                            let instance_path = if error.instance_path.as_str().is_empty() {
+                            let instance_path = if error.instance_path().as_str().is_empty() {
                                 "$".to_string()
                             } else {
-                                format!("${}", error.instance_path)
+                                format!("${}", error.instance_path())
                             };
-                            let schema_path = if error.schema_path.as_str().is_empty() {
+                            let schema_path = if error.schema_path().as_str().is_empty() {
                                 "#".to_string()
                             } else {
-                                format!("#{}", error.schema_path)
+                                format!("#{}", error.schema_path())
                             };
                             format!(
                                 "参数位置={instance_path}，schema 位置={schema_path}，原因={error}"

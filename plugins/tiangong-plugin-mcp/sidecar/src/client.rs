@@ -462,8 +462,10 @@ async fn run_stdio_mcp_request_async(
     })?;
 
     // 缓存 server 版本信息
-    if let Some(info) = service.peer_info() {
-        cache_server_version(&server.name, &info.server_info.version);
+    if let Some(info) = service.peer_info()
+        && let Some(server_info) = &info.server_info
+    {
+        cache_server_version(&server.name, &server_info.version);
     }
 
     let response = dispatch_mcp_request(service.peer(), method, params)
@@ -529,8 +531,10 @@ async fn run_http_mcp_request_async(
         )
     })?;
 
-    if let Some(info) = service.peer_info() {
-        cache_server_version(&server.name, &info.server_info.version);
+    if let Some(info) = service.peer_info()
+        && let Some(server_info) = &info.server_info
+    {
+        cache_server_version(&server.name, &server_info.version);
     }
 
     let response = dispatch_mcp_request(service.peer(), method, params).await;
