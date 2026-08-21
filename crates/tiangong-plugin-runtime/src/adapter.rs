@@ -364,7 +364,8 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        let idx = turn_start_idx as u32;
+        // 快照剔除 Notice 后位置前移，同步换算保证仍指向同一条消息。
+        let idx = tiangong_core::session::plugin_turn_start_idx(session, turn_start_idx) as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }

@@ -204,21 +204,18 @@ fn find_attachment_source(
     message_id: Option<&str>,
     attachment_index: Option<usize>,
 ) -> (String, Vec<String>) {
-    // 定位消息：优先按 message_id 精确匹配；模型编造或误传 ID 时
-    // 回退到最后一条带图片附件的用户消息，避免直接报错。
-    let source = message_id
-        .and_then(|id| {
-            messages
-                .iter()
-                .find(|msg| msg.get("id").and_then(Value::as_str) == Some(id))
-        })
-        .filter(|msg| !message_image_paths(msg).is_empty())
-        .or_else(|| {
-            messages
-                .iter()
-                .rev()
-                .find(|msg| is_user_message_with_image(msg))
-        });
+    // 定位消息：明确提供 message_id 时严格精确匹配——ID 不存在或该消息
+    // 没有图片都视为定位失败并报错，绝不回退到其他消息（避免误用历史图片
+    // 生成看似正常但内容错误的分析）。仅省略 ID 时取最近一条带图用户消息。
+    let source = match message_id {
+        Some(id) => messages
+            .iter()
+            .find(|msg| msg.get("id").and_then(Value::as_str) == Some(id)),
+        None => messages
+            .iter()
+            .rev()
+            .find(|msg| is_user_message_with_image(msg)),
+    };
 
     let Some(source) = source else {
         return (String::new(), Vec::new());
@@ -324,15 +321,15 @@ mod tests {
     }
 
     #[test]
-    fn message_id_未命中时回退到最后一条带图用户消息() {
+    fn message_id_未命中时返回空() {
         let messages = vec![
             user_message_with_image("msg-1", "第一张", "/tmp/a.png"),
             json!({ "id": "msg-2", "role": "assistant", "content": [{ "type": "text", "text": "收到" }] }),
         ];
-        // 模型编造的 ID 在会话中不存在。
+        // 模型编造的 ID 在会话中不存在：严格失败，不回退到历史图片。
         let (text, images) = find_attachment_source(&messages, Some("made-up-id"), Some(0));
-        assert_eq!(text, "第一张");
-        assert_eq!(images, vec!["/tmp/a.png".to_string()]);
+        assert_eq!(text, "");
+        assert!(images.is_empty());
     }
 
     #[test]
@@ -347,14 +344,15 @@ mod tests {
     }
 
     #[test]
-    fn 无任何图片附件时返回空() {
+    fn message_id_命中但无图时图片为空() {
         let messages = vec![json!({
             "id": "msg-1",
             "role": "user",
             "content": [{ "type": "text", "text": "纯文本" }]
         })];
+        // 严格匹配：消息找得到（文本正常提取），但没有图片可解析。
         let (text, images) = find_attachment_source(&messages, Some("msg-1"), Some(0));
-        assert_eq!(text, "");
+        assert_eq!(text, "纯文本");
         assert!(images.is_empty());
     }
 

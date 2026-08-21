@@ -1396,6 +1396,24 @@ impl From<&Session> for tiangong_types::PluginSession {
     }
 }
 
+/// 换算 Core 消息位置到插件快照位置。
+///
+/// 插件生命周期钩子携带的 `turn_start_idx` 基于 Core 完整消息列表；
+/// 快照剔除 Notice 后位置整体前移，必须同步换算才能仍指向同一条消息。
+pub fn plugin_turn_start_idx(session: &Session, turn_start_idx: usize) -> usize {
+    let removed_before = session
+        .messages
+        .get(..turn_start_idx.min(session.messages.len()))
+        .map(|prefix| {
+            prefix
+                .iter()
+                .filter(|message| message.role == MessageRole::Notice)
+                .count()
+        })
+        .unwrap_or(0);
+    turn_start_idx.saturating_sub(removed_before)
+}
+
 #[cfg(test)]
 mod plugin_session_tests {
     use super::*;
@@ -1422,5 +1440,32 @@ mod plugin_session_tests {
         assert_eq!(roles, vec!["user", "assistant"]);
         // 原会话不受影响。
         assert_eq!(session.messages.len(), 3);
+    }
+
+    #[test]
+    fn plugin_turn_start_idx_换算跳过位置之前的_notice() {
+        let mut session = Session::new("位置换算");
+        session.append_message(MessageRole::User, "第一轮");
+        session.append_message(MessageRole::Notice, "失败通知");
+        session.append_message(MessageRole::User, "第二轮");
+        session.append_message(MessageRole::Notice, "另一条通知");
+        session.append_message(MessageRole::User, "第三轮");
+
+        // 前方有一条 Notice：位置前移 1，仍指向同一条用户消息。
+        assert_eq!(plugin_turn_start_idx(&session, 2), 1);
+        assert_eq!(
+            tiangong_types::PluginSession::from(&session).messages[1].text_content(),
+            session.messages[2].text_content()
+        );
+
+        // 前方有两条 Notice：位置前移 2。
+        assert_eq!(plugin_turn_start_idx(&session, 4), 2);
+        assert_eq!(
+            tiangong_types::PluginSession::from(&session).messages[2].text_content(),
+            session.messages[4].text_content()
+        );
+
+        // 位置 0 之前无 Notice：不变。
+        assert_eq!(plugin_turn_start_idx(&session, 0), 0);
     }
 }
