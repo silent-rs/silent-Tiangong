@@ -132,10 +132,10 @@ async function main(bridgePromise: Awaitable<HostBridge>) {
               scope_id: invocation.session_id,
               created_at: Date.now(),
             });
+            // terminal_open 面向用户展示：建立标签并展开拓展区聚焦。
             await openExtensionApp(bridge, {
               sessionId: invocation.session_id,
               instanceId,
-              showPanel: false,
             });
           }
           if (isClose) sessions.delete(instanceId);
@@ -262,6 +262,8 @@ async function executeTool(
         interactive_mode?: boolean;
       };
     try {
+      // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
+      // 实例编号与 PTY 一致，重复调用幂等聚焦同一标签。
       await openExtensionApp(bridge, {
         sessionId: invocation.session_id,
         instanceId: sessionId,

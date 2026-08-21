@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import {
   api,
@@ -15,7 +15,6 @@ import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components
 import {
   TabsContainer,
   type AppTabCommand,
-  type PluginAppInstanceRef,
 } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { InteractionPluginHost } from '@/components/InteractionPluginHost';
@@ -107,43 +106,6 @@ function browserPluginSessionId(sessionId?: string | null): string {
   return sessionId.startsWith(prefix) ? sessionId.slice(prefix.length) : sessionId;
 }
 
-interface BackgroundAppInstance {
-  pluginId: string;
-  contributionId: string;
-  title: string;
-  sandbox: SandboxKind;
-  multi: boolean;
-  sessionId: string;
-  instanceId: string;
-}
-
-function findBackgroundApp(
-  instances: BackgroundAppInstance[],
-  sessionId: string,
-  pluginId?: string,
-  contributionId?: string,
-): BackgroundAppInstance | undefined {
-  for (let index = instances.length - 1; index >= 0; index -= 1) {
-    const instance = instances[index];
-    if (
-      instance.sessionId === sessionId
-      && (!pluginId || instance.pluginId === pluginId)
-      && (!contributionId || instance.contributionId === contributionId)
-    ) return instance;
-  }
-  return undefined;
-}
-
-function isSameAppInstance(
-  background: BackgroundAppInstance,
-  foreground: PluginAppInstanceRef,
-): boolean {
-  return background.pluginId === foreground.pluginId
-    && background.contributionId === foreground.contributionId
-    && background.instanceId === foreground.instanceId
-    && background.sessionId === foreground.sessionId;
-}
-
 export function MainApp() {
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const activeSessionId = useStore((state) => state.activeSessionId);
@@ -162,21 +124,10 @@ export function MainApp() {
   const [appTabCommand, setAppTabCommand] = useState<AppTabCommand | null>(null);
   // 工具接应的后台插件实例（app.open mode=background）：隐藏挂载不弹面板。
   const [bgPluginInstances, setBgPluginInstances] = useState<BackgroundPluginInstance[]>([]);
-  // 插件通过 app.open 登记、尚未接入顶部标签的后台 App 实例。
-  const [backgroundAppInstances, setBackgroundAppInstances] = useState<BackgroundAppInstance[]>([]);
-  const backgroundAppInstancesRef = useRef<BackgroundAppInstance[]>([]);
-  backgroundAppInstancesRef.current = backgroundAppInstances;
-  // 已接入当前会话顶部标签的 App 键集合。
+  // 当前会话已接入顶部标签的 App 键集合：绿点唯一事实源（工具拉起的
+  // 实例同样建立可见标签，无隐藏实例，关闭全部标签即绿点熄灭）。
   const [foregroundPluginApps, setForegroundPluginApps] = useState<string[]>([]);
-  const runningPluginApps = useMemo(() => {
-    const apps = new Set(foregroundPluginApps);
-    for (const instance of backgroundAppInstances) {
-      if (instance.sessionId === currentSessionId) {
-        apps.add(`${instance.pluginId}:${instance.contributionId}`);
-      }
-    }
-    return Array.from(apps);
-  }, [backgroundAppInstances, currentSessionId, foregroundPluginApps]);
+  const runningPluginApps = foregroundPluginApps;
   const [workspaceOpenRequestVersion, setWorkspaceOpenRequestVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -334,7 +285,6 @@ export function MainApp() {
       // 有 tab → 聚焦上次活跃的 App 态；无 tab → 进入矩阵态。
       const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
       let lastKind: TabKind | null = null;
-      let backgroundApp: BackgroundAppInstance | undefined;
       if (sessionId) {
         try {
           const result = await api.getSessionTabs(sessionId);
@@ -345,30 +295,9 @@ export function MainApp() {
         } catch {
           // 会话 tabs 未就绪时按无已打开 App 处理
         }
-        if (!lastKind) {
-          backgroundApp = findBackgroundApp(backgroundAppInstancesRef.current, sessionId);
-        }
       }
       if (lastKind) {
         void openWorkspacePanel(lastKind);
-      } else if (backgroundApp) {
-        // 插件已在后台建立 App 实例：用户打开拓展区时接入同一实例。
-        setAppTabCommand({
-          kind: 'plugin',
-          action: 'open-plugin',
-          version: Date.now(),
-          sessionId: backgroundApp.sessionId,
-          app: {
-            pluginId: backgroundApp.pluginId,
-            contributionId: backgroundApp.contributionId,
-            title: backgroundApp.title,
-            sandbox: backgroundApp.sandbox,
-            multi: backgroundApp.multi,
-            focusExisting: true,
-            instanceId: backgroundApp.instanceId,
-          },
-        });
-        void openWorkspacePanel('plugin');
       } else {
         setWorkspaceMode('matrix');
         setSidebarOpenByLayout(false);
@@ -381,6 +310,11 @@ export function MainApp() {
   /// 矩阵态下插件 webview 实例的隐藏由 TabsContainer 的 mode effect 处理。
   const handleShowMatrix = useCallback(() => {
     setWorkspaceMode('matrix');
+  }, []);
+
+  /// 矩阵态下点击顶部标签：直接切回 App 态聚焦被点的实例。
+  const handleRequestAppMode = useCallback(() => {
+    setWorkspaceMode('app');
   }, []);
 
   const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
@@ -594,11 +528,10 @@ export function MainApp() {
       }));
       guard();
       // app.open 原语落地：宿主请求打开插件 App（官方与三方插件一致）。
-      // mode=background 为工具接应的隐性挂载：不弹拓展区面板，Agent 操作
-      // 的页面照常在插件作用域进行，用户可随时自行打开拓展区观察（协同）。
-      // 前台模式（用户明确要求展示，如 web_fetch open=true / browser_open）
-      // 弹出并聚焦面板。实例挂载后 shell 订阅 tool.requested，宿主重放
-      // 挂起调用，工具继续执行。
+      // 实例统一建立拓展区顶部标签（可见、可关闭、计入绿点），showPanel
+      // 仅控制是否自动展开面板：background 为工具静默拉起，不弹面板
+      // 打扰用户。实例挂载后 shell 订阅 tool.requested，宿主重放挂起
+      // 调用，工具继续执行。
       track(await listen<{
         plugin_id: string;
         contribution_id: string;
@@ -621,30 +554,8 @@ export function MainApp() {
           || useStore.getState().activeSessionId
           || useStore.getState().newConversationId
           || '';
-        const rememberBackgroundInstance = () => {
-          if (!requestedSessionId || !payload.instance_id) return;
-          const instance: BackgroundAppInstance = {
-            pluginId: payload.plugin_id,
-            contributionId: payload.contribution_id,
-            title: payload.title || payload.plugin_id,
-            sandbox: normalizeSandbox(),
-            multi: Boolean(payload.multi),
-            sessionId: requestedSessionId,
-            instanceId: payload.instance_id,
-          };
-          setBackgroundAppInstances((prev) => [
-            ...prev.filter((item) => !(
-              item.pluginId === instance.pluginId
-              && item.contributionId === instance.contributionId
-              && item.sessionId === instance.sessionId
-              && item.instanceId === instance.instanceId
-            )),
-            instance,
-          ]);
-        };
-        if (payload.background) {
-          // 跟随发起工具调用的会话（含后台会话），不弹面板、不打扰用户。
-          if (!requestedSessionId) return;
+        if (!requestedSessionId) return;
+        const mountBackgroundShell = () => {
           setBgPluginInstances((prev) => {
             const exists = prev.some((item) => item.pluginId === payload.plugin_id
               && item.contributionId === payload.contribution_id
@@ -657,16 +568,19 @@ export function MainApp() {
               sessionId: requestedSessionId,
             }];
           });
-          rememberBackgroundInstance();
+        };
+        // 后台会话（Sub Agent/Bot 等）的实例无法进入当前会话的标签栏，
+        // 仍隐藏挂载保证其工具有人执行，不计入前台标签与绿点。
+        if ((useStore.getState().activeSessionId || useStore.getState().newConversationId)
+          !== requestedSessionId) {
+          mountBackgroundShell();
           return;
         }
-        // 前台：后台会话的工具调用不弹面板，避免打断当前对话。
-        if (
-          payload.session_id
-          && (useStore.getState().activeSessionId || useStore.getState().newConversationId)
-            !== payload.session_id
-        ) {
-          rememberBackgroundInstance();
+        // 宿主无订阅兜底拉起（不带实例编号）：只挂隐藏执行壳，插件工具
+        // 随后会携带精确实例编号再次 app.open 建立可见标签，此处建标签
+        // 会因编号不匹配产生重复空白实例。
+        if (payload.background && !payload.instance_id) {
+          mountBackgroundShell();
           return;
         }
         setAppTabCommand({
@@ -684,6 +598,12 @@ export function MainApp() {
             instanceId: payload.instance_id ?? undefined,
           },
         });
+        if (payload.background) {
+          // 工具静默拉起：实例照常建立标签（可见、可关闭、计入绿点），
+          // 仅挂载拓展区容器（隐藏保活）而不展开面板。
+          setWorkspacePanelMounted(true);
+          return;
+        }
         void openWorkspacePanel('plugin');
       }));
       guard();
@@ -700,12 +620,6 @@ export function MainApp() {
           || useStore.getState().activeSessionId
           || useStore.getState().newConversationId
           || '';
-        setBackgroundAppInstances((prev) => prev.filter((instance) => {
-          if (instance.pluginId !== payload.plugin_id || instance.sessionId !== sessionId) {
-            return true;
-          }
-          return payload.all !== true && instance.instanceId !== payload.instance_id;
-        }));
         if (
           payload.session_id
           && useStore.getState().activeSessionId !== payload.session_id
@@ -906,17 +820,10 @@ export function MainApp() {
                     matrix={
                       <ExtensionMatrix
                         runningPluginApps={runningPluginApps}
-                        onOpenPluginApp={(app) => {
-                          const backgroundApp = currentSessionId
-                            ? findBackgroundApp(
-                              backgroundAppInstances,
-                              currentSessionId,
-                              app.plugin_id,
-                              app.contribution_id,
-                            )
-                            : undefined;
-                          // App 统一走插件命令通道：按 open_mode 分派
-                          // （单例聚焦/多例新建），native 容器由官方签名插件声明。
+                        onOpenPluginApp={(app, opts) => {
+                          // App 统一走插件命令通道：已有实例聚焦（含工具
+                          // 静默建立的标签），无实例或显式新建时按 open_mode
+                          // 分派（单例聚焦/多例新建）。
                           setAppTabCommand({
                             kind: 'plugin',
                             action: 'open-plugin',
@@ -928,8 +835,7 @@ export function MainApp() {
                               title: app.title,
                               sandbox: app.sandbox,
                               multi: app.open_mode === 'multi',
-                              focusExisting: Boolean(backgroundApp),
-                              instanceId: backgroundApp?.instanceId,
+                              focusExisting: !opts?.newInstance,
                             },
                           });
                           void openWorkspacePanel('plugin');
@@ -939,13 +845,9 @@ export function MainApp() {
                     appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
-                    onTabKindsChanged={(_kinds, pluginApps, pluginInstances) => {
+                    onRequestAppMode={handleRequestAppMode}
+                    onTabKindsChanged={(_kinds, pluginApps) => {
                       setForegroundPluginApps(pluginApps);
-                      setBackgroundAppInstances((prev) => prev.filter(
-                        (background) => !pluginInstances.some(
-                          (foreground) => isSameAppInstance(background, foreground),
-                        ),
-                      ));
                     }}
                     onActiveKindChange={handleWorkspaceActiveKindChange}
                   />

@@ -22,13 +22,11 @@ interface TabsContainerProps {
   onClose: () => void;
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
+  /** 矩阵态下点击顶部标签：请求切回 App 态显示该实例（矩阵不随 active 变化）。 */
+  onRequestAppMode?: () => void;
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
    *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
-  onTabKindsChanged?: (
-    kinds: TabKind[],
-    pluginApps: string[],
-    pluginInstances: PluginAppInstanceRef[],
-  ) => void;
+  onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
   /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
   appCommand?: AppTabCommand | null;
   /** 拓展区模式：app（聚焦实例）或 matrix（App 矩阵占据内容区，tab 栏保留）。 */
@@ -60,14 +58,6 @@ export interface AppTabCommand {
     /** 工具调用拉起等宿主侧场景置 true：已有实例时聚焦而非新建（multi 亦然）。 */
     focusExisting?: boolean;
   };
-}
-
-/** 已接入拓展区顶部标签的通用 App 实例引用。 */
-export interface PluginAppInstanceRef {
-  pluginId: string;
-  contributionId: string;
-  instanceId: string;
-  sessionId: string;
 }
 
 interface WebviewPluginTabInfo {
@@ -193,6 +183,7 @@ export function TabsContainer({
   openRequestVersion,
   onClose,
   onShowMatrix,
+  onRequestAppMode,
   onTabKindsChanged,
   appCommand,
   mode = 'app',
@@ -290,26 +281,15 @@ export function TabsContainer({
   const lastTabKindsRef = useRef<string>('');
   useEffect(() => {
     const kinds = Array.from(new Set(tabs.map((tab) => tab.kind)));
-    const pluginInstances = tabs.flatMap((tab): PluginAppInstanceRef[] => (
-      tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id
-        ? [{
-          pluginId: tab.plugin_id,
-          contributionId: tab.contribution_id,
-          instanceId: tab.id,
-          sessionId: terminalSessionId,
-        }]
-        : []
-    ));
     const pluginApps = Array.from(new Set(
-      pluginInstances.map((instance) => `${instance.pluginId}:${instance.contributionId}`),
+      tabs
+        .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
+        .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
     ));
-    const instanceKey = pluginInstances
-      .map((instance) => `${instance.pluginId}:${instance.contributionId}:${instance.instanceId}`)
-      .join(',');
-    const key = `${terminalSessionId}|${kinds.join(',')}|${pluginApps.join(',')}|${instanceKey}`;
+    const key = `${terminalSessionId}|${kinds.join(',')}|${pluginApps.join(',')}`;
     if (key === lastTabKindsRef.current) return;
     lastTabKindsRef.current = key;
-    onTabKindsChangedRef.current?.(kinds, pluginApps, pluginInstances);
+    onTabKindsChangedRef.current?.(kinds, pluginApps);
   }, [tabs, terminalSessionId]);
 
   useEffect(() => {
@@ -538,13 +518,16 @@ export function TabsContainer({
   ]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
+    // 矩阵态占据内容区且不随 active 标记变化：点击标签视为请求回到
+    // App 态聚焦该实例，由宿主切回 mode=app。
+    if (mode === 'matrix') onRequestAppMode?.();
     const nextTab = tabs.find((tab) => tab.id === tabId);
     const currentTab = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
     if (currentTab && currentTab.id !== tabId && isWebviewPluginTab(currentTab) && currentTab.plugin_id) {
       const switchingWithinPlugin = Boolean(
         nextTab
-        && isWebviewPluginTab(nextTab)
-        && nextTab.plugin_id === currentTab.plugin_id,
+          && isWebviewPluginTab(nextTab)
+          && nextTab.plugin_id === currentTab.plugin_id,
       );
       void callWebviewPlugin(
         currentTab.plugin_id,
@@ -555,7 +538,7 @@ export function TabsContainer({
     }
     activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
-  }, [tabs, terminalSessionId]);
+  }, [mode, onRequestAppMode, tabs, terminalSessionId]);
 
   const handleCloseTab = useCallback(async (tabId: string) => {
     let currentTabs = tabsRef.current;
