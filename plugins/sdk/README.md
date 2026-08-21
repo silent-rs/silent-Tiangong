@@ -97,8 +97,11 @@ await openExtensionApp(bridge, {
 });
 ```
 
-`showPanel` 缺省为 `true`；设为 `false` 时只建立后台实例，用户之后仍可手动
-进入拓展区查看。未声明 `extension.tab` 或缺少 `app.use` 权限时宿主会拒绝调用。
+`showPanel` 缺省为 `true`；设为 `false` 时仍会建立正常、可见、可关闭的拓展区
+顶部标签并计入在用标记，只是不自动展开拓展区面板（工具静默拉起）。插件工具
+应尽量携带 `instanceId`：带编号的调用幂等聚焦同一标签；宿主内部在无插件 UI
+接应时发起的兜底拉起（不带编号）与非当前会话的调用才会使用隐藏执行壳，不建
+立可见标签。未声明 `extension.tab` 或缺少 `app.use` 权限时宿主会拒绝调用。
 
 ## Desktop TypeScript 工具提供器
 

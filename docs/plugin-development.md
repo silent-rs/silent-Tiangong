@@ -553,7 +553,7 @@ import {
 const bridge = await createTiangongBridge();
 await pluginStorage.set(bridge, 'tasks', JSON.stringify(list));
 
-// 仅 extension.tab App 可用；false 表示后台建立实例但不自动展开拓展区。
+// 仅 extension.tab App 可用；false 表示建立可见标签但不自动展开拓展区。
 await openExtensionApp(bridge, { sessionId, showPanel: false });
 ```
 

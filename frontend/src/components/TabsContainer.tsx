@@ -22,6 +22,8 @@ interface TabsContainerProps {
   onClose: () => void;
   /** 点击启动台按钮：拓展区切回 App 矩阵态（面板保持展开）。 */
   onShowMatrix?: () => void;
+  /** 矩阵态下点击顶部标签：请求切回 App 态显示该实例（矩阵不随 active 变化）。 */
+  onRequestAppMode?: () => void;
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
    *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
   onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
@@ -181,6 +183,7 @@ export function TabsContainer({
   openRequestVersion,
   onClose,
   onShowMatrix,
+  onRequestAppMode,
   onTabKindsChanged,
   appCommand,
   mode = 'app',
@@ -515,13 +518,16 @@ export function TabsContainer({
   ]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
+    // 矩阵态占据内容区且不随 active 标记变化：点击标签视为请求回到
+    // App 态聚焦该实例，由宿主切回 mode=app。
+    if (mode === 'matrix') onRequestAppMode?.();
     const nextTab = tabs.find((tab) => tab.id === tabId);
     const currentTab = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current);
     if (currentTab && currentTab.id !== tabId && isWebviewPluginTab(currentTab) && currentTab.plugin_id) {
       const switchingWithinPlugin = Boolean(
         nextTab
-        && isWebviewPluginTab(nextTab)
-        && nextTab.plugin_id === currentTab.plugin_id,
+          && isWebviewPluginTab(nextTab)
+          && nextTab.plugin_id === currentTab.plugin_id,
       );
       void callWebviewPlugin(
         currentTab.plugin_id,
@@ -532,7 +538,7 @@ export function TabsContainer({
     }
     activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
-  }, [tabs, terminalSessionId]);
+  }, [mode, onRequestAppMode, tabs, terminalSessionId]);
 
   const handleCloseTab = useCallback(async (tabId: string) => {
     let currentTabs = tabsRef.current;

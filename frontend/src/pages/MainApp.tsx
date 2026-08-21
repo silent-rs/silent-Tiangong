@@ -312,6 +312,11 @@ export function MainApp() {
     setWorkspaceMode('matrix');
   }, []);
 
+  /// 矩阵态下点击顶部标签：直接切回 App 态聚焦被点的实例。
+  const handleRequestAppMode = useCallback(() => {
+    setWorkspaceMode('app');
+  }, []);
+
   const handleWorkspaceActiveKindChange = useCallback((kind: TabKind | null) => {
     if (!kind) return;
     workspaceTabKindRef.current = kind;
@@ -840,6 +845,7 @@ export function MainApp() {
                     appCommand={appTabCommand}
                     onClose={() => { void closeWorkspacePanel(); }}
                     onShowMatrix={handleShowMatrix}
+                    onRequestAppMode={handleRequestAppMode}
                     onTabKindsChanged={(_kinds, pluginApps) => {
                       setForegroundPluginApps(pluginApps);
                     }}
