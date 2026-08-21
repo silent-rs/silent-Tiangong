@@ -69,6 +69,16 @@ function newQueuedMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 把当前草稿快照为一条队列消息（不修改草稿）。 */
+function queuedMessageFromCache(cache: InputCache): QueuedInputMessage {
+  return {
+    id: newQueuedMessageId(),
+    text: cache.text,
+    attachments: cache.attachments.map((attachment) => ({ ...attachment })),
+    queuedAt: Date.now(),
+  };
+}
+
 function commitSessionSwitch(sessionId: string, requestVersion: number): Promise<boolean> {
   const commit = switchCommitQueue.then(async () => {
     if (requestVersion !== switchRequestVersion) return false;
@@ -849,6 +859,10 @@ export interface AppState {
   /** 执行中 Enter：把当前草稿（文本+附件快照）排入会话队列并清空草稿。 */
   enqueueInputMessage: (cacheKey: string) => void;
   removeQueuedInputMessage: (cacheKey: string, messageId: string) => void;
+  /** 拖拽调整队列顺序；自动放行按调整后的顺序投递。 */
+  moveQueuedInputMessage: (cacheKey: string, fromIndex: number, toIndex: number) => void;
+  /** 编辑：消息内容（文本+附件）回填草稿并从队列移除；草稿非空时先转入队首。 */
+  editQueuedInputMessage: (cacheKey: string, messageId: string) => void;
   /** 立即投递指定队列消息：空闲走 sendMessage 开新轮，执行中走 appendMessage 引导。 */
   steerQueuedInputMessage: (cacheKey: string, messageId: string) => Promise<boolean>;
   /** turn 结束（runStatus 回 idle）且草稿为空时自动放行队首；失败不自动重试。 */
@@ -1627,12 +1641,7 @@ export const useStore = create<AppState>((set, get) => ({
   enqueueInputMessage: (cacheKey) => {
     const cache = get().inputCaches[cacheKey];
     if (!cache || (cache.text.trim().length === 0 && cache.attachments.length === 0)) return;
-    const message: QueuedInputMessage = {
-      id: newQueuedMessageId(),
-      text: cache.text,
-      attachments: cache.attachments.map((attachment) => ({ ...attachment })),
-      queuedAt: Date.now(),
-    };
+    const message = queuedMessageFromCache(cache);
     set((state) => ({
       inputQueues: {
         ...state.inputQueues,
@@ -1656,6 +1665,46 @@ export const useStore = create<AppState>((set, get) => ({
     });
   },
 
+  moveQueuedInputMessage: (cacheKey, fromIndex, toIndex) => {
+    set((state) => {
+      const queue = state.inputQueues[cacheKey];
+      if (
+        !queue
+        || fromIndex === toIndex
+        || fromIndex < 0 || fromIndex >= queue.length
+        || toIndex < 0 || toIndex >= queue.length
+      ) {
+        return state;
+      }
+      const next = queue.slice();
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return { inputQueues: { ...state.inputQueues, [cacheKey]: next } };
+    });
+  },
+
+  editQueuedInputMessage: (cacheKey, messageId) => {
+    const state = get();
+    const message = (state.inputQueues[cacheKey] ?? []).find((item) => item.id === messageId);
+    if (!message) return;
+    // 草稿非空时先转入队首，避免回填覆盖丢失。
+    const cache = state.inputCaches[cacheKey];
+    const draftMessage = cache && (cache.text.trim().length > 0 || cache.attachments.length > 0)
+      ? queuedMessageFromCache(cache)
+      : null;
+    set((current) => {
+      const remaining = (current.inputQueues[cacheKey] ?? []).filter((item) => item.id !== messageId);
+      return {
+        inputQueues: {
+          ...current.inputQueues,
+          [cacheKey]: draftMessage ? [draftMessage, ...remaining] : remaining,
+        },
+      };
+    });
+    get().setInputCacheText(cacheKey, message.text);
+    get().setInputCacheAttachments(cacheKey, message.attachments);
+  },
+
   steerQueuedInputMessage: async (cacheKey, messageId) => {
     const state = get();
     const queue = state.inputQueues[cacheKey] ?? [];
@@ -1665,12 +1714,7 @@ export const useStore = create<AppState>((set, get) => ({
     // 草稿非空时先入队保底，避免被队列消息覆盖丢失；排到队首，本轮投递后最先放行。
     const cache = state.inputCaches[cacheKey];
     const draftMessage = cache && (cache.text.trim().length > 0 || cache.attachments.length > 0)
-      ? {
-        id: newQueuedMessageId(),
-        text: cache.text,
-        attachments: cache.attachments.map((attachment) => ({ ...attachment })),
-        queuedAt: Date.now(),
-      }
+      ? queuedMessageFromCache(cache)
       : null;
     set((current) => {
       const remaining = (current.inputQueues[cacheKey] ?? []).filter((item) => item.id !== messageId);
