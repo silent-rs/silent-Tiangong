@@ -273,7 +273,7 @@ pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
 }
 
 fn compute_hmac_sha256(secret: &str, data: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     type HmacSha256 = Hmac<Sha256>;

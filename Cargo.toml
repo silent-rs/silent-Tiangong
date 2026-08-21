@@ -162,37 +162,37 @@ async-lock = "3"
 async-openai = "0.41"
 async-trait = "0.1"
 backoff = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false }
 clap = "4"
 crossterm = "0.29"
-cron = "0.16"
+cron = "0.17"
 dashmap = "6"
 diffy = "0.5"
 dirs = "6"
 eventsource-stream = "0.2"
 futures-util = "0.3"
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 http = "1"
 http-body-util = "0.1"
-jsonschema = { version = "0.33", default-features = false }
+jsonschema = { version = "0.50", default-features = false }
 libc = "0.2"
 sysinfo = "0.39"
-lancedb = "0.31"
+lancedb = "0.37"
 notify = "8"
 qrcode = "0.14"
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false }
-rmcp = { version = "2", default-features = false }
+rmcp = { version = "3", default-features = false }
 rusqlite = "0.40"
 scraper = "0.27"
 scru128 = "4"
 semver = "1"
 serde = "1"
 serde_json = "1"
-serial_test = "3"
-sha2 = "0.10"
+serial_test = "4"
+sha2 = "0.11"
 silent = "2"
 subtle = "2"
 tantivy = "0.26"
@@ -215,7 +215,7 @@ tracing-subscriber = "0.3"
 typed-builder = "0.23"
 url = "2"
 wiremock = "0.6"
-wasmtime = { version = "47", default-features = false, features = [
+wasmtime = { version = "48", default-features = false, features = [
     "cranelift",
     "runtime",
     "component-model",
@@ -223,8 +223,8 @@ wasmtime = { version = "47", default-features = false, features = [
     "pooling-allocator",
     "cache",
 ] }
-wasmtime-wasi = { version = "47", default-features = false }
-wit-bindgen = "0.46"
+wasmtime-wasi = { version = "48", default-features = false }
+wit-bindgen = "0.60"
 zip = { version = "8", default-features = false }
 
 [patch.crates-io]
