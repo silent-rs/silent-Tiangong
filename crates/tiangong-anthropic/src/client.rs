@@ -7,8 +7,15 @@ use crate::config::AnthropicConfig;
 use crate::error::AnthropicError;
 use crate::types::{
     ContentBlockDeltaData, ContentBlockStartData, EventStream, MessageDeltaData, MessageStartData,
-    MessagesCreateRequest, MessagesCreateResponse, ModelsListResponse, StreamEvent,
+    MessagesCreateRequest, MessagesCreateResponse, ModelsListResponse, StreamEvent, ThinkingConfig,
 };
+
+/// 官方 Anthropic API 域名。
+const OFFICIAL_API_HOST: &str = "api.anthropic.com";
+/// 默认思考预算下，为正文（含工具调用）保留的输出空间。
+const DEFAULT_BUDGET_TEXT_RESERVE_TOKENS: u32 = 8_192;
+/// 官方协议要求的思考预算下限（官方拒绝小于 1024 的值）。
+const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
 
 #[derive(Clone)]
 pub struct AnthropicClient {
@@ -35,8 +42,9 @@ impl AnthropicClient {
 
     pub async fn create(
         &self,
-        request: MessagesCreateRequest,
+        mut request: MessagesCreateRequest,
     ) -> Result<MessagesCreateResponse, AnthropicError> {
+        self.apply_official_thinking_budget(&mut request);
         let response = self
             .request_builder("/v1/messages")
             .json(&request)
@@ -50,6 +58,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<EventStream, AnthropicError> {
+        self.apply_official_thinking_budget(&mut request);
         request.stream = Some(true);
         let response = self
             .stream_request_builder("/v1/messages")
@@ -88,6 +97,37 @@ impl AnthropicClient {
 
     fn request_builder(&self, path: &str) -> reqwest::RequestBuilder {
         self.request_builder_with_client(&self.http_client, path)
+    }
+
+    /// 官方 Anthropic 端点要求 thinking.enabled 必须携带 budget_tokens
+    /// （≥1024 且严格小于 max_tokens）。DeepSeek/GLM 等兼容实现可省略预算，
+    /// 且部分实现（实测 GLM）会执行预算并在思考超限时截断输出，因此仅对
+    /// 官方端点填充默认推荐预算：max_tokens 保留正文空间后全部交给思考。
+    fn apply_official_thinking_budget(&self, request: &mut MessagesCreateRequest) {
+        if !matches!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: None
+            })
+        ) || !self.is_official_endpoint()
+        {
+            return;
+        }
+        let budget = request
+            .max_tokens
+            .saturating_sub(DEFAULT_BUDGET_TEXT_RESERVE_TOKENS)
+            .max(MIN_THINKING_BUDGET_TOKENS)
+            .min(request.max_tokens.saturating_sub(1));
+        request.thinking = Some(ThinkingConfig::Enabled {
+            budget_tokens: Some(budget),
+        });
+    }
+
+    /// 判断端点是否为官方 Anthropic API（DeepSeek/GLM 等兼容端点返回 false）。
+    fn is_official_endpoint(&self) -> bool {
+        let base = self.config.base_url.trim_end_matches('/');
+        let host = base.split("://").nth(1).unwrap_or(base);
+        host.eq_ignore_ascii_case(OFFICIAL_API_HOST)
     }
 
     fn stream_request_builder(&self, path: &str) -> reqwest::RequestBuilder {
@@ -258,5 +298,103 @@ fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, Anthropi
         }),
         "message_stop" => Ok(StreamEvent::MessageStop),
         _other => Ok(StreamEvent::Unknown),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AnthropicConfig;
+    use std::time::Duration;
+
+    fn client_with_base_url(base_url: &str) -> AnthropicClient {
+        AnthropicClient::from_config(AnthropicConfig {
+            api_key: "test-key".to_string(),
+            base_url: base_url.to_string(),
+            timeout: Duration::from_secs(1),
+            api_version: "2023-06-01".to_string(),
+            beta: None,
+        })
+        .unwrap()
+    }
+
+    fn request_with(max_tokens: u32, thinking: Option<ThinkingConfig>) -> MessagesCreateRequest {
+        MessagesCreateRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens,
+            system: None,
+            messages: Vec::new(),
+            temperature: None,
+            stop_sequences: None,
+            top_p: None,
+            metadata: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking,
+        }
+    }
+
+    #[test]
+    fn official_endpoint_fills_default_budget() {
+        let client = client_with_base_url("https://api.anthropic.com");
+        let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+        client.apply_official_thinking_budget(&mut request);
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: Some(24_576)
+            })
+        );
+    }
+
+    #[test]
+    fn official_endpoint_keeps_explicit_budget() {
+        let client = client_with_base_url("https://api.anthropic.com");
+        let mut request = request_with(32_768, Some(ThinkingConfig::with_budget(2_048)));
+        client.apply_official_thinking_budget(&mut request);
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: Some(2_048)
+            })
+        );
+    }
+
+    #[test]
+    fn compatible_endpoint_leaves_budget_unset() {
+        // DeepSeek/GLM 等兼容端点：实测会执行预算并在思考超限时截断，
+        // 不下发预算，思考量由上游决定。
+        for base_url in [
+            "https://open.bigmodel.cn/api/anthropic",
+            "http://127.0.0.1:3456/v1",
+        ] {
+            let client = client_with_base_url(base_url);
+            let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+            client.apply_official_thinking_budget(&mut request);
+            assert_eq!(request.thinking, Some(ThinkingConfig::enabled()));
+        }
+    }
+
+    #[test]
+    fn small_max_tokens_clamps_budget() {
+        let client = client_with_base_url("https://api.anthropic.com");
+        // max_tokens 小于正文预留时：取下限 1024，并保证严格小于 max_tokens。
+        let mut request = request_with(1_500, Some(ThinkingConfig::enabled()));
+        client.apply_official_thinking_budget(&mut request);
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: Some(1_024)
+            })
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_is_untouched() {
+        let client = client_with_base_url("https://api.anthropic.com");
+        let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
+        client.apply_official_thinking_budget(&mut request);
+        assert_eq!(request.thinking, Some(ThinkingConfig::Disabled));
     }
 }
