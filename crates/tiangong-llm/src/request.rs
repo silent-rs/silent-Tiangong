@@ -18,6 +18,9 @@ pub enum ReasoningEffort {
     Max,
 }
 
+// derive(Default) 会取第一个变体 None，语义是"关闭思考"，与期望的
+// 默认档位 Medium 不符，因此手写实现。
+#[allow(clippy::derivable_impls)]
 impl Default for ReasoningEffort {
     fn default() -> Self {
         Self::Medium

@@ -344,7 +344,7 @@ pub async fn load_session(
     } else {
         config.context_limit
     };
-    let default_reasoning_effort = config.reasoning_effort.clone();
+    let default_reasoning_effort = config.reasoning_effort;
     let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();
     let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
@@ -1505,7 +1505,7 @@ pub async fn set_reasoning_effort(
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
 
-    let next_effort = effort.clone();
+    let next_effort = effort;
     let previous_override =
         crate::session_ops::update_reasoning_effort(&state.core_manager, &session_id, Some(effort))
             .map_err(|error| error.to_string())?;

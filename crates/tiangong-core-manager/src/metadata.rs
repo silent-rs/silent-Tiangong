@@ -43,7 +43,7 @@ impl From<&Session> for SessionMetadata {
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             trust_mode: session.trust_mode,
-            reasoning_effort: session.reasoning_effort.clone(),
+            reasoning_effort: session.reasoning_effort,
             cwd: session.cwd.clone(),
             cwd_mode: session.cwd_mode.clone(),
             message_count: session.messages.len(),

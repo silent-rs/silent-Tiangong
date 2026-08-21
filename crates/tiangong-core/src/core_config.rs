@@ -218,6 +218,10 @@ impl std::fmt::Debug for CoreConfigProvider {
     }
 }
 
+fn default_reasoning_effort() -> crate::model::ReasoningEffort {
+    crate::model::ReasoningEffort::Medium
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,8 +302,4 @@ mod tests {
         let llm = LlmConfig::from_models_config(&models);
         assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);
     }
-}
-
-fn default_reasoning_effort() -> crate::model::ReasoningEffort {
-    crate::model::ReasoningEffort::Medium
 }
