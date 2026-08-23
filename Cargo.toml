@@ -14,6 +14,7 @@ members = [
     "crates/tiangong-entry",
     "crates/tiangong-server",
     "crates/tiangong-toolkit",
+    "crates/tiangong-sandbox",
     "crates/tiangong-media",
     "crates/tiangong-media-archive",
     "crates/tiangong-config",
@@ -151,6 +152,7 @@ tiangong-plugin-runtime = { path = "crates/tiangong-plugin-runtime" }
 tiangong-plugin-sidecar = { path = "crates/tiangong-plugin-sidecar" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
+tiangong-sandbox = { path = "crates/tiangong-sandbox" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
 tiangong-types = { path = "crates/tiangong-types" }
 tiangong-bots = { path = "crates/tiangong-bots" }

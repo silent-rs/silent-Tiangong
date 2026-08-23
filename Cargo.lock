@@ -10548,6 +10548,7 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
+ "tiangong-sandbox",
  "tiangong-server",
  "tiangong-toolkit",
  "tiangong-types",
@@ -11555,6 +11556,22 @@ dependencies = [
  "serde_json",
  "tiangong-plugin-text-to-speech-protocol",
  "wit-bindgen 0.60.0",
+]
+
+[[package]]
+name = "tiangong-sandbox"
+version = "0.15.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-config",
+ "tiangong-core",
+ "tracing",
 ]
 
 [[package]]

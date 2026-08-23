@@ -4952,3 +4952,65 @@ pub struct PluginContributionEntry {
     pub group: String,
     pub has_view: bool,
 }
+
+// ==================== 快照与恢复（RFC 0017 S1） ====================
+
+/// 列出会话的快照摘要（按拍摄时间升序）。
+#[tauri::command]
+pub async fn snapshot_list(
+    session_id: String,
+) -> Result<Vec<tiangong_sandbox::SnapshotSummary>, String> {
+    tokio::task::spawn_blocking(move || {
+        tiangong_sandbox::SnapshotService::global()
+            .list_snapshots(&session_id)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// 工作区与指定快照之间的变更集（快照之后发生了什么）。
+#[tauri::command]
+pub async fn snapshot_changeset(
+    session_id: String,
+    snapshot_id: String,
+) -> Result<Vec<tiangong_sandbox::FileChange>, String> {
+    tokio::task::spawn_blocking(move || {
+        tiangong_sandbox::SnapshotService::global()
+            .changeset(&session_id, &snapshot_id)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// 回滚工作区到指定快照（回滚前自动拍摄保护快照，保证可撤销）。
+#[tauri::command]
+pub async fn snapshot_restore(
+    session_id: String,
+    snapshot_id: String,
+) -> Result<tiangong_sandbox::RestoreReport, String> {
+    tokio::task::spawn_blocking(move || {
+        tiangong_sandbox::SnapshotService::global()
+            .restore(&session_id, &snapshot_id)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// 从指定快照恢复单个文件。
+#[tauri::command]
+pub async fn snapshot_restore_file(
+    session_id: String,
+    snapshot_id: String,
+    rel_path: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        tiangong_sandbox::SnapshotService::global()
+            .restore_file(&session_id, &snapshot_id, &rel_path)
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
