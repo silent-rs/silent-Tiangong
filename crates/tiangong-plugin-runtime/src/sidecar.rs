@@ -121,6 +121,8 @@ pub struct SidecarConfig {
     pub server_token: Option<String>,
     /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
     pub sandbox: bool,
+    /// 沙箱内是否放行网络（文件写白名单不受影响）。
+    pub sandbox_network: bool,
 }
 
 impl SidecarConfig {
@@ -149,6 +151,7 @@ impl SidecarConfig {
             server_url: None,
             server_token: None,
             sandbox: false,
+            sandbox_network: false,
         }
     }
 
@@ -182,6 +185,12 @@ impl SidecarConfig {
     /// sidecar 进程进 OS 沙箱（继承式，子进程树自动受约束；要求 stdio 传输）。
     pub fn with_sandbox(mut self, sandbox: bool) -> Self {
         self.sandbox = sandbox;
+        self
+    }
+
+    /// 沙箱内放行网络（fetch 等网络型插件；文件写白名单不受影响）。
+    pub fn with_sandbox_network(mut self, allow: bool) -> Self {
+        self.sandbox_network = allow;
         self
     }
 }

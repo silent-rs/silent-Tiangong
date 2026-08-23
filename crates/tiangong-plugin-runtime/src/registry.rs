@@ -2445,7 +2445,8 @@ fn sidecar_connection(
         Duration::from_millis(sidecar.request_timeout_ms),
     )
     .with_server_endpoint(server_url, server_token)
-    .with_sandbox(sidecar.sandbox);
+    .with_sandbox(sidecar.sandbox)
+    .with_sandbox_network(sidecar.sandbox_network);
 
     let mut connections = sidecar_connections()
         .lock()

@@ -12,7 +12,20 @@ use super::policy::SandboxPolicy;
 const SEATBELT_BIN: &str = "/usr/bin/sandbox-exec";
 
 pub fn seatbelt_available() -> bool {
-    Path::new(SEATBELT_BIN).exists()
+    if !Path::new(SEATBELT_BIN).exists() {
+        return false;
+    }
+    // 一次性真实探测：宿主环境若已在 Seatbelt 沙箱内（嵌套终端/受限 CI 外壳），
+    // sandbox-exec 无法再次应用沙箱——按平台不可用降级（快照层兜底）。
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        std::process::Command::new(SEATBELT_BIN)
+            .arg("-p")
+            .arg("(version 1)")
+            .arg("/usr/bin/true")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    })
 }
 
 /// 编译为 SBPL profile 文本。
