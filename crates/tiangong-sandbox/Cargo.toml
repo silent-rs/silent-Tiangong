@@ -1,0 +1,20 @@
+[package]
+name = "tiangong-sandbox"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "沙箱执行层：turn 边界快照与恢复服务（RFC 0017 S1）"
+
+[dependencies]
+tiangong-core = { workspace = true }
+tiangong-config = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+scru128 = { workspace = true }
+libc = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

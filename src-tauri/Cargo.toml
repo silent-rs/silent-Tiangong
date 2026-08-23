@@ -18,6 +18,7 @@ tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
+tiangong-sandbox = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-plugin-index-protocol = { workspace = true }
