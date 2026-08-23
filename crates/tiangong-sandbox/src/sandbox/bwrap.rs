@@ -56,8 +56,8 @@ pub fn wrap_argv(policy: &SandboxPolicy, bwrap_bin: &str) -> Vec<String> {
         argv.push("--unshare-net".into());
     }
     argv.push("--die-with-parent".into());
-    // 环境由调用方注入（command sidecar 已 env_clear + 白名单重建）。
-    argv.push("--clearenv".into());
+    // 环境清理责任在调用方（如 command sidecar 的 env_clear + 白名单重建）：
+    // 此处若 --clearenv 会把宿主注入的环境变量一并清掉。
     argv.push("--".into());
     argv
 }

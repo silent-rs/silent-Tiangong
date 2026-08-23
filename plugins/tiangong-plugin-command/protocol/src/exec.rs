@@ -7,6 +7,7 @@ use crate::{Ack, CommandAccessContext, CommandOperation};
 pub const RUN_COMMAND_OPERATION: &str = "command.run_command";
 pub const RUN_SHELL_OPERATION: &str = "command.run_shell";
 pub const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
+pub const TRUST_COMMAND_OPERATION: &str = "command.trust_command";
 
 /// 命令执行响应：保留与 core `ToolResult` 同构字段，便于 sidecar 直接构造。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -16,6 +17,28 @@ pub struct ExecResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+/// 请求级全权执行声明（RFC 0017 S4 升级审批闭环 v1）。
+///
+/// Agent 在预分类拒绝或沙箱拦截后，先经 `request_user`（kind: approval）
+/// 获得用户批准，再携带本声明以全权重跑。`approval_note` 记录批准依据，
+/// 全程审计留痕；宿主验证审批结果的正式闭环见 RFC §14 开放问题。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EscalatedRequest {
+    /// 用户批准的依据描述（如批准弹窗中的命令与影响说明）。
+    #[serde(default)]
+    pub approval_note: String,
+}
+
+/// `trust_command` 请求：把命令登记进会话信任列表（本会话内免重复审批）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrustCommandRequest {
+    /// 命令程序名（如 `docker`）。
+    pub command: String,
+    /// 用户批准依据，审计留痕。
+    #[serde(default)]
+    pub approval_note: String,
 }
 
 /// `run_command` 工具请求。
@@ -34,6 +57,9 @@ pub struct RunCommandRequest {
     pub timeout_secs: u64,
     #[serde(flatten)]
     pub access: CommandAccessContext,
+    /// 全权执行声明（S4）：携带即跳过沙箱，审计留痕。
+    #[serde(default)]
+    pub escalated: Option<EscalatedRequest>,
 }
 pub struct RunCommand;
 impl CommandOperation for RunCommand {
@@ -58,7 +84,11 @@ pub struct RunShellRequest {
     pub timeout_secs: u64,
     #[serde(flatten)]
     pub access: CommandAccessContext,
+    /// 全权执行声明（S4）：携带即跳过沙箱，审计留痕。
+    #[serde(default)]
+    pub escalated: Option<EscalatedRequest>,
 }
+
 pub struct RunShell;
 impl CommandOperation for RunShell {
     const NAME: &'static str = RUN_SHELL_OPERATION;
@@ -83,5 +113,12 @@ pub struct SetWorkspace;
 impl CommandOperation for SetWorkspace {
     const NAME: &'static str = SET_WORKSPACE_OPERATION;
     type Request = SetWorkspaceRequest;
+    type Response = Ack;
+}
+
+pub struct TrustCommand;
+impl CommandOperation for TrustCommand {
+    const NAME: &'static str = TRUST_COMMAND_OPERATION;
+    type Request = TrustCommandRequest;
     type Response = Ack;
 }

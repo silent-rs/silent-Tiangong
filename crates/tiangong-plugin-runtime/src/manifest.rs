@@ -221,6 +221,12 @@ pub struct SidecarManifest {
     pub lifecycle: SidecarLifecycle,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
+    /// IPC 通道：`tcp`（默认，存量）或 `stdio`（沙箱友好，RFC 0017 D16）。
+    #[serde(default)]
+    pub transport: String,
+    /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，要求 transport=stdio）。
+    #[serde(default)]
+    pub sandbox: bool,
     #[serde(default)]
     pub business_protocol: u32,
     #[serde(default = "default_startup_timeout_ms")]

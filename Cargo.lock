@@ -11324,6 +11324,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-sandbox",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11562,19 +11563,22 @@ dependencies = [
 
 [[package]]
 name = "tiangong-sandbox"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "hex",
  "libc",
  "scru128",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tiangong-config",
  "tiangong-core",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

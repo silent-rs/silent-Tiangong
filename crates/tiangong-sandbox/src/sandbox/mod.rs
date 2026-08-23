@@ -42,7 +42,10 @@ pub fn availability() -> SandboxAvailability {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        SandboxAvailability::Unsupported(windows::UNSUPPORTED_REASON.into())
+        SandboxAvailability::Unsupported(
+            "Windows 沙箱（受限令牌）核心原语已就绪，输出捕获桥接受真实环境验证（RFC 0017 S6）"
+                .into(),
+        )
     }
 }
 
