@@ -280,10 +280,20 @@ v1 仅 L1 官方可注册阻断型 pre 钩子；L2/L3 至多只读观察型 post
 | `crates/tiangong-sandbox` | 全部新代码（IR/编译器/runner/快照） | 大（纯新增） |
 | toolkit / terminal / command | 接 runner | 中 |
 
-sidecar 沙箱化迁移顺序（按业务画像）：memory、index（只写数据目录）→ fetch、
-generate-image 系（网络 + 数据目录）→ fs、command、mcp（需 invoke 层动态检查）→
-terminal（PTY 载体，依赖 stdio、宿主直跑、审批闭环三前置件）；TS 系新 sidecar
-生而沙箱化。
+sidecar 沙箱化迁移状态（2026-08-23 实施）：
+
+| 插件 | 状态 | 说明 |
+| --- | --- | --- |
+| index、skill、coding、generate-image、generate-video、speech-to-text、text-to-speech、analyze-attachment | ✅ stdio + sandbox | 无网络依赖，只写数据目录；已逐一 stdio 握手验证 |
+| fetch、generate-image-openai、mcp、scheduler | ✅ stdio + sandbox + network | 网络型（manifest `sandbox_network`），文件写白名单不变 |
+| command | ✅ stdio | 命令级沙箱载体，自身再套会与内层沙箱冲突 |
+| memory | ⏸ 回退 tcp | IPC 的 recall 流式分支依赖 TCP 连接对象，stdio 适配待 recall 流改造 |
+| terminal | ⏸ 保持 tcp | PTY 交互载体，已有独立沙箱包装开关（TIANGONG_TERMINAL_SANDBOX） |
+| computer-use、screenshot-input | ⏸ 保持 tcp | 系统平台 API（UIA/AX/截图），沙箱会断能力 |
+| fs | ⏸ 保持 tcp | 动态路径访问，等待 invoke 层动态检查（D12）配套 |
+
+验证工具：`cargo run -p tiangong-plugin-runtime --example stdio_handshake -- <二进制> <插件id>`
+真实 spawn 完成身份握手；TS 系新 sidecar 生而沙箱化。
 
 ## 11. plugin creator：自建插件辅助插件
 
@@ -379,7 +389,19 @@ terminal（PTY 载体，依赖 stdio、宿主直跑、审批闭环三前置件�
 6. plugin creator 受限写桥接的命名空间与范围（`plugin-dev.*` 独立命名空间 vs
    扩展既有 fs 桥接）、开发目录固定为 `~/.tiangong/plugins-dev/` 还是允许项目内路径。
 
-## 15. 业界对标摘要
+## 15. 会话外验证项（无法在 macOS 开发环境完成）
+
+1. **S6 Windows 受限令牌运行时行为**：CreateRestrictedToken(LUA_TOKEN) +
+   CreateProcessAsUserW 的核心原语已实现（`sandbox/windows.rs`），但
+   输出捕获管道桥接（PROC_THREAD_ATTRIBUTE_HANDLE_LIST 句柄继承）未实现，
+   wrap 在 Windows 仍降级直跑；需真实 Windows 环境开发验证后接入主流程。
+2. **Windows 交叉编译类型检查**：本机交叉编译被 aws-lc-sys（需 C 工具链 +
+   MSVC SDK）阻塞，windows-sys 相关代码的类型验证依赖 CI Windows 任务。
+3. **沙箱包装的真实拦截验证**：开发环境处于嵌套 Seatbelt 沙箱
+   （可用性探测自动降级），`sandbox::tests` 中的真实拦截测试需在普通终端
+   或 CI macOS/Linux 环境执行。
+
+## 16. 业界对标摘要
 
 | 产品 | 沙箱方案 | 本 RFC 借鉴点 |
 | --- | --- | --- |
