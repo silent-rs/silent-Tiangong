@@ -17,7 +17,7 @@ use crate::loader::{
     instantiate_component,
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
-use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+use crate::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection, TRANSPORT_STDIO};
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
@@ -25,7 +25,7 @@ static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
 /// 随 `preload_installed_plugins` 全量刷新，供插件管理列表展示和清理。
 static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new();
-static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
+static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>>> =
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
 
@@ -281,7 +281,7 @@ struct LoadedPlugin {
     generation: u64,
     instances: Vec<Weak<WasmPluginAdapter>>,
     ts_instances: Vec<Weak<TsPluginAdapter>>,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     last_error: Option<String>,
     enabled: bool,
 }
@@ -326,7 +326,7 @@ fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>> {
+fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>> {
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1206,7 +1206,7 @@ type CompiledPlugin = (
 fn compile_plugin(
     bytes: Arc<Vec<u8>>,
     manifest: &PluginManifest,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     config: PluginRuntimeConfig,
 ) -> Result<CompiledPlugin> {
     // 纯 UI 插件（wasm 省略）：无逻辑层，返回空三元组
@@ -1216,7 +1216,6 @@ fn compile_plugin(
     let plugin_id = manifest.id.clone();
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
-        let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
         let component = Arc::new(compile_component(&bytes)?);
         let mut plugin = instantiate_component(
             &component,
@@ -1244,13 +1243,12 @@ fn compile_plugin(
 
 fn instantiate_from_compiled(
     component: Arc<wasmtime::component::Component>,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     config: PluginRuntimeConfig,
     plugin_id: String,
     storage_access: bool,
 ) -> Result<WasmPlugin> {
     crate::execution::run_outside_tokio(move || {
-        let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
         instantiate_component(&component, &config, sidecar, &plugin_id, storage_access)
     })
 }
@@ -2353,7 +2351,7 @@ fn resolve_sidecar(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,
-) -> Result<Option<Arc<ProcessSidecarConnection>>> {
+) -> Result<Option<Arc<dyn SidecarConnection>>> {
     if installed.manifest.sidecar.is_none() {
         return Ok(None);
     }
@@ -2364,19 +2362,37 @@ fn sidecar_connection(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,
-) -> Result<Arc<ProcessSidecarConnection>> {
+) -> Result<Arc<dyn SidecarConnection>> {
     let sidecar = installed
         .manifest
         .sidecar
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
-    let signed_release = installed.signed_release.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "未签名插件 {} 不允许启动原生 sidecar",
-            installed.manifest.id
-        )
-    })?;
-    if !signed_release.has_permission("sidecar.invoke") {
+    // 通道判定（RFC 0017 §5）：L1 官方签名走原路径；L4 放开开关审计放行；
+    // L3 本地确认按内容哈希命中放行。其余维持"未签名不允许启动原生 sidecar"。
+    let safety = tiangong_sandbox::PluginSafetyStore::open(storage_root);
+    let signed_release = installed.signed_release.as_ref();
+    if signed_release.is_none() {
+        if safety.unsafe_mode() {
+            tracing::warn!(
+                plugin_id = %installed.manifest.id,
+                "L4 放开开关生效：未签名插件启动原生 sidecar"
+            );
+        } else if safety.is_trusted(&installed.manifest.id, &installed.directory) {
+            tracing::warn!(
+                plugin_id = %installed.manifest.id,
+                "L3 本地信任命中：未签名插件启动原生 sidecar"
+            );
+        } else {
+            anyhow::bail!(
+                "未签名插件 {} 不允许启动原生 sidecar（可经本地信任或放开开关授权）",
+                installed.manifest.id
+            );
+        }
+    }
+    if let Some(signed_release) = signed_release
+        && !signed_release.has_permission("sidecar.invoke")
+    {
         bail!(
             "插件 {} 的官方签名未授权 sidecar.invoke",
             installed.manifest.id
@@ -2386,6 +2402,13 @@ fn sidecar_connection(
         && !installed.manifest.has_permission("sidecar.invoke")
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
+    }
+    // OS 沙箱声明依赖 stdio 传输（沙箱内网络禁用会断开 TCP loopback）。
+    if sidecar.sandbox && sidecar.transport != TRANSPORT_STDIO {
+        bail!(
+            "插件 {} 声明 sidecar.sandbox 但未使用 stdio 传输",
+            installed.manifest.id
+        );
     }
 
     let mut binary = installed.directory.join(&sidecar.binary);
@@ -2413,25 +2436,27 @@ fn sidecar_connection(
         data_dir,
         storage_root,
     )
-    .with_sensitive_storage(
-        signed_release.has_permission("model-config.read")
-            || signed_release.has_permission("app-storage.read"),
-    )
+    .with_sensitive_storage(signed_release.is_some_and(|release| {
+        release.has_permission("model-config.read") || release.has_permission("app-storage.read")
+    }))
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
-    .with_server_endpoint(server_url, server_token);
+    .with_server_endpoint(server_url, server_token)
+    .with_sandbox(sidecar.sandbox);
 
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
     if refresh || !connections.contains_key(&installed.directory) {
-        connections.insert(
-            installed.directory.clone(),
-            Arc::new(ProcessSidecarConnection::new(config)),
-        );
+        let connection: Arc<dyn SidecarConnection> = if sidecar.transport == TRANSPORT_STDIO {
+            Arc::new(StdioSidecarConnection::new(config))
+        } else {
+            Arc::new(crate::sidecar::ProcessSidecarConnection::new(config))
+        };
+        connections.insert(installed.directory.clone(), connection);
     }
     connections
         .get(&installed.directory)

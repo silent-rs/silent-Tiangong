@@ -4844,3 +4844,50 @@ pub async fn snapshot_restore_file(
     .await
     .map_err(|err| err.to_string())?
 }
+
+// ==================== 插件信任管理（RFC 0017 L3/L4） ====================
+
+/// 本地信任插件列表（L3）。
+#[tauri::command]
+pub async fn plugin_trust_list() -> Result<Vec<tiangong_sandbox::trust::TrustedPlugin>, String> {
+    let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
+    Ok(store.trusted_plugins())
+}
+
+/// 登记本地信任（L3，内容哈希锁定；原生确认对话框 UI 见 RFC 开放问题）。
+#[tauri::command]
+pub async fn plugin_trust_grant(
+    plugin_id: String,
+    directory: String,
+    origin: Option<String>,
+) -> Result<(), String> {
+    let granted = tokio::task::spawn_blocking(move || {
+        let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
+        store
+            .grant(
+                &plugin_id,
+                std::path::Path::new(&directory),
+                &origin.unwrap_or_default(),
+            )
+            .map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    granted.map(|_| ())
+}
+
+/// 撤销本地信任。
+#[tauri::command]
+pub async fn plugin_trust_revoke(plugin_id: String) -> Result<(), String> {
+    let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
+    store.revoke(&plugin_id).map_err(|err| err.to_string())
+}
+
+/// L4 放开开关（开发者模式：跳过签名门槛，审计留痕）。
+#[tauri::command]
+pub async fn plugin_safety_set_unsafe_mode(enabled: bool) -> Result<(), String> {
+    let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
+    store
+        .set_unsafe_mode(enabled)
+        .map_err(|err| err.to_string())
+}

@@ -1,6 +1,12 @@
 //! 通用插件 sidecar 进程与连接管理。
 //!
 //! 本模块只处理进程、endpoint、鉴权和 JSON Lines 传输，不理解插件业务协议。
+//! TCP 与 stdio 两种传输并存：TCP 为存量默认，stdio 为沙箱友好的新传输
+//! （RFC 0017 D16），由 manifest `sidecar.transport` 选择。
+
+pub mod stdio;
+
+pub use stdio::{StdioSidecarConnection, TRANSPORT_STDIO};
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -72,6 +78,26 @@ pub trait SidecarConnection: Send + Sync {
 
     /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
     fn update_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
+
+    /// 停止 sidecar 进程（宿主关闭流程调用）。默认空实现（无进程的连接）。
+    fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 当前 sidecar 的插件 ID。默认空。
+    fn plugin_id(&self) -> &str {
+        ""
+    }
+
+    /// 确保进程存活并完成握手（安装验证用）。默认空实现。
+    fn ensure_running(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 是否存在可用的运行端点（安装验证用）。默认 false。
+    fn has_runtime_endpoint(&self) -> bool {
+        false
+    }
 }
 
 /// 一个插件 sidecar 的本地运行配置。
@@ -93,6 +119,8 @@ pub struct SidecarConfig {
     pub server_url: Option<String>,
     /// 本机 server 的鉴权 token。
     pub server_token: Option<String>,
+    /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
+    pub sandbox: bool,
 }
 
 impl SidecarConfig {
@@ -120,6 +148,7 @@ impl SidecarConfig {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
             server_token: None,
+            sandbox: false,
         }
     }
 
@@ -147,6 +176,12 @@ impl SidecarConfig {
     pub fn with_server_endpoint(mut self, url: Option<String>, token: Option<String>) -> Self {
         self.server_url = url;
         self.server_token = token;
+        self
+    }
+
+    /// sidecar 进程进 OS 沙箱（继承式，子进程树自动受约束；要求 stdio 传输）。
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
         self
     }
 }
@@ -623,6 +658,22 @@ impl SidecarConnection for ProcessSidecarConnection {
             *guard = env;
         }
     }
+
+    fn stop(&self) -> Result<()> {
+        ProcessSidecarConnection::stop(self)
+    }
+
+    fn plugin_id(&self) -> &str {
+        ProcessSidecarConnection::plugin_id(self)
+    }
+
+    fn ensure_running(&self) -> Result<()> {
+        ProcessSidecarConnection::ensure_running(self)
+    }
+
+    fn has_runtime_endpoint(&self) -> bool {
+        ProcessSidecarConnection::has_runtime_endpoint(self)
+    }
 }
 
 fn classify_transport_error(error: anyhow::Error) -> anyhow::Error {
@@ -668,6 +719,11 @@ static SIDECAR_NOTIFICATION_FORWARDER: std::sync::OnceLock<SidecarNotificationFo
 /// 注入 sidecar 通知转发回调（宿主入口启动时调用）。
 pub fn set_sidecar_notification_forwarder(forwarder: SidecarNotificationForwarder) {
     let _ = SIDECAR_NOTIFICATION_FORWARDER.set(forwarder);
+}
+
+/// 当前通知转发回调（stdio 读线程与 TCP 通知监听共用）。
+pub(crate) fn sidecar_notification_forwarder() -> Option<SidecarNotificationForwarder> {
+    SIDECAR_NOTIFICATION_FORWARDER.get().cloned()
 }
 
 /// sidecar 通知常驻连接：认证后只读，收到 Notification 帧即转发。

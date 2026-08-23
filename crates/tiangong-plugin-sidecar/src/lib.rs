@@ -37,6 +37,7 @@ pub mod model;
 pub mod server;
 pub mod shutdown;
 pub mod singleton;
+pub mod stdio;
 
 pub use identity::{SidecarConfig, SidecarIdentity};
 pub use model::{ModelInfo, mask_sensitive};
@@ -61,6 +62,11 @@ pub async fn run<F>(config: SidecarConfig, service_factory: F) -> Result<()>
 where
     F: FnOnce() -> Result<Arc<dyn SidecarService>>,
 {
+    // stdio 传输（RFC 0017 D16）：宿主直连管道，无单例与信号等待，EOF 即退。
+    if stdio::stdio_requested() {
+        return stdio::run_stdio(service_factory).await;
+    }
+
     let guard = start(&config, service_factory).inspect_err(|err| {
         if err
             .downcast_ref::<SingletonError>()

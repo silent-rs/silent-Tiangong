@@ -11215,6 +11215,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-sandbox",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11454,14 +11455,17 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "hex",
  "libc",
  "scru128",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tiangong-config",
  "tiangong-core",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

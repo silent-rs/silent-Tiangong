@@ -14,6 +14,7 @@ pub mod formats;
 pub mod plugin;
 pub mod sandbox;
 pub mod service;
+pub mod trust;
 
 pub use engine::{SnapshotConfig, SnapshotEngine};
 pub use formats::{FileChange, FileChangeKind, RestoreReport, SnapshotReason, SnapshotSummary};
@@ -23,6 +24,7 @@ pub use sandbox::{
     assess_script, availability, denial_hint, explain_violation, wrap,
 };
 pub use service::SnapshotService;
+pub use trust::PluginSafetyStore;
 
 #[cfg(test)]
 mod tests {
