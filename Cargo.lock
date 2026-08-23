@@ -10810,6 +10810,7 @@ dependencies = [
  "tiangong-plugin-command-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
+ "tiangong-sandbox",
  "tiangong-toolkit",
  "tokio",
  "tracing",
@@ -11401,6 +11402,7 @@ dependencies = [
  "tempfile",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
+ "tiangong-sandbox",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -11451,6 +11453,7 @@ version = "0.15.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "dirs",
  "libc",
  "scru128",
  "serde",

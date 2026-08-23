@@ -15,6 +15,7 @@ tiangong-plugin-command-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
 tiangong-toolkit = { workspace = true }
+tiangong-sandbox = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

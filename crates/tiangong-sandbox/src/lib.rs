@@ -1,25 +1,27 @@
 //! 沙箱执行层（RFC 0017）。
 //!
-//! S1 阶段交付 turn 边界快照与恢复服务：
-//!
-//! - [`engine::SnapshotEngine`]：扫描、增量快照（快照区内硬链接复用 + 平台写时复制）、
-//!   变更集计算、回滚（回滚前自动拍摄保护快照，多出的文件移入暂存区而非直接删除）、
-//!   数量与容量双重保留策略。
-//! - [`service::SnapshotService`]：单工作线程串行处理，turn 钩子非阻塞入队，
-//!   查询类调用经回执通道等待。
-//! - [`plugin`]:以 core 插件形式在 `on_turn_finished` 触发快照，core 零改动。
-//!
-//! 后续阶段（S2+）在本 crate 内追加沙箱策略编译与 runner。
+//! - 快照恢复层（S1）：[`engine::SnapshotEngine`] 扫描、增量快照（快照区内硬链接
+//!   复用 + 平台写时复制）、变更集计算、回滚（回滚前自动拍摄保护快照）、
+//!   数量与容量双重保留策略；[`service::SnapshotService`] 单工作线程串行处理；
+//!   [`plugin`] 以 core 插件形式在 `on_turn_finished` 触发快照，core 零改动。
+//! - 沙箱执行层（S3）：[`sandbox`] 策略 IR + 平台编译器（macOS Seatbelt /
+//!   Linux bubblewrap / Windows 受限令牌占位）+ 命令包装与违规归因 +
+//!   命令预分类器。
 
 pub mod copy;
 pub mod engine;
 pub mod formats;
 pub mod plugin;
+pub mod sandbox;
 pub mod service;
 
 pub use engine::{SnapshotConfig, SnapshotEngine};
 pub use formats::{FileChange, FileChangeKind, RestoreReport, SnapshotReason, SnapshotSummary};
 pub use plugin::build_plugin;
+pub use sandbox::{
+    CommandRisk, SandboxAvailability, SandboxMode, SandboxPolicy, SandboxedProgram, assess_program,
+    assess_script, availability, denial_hint, explain_violation, wrap,
+};
 pub use service::SnapshotService;
 
 #[cfg(test)]

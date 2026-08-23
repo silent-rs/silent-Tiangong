@@ -1,9 +1,10 @@
 //! Command sidecar 业务服务：按操作名分发请求，承载 tokio 子进程 spawn 与命令校验策略。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, anyhow};
+use tiangong_sandbox::SandboxedProgram;
 
 use tiangong_plugin_command_protocol::exec::{
     ExecResponse, RUN_COMMAND_OPERATION, RUN_SHELL_OPERATION, RunCommandRequest, RunShellRequest,
@@ -138,8 +139,16 @@ impl CommandService {
         {
             return error_response("run_command", e);
         }
+        // 沙箱（RFC 0017 S3）：预分类拒绝高危命令，其余包装进 OS 沙箱执行。
+        let risk = tiangong_sandbox::assess_program(&cmd, &cmd_args);
+        let (cmd, cmd_args) =
+            match self.apply_sandbox("run_command", risk, cmd, cmd_args, &effective_cwd) {
+                Ok(wrapped) => wrapped,
+                Err(resp) => return resp,
+            };
         exec::exec_and_collect(&cmd, &cmd_args, &effective_cwd, timeout_ms)
             .await
+            .map(annotate_violation)
             .unwrap_or_else(|e| error_response("命令执行", e))
     }
 
@@ -172,12 +181,59 @@ impl CommandService {
         {
             return error_response("run_shell", e);
         }
+        // 沙箱（RFC 0017 S3）：整段脚本先过预分类，其余包装进 OS 沙箱执行。
+        let risk = tiangong_sandbox::assess_script(script);
+        let (cmd, cmd_args) =
+            match self.apply_sandbox("run_shell", risk, cmd, cmd_args, &effective_cwd) {
+                Ok(wrapped) => wrapped,
+                Err(resp) => return resp,
+            };
         exec::exec_and_collect(&cmd, &cmd_args, &effective_cwd, timeout_ms)
             .await
+            .map(annotate_violation)
             .unwrap_or_else(|e| error_response("命令执行", e))
     }
 
     // ── 生命周期 ─────────────────────────────────────────────
+
+    /// 沙箱接入（RFC 0017 S3）：全信模式原样直跑；高危命令预分类拒绝并
+    /// 引导走升级审批；其余命令包装进 OS 沙箱（macOS Seatbelt / Linux bwrap），
+    /// 平台不可用时降级直跑（快照层兜底）。
+    fn apply_sandbox(
+        &self,
+        tool: &str,
+        risk: tiangong_sandbox::CommandRisk,
+        cmd: String,
+        args: Vec<String>,
+        cwd: &Path,
+    ) -> std::result::Result<(String, Vec<String>), ExecResponse> {
+        let full_trust = self.full_trust.read().map(|guard| *guard).unwrap_or(false);
+        if full_trust {
+            return Ok((cmd, args));
+        }
+        if risk == tiangong_sandbox::CommandRisk::KnownDangerous {
+            let desc = if args.is_empty() {
+                cmd.clone()
+            } else {
+                format!("{cmd} {}", args.join(" "))
+            };
+            return Err(error_response(
+                tool,
+                anyhow!("{}", tiangong_sandbox::denial_hint(&desc)),
+            ));
+        }
+        let policy = tiangong_sandbox::SandboxPolicy::workspace_write(cwd);
+        match tiangong_sandbox::wrap(&policy) {
+            SandboxedProgram::Direct => Ok((cmd, args)),
+            SandboxedProgram::Wrapped { program, prefix } => {
+                let mut wrapped_args = prefix;
+                wrapped_args.push(cmd);
+                wrapped_args.extend(args);
+                tracing::debug!(tool, program = %program, "命令已包装进 OS 沙箱");
+                Ok((program, wrapped_args))
+            }
+        }
+    }
 
     fn handle_set_workspace(&self, req: SetWorkspaceRequest) -> Result<()> {
         if let Ok(mut guard) = self.workspace.write() {
@@ -224,6 +280,17 @@ fn error_response(tool: &str, e: anyhow::Error) -> ExecResponse {
     }
 }
 
+/// 沙箱违规归因（RFC 0017 D11）：失败输出命中沙箱拒绝特征时，
+/// 在 stderr 追加行动提示（改写法或申请升级），让 Agent 能自主恢复。
+fn annotate_violation(mut resp: ExecResponse) -> ExecResponse {
+    if !resp.ok
+        && let Some(hint) = tiangong_sandbox::explain_violation(&resp.stderr)
+    {
+        resp.stderr = format!("{}\n[沙箱提示] {}", resp.stderr, hint);
+    }
+    resp
+}
+
 #[async_trait::async_trait]
 impl tiangong_plugin_sidecar::SidecarService for CommandService {
     async fn dispatch(
@@ -231,5 +298,76 @@ impl tiangong_plugin_sidecar::SidecarService for CommandService {
         request: tiangong_plugin_runtime::protocol::Request,
     ) -> tiangong_plugin_runtime::protocol::Response {
         CommandService::dispatch(self, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_with(workspace: &str, full_trust: bool) -> CommandService {
+        let service = CommandService::new().unwrap();
+        service
+            .handle_set_workspace(SetWorkspaceRequest {
+                workspace: Some(workspace.to_string()),
+                full_trust,
+                allowed_commands: Vec::new(),
+            })
+            .unwrap();
+        service
+    }
+
+    #[test]
+    fn full_trust_bypasses_sandbox() {
+        let service = service_with("/tmp", true);
+        let result = service.apply_sandbox(
+            "run_command",
+            tiangong_sandbox::CommandRisk::KnownDangerous,
+            "mkfs".to_string(),
+            vec![],
+            Path::new("/tmp"),
+        );
+        let (cmd, args) = result.expect("全信模式应原样放行");
+        assert_eq!(cmd, "mkfs");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn dangerous_command_is_denied_with_hint() {
+        let service = service_with("/tmp", false);
+        let result = service.apply_sandbox(
+            "run_command",
+            tiangong_sandbox::CommandRisk::KnownDangerous,
+            "mkfs.ext4".to_string(),
+            vec![],
+            Path::new("/tmp"),
+        );
+        let resp = result.expect_err("高危命令应被拒绝");
+        assert!(!resp.ok);
+        assert!(resp.stderr.contains("request_user"), "提示应引导升级审批");
+    }
+
+    #[test]
+    fn unknown_command_is_wrapped_or_direct() {
+        let service = service_with("/tmp", false);
+        let result = service.apply_sandbox(
+            "run_command",
+            tiangong_sandbox::CommandRisk::Unknown,
+            "cargo".to_string(),
+            vec!["build".to_string()],
+            Path::new("/tmp"),
+        );
+        match result.expect("未知命令应放行") {
+            (cmd, args) if cmd == "cargo" => {
+                // 平台沙箱不可用：降级直跑（快照层兜底）。
+                assert_eq!(args, vec!["build".to_string()]);
+            }
+            (cmd, args) => {
+                // 平台沙箱可用：包装入口 + 前缀 + 原命令 + 原参数。
+                assert!(cmd.contains("sandbox-exec") || cmd.contains("bwrap"));
+                assert_eq!(args.last().unwrap(), "build");
+                assert!(args.contains(&"cargo".to_string()));
+            }
+        }
     }
 }
