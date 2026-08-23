@@ -2628,7 +2628,9 @@ fn sidecar_connection_inner(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
-    .with_server_endpoint(server_url, server_token);
+    .with_server_endpoint(server_url, server_token)
+    .with_sandbox(sidecar.sandbox)
+    .with_sandbox_network(sidecar.sandbox_network);
     if let Some(signed_release) = signed_release {
         config = config.with_sensitive_storage(
             signed_release.has_permission("model-config.read")

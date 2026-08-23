@@ -227,6 +227,9 @@ pub struct SidecarManifest {
     /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，要求 transport=stdio）。
     #[serde(default)]
     pub sandbox: bool,
+    /// 沙箱内是否放行网络（文件写白名单不受影响；供 fetch 等网络型插件）。
+    #[serde(default)]
+    pub sandbox_network: bool,
     #[serde(default)]
     pub business_protocol: u32,
     #[serde(default = "default_startup_timeout_ms")]
