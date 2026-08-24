@@ -195,22 +195,6 @@ fn shell_quote(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn create_fifo(path: &Path) {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let raw = CString::new(path.as_os_str().as_bytes()).expect("FIFO 路径包含 NUL 字节");
-    let status = unsafe { libc::mkfifo(raw.as_ptr(), 0o600) };
-    assert_eq!(
-        status,
-        0,
-        "创建并发阻塞 FIFO 失败 {}: {}",
-        path.display(),
-        std::io::Error::last_os_error()
-    );
-}
-
-#[cfg(unix)]
 #[test]
 fn real_launcher_enforces_workspace_and_dedicated_temp() {
     let _serial = REAL_SANDBOX_TEST_LOCK
@@ -545,15 +529,9 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
     let mut markers = Vec::new();
     for index in 0..10 {
         let marker = fixture.workspace.join(format!("concurrent-{index}.ready"));
-        let hold = fixture.workspace.join(format!("concurrent-{index}.hold"));
-        create_fifo(&hold);
         markers.push(marker.clone());
         let request = shell_request_with_timeout(
-            format!(
-                ": > {}; read _ < {}",
-                shell_quote(&marker),
-                shell_quote(&hold)
-            ),
+            format!(": > {}; kill -STOP $$", shell_quote(&marker)),
             &fixture.workspace,
             120,
         );
