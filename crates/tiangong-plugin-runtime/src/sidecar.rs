@@ -167,6 +167,8 @@ pub struct SidecarConfig {
     pub sandbox_workspace: Option<PathBuf>,
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     pub sandbox_extra_writable: Vec<PathBuf>,
+    /// 除宿主默认凭据路径外额外禁止读取的路径（受控验证使用）。
+    pub sandbox_denied_read_paths: Vec<PathBuf>,
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,
     /// Launcher 允许启动目标程序的插件权威目录。
@@ -203,6 +205,7 @@ impl SidecarConfig {
             sandbox: false,
             sandbox_workspace: None,
             sandbox_extra_writable: Vec::new(),
+            sandbox_denied_read_paths: Vec::new(),
             sandbox_temp_dir: None,
             sandbox_program_root: None,
             sandbox_network: false,
@@ -257,6 +260,12 @@ impl SidecarConfig {
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     pub fn with_sandbox_extra_writable(mut self, extra: Vec<PathBuf>) -> Self {
         self.sandbox_extra_writable = extra;
+        self
+    }
+
+    /// 增加宿主权威的读取拒绝路径。
+    pub fn with_sandbox_denied_read_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.sandbox_denied_read_paths = paths;
         self
     }
 

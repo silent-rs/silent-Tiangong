@@ -51,6 +51,18 @@ pub fn wrap_argv(policy: &SandboxPolicy) -> Vec<String> {
             argv.push(path);
         }
     }
+    // 读取隔离在所有可写挂载之后覆盖：目录替换为空 tmpfs，文件替换为
+    // 只读 /dev/null。宿主敏感内容不会出现在沙箱挂载命名空间内。
+    for path in policy.denied_read_roots() {
+        if path.is_dir() {
+            argv.push("--tmpfs".into());
+            argv.push(path.display().to_string());
+        } else if path.is_file() {
+            argv.push("--ro-bind".into());
+            argv.push("/dev/null".into());
+            argv.push(path.display().to_string());
+        }
+    }
     argv.push("--unshare-user".into());
     argv.push("--unshare-pid".into());
     if !policy.allow_network {
@@ -69,11 +81,26 @@ mod tests {
 
     #[test]
     fn argv_orders_ro_bind_before_writable_and_protection() {
-        let policy = SandboxPolicy::workspace_write("/tmp/ws");
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws");
+        let secrets = root.path().join("home/.ssh");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&secrets).unwrap();
+        let mut policy = SandboxPolicy::workspace_write(&workspace);
+        policy.denied_read_paths = vec![secrets.clone()];
         let argv = wrap_argv(&policy);
         let ro_root = argv.iter().position(|a| a == "--ro-bind").unwrap();
-        let bind_ws = argv.iter().position(|a| a == "/tmp/ws").unwrap();
+        let bind_ws = argv
+            .iter()
+            .position(|a| a == &workspace.display().to_string())
+            .unwrap();
         assert!(bind_ws > ro_root);
+        let hidden_secret = argv
+            .iter()
+            .position(|a| a == &secrets.display().to_string())
+            .unwrap();
+        assert!(hidden_secret > bind_ws);
+        assert_eq!(argv[hidden_secret - 1], "--tmpfs");
         assert!(argv.contains(&"--unshare-net".to_string()));
         assert!(argv.last().unwrap() == "--");
         assert!(!argv.iter().any(|arg| arg.contains("bwrap")));

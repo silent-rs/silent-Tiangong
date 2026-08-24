@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 /// App ↔ Launcher 通信协议版本。
 const PROTOCOL_VERSION: u32 = 1;
 /// 策略 Schema 版本。
-const POLICY_SCHEMA: u32 = 1;
+const POLICY_SCHEMA: u32 = 2;
 /// 策略经此继承描述符传入。
 #[cfg(unix)]
 const POLICY_FD: i32 = 3;
@@ -59,6 +59,10 @@ struct LaunchRequest {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--self-check-network-probe") {
+        let address = args.get(1).map(String::as_str).unwrap_or_default();
+        std::process::exit(run_network_probe(address));
+    }
     if args.iter().any(|arg| arg == "--self-check") {
         // 自检有自己的三态退出码语义，不走统一拒绝路径。
         std::process::exit(run_self_check());
@@ -309,51 +313,27 @@ fn run_self_check() -> i32 {
         return EXIT_SANDBOX_UNAVAILABLE;
     }
 
-    {
-        // 真实拦截核心项：工作区内写成功、工作区外写被拒。
-        let workspace = tempfile::tempdir().expect("创建自检工作区失败");
-        let policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace.path());
-        if let tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } =
-            tiangong_sandbox::wrap(&policy)
-        {
-            let inside = workspace.path().join("selfcheck.txt");
-            let status = std::process::Command::new(&program)
-                .args(&prefix)
-                .arg("/usr/bin/touch")
-                .arg(&inside)
-                .status()
-                .expect("自检命令启动失败");
-            let inside_ok = status.success() && inside.is_file();
-            report.insert("workspace_write".into(), serde_json::Value::from(inside_ok));
-
-            let outside_dir = tempfile::Builder::new()
-                .prefix("tiangong-sandbox-selfcheck-")
-                .tempdir()
-                .expect("创建自检外部目录失败");
-            let outside = outside_dir.path().join("blocked.txt");
-            let status = std::process::Command::new(&program)
-                .args(&prefix)
-                .arg("/usr/bin/touch")
-                .arg(&outside)
-                .status()
-                .expect("自检命令启动失败");
-            let blocked = !status.success() || !outside.is_file();
-            drop(outside_dir);
-            report.insert(
-                "outside_write_blocked".into(),
-                serde_json::Value::from(blocked),
-            );
-        }
-    }
+    #[cfg(unix)]
+    run_enforcement_probes(&mut report);
     // 必需能力失败时制品不可用，宿主必须拒绝启动。
-    let required_ok = report
-        .get("workspace_write")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-        && report
-            .get("outside_write_blocked")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+    let required_ok = [
+        "workspace_write",
+        "outside_write_blocked",
+        "outside_delete_blocked",
+        "outside_config_write_blocked",
+        "git_metadata_write_blocked",
+        "network_blocked",
+        "sensitive_read_blocked",
+        "symlink_escape_blocked",
+        "path_traversal_blocked",
+    ]
+    .iter()
+    .all(|field| {
+        report
+            .get(*field)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
     let exit_code = if required_ok {
         0
     } else {
@@ -361,4 +341,252 @@ fn run_self_check() -> i32 {
     };
     println!("{}", serde_json::Value::Object(report));
     exit_code
+}
+
+fn run_network_probe(address: &str) -> i32 {
+    let Ok(address) = address.parse::<std::net::SocketAddr>() else {
+        return 2;
+    };
+    match std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(2)) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+#[cfg(unix)]
+fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value>) {
+    let root = tempfile::Builder::new()
+        .prefix("tiangong-sandbox-selfcheck-")
+        .tempdir()
+        .expect("创建自检根目录失败");
+    let workspace = root.path().join("workspace");
+    let outside = root.path().join("outside");
+    let fake_home = root.path().join("home");
+    let ssh_dir = fake_home.join(".ssh");
+    let aws_dir = fake_home.join(".aws");
+    let tiangong_dir = fake_home.join(".tiangong");
+    let git_dir = workspace.join(".git");
+    for path in [
+        &workspace,
+        &outside,
+        &ssh_dir,
+        &aws_dir,
+        &tiangong_dir,
+        &git_dir,
+    ] {
+        std::fs::create_dir_all(path).expect("创建自检目录失败");
+    }
+
+    let ssh_secret = ssh_dir.join("id_ed25519");
+    let aws_secret = aws_dir.join("credentials");
+    let trust_db = tiangong_dir.join("trust.db");
+    let secrets = [
+        (&ssh_secret, "TIANGONG_FAKE_SSH_SECRET"),
+        (&aws_secret, "TIANGONG_FAKE_AWS_SECRET"),
+        (&trust_db, "TIANGONG_FAKE_TRUST_SECRET"),
+    ];
+    for (path, marker) in secrets {
+        std::fs::write(path, marker).expect("写入自检假凭据失败");
+    }
+    let bashrc = fake_home.join(".bashrc");
+    std::fs::write(&bashrc, "safe\n").expect("写入自检配置失败");
+    let git_config = git_dir.join("config");
+    std::fs::write(&git_config, "safe\n").expect("写入自检 git 配置失败");
+
+    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(&workspace);
+    policy.denied_read_paths = vec![ssh_dir, aws_dir, trust_db];
+
+    let inside = workspace.join("selfcheck.txt");
+    let output = run_sandbox_command(&policy, "/usr/bin/touch", &[inside.display().to_string()]);
+    report.insert(
+        "workspace_write".into(),
+        serde_json::Value::from(output.status.success() && inside.is_file()),
+    );
+
+    let outside_write = outside.join("blocked.txt");
+    let output = run_sandbox_command(
+        &policy,
+        "/usr/bin/touch",
+        &[outside_write.display().to_string()],
+    );
+    report.insert(
+        "outside_write_blocked".into(),
+        serde_json::Value::from(!output.status.success() && !outside_write.exists()),
+    );
+
+    let delete_target = outside.join("delete-me");
+    std::fs::create_dir_all(&delete_target).expect("创建自检删除目标失败");
+    std::fs::write(delete_target.join("keep"), "safe").expect("写入自检删除目标失败");
+    let output = run_sandbox_command(
+        &policy,
+        "/bin/rm",
+        &["-rf".into(), delete_target.display().to_string()],
+    );
+    report.insert(
+        "outside_delete_blocked".into(),
+        serde_json::Value::from(!output.status.success() && delete_target.join("keep").is_file()),
+    );
+
+    let output = run_sandbox_command(
+        &policy,
+        "/bin/sh",
+        &[
+            "-c".into(),
+            format!("printf PWNED >> {}", shell_quote(&bashrc)),
+        ],
+    );
+    report.insert(
+        "outside_config_write_blocked".into(),
+        serde_json::Value::from(
+            !output.status.success()
+                && std::fs::read_to_string(&bashrc).is_ok_and(|value| value == "safe\n"),
+        ),
+    );
+
+    let output = run_sandbox_command(
+        &policy,
+        "/bin/sh",
+        &[
+            "-c".into(),
+            format!("printf PWNED > {}", shell_quote(&git_config)),
+        ],
+    );
+    report.insert(
+        "git_metadata_write_blocked".into(),
+        serde_json::Value::from(
+            !output.status.success()
+                && std::fs::read_to_string(&git_config).is_ok_and(|value| value == "safe\n"),
+        ),
+    );
+
+    let sensitive_read_blocked = [ssh_secret, aws_secret, tiangong_dir.join("trust.db")]
+        .iter()
+        .all(|path| {
+            let output = run_sandbox_command(&policy, "/bin/cat", &[path.display().to_string()]);
+            !String::from_utf8_lossy(&output.stdout).contains("TIANGONG_FAKE_")
+        });
+    report.insert(
+        "sensitive_read_blocked".into(),
+        serde_json::Value::from(sensitive_read_blocked),
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("创建自检网络监听失败");
+    let address = listener.local_addr().expect("读取自检监听地址失败");
+    let current_exe = std::env::current_exe().expect("读取自检程序路径失败");
+    let direct_probe = std::process::Command::new(&current_exe)
+        .arg("--self-check-network-probe")
+        .arg(address.to_string())
+        .status()
+        .expect("启动直连网络探测失败")
+        .success();
+    let output = run_sandbox_command(
+        &policy,
+        &current_exe.display().to_string(),
+        &["--self-check-network-probe".into(), address.to_string()],
+    );
+    drop(listener);
+    report.insert(
+        "network_blocked".into(),
+        serde_json::Value::from(direct_probe && !output.status.success()),
+    );
+
+    let symlink_target = outside.join("symlink-target");
+    std::fs::write(&symlink_target, "safe\n").expect("写入自检符号链接目标失败");
+    let symlink = workspace.join("escape-link");
+    std::os::unix::fs::symlink(&symlink_target, &symlink).expect("创建自检符号链接失败");
+    let output = run_sandbox_command(
+        &policy,
+        "/bin/sh",
+        &[
+            "-c".into(),
+            format!("printf PWNED > {}", shell_quote(&symlink)),
+        ],
+    );
+    report.insert(
+        "symlink_escape_blocked".into(),
+        serde_json::Value::from(
+            !output.status.success()
+                && std::fs::read_to_string(&symlink_target).is_ok_and(|value| value == "safe\n"),
+        ),
+    );
+
+    let traversal_target = workspace.join("../outside/traversal");
+    let output = run_sandbox_command(
+        &policy,
+        "/usr/bin/touch",
+        &[traversal_target.display().to_string()],
+    );
+    report.insert(
+        "path_traversal_blocked".into(),
+        serde_json::Value::from(!output.status.success() && !outside.join("traversal").exists()),
+    );
+}
+
+#[cfg(unix)]
+fn run_sandbox_command(
+    policy: &tiangong_sandbox::SandboxPolicy,
+    target: &str,
+    args: &[String],
+) -> std::process::Output {
+    let tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } =
+        tiangong_sandbox::wrap(policy)
+    else {
+        panic!("自检时平台沙箱应保持可用");
+    };
+    std::process::Command::new(program)
+        .args(prefix)
+        .arg(target)
+        .args(args)
+        .output()
+        .expect("启动沙箱自检命令失败")
+}
+
+#[cfg(unix)]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(root: &Path, program: &Path) -> LaunchRequest {
+        LaunchRequest {
+            protocol_version: PROTOCOL_VERSION,
+            policy_schema: POLICY_SCHEMA,
+            policy: tiangong_sandbox::SandboxPolicy::workspace_write(root),
+            plugin_id: "command".to_string(),
+            program: program.display().to_string(),
+            program_root: root.display().to_string(),
+            program_sha256: String::new(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn target_path_traversal_is_rejected() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("command");
+        let outside = fixture.path().join("outside-sidecar");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "not executable").unwrap();
+
+        let error = validate_target(&request(&root, &root.join("../outside-sidecar"))).unwrap_err();
+        assert!(error.to_string().contains("不在 command 插件权威目录内"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_is_rejected() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("command");
+        let outside = fixture.path().join("outside-sidecar");
+        let link = root.join("sidecar");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "not executable").unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let error = validate_target(&request(&root, &link)).unwrap_err();
+        assert!(error.to_string().contains("目标程序必须是实际普通文件"));
+    }
 }

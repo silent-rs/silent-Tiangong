@@ -18,7 +18,7 @@ pub enum SandboxMode {
 }
 
 /// 平台无关的沙箱策略（可序列化，经 Launcher 协议传输）。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// 会话工作区（WorkspaceWrite 模式下的主可写根）。
@@ -28,8 +28,35 @@ pub struct SandboxPolicy {
     /// 即使位于可写根内也保持只读的宿主敏感路径。
     #[serde(default)]
     pub protected_paths: Vec<PathBuf>,
+    /// 沙箱内不可读取的宿主敏感路径（用户凭据等）。
+    #[serde(default)]
+    pub denied_read_paths: Vec<PathBuf>,
     /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
     pub allow_network: bool,
+    /// 单次 command 的资源上限。
+    #[serde(default)]
+    pub resource_limits: SandboxResourceLimits,
+}
+
+/// 单次 command 进程树的资源上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SandboxResourceLimits {
+    /// 整次命令可消耗的 CPU 时间上限（秒）。
+    pub max_cpu_time_seconds: u64,
+    /// Unix 为单进程地址空间上限，Windows 为整个 Job 的提交内存上限。
+    pub max_memory_bytes: u64,
+    /// Linux 与 Windows 的进程数量上限。
+    pub max_processes: u32,
+}
+
+impl Default for SandboxResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_cpu_time_seconds: 300,
+            max_memory_bytes: 2 * 1024 * 1024 * 1024,
+            max_processes: 64,
+        }
+    }
 }
 
 impl SandboxPolicy {
@@ -40,7 +67,9 @@ impl SandboxPolicy {
             workspace: workspace.into(),
             extra_writable: Vec::new(),
             protected_paths: Vec::new(),
+            denied_read_paths: Vec::new(),
             allow_network: false,
+            resource_limits: SandboxResourceLimits::default(),
         }
     }
 
@@ -50,8 +79,19 @@ impl SandboxPolicy {
             workspace: PathBuf::new(),
             extra_writable: Vec::new(),
             protected_paths: Vec::new(),
+            denied_read_paths: Vec::new(),
             allow_network: true,
+            resource_limits: SandboxResourceLimits::default(),
         }
+    }
+
+    /// 加入宿主权威的默认敏感读取拒绝项。
+    pub fn protect_user_credentials(&mut self, storage_root: &Path) {
+        if let Some(home) = user_home_dir() {
+            self.denied_read_paths.push(home.join(".ssh"));
+            self.denied_read_paths.push(home.join(".aws"));
+        }
+        self.denied_read_paths.push(storage_root.join("trust.db"));
     }
 
     /// 全部可写根（已规范化去重）：工作区、临时目录、额外可写。
@@ -97,13 +137,40 @@ impl SandboxPolicy {
             })
             .collect::<Vec<_>>();
         let git = canonical_or_keep(&self.workspace.join(".git"));
-        if git.is_dir() {
+        if git.exists() {
             paths.push(git);
         }
         paths.sort();
         paths.dedup();
         paths
     }
+
+    /// 不可读取路径（规范化、去重，只保留绝对路径）。
+    pub fn denied_read_roots(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .denied_read_paths
+            .iter()
+            .filter(|path| path.is_absolute())
+            .map(|path| canonical_or_keep(path))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let value = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(drive).join(path))
+        });
+    #[cfg(not(windows))]
+    let value = std::env::var_os("HOME").map(PathBuf::from);
+    value.filter(|path| path.is_absolute())
 }
 
 /// 规范化路径：能解析则用真实路径（macOS 上 `/var` → `/private/var`），
@@ -179,6 +246,38 @@ mod tests {
             policy
                 .read_only_roots()
                 .contains(&canonical_or_keep(root.path()))
+        );
+    }
+
+    #[test]
+    fn policy_serialization_is_platform_stable() {
+        let mut policy = SandboxPolicy::workspace_write("/workspace");
+        policy.extra_writable = vec!["/execution/tmp".into()];
+        policy.protected_paths = vec!["/workspace/.git".into()];
+        policy.denied_read_paths = vec!["/home/user/.ssh".into()];
+
+        let value = serde_json::to_value(&policy).unwrap();
+        assert_eq!(value["mode"], "workspace_write");
+        assert_eq!(value["workspace"], "/workspace");
+        assert_eq!(value["allow_network"], false);
+        assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
+        assert_eq!(value["resource_limits"]["max_processes"], 64);
+
+        let decoded: SandboxPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, policy);
+    }
+
+    #[test]
+    fn git_metadata_file_is_read_only() {
+        let workspace = tempfile::tempdir().unwrap();
+        let git_file = workspace.path().join(".git");
+        std::fs::write(&git_file, "gitdir: ../metadata").unwrap();
+        let policy = SandboxPolicy::workspace_write(workspace.path());
+
+        assert!(
+            policy
+                .read_only_roots()
+                .contains(&canonical_or_keep(&git_file))
         );
     }
 }

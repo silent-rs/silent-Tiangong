@@ -4,6 +4,8 @@
 //! 平台不支持嵌套沙箱时明确跳过。真实 Launcher 与无沙箱 stdio 链路分别
 //! 验证取消和宿主停止后的后代进程清理。
 
+#[cfg(unix)]
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
@@ -61,6 +63,8 @@ struct SandboxFixture {
     _root: tempfile::TempDir,
     workspace: PathBuf,
     outside: PathBuf,
+    fake_home: PathBuf,
+    trust_db: PathBuf,
     sidecar_log: PathBuf,
     connection: Arc<EphemeralCommandConnection>,
 }
@@ -75,9 +79,18 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
     let plugin_root = storage_root.join("plugins/command");
     let workspace = storage_root.join("workspaces/session-a");
     let outside = root.path().join("outside/blocked.txt");
+    let fake_home = root.path().join("home");
+    let ssh_dir = fake_home.join(".ssh");
+    let aws_dir = fake_home.join(".aws");
+    let trust_db = storage_root.join("trust.db");
     std::fs::create_dir_all(&plugin_root).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&ssh_dir).unwrap();
+    std::fs::create_dir_all(&aws_dir).unwrap();
+    std::fs::write(ssh_dir.join("id_ed25519"), "TIANGONG_FAKE_SSH_SECRET").unwrap();
+    std::fs::write(aws_dir.join("credentials"), "TIANGONG_FAKE_AWS_SECRET").unwrap();
+    std::fs::write(&trust_db, "TIANGONG_FAKE_TRUST_SECRET").unwrap();
 
     let binary_name = format!("tiangong-command-sidecar{}", std::env::consts::EXE_SUFFIX);
     let binary = plugin_root.join(&binary_name);
@@ -108,14 +121,22 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
         storage_root,
     )
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(20))
-    .with_sandbox_program_root(Some(plugin_root));
+    .with_sandbox_program_root(Some(plugin_root))
+    .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()]);
+    let connection = Arc::new(EphemeralCommandConnection::new(config));
+    connection.update_exec_env(BTreeMap::from([(
+        "HOME".to_string(),
+        fake_home.display().to_string(),
+    )]));
 
     Some(SandboxFixture {
         _root: root,
         workspace,
         outside,
+        fake_home,
+        trust_db,
         sidecar_log,
-        connection: Arc::new(EphemeralCommandConnection::new(config)),
+        connection,
     })
 }
 
@@ -130,15 +151,42 @@ fn invocation_context(workspace: &Path, invocation_id: &str) -> SidecarInvocatio
 
 #[cfg(unix)]
 fn shell_request(script: String, claimed_workspace: &Path) -> String {
+    shell_request_with_timeout(script, claimed_workspace, 15)
+}
+
+#[cfg(unix)]
+fn shell_request_with_timeout(
+    script: String,
+    claimed_workspace: &Path,
+    timeout_secs: u64,
+) -> String {
     serde_json::json!({
         "script": script,
         "shell": "sh",
-        "timeout_secs": 15,
+        "timeout_secs": timeout_secs,
         "workspace": claimed_workspace.display().to_string(),
         "full_trust": true,
         "allowed_commands": [],
     })
     .to_string()
+}
+
+#[cfg(unix)]
+fn invoke_shell(fixture: &SandboxFixture, id: &str, script: String) -> serde_json::Value {
+    let raw = fixture
+        .connection
+        .invoke_with_context(
+            RUN_SHELL_OPERATION,
+            &shell_request(script, &fixture.workspace),
+            &invocation_context(&fixture.workspace, id),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "攻击验证 {id} 调用失败: {error:#}；sidecar 日志:\n{}",
+                read_log(&fixture.sidecar_log)
+            )
+        });
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("攻击验证响应无效: {error}: {raw}"))
 }
 
 #[cfg(unix)]
@@ -198,6 +246,141 @@ fn real_launcher_enforces_workspace_and_dedicated_temp() {
 
 #[cfg(unix)]
 #[test]
+fn real_launcher_blocks_dangerous_attack_matrix() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) = sandbox_fixture() else {
+        return;
+    };
+
+    for (id, path, marker) in [
+        (
+            "read_ssh",
+            fixture.fake_home.join(".ssh/id_ed25519"),
+            "TIANGONG_FAKE_SSH_SECRET",
+        ),
+        (
+            "read_aws",
+            fixture.fake_home.join(".aws/credentials"),
+            "TIANGONG_FAKE_AWS_SECRET",
+        ),
+        (
+            "read_trust",
+            fixture.trust_db.clone(),
+            "TIANGONG_FAKE_TRUST_SECRET",
+        ),
+    ] {
+        let response = invoke_shell(&fixture, id, format!("/bin/cat {}", shell_quote(&path)));
+        assert!(
+            !response["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(marker),
+            "敏感内容泄漏: {id}: {response}"
+        );
+        eprintln!("SAFE: {id}");
+    }
+
+    let delete_root = fixture.outside.parent().unwrap().join("delete-root");
+    std::fs::create_dir_all(&delete_root).unwrap();
+    std::fs::write(delete_root.join("keep"), "safe").unwrap();
+    let response = invoke_shell(
+        &fixture,
+        "delete_outside",
+        format!("/bin/rm -rf {}", shell_quote(&delete_root)),
+    );
+    assert_eq!(response["ok"], false, "工作区外删除应失败: {response}");
+    assert!(delete_root.join("keep").is_file());
+    eprintln!("SAFE: delete_outside");
+
+    let hosts = fixture.outside.parent().unwrap().join("etc/hosts");
+    std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+    std::fs::write(&hosts, "safe\n").unwrap();
+    let response = invoke_shell(
+        &fixture,
+        "write_system_config",
+        format!("printf PWNED >> {}", shell_quote(&hosts)),
+    );
+    assert_eq!(response["ok"], false, "系统配置写入应失败: {response}");
+    assert_eq!(std::fs::read_to_string(&hosts).unwrap(), "safe\n");
+    eprintln!("SAFE: write_system_config");
+
+    let bashrc = fixture.fake_home.join(".bashrc");
+    std::fs::write(&bashrc, "safe\n").unwrap();
+    let response = invoke_shell(
+        &fixture,
+        "write_bashrc",
+        format!("printf PWNED >> {}", shell_quote(&bashrc)),
+    );
+    assert_eq!(response["ok"], false, "用户配置写入应失败: {response}");
+    assert_eq!(std::fs::read_to_string(&bashrc).unwrap(), "safe\n");
+    eprintln!("SAFE: write_bashrc");
+
+    let git_dir = fixture.workspace.join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let git_config = git_dir.join("config");
+    std::fs::write(&git_config, "safe\n").unwrap();
+    let response = invoke_shell(
+        &fixture,
+        "git_history",
+        format!("printf PWNED > {}", shell_quote(&git_config)),
+    );
+    assert_eq!(response["ok"], false, "git 元数据写入应失败: {response}");
+    assert_eq!(std::fs::read_to_string(&git_config).unwrap(), "safe\n");
+    eprintln!("SAFE: git_history");
+
+    let link_target = fixture.outside.parent().unwrap().join("link-target");
+    std::fs::write(&link_target, "safe\n").unwrap();
+    let link = fixture.workspace.join("escape-link");
+    std::os::unix::fs::symlink(&link_target, &link).unwrap();
+    let response = invoke_shell(
+        &fixture,
+        "symlink_escape",
+        format!("printf PWNED > {}", shell_quote(&link)),
+    );
+    assert_eq!(response["ok"], false, "符号链接逃逸应失败: {response}");
+    assert_eq!(std::fs::read_to_string(&link_target).unwrap(), "safe\n");
+    eprintln!("SAFE: symlink_escape");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_launcher_sanitizes_environment() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) = sandbox_fixture() else {
+        return;
+    };
+    fixture.connection.update_exec_env(BTreeMap::from([
+        ("HOME".into(), fixture.fake_home.display().to_string()),
+        ("LD_PRELOAD".into(), "PWNED_RUNTIME_LD".into()),
+        ("LD_LIBRARY_PATH".into(), "PWNED_RUNTIME_LIBRARY".into()),
+        ("DYLD_INSERT_LIBRARIES".into(), "PWNED_RUNTIME_DYLD".into()),
+        ("BASH_ENV".into(), "PWNED_RUNTIME_BASH".into()),
+    ]));
+    std::fs::write(
+        fixture.workspace.join(".env"),
+        "LD_PRELOAD=PWNED_FILE_LD\nDYLD_INSERT_LIBRARIES=PWNED_FILE_DYLD\nBASH_ENV=PWNED_FILE_BASH\nPATH=PWNED_FILE_PATH\nTMPDIR=PWNED_FILE_TMP\nTMP=PWNED_FILE_TMP\nTEMP=PWNED_FILE_TMP\n",
+    )
+    .unwrap();
+
+    let response = invoke_shell(&fixture, "sanitized-env", "/usr/bin/env".to_string());
+    assert_eq!(response["ok"], true, "环境检查命令应成功: {response}");
+    let stdout = response["stdout"].as_str().unwrap_or_default();
+    assert!(!stdout.contains("PWNED_"), "危险环境变量泄漏: {stdout}");
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        let value = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("缺少 {key}: {stdout}"));
+        assert!(value.contains("tiangong-command-"), "{key} 未使用专用目录");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn real_launcher_cancel_kills_background_process_tree() {
     let _serial = REAL_SANDBOX_TEST_LOCK
         .lock()
@@ -244,6 +427,150 @@ fn real_launcher_cancel_kills_background_process_tree() {
     wait_for_heartbeat_stop(&heartbeat_file, Duration::from_secs(5));
     #[cfg(not(target_os = "linux"))]
     wait_for_process_exit(background_pid, Duration::from_secs(5));
+    eprintln!("SAFE: background_persistence");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_launcher_timeout_kills_background_process_tree() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) = sandbox_fixture() else {
+        return;
+    };
+    let pid_file = fixture.workspace.join("timeout-background.pid");
+    let heartbeat_file = fixture.workspace.join("timeout-background.heartbeat");
+    let request = shell_request_with_timeout(
+        unix_background_process_script(&pid_file, &heartbeat_file),
+        &fixture.workspace,
+        1,
+    );
+    let worker_connection = Arc::clone(&fixture.connection);
+    let context = invocation_context(&fixture.workspace, "timeout-background");
+    let (finished_tx, finished_rx) = sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let result = worker_connection.invoke_with_context(RUN_SHELL_OPERATION, &request, &context);
+        let _ = finished_tx.send(result);
+    });
+
+    let background_pid = wait_for_pid(
+        &pid_file,
+        &finished_rx,
+        &fixture.sidecar_log,
+        Duration::from_secs(30),
+    );
+    wait_for_heartbeat_growth(
+        &heartbeat_file,
+        &finished_rx,
+        &fixture.sidecar_log,
+        Duration::from_secs(30),
+    );
+    let raw = finished_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("命令超时后调用线程未及时结束")
+        .expect("命令超时应返回结构化响应");
+    worker.join().unwrap();
+    let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(response["ok"], false, "超时命令不应成功: {raw}");
+    assert!(
+        response["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("超时"),
+        "超时响应应明确说明原因: {raw}"
+    );
+    wait_for_heartbeat_stop(&heartbeat_file, Duration::from_secs(5));
+    #[cfg(not(target_os = "linux"))]
+    wait_for_process_exit(background_pid, Duration::from_secs(5));
+    #[cfg(target_os = "linux")]
+    let _ = background_pid;
+    eprintln!("SAFE: timeout_process_tree");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn real_launcher_applies_resource_limits() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) = sandbox_fixture() else {
+        return;
+    };
+    let response = invoke_shell(
+        &fixture,
+        "resource-limits",
+        "/bin/bash -c 'ulimit -t; ulimit -v; ulimit -u'".to_string(),
+    );
+    assert_eq!(response["ok"], true, "资源上限探测失败: {response}");
+    let values = response["stdout"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        ["300", "2097152", "64"],
+        "资源上限未生效: {response}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) = sandbox_fixture() else {
+        return;
+    };
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let mut workers = Vec::new();
+    let mut markers = Vec::new();
+    for index in 0..10 {
+        let marker = fixture.workspace.join(format!("concurrent-{index}.ready"));
+        markers.push(marker.clone());
+        let request = shell_request_with_timeout(
+            format!("/usr/bin/touch {}; /bin/sleep 120", shell_quote(&marker)),
+            &fixture.workspace,
+            120,
+        );
+        let connection = Arc::clone(&fixture.connection);
+        let context = invocation_context(&fixture.workspace, &format!("concurrent-{index}"));
+        let finished_tx = finished_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            let result = connection.invoke_with_context(RUN_SHELL_OPERATION, &request, &context);
+            let _ = finished_tx.send(result);
+        }));
+    }
+    drop(finished_tx);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !markers.iter().all(|marker| marker.is_file()) {
+        assert!(
+            Instant::now() < deadline,
+            "并发 command 未全部启动；sidecar 日志:\n{}",
+            read_log(&fixture.sidecar_log)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let cancel_connection = Arc::clone(&fixture.connection);
+    let stop_connection = Arc::clone(&fixture.connection);
+    let cancel = std::thread::spawn(move || cancel_connection.cancel_session("session-a"));
+    let stop = std::thread::spawn(move || stop_connection.stop());
+    cancel.join().unwrap().unwrap();
+    stop.join().unwrap().unwrap();
+
+    for _ in 0..10 {
+        finished_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("并发 command 在取消后未及时结束")
+            .ok();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
 }
 
 #[test]
@@ -345,6 +672,60 @@ fn stdio_stop_kills_background_process_tree() {
     wait_for_process_exit(background_pid, Duration::from_secs(5));
     #[cfg(unix)]
     wait_for_heartbeat_stop(&heartbeat_file, Duration::from_secs(5));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn repeated_stdio_start_stop_does_not_leak_host_resources() {
+    let Some(binary) = command_sidecar_binary() else {
+        eprintln!("跳过资源泄漏测试：target/debug/tiangong-command-sidecar 尚未构建");
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let before = host_resource_count();
+
+    for index in 0..20 {
+        let instance = root.path().join(format!("instance-{index}"));
+        let connection = StdioSidecarConnection::new(
+            SidecarConfig::new(
+                "command",
+                "0.0.0",
+                &binary,
+                instance.join("endpoint.json"),
+                instance.join("sidecar.log"),
+                instance.join("data"),
+                instance.join("storage"),
+            )
+            .with_timeouts(Duration::from_secs(15), Duration::from_secs(15)),
+        );
+        connection
+            .invoke(
+                SET_WORKSPACE_OPERATION,
+                &serde_json::json!({
+                    "workspace": workspace.display().to_string(),
+                    "full_trust": true,
+                    "allowed_commands": [],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        connection.stop().unwrap();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let after = loop {
+        let current = host_resource_count();
+        if current <= before + 10 || Instant::now() >= deadline {
+            break current;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        after <= before + 10,
+        "重复启动停止后宿主资源持续增长: before={before}, after={after}"
+    );
 }
 
 #[cfg(unix)]
@@ -464,6 +845,28 @@ fn ensure_invocation_running(finished: &Receiver<anyhow::Result<String>>, log: &
 
 fn read_log(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| format!("<读取失败: {error}>"))
+}
+
+#[cfg(unix)]
+fn host_resource_count() -> u32 {
+    let path = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    std::fs::read_dir(path)
+        .map(|entries| entries.filter_map(Result::ok).count() as u32)
+        .expect("读取宿主文件描述符失败")
+}
+
+#[cfg(windows)]
+fn host_resource_count() -> u32 {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    let mut count = 0;
+    let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    assert_ne!(ok, 0, "读取宿主句柄数量失败");
+    count
 }
 
 #[cfg(unix)]

@@ -50,6 +50,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare diagnostics directory
+        run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
+
       - name: Verify CI isolation routing
         run: |
           sandbox_only="$(
@@ -60,6 +63,14 @@ jobs:
               | bash .github/scripts/sandbox-change-scope.sh
           )"
           [[ "$sandbox_only" == "true" ]]
+
+          command_only="$(
+            printf '%s\n' \
+              plugins/tiangong-plugin-command/sidecar/src/exec.rs \
+              Cargo.lock \
+              | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          [[ "$command_only" == "true" ]]
 
           mixed_change="$(
             printf '%s\n' crates/tiangong-sandbox/src/lib.rs README.md \
@@ -108,10 +119,12 @@ jobs:
       - name: Verify native sandbox enforcement
         run: |
           set +e
-          report="$(target/debug/tiangong-sandbox --self-check)"
+          report="$(target/debug/tiangong-sandbox --self-check 2>"$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.stderr")"
           status=$?
           set -e
           printf '%s\n' "$report"
+          printf '%s\n' "$report" > "$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.json"
+          printf '%s\n' "$status" > "$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.exit-code"
           if [[ "$status" -ne 0 ]]; then
             exit "$status"
           fi
@@ -121,21 +134,67 @@ jobs:
           assert report["platform"] == "available", report
           assert report["workspace_write"] is True, report
           assert report["outside_write_blocked"] is True, report
+          assert report["outside_delete_blocked"] is True, report
+          assert report["outside_config_write_blocked"] is True, report
+          assert report["git_metadata_write_blocked"] is True, report
+          assert report["network_blocked"] is True, report
+          assert report["sensitive_read_blocked"] is True, report
+          assert report["symlink_escape_blocked"] is True, report
+          assert report["path_traversal_blocked"] is True, report
           ' <<< "$report"
 
       - name: Test Sandbox and sidecar integration
-        run: >-
-          cargo test --locked
-          -p tiangong-sandbox
-          -p tiangong-plugin-runtime
-          -p tiangong-plugin-sidecar
-          -- --nocapture
+        run: |
+          cargo test --locked \
+            -p tiangong-sandbox \
+            -p tiangong-plugin-sidecar \
+            -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
+
+      - name: Verify dangerous commands, environment, resources and concurrency
+        run: |
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --test ephemeral_route \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/ephemeral-route.log"
+
+      - name: Verify background process cleanup explicitly
+        run: |
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --test ephemeral_route \
+            real_launcher_cancel_kills_background_process_tree \
+            -- --exact --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/background-cleanup.log"
 
       - name: Verify packaged Launcher
         run: |
           target="$(rustc -vV | sed -n 's/^host: //p')"
           TAURI_ENV_TARGET_TRIPLE="$target" cargo run --locked -p xtask -- prepare-sandbox
-          test -f "src-tauri/binaries/tiangong-sandbox-$target"
+          artifact="src-tauri/binaries/tiangong-sandbox-$target"
+          test -f "$artifact"
+          test ! -L "$artifact"
+          test -x "$artifact"
+          report="$("$artifact" --self-check)"
+          printf '%s\n' "$report" > "$RUNNER_TEMP/sandbox-diagnostics/packaged-self-check.json"
+          expected_version="$(jq -r .version src-tauri/tauri.conf.json)"
+          actual_version="$(jq -r .product_version <<< "$report")"
+          [[ "$actual_version" == "$expected_version" ]]
+
+      - name: Print Sandbox diagnostics
+        if: failure()
+        run: |
+          find "$RUNNER_TEMP/sandbox-diagnostics" -maxdepth 2 -type f -print \
+            -exec sed -n '1,240p' {} \;
+
+      - name: Upload Sandbox diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-linux-diagnostics
+          path: ${{ runner.temp }}/sandbox-diagnostics
+          if-no-files-found: ignore
 
   macos:
     name: Sandbox (macOS x86_64 native)
@@ -144,6 +203,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare diagnostics directory
+        run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -155,10 +216,12 @@ jobs:
       - name: Probe native sandbox enforcement
         run: |
           set +e
-          report="$(target/debug/tiangong-sandbox --self-check)"
+          report="$(target/debug/tiangong-sandbox --self-check 2>"$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.stderr")"
           status=$?
           set -e
           printf '%s\n' "$report"
+          printf '%s\n' "$report" > "$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.json"
+          printf '%s\n' "$status" > "$RUNNER_TEMP/sandbox-diagnostics/launcher-self-check.exit-code"
           if [[ "$status" -eq 79 ]]; then
             python3 -c '
             import json, sys
@@ -176,20 +239,57 @@ jobs:
             assert report["platform"] == "available", report
             assert report["workspace_write"] is True, report
             assert report["outside_write_blocked"] is True, report
+            assert report["outside_delete_blocked"] is True, report
+            assert report["outside_config_write_blocked"] is True, report
+            assert report["git_metadata_write_blocked"] is True, report
+            assert report["network_blocked"] is True, report
+            assert report["sensitive_read_blocked"] is True, report
+            assert report["symlink_escape_blocked"] is True, report
+            assert report["path_traversal_blocked"] is True, report
             ' <<< "$report"
           fi
 
       - name: Test native Launcher and process cleanup
         run: |
-          cargo test --locked -p tiangong-sandbox -- --nocapture
-          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture
-          cargo test --locked -p tiangong-plugin-runtime --test ephemeral_route -- --nocapture
+          cargo test --locked -p tiangong-sandbox -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
+          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/stdio-e2e.log"
+          cargo test --locked -p tiangong-plugin-runtime --test ephemeral_route \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/ephemeral-route.log"
 
       - name: Verify packaged Launcher
         run: |
           target="$(rustc -vV | sed -n 's/^host: //p')"
           TAURI_ENV_TARGET_TRIPLE="$target" cargo run --locked -p xtask -- prepare-sandbox
-          test -f "src-tauri/binaries/tiangong-sandbox-$target"
+          artifact="src-tauri/binaries/tiangong-sandbox-$target"
+          test -f "$artifact"
+          test ! -L "$artifact"
+          test -x "$artifact"
+          set +e
+          report="$("$artifact" --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report" > "$RUNNER_TEMP/sandbox-diagnostics/packaged-self-check.json"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+          expected_version="$(jq -r .version src-tauri/tauri.conf.json)"
+          actual_version="$(jq -r .product_version <<< "$report")"
+          [[ "$actual_version" == "$expected_version" ]]
+
+      - name: Print Sandbox diagnostics
+        if: failure()
+        run: |
+          find "$RUNNER_TEMP/sandbox-diagnostics" -maxdepth 2 -type f -print \
+            -exec sed -n '1,240p' {} \;
+
+      - name: Upload Sandbox diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-macos-diagnostics
+          path: ${{ runner.temp }}/sandbox-diagnostics
+          if-no-files-found: ignore
 
   windows:
     name: Sandbox (Windows x86_64)
@@ -197,6 +297,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare diagnostics directory
+        run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -229,6 +331,8 @@ jobs:
           $output = & .\target\debug\tiangong-sandbox.exe --self-check | Out-String
           $exitCode = $LASTEXITCODE
           Write-Host $output
+          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.json"
+          $exitCode | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.exit-code"
           if ($exitCode -ne 78) {
             throw "Expected self-check exit code 78, got $exitCode"
           }
@@ -240,17 +344,34 @@ jobs:
           exit 0
 
       - name: Test Windows Job Object process cleanup
-        run: >-
-          cargo test --locked
-          -p tiangong-plugin-runtime
-          --test ephemeral_route
-          stdio_stop_kills_background_process_tree
-          -- --exact --nocapture
+        run: |
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --test ephemeral_route \
+            stdio_stop_kills_background_process_tree \
+            -- --exact --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/process-cleanup.log"
+
+      - name: Test Windows resource limits and handle cleanup
+        run: |
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --lib sidecar::stdio::windows_tests::job_object_applies_process_and_memory_limits \
+            -- --exact --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/resource-limits.log"
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --test ephemeral_route \
+            repeated_stdio_start_stop_does_not_leak_host_resources \
+            -- --exact --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/handle-cleanup.log"
 
       - name: Test Windows Sandbox and stdio transport
         run: |
-          cargo test --locked -p tiangong-sandbox -- --nocapture
-          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture
+          cargo test --locked -p tiangong-sandbox -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
+          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/stdio-e2e.log"
 
       - name: Verify packaged Launcher
         shell: pwsh
@@ -264,10 +385,164 @@ jobs:
           if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
             throw "Packaged Launcher is missing: $artifact"
           }
+          $item = Get-Item -LiteralPath $artifact
+          if ($null -ne $item.LinkType) {
+            throw "Packaged Launcher must not be a symbolic link: $artifact"
+          }
+          $output = & $artifact --self-check | Out-String
+          $exitCode = $LASTEXITCODE
+          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.json"
+          if ($exitCode -ne 78) {
+            throw "Expected packaged self-check exit code 78, got $exitCode"
+          }
+          $report = $output | ConvertFrom-Json
+          $config = Get-Content -Raw -LiteralPath 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          if ($report.product_version -ne $config.version) {
+            throw "Launcher version $($report.product_version) does not match App $($config.version)"
+          }
+
+      - name: Print Sandbox diagnostics
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics" -File | ForEach-Object {
+            Write-Host "===== $($_.Name) ====="
+            Get-Content -LiteralPath $_.FullName -TotalCount 240
+          }
+
+      - name: Upload Sandbox diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-windows-diagnostics
+          path: ${{ runner.temp }}/sandbox-diagnostics
+          if-no-files-found: ignore
+
+  bundle:
+    name: Sandbox bundle (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux
+            label: Linux x86_64
+            runner: ubuntu-22.04
+            bundles: deb
+          - id: macos
+            label: macOS x86_64
+            runner: macos-15-intel
+            bundles: app
+          - id: windows
+            label: Windows x86_64
+            runner: windows-2022
+            bundles: nsis
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare diagnostics directory
+        run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        run: yarn --cwd frontend install --frozen-lockfile
+
+      - name: Setup Rust on Linux
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/setup-rust
+        with:
+          matrix: '["tiangong-app","tiangong-sandbox","xtask"]'
+
+      - name: Setup Rust on macOS and Windows
+        if: runner.os != 'Linux'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts on macOS and Windows
+        if: runner.os != 'Linux'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc on macOS
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc on Windows
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - name: Disable updater artifacts for unsigned CI bundle
+        run: >-
+          node -e 'const fs=require("fs"); const path="src-tauri/tauri.conf.json";
+          const config=JSON.parse(fs.readFileSync(path,"utf8"));
+          config.bundle.createUpdaterArtifacts=false;
+          fs.writeFileSync(path,JSON.stringify(config,null,2)+"\n");'
+
+      - name: Build complete Tauri bundle
+        uses: tauri-apps/tauri-action@v0.6.2
+        with:
+          projectPath: .
+          args: --bundles ${{ matrix.bundles }}
+
+      - name: Verify Linux bundle contains Launcher
+        if: runner.os == 'Linux'
+        run: |
+          package="$(find target/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          test -n "$package"
+          dpkg-deb --contents "$package" \
+            | tee "$RUNNER_TEMP/sandbox-diagnostics/bundle-contents.log"
+          rg 'usr/bin/tiangong-sandbox$' \
+            "$RUNNER_TEMP/sandbox-diagnostics/bundle-contents.log"
+
+      - name: Verify macOS bundle contains runnable Launcher
+        if: runner.os == 'macOS'
+        run: |
+          launcher="$(find target/release/bundle/macos -type f \
+            -path '*/Contents/MacOS/tiangong-sandbox' -print -quit)"
+          test -n "$launcher"
+          test ! -L "$launcher"
+          test -x "$launcher"
+          set +e
+          report="$("$launcher" --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report" > "$RUNNER_TEMP/sandbox-diagnostics/bundled-self-check.json"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+          [[ "$(jq -r .product_version <<< "$report")" == "$(jq -r .version src-tauri/tauri.conf.json)" ]]
+
+      - name: Verify Windows installer contains Launcher
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path 'target\release\bundle\nsis\*.exe' | Select-Object -First 1
+          if ($null -eq $installer) {
+            throw 'NSIS installer is missing'
+          }
+          $contents = & 7z l $installer.FullName | Out-String
+          $contents | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\bundle-contents.log"
+          if ($contents -notmatch 'tiangong-sandbox\.exe') {
+            throw "NSIS installer does not contain tiangong-sandbox.exe: $($installer.FullName)"
+          }
+
+      - name: Upload bundle diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-bundle-${{ matrix.id }}-diagnostics
+          path: ${{ runner.temp }}/sandbox-diagnostics
+          if-no-files-found: ignore
 
   result:
     name: Sandbox CI
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, bundle]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -276,8 +551,9 @@ jobs:
           LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
+          BUNDLE_RESULT: ${{ needs.bundle.result }}
         run: |
-          for result in "$LINUX_RESULT" "$MACOS_RESULT" "$WINDOWS_RESULT"; do
+          for result in "$LINUX_RESULT" "$MACOS_RESULT" "$WINDOWS_RESULT" "$BUNDLE_RESULT"; do
             if [[ "$result" != "success" ]]; then
               exit 1
             fi

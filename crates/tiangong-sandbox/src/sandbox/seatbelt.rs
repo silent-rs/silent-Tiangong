@@ -47,7 +47,15 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
     }
     // 防篡改段：写在 allow 之后才能重新锁死（后规则覆盖先规则）。
     for path in policy.read_only_roots() {
-        let _ = writeln!(sbpl, "(deny file-write* (subpath \"{}\"))", escape(&path));
+        let escaped = escape(&path);
+        let _ = writeln!(sbpl, "(deny file-write* (literal \"{escaped}\"))");
+        let _ = writeln!(sbpl, "(deny file-write* (subpath \"{escaped}\"))");
+    }
+    // 敏感路径读取规则位于全局 file-read 放行之后，精确路径与子路径都拒绝。
+    for path in policy.denied_read_roots() {
+        let escaped = escape(&path);
+        let _ = writeln!(sbpl, "(deny file-read* (literal \"{escaped}\"))");
+        let _ = writeln!(sbpl, "(deny file-read* (subpath \"{escaped}\"))");
     }
     if !policy.allow_network {
         sbpl.push_str("(deny network*)\n");
@@ -75,6 +83,7 @@ mod tests {
     fn profile_denies_write_outside_roots_and_network() {
         let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
         policy.protected_paths = vec!["/tmp/ws/protected".into()];
+        policy.denied_read_paths = vec!["/tmp/home/.ssh".into()];
         let sbpl = compile_profile(&policy);
         assert!(sbpl.contains("(deny file-write*)"));
         assert!(sbpl.contains("(deny network*)"));
@@ -87,6 +96,7 @@ mod tests {
             .find("(deny file-write* (subpath \"/tmp/ws/protected\"))")
             .unwrap();
         assert!(protected_deny > ws_allow);
+        assert!(sbpl.contains("(deny file-read* (subpath \"/tmp/home/.ssh\"))"));
     }
 
     #[test]
