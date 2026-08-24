@@ -412,7 +412,31 @@ sidecar 沙箱化迁移状态（2026-08-23 实施）：
    （常驻/一次性），危险调用走一次性 sidecar，删除协议中的票据字段
 3. 能力 Broker：文件/网络代理/Secret Broker 服务动态能力需求
 
-## 16. 会话外验证项（无法在 macOS 开发环境完成）
+## 16. 独立 Launcher 方案（2026-08-24 全新方案，第一阶段已落地）
+
+沙箱从宿主内嵌库解耦为独立、可版本化、可更新、可回滚的官方安全组件：
+
+> 天工决定允许什么（策略、审批、版本选择、审计），Launcher 负责可靠实施
+> （校验、探测、沙箱、进程管理），插件完全不参与沙箱决策。
+
+- `tiangong-sandbox-launcher`：一次性包装器形态（非常驻守护）；策略经
+  fd3 继承管道传入（`protocol_version` + `policy_schema` 双版本化），
+  Unix 上 exec 替换自身；fail-closed（协议不符 / 策略非法 / 平台不可用
+  / full_access 一律结构化拒绝，绝不静默降级）；`--self-check` 自检
+- 版本管理：`~/.tiangong/runtime/sandbox/{active.json, installs/, staging/,
+  quarantine/}`，选择链 active → 内置保底（宿主同目录）→ 拒绝执行；
+  更新（下载→签名校验→自检→原子安装）、回滚与撤销（revoked/
+  min_safe_version）为后续阶段
+- 宿主 spawn 链：声明沙箱的 sidecar 一律经 Launcher 启动
+- 无沙箱执行独立建模：结构化授权指纹（操作/程序/参数/脚本/工作目录），
+  一次性消费、短时效、原生确认；Session/Tool Call 绑定待调用上下文链路
+- `full_trust` 仅审批语义（跳过逐次询问），永不关闭沙箱——审批与隔离
+  两个独立维度（ApprovalMode × IsolationMode）
+- 待后续：远程更新/回滚/撤销流程、policy-pack 独立数据包、
+  Windows 受限进程后端与继承句柄、用户终端与 Agent 命令终端的区分
+  （桌面 Agent 命令经 terminal PTY 注入路径的沙箱化）、sbe 实验后端
+
+## 17. 会话外验证项（无法在 macOS 开发环境完成）
 
 1. **S6 Windows 受限令牌运行时行为**：CreateRestrictedToken(LUA_TOKEN) +
    CreateProcessAsUserW 的核心原语已实现（`sandbox/windows.rs`），但
@@ -424,7 +448,7 @@ sidecar 沙箱化迁移状态（2026-08-23 实施）：
    （可用性探测自动降级），`sandbox::tests` 中的真实拦截测试需在普通终端
    或 CI macOS/Linux 环境执行。
 
-## 17. 业界对标摘要
+## 18. 业界对标摘要
 
 | 产品 | 沙箱方案 | 本 RFC 借鉴点 |
 | --- | --- | --- |
