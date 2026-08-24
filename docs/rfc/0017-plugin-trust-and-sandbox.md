@@ -419,15 +419,16 @@ sidecar 沙箱化迁移状态（2026-08-23 实施）：
 > 天工决定允许什么（策略、审批、版本选择、审计），Launcher 负责可靠实施
 > （校验、探测、沙箱、进程管理），插件完全不参与沙箱决策。
 
-- `tiangong-sandbox-launcher`：一次性包装器形态（非常驻守护）；策略经
-  fd3 继承管道传入（`protocol_version` + `policy_schema` 双版本化），
+- `crates/tiangong-sandbox`（单 crate，lib + bin）：沙箱能力不拆多包，
+  可执行文件名即 `tiangong-sandbox`——一次性包装器形态（非常驻守护）；
+  策略经 fd3 继承管道传入（`protocol_version` + `policy_schema` 双版本化），
   Unix 上 exec 替换自身；fail-closed（协议不符 / 策略非法 / 平台不可用
   / full_access 一律结构化拒绝，绝不静默降级）；`--self-check` 自检
 - 版本管理：`~/.tiangong/runtime/sandbox/{active.json, installs/, staging/,
   quarantine/}`，选择链 active → 内置保底（宿主同目录）→ 拒绝执行；
   更新（下载→签名校验→自检→原子安装）、回滚与撤销（revoked/
   min_safe_version）为后续阶段
-- 宿主 spawn 链：声明沙箱的 sidecar 一律经 Launcher 启动
+- 宿主 spawn 链：声明沙箱的 sidecar 一律经 tiangong-sandbox 程序启动
 - 无沙箱执行独立建模：结构化授权指纹（操作/程序/参数/脚本/工作目录），
   一次性消费、短时效、原生确认；Session/Tool Call 绑定待调用上下文链路
 - `full_trust` 仅审批语义（跳过逐次询问），永不关闭沙箱——审批与隔离
