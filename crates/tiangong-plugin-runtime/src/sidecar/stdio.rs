@@ -164,8 +164,12 @@ impl StdioSidecarConnection {
         // OS 沙箱（RFC 0017 D12 继承式）：可写根 = 插件数据目录；宿主数据目录与
         // 工作区 .git 经防篡改段强制只读；沙箱不可用时降级直跑并告警（快照层兜底）。
         let sandboxed_argv = if self.config.sandbox {
-            let mut policy =
-                tiangong_sandbox::SandboxPolicy::workspace_write(self.config.data_dir.clone());
+            let workspace = self
+                .config
+                .sandbox_workspace
+                .clone()
+                .unwrap_or_else(|| self.config.data_dir.clone());
+            let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
             policy.allow_network = self.config.sandbox_network;
             match tiangong_sandbox::wrap(&policy) {
                 tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } => {

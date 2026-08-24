@@ -129,36 +129,6 @@ struct ExecRequest {
 }
 
 /// 用户默认交互 shell（SHELL 环境变量，缺省回退 sh/cmd）。
-/// 终端沙箱开关（默认关闭，RFC 0017 D12）：TIANGONG_TERMINAL_SANDBOX=1 时
-/// 返回 OS 沙箱包装前缀，PTY 会话（及其全部子进程）整体进入 workspace-write 沙箱。
-/// 工作区取会话 cwd，缺失时回退 sidecar 当前目录；沙箱不可用时返回 None 直跑。
-fn terminal_sandbox_prefix(cwd: Option<&str>) -> Option<(String, Vec<String>)> {
-    if std::env::var("TIANGONG_TERMINAL_SANDBOX").ok().as_deref() != Some("1") {
-        return None;
-    }
-    let workspace = cwd
-        .filter(|c| std::path::Path::new(c).is_dir())
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())?;
-    let policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
-    match tiangong_sandbox::wrap(&policy) {
-        tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } => {
-            tracing::info!("终端沙箱已启用（workspace-write）");
-            Some((program, prefix))
-        }
-        tiangong_sandbox::SandboxedProgram::Direct => None,
-        // 用户显式开启沙箱但平台不可用：终端是用户自担风险的交互通道，
-        // 降级为常规终端并醒目告警（与 agent 命令通道的默认拒绝不同）。
-        tiangong_sandbox::SandboxedProgram::Unavailable(reason) => {
-            tracing::error!(
-                reason,
-                "TIANGONG_TERMINAL_SANDBOX=1 但平台沙箱不可用，终端将以非沙箱模式运行"
-            );
-            None
-        }
-    }
-}
-
 fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| {
         if cfg!(windows) {
@@ -369,58 +339,32 @@ impl TerminalService {
             })
             .context("创建 PTY 失败")?;
 
-        // 沙箱包装（RFC 0017 D12 继承式：PTY 会话整体进沙箱，子进程树自动受
-        // 约束）。默认关闭：升级审批闭环（S4）就绪前避免用户交互终端被频繁
-        // 拦截；设 TIANGONG_TERMINAL_SANDBOX=1 可提前启用验证。
-        let sandbox_prefix = terminal_sandbox_prefix(request.cwd.as_deref());
-        // 构建辅助：有沙箱前缀时以包装程序为入口，原程序降为首个参数。
-        let make_builder = |program: String, args: Vec<String>| {
-            let push_args = |builder: &mut CommandBuilder, args: Vec<String>| {
-                for arg in args {
-                    builder.arg(arg);
-                }
-            };
-            match &sandbox_prefix {
-                Some((wrap_program, prefix)) => {
-                    let mut builder = CommandBuilder::new(wrap_program);
-                    for arg in prefix {
-                        builder.arg(arg);
-                    }
-                    builder.arg(program);
-                    push_args(&mut builder, args);
-                    builder
-                }
-                None => {
-                    let mut builder = CommandBuilder::new(program);
-                    push_args(&mut builder, args);
-                    builder
-                }
-            }
-        };
-
-        // 脚本走 shell -c；命令直接执行
+        // 脚本走 shell -c；命令直接执行（沙箱由宿主透明封套决策，插件不感知）
         let mut command = if let Some(script) = request.script.as_deref() {
-            make_builder(default_shell(), vec!["-c".to_string(), script.to_string()])
+            let mut builder = CommandBuilder::new(default_shell());
+            builder.arg("-c");
+            builder.arg(script);
+            builder
         } else if request.cmd.is_empty() {
             // 登录 shell 启动（对齐原版终端与 Terminal.app 行为）：source
             // /etc/profile 与 ~/.zprofile 等，拿到用户真实 PATH；并设置
             // TERM 让 zsh/zle 以全功能终端运行（否则语法高亮/补全降级错乱）。
             let shell = default_shell();
-            let mut builder = make_builder(
-                shell.clone(),
-                login_shell_args(&shell)
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-            );
+            let mut builder = CommandBuilder::new(&shell);
+            for arg in login_shell_args(&shell) {
+                builder.arg(arg);
+            }
             builder.env("TERM", "xterm-256color");
             builder.env("COLORTERM", "truecolor");
             builder
         } else {
-            let mut builder = make_builder(request.cmd.clone(), request.args.clone());
+            let mut builder = CommandBuilder::new(&request.cmd);
             builder.env("TERM", "xterm-256color");
             builder
         };
+        for arg in &request.args {
+            command.arg(arg);
+        }
         // cwd 失效（目录被删等）不阻断会话创建：回退到继承进程工作目录
         if let Some(cwd) = request
             .cwd

@@ -7,7 +7,6 @@ use crate::{Ack, CommandAccessContext, CommandOperation};
 pub const RUN_COMMAND_OPERATION: &str = "command.run_command";
 pub const RUN_SHELL_OPERATION: &str = "command.run_shell";
 pub const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
-pub const TRUST_COMMAND_OPERATION: &str = "command.trust_command";
 
 /// 命令执行响应：保留与 core `ToolResult` 同构字段，便于 sidecar 直接构造。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -32,16 +31,6 @@ pub struct EscalatedRequest {
     /// 宿主签发的一次性升级审批票据；宿主转发层核验（无效即剥离声明）。
     #[serde(default)]
     pub token: String,
-}
-
-/// `trust_command` 请求：把命令登记进会话信任列表（本会话内免重复审批）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TrustCommandRequest {
-    /// 命令程序名（如 `docker`）。
-    pub command: String,
-    /// 用户批准依据，审计留痕。
-    #[serde(default)]
-    pub approval_note: String,
 }
 
 /// `run_command` 工具请求。
@@ -116,12 +105,5 @@ pub struct SetWorkspace;
 impl CommandOperation for SetWorkspace {
     const NAME: &'static str = SET_WORKSPACE_OPERATION;
     type Request = SetWorkspaceRequest;
-    type Response = Ack;
-}
-
-pub struct TrustCommand;
-impl CommandOperation for TrustCommand {
-    const NAME: &'static str = TRUST_COMMAND_OPERATION;
-    type Request = TrustCommandRequest;
     type Response = Ack;
 }

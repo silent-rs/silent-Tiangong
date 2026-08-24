@@ -121,6 +121,8 @@ pub struct SidecarConfig {
     pub server_token: Option<String>,
     /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
     pub sandbox: bool,
+    /// 沙箱可写根覆盖（一次性实例的会话工作区；None 用数据目录）。
+    pub sandbox_workspace: Option<PathBuf>,
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     pub sandbox_network: bool,
 }
@@ -151,6 +153,7 @@ impl SidecarConfig {
             server_url: None,
             server_token: None,
             sandbox: false,
+            sandbox_workspace: None,
             sandbox_network: false,
         }
     }
@@ -191,6 +194,12 @@ impl SidecarConfig {
     /// 沙箱内放行网络（fetch 等网络型插件；文件写白名单不受影响）。
     pub fn with_sandbox_network(mut self, allow: bool) -> Self {
         self.sandbox_network = allow;
+        self
+    }
+
+    /// 覆盖沙箱可写根（一次性实例按会话工作区构造策略）。
+    pub fn with_sandbox_workspace(mut self, workspace: Option<PathBuf>) -> Self {
+        self.sandbox_workspace = workspace;
         self
     }
 }
