@@ -389,7 +389,30 @@ sidecar 沙箱化迁移状态（2026-08-23 实施）：
 6. plugin creator 受限写桥接的命名空间与范围（`plugin-dev.*` 独立命名空间 vs
    扩展既有 fs 桥接）、开发目录固定为 `~/.tiangong/plugins-dev/` 还是允许项目内路径。
 
-## 15. 会话外验证项（无法在 macOS 开发环境完成）
+## 15. 透明执行封套修订（2026-08-24 架构评审）
+
+策略权威反转：sidecar 的沙箱与网络能力**不读插件 manifest**（插件自声明
+构成提权通道——伪造 `sandbox_network: true` 即可联网），由宿主权威决定：
+
+```text
+宿主策略表 ∩ 用户授权（信任通道） = 有效范围
+```
+
+- `host_policy` 模块：官方签名插件查内置策略表（fetch/mcp/scheduler/
+  generate-image-openai 联网；terminal/computer-use/screenshot-input/fs/
+  command/memory 为非沙箱特殊载体）；未签名插件一律保守默认（进沙箱断网）
+- manifest 的 `sandbox` / `sandbox_network` 降级为开发提示语义，
+  不参与安全决策；`transport` 保留为通信实现选择
+- 审批保持宿主截获语义：票据核验在 `invoke_sidecar` 转发层，
+  插件侧只接受已核验的审批标记
+
+演进路线（透明执行封套三阶段）：
+1. ✅ 宿主策略表 + 声明降权 + 禁止降级直跑（本阶段）
+2. 按调用选实例：宿主按 Tool Call 上下文从策略池选择沙箱实例
+   （常驻/一次性），危险调用走一次性 sidecar，删除协议中的票据字段
+3. 能力 Broker：文件/网络代理/Secret Broker 服务动态能力需求
+
+## 16. 会话外验证项（无法在 macOS 开发环境完成）
 
 1. **S6 Windows 受限令牌运行时行为**：CreateRestrictedToken(LUA_TOKEN) +
    CreateProcessAsUserW 的核心原语已实现（`sandbox/windows.rs`），但
@@ -401,7 +424,7 @@ sidecar 沙箱化迁移状态（2026-08-23 实施）：
    （可用性探测自动降级），`sandbox::tests` 中的真实拦截测试需在普通终端
    或 CI macOS/Linux 环境执行。
 
-## 16. 业界对标摘要
+## 17. 业界对标摘要
 
 | 产品 | 沙箱方案 | 本 RFC 借鉴点 |
 | --- | --- | --- |
