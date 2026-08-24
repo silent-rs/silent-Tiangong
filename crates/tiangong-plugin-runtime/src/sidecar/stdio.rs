@@ -463,43 +463,28 @@ fn child_status(process: &StdioProcess) -> String {
 /// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
 ///
 /// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
-/// 读端在父进程侧设置 FD_CLOEXEC，避免被无关子进程继承。
+/// 标准库管道两端在返回调用方前均已设置 FD_CLOEXEC，避免并发 spawn 继承
+/// 尚未关闭的写端，导致 Launcher 永远等不到策略 EOF。
 #[cfg(unix)]
-struct PolicyFdGuard(std::os::fd::OwnedFd);
+struct PolicyFdGuard(std::io::PipeReader);
 
 #[cfg(not(unix))]
 struct PolicyFdGuard;
 
 #[cfg(unix)]
 fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
 
-    let (read_fd, write_fd) = {
-        let mut fds = [0i32; 2];
-        // SAFETY: fds 为有效出参缓冲。
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("创建策略管道失败");
-        }
-        (fds[0], fds[1])
-    };
-    {
-        use std::io::Write;
-        let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
-        writer
-            .write_all(policy_json.as_bytes())
-            .and_then(|_| writer.flush())
-            .context("写入策略管道失败")?;
-    }
-    let guard = PolicyFdGuard(unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) });
+    let (read_fd, mut writer) = std::io::pipe().context("创建策略管道失败")?;
+    writer
+        .write_all(policy_json.as_bytes())
+        .and_then(|_| writer.flush())
+        .context("写入策略管道失败")?;
+    drop(writer);
+
+    let guard = PolicyFdGuard(read_fd);
     let raw_read = guard.0.as_raw_fd();
-    // 父进程侧读端设 CLOEXEC：本进程后续 spawn 的无关子进程不会继承它。
-    // SAFETY: fcntl 对有效 fd 的标准操作。
-    unsafe {
-        let flags = libc::fcntl(raw_read, libc::F_GETFD);
-        if flags >= 0 {
-            libc::fcntl(raw_read, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-        }
-    }
     // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
     // dup2 会清除目标 fd 的 CLOEXEC；原描述符恰好已经是 3 时则必须显式
     // 清除，否则并发 spawn 中拿到 fd3 的 Launcher 会在 exec 后读到 EBADF。
