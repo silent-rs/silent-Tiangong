@@ -1,4 +1,4 @@
-//! Launcher 版本管理（RFC 0017 §十 独立更新与回滚，第一阶段）。
+//! tiangong-sandbox 沙箱程序版本管理（RFC 0017 §十 独立更新与回滚，第一阶段）。
 //!
 //! 选择链（不能降级为无沙箱执行）：
 //! ```text
@@ -27,7 +27,7 @@ pub fn runtime_root(storage_root: &Path) -> PathBuf {
 ///
 /// 优先 active.json 指向的已安装版本；不存在或文件缺失时回退宿主同目录
 /// 的内置保底版；两者皆不可用返回 None（调用方必须拒绝沙箱任务）。
-pub fn resolve_launcher(storage_root: &Path) -> Option<PathBuf> {
+pub fn resolve_sandbox_binary(storage_root: &Path) -> Option<PathBuf> {
     // 1. active.json 指向的版本。
     if let Ok(active) = std::fs::read_to_string(runtime_root(storage_root).join("active.json"))
         && let Ok(active) = serde_json::from_str::<ActiveFile>(&active)
@@ -56,9 +56,9 @@ fn builtin_launcher() -> Option<PathBuf> {
 
 fn launcher_file_name() -> String {
     if std::env::consts::EXE_SUFFIX.is_empty() {
-        "tiangong-sandbox-launcher".to_string()
+        "tiangong-sandbox".to_string()
     } else {
-        format!("tiangong-sandbox-launcher{}", std::env::consts::EXE_SUFFIX)
+        format!("tiangong-sandbox{}", std::env::consts::EXE_SUFFIX)
     }
 }
 
@@ -76,7 +76,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // 无 active.json 且宿主同目录无内置（测试二进制目录）→ None（拒绝执行）。
         // 注：若测试环境恰好存在同名文件则返回 Some，两种结果都符合选择链语义。
-        if let Some(path) = resolve_launcher(root.path()) {
+        if let Some(path) = resolve_sandbox_binary(root.path()) {
             assert!(path.is_file());
         }
     }
@@ -93,6 +93,6 @@ mod tests {
             r#"{"version": "9.9.9"}"#,
         )
         .unwrap();
-        assert_eq!(resolve_launcher(root.path()), Some(launcher));
+        assert_eq!(resolve_sandbox_binary(root.path()), Some(launcher));
     }
 }

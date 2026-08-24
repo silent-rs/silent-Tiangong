@@ -11467,19 +11467,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-sandbox-launcher"
-version = "0.15.1"
-dependencies = [
- "anyhow",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tiangong-sandbox",
- "tracing",
-]
-
-[[package]]
 name = "tiangong-scheduler"
 version = "0.15.1"
 dependencies = [

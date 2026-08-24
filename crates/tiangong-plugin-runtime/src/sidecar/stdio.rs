@@ -161,10 +161,10 @@ impl StdioSidecarConnection {
             .with_context(|| format!("打开 sidecar 日志失败: {}", self.config.log.display()))?;
 
         let token = scru128::new().to_string();
-        // OS 沙箱（RFC 0017 独立 Launcher 方案）：声明沙箱的 sidecar 一律经
-        // 官方 Launcher 启动——策略经 fd3 继承管道传入（双版本化），
-        // Launcher 校验并应用平台沙箱后 exec 目标进程；stdin/stdout 业务
-        // 通信透传。Launcher 不可用即 fail-closed（拒绝启动，不静默降级）。
+        // OS 沙箱（RFC 0017 官方沙箱程序）：声明沙箱的 sidecar 一律经
+        // tiangong-sandbox 可执行文件启动——策略经 fd3 继承管道传入
+        // （双版本化），沙箱程序校验并应用平台沙箱后 exec 目标进程；
+        // stdin/stdout 业务通信透传。不可用即 fail-closed（拒绝启动）。
         let launch_policy = if self.config.sandbox {
             let workspace = self
                 .config
@@ -179,14 +179,16 @@ impl StdioSidecarConnection {
         };
         let mut command = match &launch_policy {
             Some(policy) => {
-                let launcher =
-                    tiangong_sandbox::launcher_manager::resolve_launcher(&self.config.storage_root)
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "插件 {} 声明沙箱但 Launcher 不可用（active/内置均缺失），拒绝启动",
-                                self.config.plugin_id
-                            )
-                        })?;
+                let sandbox_bin =
+                    tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
+                        &self.config.storage_root,
+                    )
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "插件 {} 声明沙箱但 tiangong-sandbox 程序不可用（active/内置均缺失），拒绝启动",
+                            self.config.plugin_id
+                        )
+                    })?;
                 let request = serde_json::json!({
                     "protocol_version": 1,
                     "policy_schema": 1,
@@ -194,7 +196,7 @@ impl StdioSidecarConnection {
                     "program": self.config.binary.display().to_string(),
                     "args": [],
                 });
-                let mut command = Command::new(launcher);
+                let mut command = Command::new(sandbox_bin);
                 prepare_policy_fd(&mut command, request.to_string())?;
                 command
             }
@@ -356,8 +358,8 @@ impl StdioSidecarConnection {
     }
 }
 
-/// 为 Launcher 准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
-/// 策略写完后立即关闭写端（Launcher 读取到 EOF）；子进程不继承写端。
+/// 为沙箱程序准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
+/// 策略写完后立即关闭写端（读取到 EOF 即策略完整）；子进程不继承写端。
 fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -369,7 +371,6 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
         }
         (fds[0], fds[1])
     };
-    // 立即写入策略并关闭写端：Launcher 侧读到 EOF 即策略完整。
     {
         use std::io::Write;
         let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
@@ -380,7 +381,7 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
     }
     let read_fd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
     let raw_read = read_fd_owned.as_raw_fd();
-    // pre_exec（fork 后、exec 前）把读端复制到 fd3 并关闭原描述符。
+    // pre_exec（fork 后、exec 前）把读端复制到 fd3。
     // SAFETY: dup2 语义；pre_exec 限制内仅调用异步信号安全函数。
     #[cfg(unix)]
     unsafe {
@@ -395,9 +396,8 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = raw_read;
-        bail!("Launcher fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
+        bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
     }
-    // command 持有 read_fd_owned（存活到 spawn 完成）。
     std::mem::forget(read_fd_owned);
     Ok(())
 }

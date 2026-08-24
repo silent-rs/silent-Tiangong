@@ -56,7 +56,7 @@ fn main() {
     if let Err(error) = result {
         // 结构化拒绝信息：宿主与审计可解析，绝不静默放行。
         let payload = serde_json::json!({
-            "launcher": "tiangong-sandbox-launcher",
+            "launcher": "tiangong-sandbox",
             "product_version": env!("CARGO_PKG_VERSION"),
             "error": format!("{error:#}"),
         });
