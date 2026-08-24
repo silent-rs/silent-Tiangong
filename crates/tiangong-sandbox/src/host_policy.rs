@@ -42,15 +42,17 @@ const OFFICIAL_NETWORKED: &[&str] = &[
     "generate-image-openai", // 直连 OpenAI 兼容端点
 ];
 
-/// 不进沙箱的官方特殊载体（依赖平台 API 或自身即沙箱载体）。
-const OFFICIAL_UNSANDBOXED: &[&str] = &[
-    "terminal",         // PTY 交互载体，独立沙箱开关
-    "computer-use",     // 系统 UIA/AX/AT-SPI 自动化
-    "screenshot-input", // 平台截图 API
-    "fs",               // 动态路径，待 invoke 层检查配套（RFC D12）
-    "command",          // 命令级沙箱载体，避免双层沙箱冲突
-    "memory",           // recall 流式依赖 TCP 连接对象，stdio 适配待改造
-];
+/// 不进沙箱的官方特殊载体。
+///
+/// 区分两类（审查修订）：
+/// - 平台能力载体：terminal（用户交互 PTY）、computer-use（UIA/AX）、
+///   screenshot-input（截图 API）——合法的系统访问需求；
+/// - 过渡期待适配：fs（动态路径，待 invoke 层检查）、memory（recall 流式
+///   依赖 TCP 连接对象）——"暂未适配"不等于永久豁免，宿主启动时审计告警。
+///
+/// command 不在此列：其执行操作走宿主一次性沙箱实例（透明执行封套）。
+const OFFICIAL_PLATFORM_CARRIERS: &[&str] = &["terminal", "computer-use", "screenshot-input"];
+const OFFICIAL_PENDING_SANDBOX: &[&str] = &["fs", "memory"];
 
 /// 解析插件的宿主执行策略。
 ///
@@ -60,7 +62,17 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     if !official_signed {
         return conservative_default();
     }
-    if OFFICIAL_UNSANDBOXED.contains(&plugin_id) {
+    if OFFICIAL_PLATFORM_CARRIERS.contains(&plugin_id) {
+        return HostExecutionPolicy {
+            sandbox: false,
+            allow_network: false,
+        };
+    }
+    if OFFICIAL_PENDING_SANDBOX.contains(&plugin_id) {
+        tracing::warn!(
+            plugin_id,
+            "官方插件以过渡期无沙箱方式运行（待沙箱适配），宿主审计记录"
+        );
         return HostExecutionPolicy {
             sandbox: false,
             allow_network: false,
@@ -75,7 +87,10 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
 /// 策略表快照（审计与测试用）。
 pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
     let mut out = BTreeMap::new();
-    for id in OFFICIAL_UNSANDBOXED {
+    for id in OFFICIAL_PLATFORM_CARRIERS
+        .iter()
+        .chain(OFFICIAL_PENDING_SANDBOX)
+    {
         out.insert(
             (*id).to_string(),
             HostExecutionPolicy {
@@ -127,9 +142,12 @@ mod tests {
 
     #[test]
     fn special_carriers_stay_unsandboxed() {
-        for id in ["terminal", "fs", "command", "computer-use"] {
+        // 平台能力载体与过渡期待适配者不套沙箱；command 走一次性实例沙箱，
+        // 常驻路径同样按沙箱处理。
+        for id in ["terminal", "fs", "memory", "computer-use"] {
             let policy = resolve(id, true);
             assert!(!policy.sandbox, "{id} 应保持非沙箱载体");
         }
+        assert!(resolve("command", true).sandbox);
     }
 }

@@ -721,26 +721,59 @@ pub fn verify_local_trust_target(
     Ok(())
 }
 
-/// 一次性 command sidecar 路由（透明执行封套第一阶段）：
-/// 预分类 → 票据核验 → 按会话工作区构造策略 → 沙箱/全权实例执行 →
-/// 违规提示附加。插件侧无任何沙箱逻辑，协议原样透传。
+/// 一次性 command sidecar 路由（透明执行封套）：
+/// 权威工作区解析 → 票据匹配 → 预分类 → 沙箱/全权实例 → set_workspace
+/// 初始化 → 原样执行 → 违规提示。插件零感知，协议原样透传。
+///
+/// 安全决策全部宿主侧：
+/// - 沙箱恒开（唯一例外：用户批准的完整命令文本经票据匹配命中）；
+/// - `full_trust` 等请求字段只影响 sidecar 内部白名单校验的宽松度
+///   （审批语义），不参与沙箱决策；
+/// - 工作区以 core 登记的权威集合为准，请求 `cwd` 仅作候选并校验。
+#[allow(clippy::too_many_lines)]
 fn invoke_command_ephemeral(
     storage_root: &Path,
     installed: &InstalledPlugin,
     operation: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    use tiangong_sandbox::escalation::verify_and_strip_escalation;
+    // 完整命令文本（票据匹配与预分类共用）。
+    let full_command = match operation {
+        "command.run_shell" => payload
+            .get("script")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => {
+            let cmd = payload
+                .get("cmd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let args = payload
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            if args.is_empty() {
+                cmd
+            } else {
+                format!("{cmd} {args}")
+            }
+        }
+    };
 
-    let (payload, escalation_granted) = verify_and_strip_escalation(operation, payload);
-    let full_trust = payload
-        .get("access")
-        .and_then(|access| access.get("full_trust"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let full_access = escalation_granted || full_trust;
+    // 全权判定：仅用户批准的完整命令文本经票据匹配（一次性消费）。
+    let full_access =
+        tiangong_sandbox::EscalationBroker::consume_by_command(operation, &full_command);
 
-    // 预分类：非全权时拒绝已知高危命令（引导走审批通道）。
+    // 预分类：非全权时拒绝已知高危命令（引导走用户批准通道）。
     if !full_access {
         let dangerous = match operation {
             "command.run_shell" => payload
@@ -772,20 +805,24 @@ fn invoke_command_ephemeral(
         };
         if dangerous {
             bail!(
-                "命令被宿主预分类器判定为高危，未执行。如确需执行，请先调用                  request_user（kind: approval）获得用户批准，再经界面批准的升级                  票据以全权方式执行。"
+                "命令被宿主预分类器判定为高危，未执行：{full_command}。\n\
+如确需执行，请引导用户在宿主界面批准该完整命令（批准后重试同一命令即可全权执行）。"
             );
         }
     }
 
-    // 会话工作区（策略可写根）：请求自带，插件无需感知。
+    // 权威工作区：请求的 cwd 仅作候选，canonicalize 后必须位于 core 登记
+    // 的权威集合内；不合法则回退插件数据目录（命令可写范围受限）。
+    let fallback_workspace = installed.directory.join("data");
     let workspace = payload
         .get("access")
         .and_then(|access| access.get("workspace"))
         .or_else(|| payload.get("cwd"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && Path::new(value).is_dir())
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| installed.directory.join("data"));
+        .filter(|candidate| tiangong_core::workspace_registry::is_authoritative(candidate))
+        .unwrap_or(fallback_workspace);
 
     let sidecar = installed
         .manifest
@@ -818,15 +855,40 @@ fn invoke_command_ephemeral(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
-    // 全权实例不套沙箱（用户已批准的通道）；其余按会话工作区沙箱执行，
+    // 沙箱恒开（唯一例外：用户批准命中的全权实例）；
     // 平台沙箱不可用时 spawn 显式失败（不静默降级裸奔）。
     .with_sandbox(!full_access)
-    .with_sandbox_workspace(if full_access { None } else { Some(workspace) });
+    .with_sandbox_workspace(if full_access {
+        None
+    } else {
+        Some(workspace.clone())
+    });
 
     let connection = StdioSidecarConnection::new(config);
-    let payload_text = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
-    let invoke_result = connection.invoke(operation, &payload_text);
-    let response_text = match invoke_result {
+    // 一次性实例必须先初始化会话工作区，否则 sidecar 拒绝执行。
+    // full_trust 仅保留其审批语义（sidecar 内部白名单校验宽松度），
+    // 不影响沙箱决策。
+    let sidecar_full_trust = payload
+        .get("access")
+        .and_then(|access| access.get("full_trust"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let init = serde_json::json!({
+        "workspace": workspace.display().to_string(),
+        "full_trust": sidecar_full_trust,
+        "allowed_commands": [],
+    });
+    let response_result = (|| -> Result<String> {
+        connection.invoke(
+            "command.set_workspace",
+            &serde_json::to_string(&init).context("序列化 set_workspace 失败")?,
+        )?;
+        connection.invoke(
+            operation,
+            &serde_json::to_string(&payload).context("序列化插件请求失败")?,
+        )
+    })();
+    let response_text = match response_result {
         Ok(text) => text,
         Err(error) => {
             let _ = connection.stop();
