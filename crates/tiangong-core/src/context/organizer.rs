@@ -13,6 +13,8 @@ impl ContextOrganizer {
     const SAFETY_MARGIN_DIVISOR: usize = 100;
     const MIN_SAFETY_MARGIN_TOKENS: usize = 4_096;
     pub const MIN_COMPRESSION_OUTPUT_TOKENS: usize = 2_048;
+    /// 默认压缩触发比例：上下文窗口的 70%。
+    const DEFAULT_TRIGGER_PERCENT: usize = 70;
 
     pub fn new(context_limit: usize) -> Self {
         Self {
@@ -48,12 +50,20 @@ impl ContextOrganizer {
             .saturating_sub(self.safety_margin_tokens())
     }
 
-    /// 压缩阈值（token 数）
+    /// 压缩阈值（token 数）。
+    ///
+    /// 默认在上下文窗口的 70% 处触发；用户覆盖值与默认值都不能突破派生的安全上限。
     pub fn token_threshold(&self) -> usize {
-        self.requested_threshold.map_or_else(
-            || self.safe_threshold(),
-            |requested| requested.min(self.safe_threshold()),
-        )
+        self.requested_threshold
+            .unwrap_or_else(|| self.default_trigger_tokens())
+            .min(self.safe_threshold())
+    }
+
+    /// 默认触发点：上下文窗口的 70%。
+    fn default_trigger_tokens(&self) -> usize {
+        self.context_limit
+            .saturating_mul(Self::DEFAULT_TRIGGER_PERCENT)
+            / 100
     }
 
     /// 基于 API 返回的输入与输出总量判断是否需要压缩。
@@ -92,7 +102,7 @@ mod tests {
 
         assert_eq!(organizer.target_output_tokens(), 10_000);
         assert_eq!(organizer.safety_margin_tokens(), 4_096);
-        assert_eq!(organizer.token_threshold(), 185_904);
+        assert_eq!(organizer.token_threshold(), 140_000);
     }
 
     #[test]
@@ -101,7 +111,7 @@ mod tests {
 
         assert_eq!(organizer.target_output_tokens(), 50_000);
         assert_eq!(organizer.safety_margin_tokens(), 10_000);
-        assert_eq!(organizer.token_threshold(), 940_000);
+        assert_eq!(organizer.token_threshold(), 700_000);
         assert_eq!(organizer.compression_output_budget(950_000), Some(40_000));
     }
 
@@ -111,7 +121,7 @@ mod tests {
 
         assert_eq!(organizer.target_output_tokens(), 100_000);
         assert_eq!(organizer.safety_margin_tokens(), 20_000);
-        assert_eq!(organizer.token_threshold(), 1_880_000);
+        assert_eq!(organizer.token_threshold(), 1_400_000);
     }
 
     #[test]
