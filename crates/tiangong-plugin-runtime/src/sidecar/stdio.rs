@@ -459,8 +459,8 @@ fn child_status(process: &StdioProcess) -> String {
     }
 }
 
-/// 为沙箱程序准备策略描述符：匿名管道写端写入策略后立即关闭（读取到
-/// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
+/// 为沙箱程序准备策略描述符：匿名管道写端写入长度前缀和策略正文后立即
+/// 关闭；读端经 pre_exec 复制到 fd3 并关闭原描述符。
 ///
 /// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
 /// 标准库管道两端在返回调用方前均已设置 FD_CLOEXEC，避免并发 spawn 继承
@@ -476,9 +476,19 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
     use std::io::Write;
     use std::os::fd::AsRawFd;
 
+    let policy_bytes = policy_json.as_bytes();
+    if policy_bytes.len() > tiangong_sandbox::MAX_POLICY_FRAME_BYTES {
+        bail!(
+            "Launcher 策略超过长度上限: actual={}, max={}",
+            policy_bytes.len(),
+            tiangong_sandbox::MAX_POLICY_FRAME_BYTES
+        );
+    }
+    let length = u32::try_from(policy_bytes.len()).context("Launcher 策略长度无法编码")?;
     let (read_fd, mut writer) = std::io::pipe().context("创建策略管道失败")?;
     writer
-        .write_all(policy_json.as_bytes())
+        .write_all(&length.to_be_bytes())
+        .and_then(|_| writer.write_all(policy_bytes))
         .and_then(|_| writer.flush())
         .context("写入策略管道失败")?;
     drop(writer);
