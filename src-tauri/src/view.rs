@@ -31,7 +31,10 @@ impl TokenStatsView {
         let usage = core_session.total_usage();
         Self {
             current_tokens: core_session.current_tokens,
-            compression_threshold_tokens: context_limit_tokens.saturating_mul(95) / 100,
+            compression_threshold_tokens: tiangong_core::context::organizer::ContextOrganizer::new(
+                context_limit_tokens,
+            )
+            .token_threshold(),
             context_limit_tokens,
             total_prompt_tokens: usage.prompt_tokens,
             total_completion_tokens: usage.completion_tokens,
