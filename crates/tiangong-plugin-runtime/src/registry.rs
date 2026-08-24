@@ -17,7 +17,9 @@ use crate::loader::{
     instantiate_component,
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
-use crate::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
+use crate::sidecar::{
+    EphemeralCommandConnection, SidecarConfig, SidecarConnection, StdioSidecarConnection,
+};
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
@@ -685,129 +687,6 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 }
 
 /// 通过插件 ID 调用其 sidecar，入口不需要了解制品位置或传输协议。
-/// 一次性 command sidecar 路由（透明执行封套，任务边界收敛版）：
-/// 权威工作区解析 → 沙箱实例（恒开）→ set_workspace 初始化 → 原样执行 →
-/// 违规提示。无沙箱重试闭环（审批升级）拆分至 feature/sandbox-escalation：
-/// 沙箱拒绝即返回结构化错误，由调用方引导用户。
-#[allow(clippy::too_many_lines)]
-fn invoke_command_ephemeral(
-    storage_root: &Path,
-    installed: &InstalledPlugin,
-    operation: &str,
-    payload: serde_json::Value,
-) -> Result<serde_json::Value> {
-    // 权威工作区：请求的 cwd 仅作候选，canonicalize 后必须位于 core 登记
-    // 的活跃工作区内；不合法则回退插件数据目录（命令可写范围受限）。
-    let fallback_workspace = installed.directory.join("data");
-    let workspace = payload
-        .get("access")
-        .and_then(|access| access.get("workspace"))
-        .or_else(|| payload.get("cwd"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|candidate| tiangong_core::workspace_registry::is_authoritative(candidate))
-        .unwrap_or(fallback_workspace);
-
-    let sidecar = installed
-        .manifest
-        .sidecar
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
-    let mut binary = installed.directory.join(&sidecar.binary);
-    if !std::env::consts::EXE_SUFFIX.is_empty() {
-        let file_name = binary
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow::anyhow!("sidecar 文件名无效"))?;
-        if !file_name.ends_with(std::env::consts::EXE_SUFFIX) {
-            binary.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
-        }
-    }
-    // 每次执行专用临时目录（策略可写根，不放开全局 temp）。
-    let base = installed
-        .directory
-        .join(format!("ephemeral-{}", scru128::new()));
-    std::fs::create_dir_all(base.join("tmp"))
-        .with_context(|| format!("创建专用临时目录失败：{}", base.join("tmp").display()))?;
-    let exec_tmp = base.join("tmp");
-    let config = SidecarConfig::new(
-        &installed.manifest.id,
-        &installed.manifest.version,
-        binary,
-        base.join("endpoint.json"),
-        base.join("sidecar.log"),
-        base.join("data"),
-        storage_root.to_path_buf(),
-    )
-    .with_timeouts(
-        Duration::from_millis(sidecar.startup_timeout_ms),
-        Duration::from_millis(sidecar.request_timeout_ms),
-    )
-    // 沙箱恒开；平台不可用时 spawn 显式失败（不静默降级裸奔）。
-    .with_sandbox(true)
-    .with_sandbox_workspace(Some(workspace.clone()))
-    .with_sandbox_extra_writable(vec![exec_tmp]);
-
-    let connection = StdioSidecarConnection::new(config);
-    // 一次性实例必须先初始化会话工作区，否则 sidecar 拒绝执行。
-    // full_trust 仅保留审批语义（sidecar 内部白名单校验宽松度），
-    // 不影响沙箱决策。
-    let sidecar_full_trust = payload
-        .get("access")
-        .and_then(|access| access.get("full_trust"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let init = serde_json::json!({
-        "workspace": workspace.display().to_string(),
-        "full_trust": sidecar_full_trust,
-        "allowed_commands": [],
-    });
-    let response_result = (|| -> Result<String> {
-        connection.invoke(
-            "command.set_workspace",
-            &serde_json::to_string(&init).context("序列化 set_workspace 失败")?,
-        )?;
-        connection.invoke(
-            operation,
-            &serde_json::to_string(&payload).context("序列化插件请求失败")?,
-        )
-    })();
-    let response_text = match response_result {
-        Ok(text) => text,
-        Err(error) => {
-            let _ = connection.stop();
-            let _ = std::fs::remove_dir_all(&base);
-            return Err(error);
-        }
-    };
-    let _ = connection.stop();
-    let _ = std::fs::remove_dir_all(&base);
-
-    let mut response: serde_json::Value =
-        serde_json::from_str(&response_text).with_context(|| "解析插件响应失败")?;
-    // 沙箱违规归因提示（对模型透明，Agent 可自主改写法或求助用户）。
-    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
-        && let Some(hint) = response
-            .get("stderr")
-            .and_then(serde_json::Value::as_str)
-            .and_then(tiangong_sandbox::explain_violation)
-    {
-        let annotated = response
-            .get("stderr")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if let Some(map) = response.as_object_mut() {
-            map.insert(
-                "stderr".to_string(),
-                serde_json::Value::String(format!("{annotated}\n[沙箱提示] {hint}")),
-            );
-        }
-    }
-    Ok(response)
-}
-
 pub fn invoke_sidecar(
     storage_root: &Path,
     plugin_id: &str,
@@ -817,11 +696,6 @@ pub fn invoke_sidecar(
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
-    }
-    // 命令执行操作走一次性沙箱实例（透明执行封套）：宿主按请求自带的
-    // 会话工作区构造策略，每次调用启动独立 command sidecar，插件零感知。
-    if plugin_id == "command" && matches!(operation, "command.run_command" | "command.run_shell") {
-        return invoke_command_ephemeral(storage_root, &installed, operation, payload);
     }
     let connection = sidecar_connection(storage_root, &installed, false)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
@@ -2496,8 +2370,7 @@ fn sidecar_connection(
         .sidecar
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
-    // 启动门槛（任务边界收敛版）：仅官方签名可启动原生 sidecar；
-    // L3/L4 信任放行拆分至 feature/plugin-trust-model 分支。
+    // 当前启动门槛：只有官方签名插件可启动原生 sidecar。
     let signed_release = installed.signed_release.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "未签名插件 {} 不允许启动原生 sidecar",
@@ -2515,9 +2388,8 @@ fn sidecar_connection(
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
     }
-    // 沙箱策略由宿主权威策略表决定（RFC 0017 透明执行封套）：
-    // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
-    let host_policy = tiangong_sandbox::host_policy::resolve(&installed.manifest.id, true);
+    // 当前分支只改变 command；其它已签名 sidecar 保持原有 TCP 路径。
+    let host_policy = tiangong_sandbox::host_policy::resolve(&installed.manifest.id);
 
     let mut binary = installed.directory.join(&sidecar.binary);
     if !std::env::consts::EXE_SUFFIX.is_empty() {
@@ -2555,6 +2427,7 @@ fn sidecar_connection(
     )
     .with_server_endpoint(server_url, server_token)
     .with_sandbox(host_policy.sandbox)
+    .with_sandbox_program_root(Some(installed.directory.clone()))
     .with_sandbox_network(host_policy.allow_network);
 
     let mut connections = sidecar_connections()
@@ -2563,12 +2436,13 @@ fn sidecar_connection(
     if refresh || !connections.contains_key(&installed.directory) {
         // 通信通道由宿主策略表权威决定（插件不声明）：spawn 时注入的
         // 环境变量即通道选择，sidecar 通用库自动适配。
-        let connection: Arc<dyn SidecarConnection> =
-            if host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio {
-                Arc::new(StdioSidecarConnection::new(config))
-            } else {
-                Arc::new(crate::sidecar::ProcessSidecarConnection::new(config))
-            };
+        let connection: Arc<dyn SidecarConnection> = if installed.manifest.id == "command" {
+            Arc::new(EphemeralCommandConnection::new(config))
+        } else if host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio {
+            Arc::new(StdioSidecarConnection::new(config))
+        } else {
+            Arc::new(crate::sidecar::ProcessSidecarConnection::new(config))
+        };
         connections.insert(installed.directory.clone(), connection);
     }
     connections

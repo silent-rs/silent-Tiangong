@@ -16,7 +16,7 @@ pub fn seatbelt_available() -> bool {
         return false;
     }
     // 一次性真实探测：宿主环境若已在 Seatbelt 沙箱内（嵌套终端/受限 CI 外壳），
-    // sandbox-exec 无法再次应用沙箱——按平台不可用降级（快照层兜底）。
+    // sandbox-exec 无法再次应用沙箱——明确报告平台能力不可用。
     static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PROBE.get_or_init(|| {
         std::process::Command::new(SEATBELT_BIN)
@@ -46,7 +46,7 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
         let _ = writeln!(sbpl, "(allow file-write* (subpath \"{}\"))", escape(root));
     }
     // 防篡改段：写在 allow 之后才能重新锁死（后规则覆盖先规则）。
-    for path in policy.protected_paths() {
+    for path in policy.read_only_roots() {
         let _ = writeln!(sbpl, "(deny file-write* (subpath \"{}\"))", escape(&path));
     }
     if !policy.allow_network {
@@ -57,11 +57,7 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
 
 /// 构造 sandbox-exec 的 argv 前缀（不含被包装命令本身）。
 pub fn wrap_argv(policy: &SandboxPolicy) -> Vec<String> {
-    vec![
-        SEATBELT_BIN.to_string(),
-        "-p".to_string(),
-        compile_profile(policy),
-    ]
+    vec!["-p".to_string(), compile_profile(policy)]
 }
 
 fn escape(path: &Path) -> String {
@@ -77,7 +73,8 @@ mod tests {
 
     #[test]
     fn profile_denies_write_outside_roots_and_network() {
-        let policy = SandboxPolicy::workspace_write("/tmp/ws");
+        let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
+        policy.protected_paths = vec!["/tmp/ws/protected".into()];
         let sbpl = compile_profile(&policy);
         assert!(sbpl.contains("(deny file-write*)"));
         assert!(sbpl.contains("(deny network*)"));
@@ -86,8 +83,10 @@ mod tests {
         let ws_allow = sbpl
             .find("(allow file-write* (subpath \"/tmp/ws\"))")
             .unwrap();
-        let tiangong_deny = sbpl.find(".tiangong").unwrap();
-        assert!(tiangong_deny > ws_allow);
+        let protected_deny = sbpl
+            .find("(deny file-write* (subpath \"/tmp/ws/protected\"))")
+            .unwrap();
+        assert!(protected_deny > ws_allow);
     }
 
     #[test]
@@ -100,11 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn wrap_argv_leads_with_sandbox_exec() {
+    fn wrap_argv_contains_only_launcher_arguments() {
         let policy = SandboxPolicy::workspace_write("/tmp/ws");
         let argv = wrap_argv(&policy);
-        assert_eq!(argv[0], "/usr/bin/sandbox-exec");
-        assert_eq!(argv[1], "-p");
-        assert!(argv[2].contains("(version 1)"));
+        assert_eq!(argv[0], "-p");
+        assert!(argv[1].contains("(version 1)"));
+        assert!(!argv.iter().any(|arg| arg == SEATBELT_BIN));
     }
 }

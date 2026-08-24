@@ -17,6 +17,7 @@ use crate::bindings::exports::tiangong::plugin::plugin::{PluginError, ToolCall a
 use crate::config::PluginRuntimeConfig;
 use crate::host_state::HostState;
 use crate::sidecar::SidecarConnection;
+use crate::sidecar::SidecarInvocationContext;
 
 static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
 static SHARED_LINKER: OnceLock<Arc<Linker<HostState>>> = OnceLock::new();
@@ -221,6 +222,26 @@ impl WasmPlugin {
 
     /// 在施加资源限制的前提下处理一次工具调用。
     pub fn handle_tool(&mut self, call: ToolCall, limits: &PluginRuntimeConfig) -> Result<Outcome> {
+        self.handle_tool_inner(call, limits, None)
+    }
+
+    /// 使用宿主权威调用上下文处理工具调用。Core 的实际执行路径使用此入口；
+    /// 直接调用旧入口时不会向 sidecar 提供工作区权限。
+    pub fn handle_tool_with_context(
+        &mut self,
+        call: ToolCall,
+        limits: &PluginRuntimeConfig,
+        invocation_context: SidecarInvocationContext,
+    ) -> Result<Outcome> {
+        self.handle_tool_inner(call, limits, Some(invocation_context))
+    }
+
+    fn handle_tool_inner(
+        &mut self,
+        call: ToolCall,
+        limits: &PluginRuntimeConfig,
+        invocation_context: Option<SidecarInvocationContext>,
+    ) -> Result<Outcome> {
         // 单次调用前重置 fuel 与 epoch deadline。
         // set_fuel 仅在未开启 consume_fuel 时返回 Err，配置已开启，安全忽略。
         let _ = self.store.set_fuel(limits.fuel_limit);
@@ -232,7 +253,10 @@ impl WasmPlugin {
             arguments: call.arguments,
         };
 
-        match self
+        self.store
+            .data_mut()
+            .set_invocation_context(invocation_context);
+        let result = match self
             .instance
             .tiangong_plugin_plugin()
             .call_handle_tool(&mut self.store, &wit_call)
@@ -254,7 +278,9 @@ impl WasmPlugin {
             }),
             Ok(Err(e)) => Err(plugin_err(e)),
             Err(e) => Err(anyhow::anyhow!("handle-tool 调用失败: {e}")),
-        }
+        };
+        self.store.data_mut().set_invocation_context(None);
+        result
     }
 
     /// 关闭插件。

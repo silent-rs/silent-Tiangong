@@ -2,10 +2,13 @@
 //!
 //! 本模块只处理进程、endpoint、鉴权和 JSON Lines 传输，不理解插件业务协议。
 //! TCP 与 stdio 两种传输并存：TCP 为存量默认，stdio 为沙箱友好的新传输
-//! （RFC 0017 D16），由 manifest `sidecar.transport` 选择。
+//! （RFC 0017 D16）。当前只有 command 由宿主策略强制使用 stdio，插件清单
+//! 不参与通信通道或沙箱权限决策。
 
+pub mod command;
 pub mod stdio;
 
+pub use command::EphemeralCommandConnection;
 pub use stdio::{StdioSidecarConnection, TRANSPORT_STDIO};
 
 use std::fs::OpenOptions;
@@ -38,6 +41,17 @@ pub const EXEC_ENV_JSON_ENV: &str = "TIANGONG_EXEC_ENV_JSON";
 pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 /// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
 pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
+
+/// 宿主在单次工具调用边界确定的权威上下文。
+///
+/// 该上下文不经过插件协议，也不从工具参数推导；command 沙箱只使用这里的
+/// 工作区构造策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarInvocationContext {
+    pub session_id: String,
+    pub invocation_id: String,
+    pub authoritative_workspace: PathBuf,
+}
 
 #[derive(Debug)]
 pub enum SidecarInvokeError {
@@ -76,11 +90,39 @@ pub trait SidecarConnection: Send + Sync {
         self.invoke(operation, payload)
     }
 
+    /// 带宿主权威调用上下文的请求。普通 sidecar 忽略上下文；command 的
+    /// 一次性连接覆写本方法，并拒绝缺少上下文的执行请求。
+    fn invoke_with_context(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &SidecarInvocationContext,
+    ) -> Result<String> {
+        let _ = context;
+        self.invoke(operation, payload)
+    }
+
+    fn invoke_with_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &SidecarInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        let _ = context;
+        self.invoke_with_progress(operation, payload, on_progress)
+    }
+
     /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
     fn update_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
 
     /// 停止 sidecar 进程（宿主关闭流程调用）。默认空实现（无进程的连接）。
     fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 终止指定会话仍在执行的临时 sidecar。常驻 sidecar 默认无需处理。
+    fn cancel_session(&self, _session_id: &str) -> Result<()> {
         Ok(())
     }
 
@@ -125,6 +167,10 @@ pub struct SidecarConfig {
     pub sandbox_workspace: Option<PathBuf>,
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     pub sandbox_extra_writable: Vec<PathBuf>,
+    /// 沙箱内进程使用的专用临时目录。
+    pub sandbox_temp_dir: Option<PathBuf>,
+    /// Launcher 允许启动目标程序的插件权威目录。
+    pub sandbox_program_root: Option<PathBuf>,
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     pub sandbox_network: bool,
 }
@@ -157,6 +203,8 @@ impl SidecarConfig {
             sandbox: false,
             sandbox_workspace: None,
             sandbox_extra_writable: Vec::new(),
+            sandbox_temp_dir: None,
+            sandbox_program_root: None,
             sandbox_network: false,
         }
     }
@@ -209,6 +257,18 @@ impl SidecarConfig {
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     pub fn with_sandbox_extra_writable(mut self, extra: Vec<PathBuf>) -> Self {
         self.sandbox_extra_writable = extra;
+        self
+    }
+
+    /// 设置本次沙箱进程的临时目录；调用方还需将其父级或自身加入可写根。
+    pub fn with_sandbox_temp_dir(mut self, temp_dir: Option<PathBuf>) -> Self {
+        self.sandbox_temp_dir = temp_dir;
+        self
+    }
+
+    /// 设置 Launcher 可接受的目标程序根目录。
+    pub fn with_sandbox_program_root(mut self, root: Option<PathBuf>) -> Self {
+        self.sandbox_program_root = root;
         self
     }
 }

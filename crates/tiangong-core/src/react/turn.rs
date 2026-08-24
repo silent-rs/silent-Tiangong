@@ -40,8 +40,6 @@ pub(crate) async fn run_turn(
 
     // ── 启动插件生命周期 ──
     // 插件看到的是已包含本轮用户消息的完整 Session。
-    // turn 开始即刷新活跃工作区（沙箱权威校验依据，RFC 0017）。
-    crate::workspace_registry::register(std::path::Path::new(&ctx.session.cwd));
     for plugin in &ctx.plugins {
         plugin.on_turn_started(&mut ctx.session, turn_start_idx);
     }

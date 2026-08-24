@@ -1,19 +1,7 @@
-//! 宿主权威执行策略表（RFC 0017 审查修订：透明执行封套）。
+//! command 通道的宿主权威执行策略。
 //!
-//! 策略权威反转：sidecar 的沙箱与网络能力**不读插件 manifest**（插件自声明
-//! 构成提权通道），由宿主按插件身份查表——
-//!
-//! ```text
-//! 宿主策略表 ∩ 用户授权（信任通道） = 有效范围
-//! ```
-//!
-//! 优先级：
-//! 1. 官方签名插件的宿主策略表（内置，随天工发行）
-//! 2. 未签名插件：保守默认（数据目录可写、断网），可被 L3/L4 信任授权
-//!    收紧或后续经用户授权扩展
-//!
-//! manifest 的 `sandbox` / `sandbox_network` 字段保留为开发提示语义，
-//! 不参与安全决策。
+//! 只有已通过官方签名启动门槛的 sidecar 会进入此处。当前分支只改变
+//! command：强制 stdio、强制沙箱、禁止网络；其它插件保持原有 TCP 路径。
 
 use std::collections::BTreeMap;
 
@@ -38,28 +26,8 @@ pub struct HostExecutionPolicy {
     pub transport: SidecarTransport,
 }
 
-/// 未知 / 未签名插件的保守默认：进沙箱、断网、管道通信。
-pub fn conservative_default() -> HostExecutionPolicy {
-    HostExecutionPolicy {
-        sandbox: true,
-        allow_network: false,
-        transport: SidecarTransport::Stdio,
-    }
-}
-
-/// 任务边界收敛（review 修订）：本表只治理 command（唯一沙箱化的命令通道）。
-/// 其它官方插件（fetch/mcp/scheduler/memory/fs/terminal 等）的沙箱、网络与
-/// transport 逐批迁移决策归 feature/sidecar-sandbox-migration 分支，当前一律
-/// 按存量默认（TCP、不沙箱）运行，避免本分支强制存量 sidecar 走 stdio。
 /// 解析插件的宿主执行策略。
-///
-/// 收敛语义：command 的执行操作走宿主一次性沙箱实例（`invoke_command_ephemeral`，
-/// 常驻连接同样按沙箱处理）；未签名插件保守默认（进沙箱、断网、管道）；
-/// 其余官方插件按存量默认（TCP、不沙箱）运行。
-pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
-    if !official_signed {
-        return conservative_default();
-    }
+pub fn resolve(plugin_id: &str) -> HostExecutionPolicy {
     if plugin_id == "command" {
         return HostExecutionPolicy {
             sandbox: true,
@@ -78,7 +46,7 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
 pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
     ["command"]
         .iter()
-        .map(|id| ((*id).to_string(), resolve(id, true)))
+        .map(|id| ((*id).to_string(), resolve(id)))
         .collect()
 }
 
@@ -87,16 +55,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unsigned_plugins_get_conservative_default() {
-        let policy = resolve("anything", false);
-        assert!(policy.sandbox);
-        assert!(!policy.allow_network);
-        assert_eq!(policy.transport, SidecarTransport::Stdio);
-    }
-
-    #[test]
     fn command_is_the_only_sandboxed_official_plugin() {
-        let policy = resolve("command", true);
+        let policy = resolve("command");
         assert!(policy.sandbox);
         assert_eq!(policy.transport, SidecarTransport::Stdio);
         // 其它官方插件按存量默认（TCP、不沙箱），逐批迁移归独立分支。
@@ -109,7 +69,7 @@ mod tests {
             "terminal",
             "index",
         ] {
-            let policy = resolve(id, true);
+            let policy = resolve(id);
             assert!(!policy.sandbox, "{id} 本分支不沙箱化");
             assert_eq!(policy.transport, SidecarTransport::Tcp, "{id} 保持存量 TCP");
         }

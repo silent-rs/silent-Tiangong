@@ -5,7 +5,7 @@
   "identifier": "com.silent.tiangong",
   "build": {
     "beforeDevCommand": "yarn --cwd ../frontend dev",
-    "beforeBuildCommand": "yarn --cwd ../frontend build && ../scripts/prepare-sandbox-binary.sh",
+    "beforeBuildCommand": "yarn --cwd ../frontend build && cargo run --manifest-path ../Cargo.toml -p xtask -- prepare-sandbox",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
   },

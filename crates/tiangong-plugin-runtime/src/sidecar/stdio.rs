@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::protocol::{
     HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcFrame, IpcRequest, PROTOCOL_VERSION,
@@ -34,6 +35,7 @@ pub const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
 /// 子进程环境：stdio 模式的认证 token。
 pub const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
 pub const TRANSPORT_STDIO: &str = "stdio";
+const PROCESS_GROUP_ENV: &str = "TIANGONG_SIDECAR_OWN_PROCESS_GROUP";
 
 /// stdio 传输连接：单子进程 + 常驻读线程按 request_id 路由响应与进度，
 /// Notification 帧走全局通知转发（与 TCP 通知监听等价）。
@@ -41,6 +43,7 @@ pub struct StdioSidecarConnection {
     config: SidecarConfig,
     state: Mutex<StdioState>,
     exec_env: Mutex<std::collections::BTreeMap<String, String>>,
+    stopped: AtomicBool,
 }
 
 struct StdioState {
@@ -55,6 +58,8 @@ struct StdioProcess {
     token: String,
     /// 本进程是否已发送过 Auth 首帧。
     authenticated: AtomicBool,
+    #[cfg(windows)]
+    job: WindowsJob,
 }
 
 #[derive(Clone)]
@@ -69,6 +74,7 @@ impl StdioSidecarConnection {
             config,
             state: Mutex::new(StdioState { process: None }),
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -86,6 +92,8 @@ impl StdioSidecarConnection {
 
     /// 停止子进程（宿主关闭流程调用）。
     pub fn stop(&self) -> Result<()> {
+        // stop 是终止语义。先置位可阻止与取消并发的 invoke 在进程被杀后重启。
+        self.stopped.store(true, Ordering::Release);
         let mut state = self
             .state
             .lock()
@@ -93,8 +101,7 @@ impl StdioSidecarConnection {
         if let Some(process) = state.process.take()
             && let Ok(mut child) = process.child.lock()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_process_tree(&process, &mut child);
         }
         Ok(())
     }
@@ -110,6 +117,9 @@ impl StdioSidecarConnection {
 
     /// 确保子进程存活且完成过握手。进程退出时自动重启（换代）。
     fn ensure_running(&self, state: &mut StdioState) -> Result<Arc<StdioProcess>> {
+        if self.stopped.load(Ordering::Acquire) {
+            bail!("stdio sidecar 已停止");
+        }
         if let Some(process) = state.process.as_ref() {
             let alive = process
                 .child
@@ -124,6 +134,9 @@ impl StdioSidecarConnection {
             if alive {
                 return Ok(Arc::clone(process));
             }
+            if let Ok(mut child) = process.child.lock() {
+                terminate_process_tree(process, &mut child);
+            }
             tracing::warn!(
                 plugin_id = %self.config.plugin_id,
                 "stdio sidecar 已退出，准备重启"
@@ -132,7 +145,13 @@ impl StdioSidecarConnection {
         }
         let process = Arc::new(self.spawn()?);
         state.process = Some(Arc::clone(&process));
-        self.handshake(&process)?;
+        if let Err(error) = self.handshake(&process) {
+            state.process = None;
+            if let Ok(mut child) = process.child.lock() {
+                terminate_process_tree(&process, &mut child);
+            }
+            return Err(error);
+        }
         tracing::info!(
             plugin_id = %self.config.plugin_id,
             "stdio sidecar 已就绪"
@@ -172,6 +191,8 @@ impl StdioSidecarConnection {
                 .clone()
                 .unwrap_or_else(|| self.config.data_dir.clone());
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
+            policy.extra_writable = self.config.sandbox_extra_writable.clone();
+            policy.protected_paths = vec![self.config.storage_root.clone()];
             policy.allow_network = self.config.sandbox_network;
             Some(policy)
         } else {
@@ -182,21 +203,29 @@ impl StdioSidecarConnection {
         let mut policy_fd_guard = None;
         let mut command = match &launch_policy {
             Some(policy) => {
-                let sandbox_bin =
-                    tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
-                        &self.config.storage_root,
+                let sandbox_bin = tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
+                    &self.config.storage_root,
+                )
+                .ok_or_else(|| {
+                    anyhow!(
+                        "插件 {} 声明沙箱但随 App 发布的 tiangong-sandbox 程序不可用，拒绝启动",
+                        self.config.plugin_id
                     )
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "插件 {} 声明沙箱但 tiangong-sandbox 程序不可用（active/内置均缺失），拒绝启动",
-                            self.config.plugin_id
-                        )
-                    })?;
+                })?;
                 let request = serde_json::json!({
                     "protocol_version": 1,
                     "policy_schema": 1,
                     "policy": policy,
+                    "plugin_id": self.config.plugin_id,
                     "program": self.config.binary.display().to_string(),
+                    "program_root": self
+                        .config
+                        .sandbox_program_root
+                        .as_deref()
+                        .or_else(|| self.config.binary.parent())
+                        .map(|path| path.display().to_string())
+                        .ok_or_else(|| anyhow!("sidecar 目标程序缺少权威目录"))?,
+                    "program_sha256": sha256_file(&self.config.binary)?,
                     "args": [],
                 });
                 let mut command = Command::new(sandbox_bin);
@@ -215,7 +244,17 @@ impl StdioSidecarConnection {
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             // stdio 模式无 endpoint 文件；保留路径占位以兼容读取方。
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
-            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
+            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
+            .env(PROCESS_GROUP_ENV, "1");
+        if let Some(temp_dir) = &self.config.sandbox_temp_dir {
+            if !temp_dir.is_absolute() || !temp_dir.is_dir() {
+                bail!("sidecar 专用临时目录无效: {}", temp_dir.display());
+            }
+            command
+                .env("TMPDIR", temp_dir)
+                .env("TMP", temp_dir)
+                .env("TEMP", temp_dir);
+        }
         if self.config.allow_sensitive_storage {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
@@ -224,10 +263,19 @@ impl StdioSidecarConnection {
         {
             command.env(EXEC_ENV_JSON_ENV, json);
         }
+        configure_process_lifecycle(&mut command)?;
+        #[cfg(windows)]
+        let job = WindowsJob::new().context("创建 sidecar Job Object 失败")?;
         let mut child = command.spawn().with_context(|| {
             // spawn 完成：父进程侧策略管道读端即可关闭。
             format!("启动 stdio sidecar 失败: {}", self.config.binary.display())
         })?;
+        #[cfg(windows)]
+        if let Err(error) = job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("将 sidecar 加入 Job Object 失败");
+        }
         drop(policy_fd_guard);
         let stdin = child.stdin.take().context("stdio sidecar 未提供 stdin")?;
         let stdout = child.stdout.take().context("stdio sidecar 未提供 stdout")?;
@@ -248,6 +296,8 @@ impl StdioSidecarConnection {
             pending,
             token,
             authenticated: AtomicBool::new(false),
+            #[cfg(windows)]
+            job,
         })
     }
 
@@ -368,8 +418,13 @@ impl StdioSidecarConnection {
 ///
 /// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
 /// 读端在父进程侧设置 FD_CLOEXEC，避免被无关子进程继承。
+#[cfg(unix)]
 struct PolicyFdGuard(std::os::fd::OwnedFd);
 
+#[cfg(not(unix))]
+struct PolicyFdGuard;
+
+#[cfg(unix)]
 fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -402,7 +457,6 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
     // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
     // dup2 语义清除目标 fd 的 CLOEXEC，fd3 随 exec 传递给沙箱程序。
     // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
-    #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
@@ -415,12 +469,132 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
             Ok(())
         });
     }
-    #[cfg(not(unix))]
-    {
-        let _ = raw_read;
-        bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
-    }
     Ok(guard)
+}
+
+#[cfg(windows)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
+    Ok(PolicyFdGuard)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
+    bail!("当前平台没有可用的 Launcher 策略传输通道")
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // 每个 stdio sidecar 独占进程组，正常取消时可连同 Shell 后台进程清理。
+        command.process_group(0);
+
+        #[cfg(target_os = "linux")]
+        {
+            let expected_parent = unsafe { libc::getpid() };
+            // SAFETY: pre_exec 内仅调用异步信号安全的 libc 原语。
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // 消除 fork 与 prctl 之间父进程已经退出的竞态。
+                    if libc::getppid() != expected_parent {
+                        return Err(std::io::Error::other("sidecar 宿主已退出"));
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    let _ = command;
+    Ok(())
+}
+
+fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
+    let pid = child.id();
+    #[cfg(unix)]
+    unsafe {
+        // 进程组 ID 在 spawn 前固定为直接子进程 PID；即使组长先退出，仍可清理后代。
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    process.job.terminate();
+    #[cfg(not(windows))]
+    let _ = process;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+struct WindowsJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsJob {
+    fn new() -> std::io::Result<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let job = Self { handle };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    fn assign(&self, child: &Child) -> std::io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let process = child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        if unsafe { AssignProcessToJobObject(self.handle, process) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            TerminateJobObject(self.handle, 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {
@@ -543,18 +717,20 @@ impl SidecarConnection for StdioSidecarConnection {
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
-        let mut state = self.state.lock().map_err(|_| {
-            anyhow!(SidecarInvokeError::Unavailable(
-                "stdio sidecar 状态锁已损坏".to_string()
-            ))
-        })?;
-        let process = self.ensure_running(&mut state).map_err(|error| {
-            if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                error
-            } else {
-                SidecarInvokeError::Unavailable(error.to_string()).into()
-            }
-        })?;
+        let process = {
+            let mut state = self.state.lock().map_err(|_| {
+                anyhow!(SidecarInvokeError::Unavailable(
+                    "stdio sidecar 状态锁已损坏".to_string()
+                ))
+            })?;
+            self.ensure_running(&mut state).map_err(|error| {
+                if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                    error
+                } else {
+                    SidecarInvokeError::Unavailable(error.to_string()).into()
+                }
+            })?
+        };
         let response = self
             .round_trip(&process, operation, payload, on_progress)
             .map_err(|error| {
@@ -602,5 +778,11 @@ impl SidecarConnection for StdioSidecarConnection {
 
     fn plugin_id(&self) -> &str {
         StdioSidecarConnection::plugin_id(self)
+    }
+}
+
+impl Drop for StdioSidecarConnection {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }

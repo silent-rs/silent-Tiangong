@@ -70,6 +70,7 @@ where
             .context("读取 stdio 帧失败")?;
         if bytes == 0 {
             tracing::info!(service = %service_name, "stdin 已关闭（宿主退出），stdio sidecar 退出");
+            terminate_owned_process_group();
             break;
         }
         let Ok(frame) = serde_json::from_str::<IpcFrame>(line.trim_end()) else {
@@ -112,6 +113,29 @@ where
     }
     Ok(())
 }
+
+/// Launcher 启动的 stdio sidecar 是独立进程组组长。宿主异常退出时 stdin
+/// 会先关闭；此处终止整个组，避免已启动的后台 Shell 进程成为孤儿。
+#[cfg(unix)]
+fn terminate_owned_process_group() {
+    if std::env::var("TIANGONG_SIDECAR_OWN_PROCESS_GROUP")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let pid = unsafe { libc::getpid() };
+    let group = unsafe { libc::getpgrp() };
+    if group == pid {
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_owned_process_group() {}
 
 async fn dispatch_and_respond(
     writer: &Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
