@@ -16,7 +16,11 @@ use tiangong_plugin_runtime::sidecar::{
 };
 
 const RUN_SHELL_OPERATION: &str = "command.run_shell";
+#[cfg(windows)]
+const RUN_COMMAND_OPERATION: &str = "command.run_command";
 const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
+#[cfg(windows)]
+const WINDOWS_PROCESS_TREE_MARKER: &str = ".tiangong-process-tree-helper";
 
 #[cfg(unix)]
 static REAL_SANDBOX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -305,11 +309,17 @@ fn stdio_stop_kills_background_process_tree() {
         &workspace,
     );
     #[cfg(windows)]
+    std::fs::write(workspace.join(WINDOWS_PROCESS_TREE_MARKER), b"ready").unwrap();
+    #[cfg(windows)]
     let request = windows_background_process_request(&pid_file);
+    #[cfg(unix)]
+    let operation = RUN_SHELL_OPERATION;
+    #[cfg(windows)]
+    let operation = RUN_COMMAND_OPERATION;
     let worker_connection = Arc::clone(&connection);
     let (finished_tx, finished_rx) = sync_channel(1);
     let worker = std::thread::spawn(move || {
-        let result = worker_connection.invoke(RUN_SHELL_OPERATION, &request);
+        let result = worker_connection.invoke(operation, &request);
         let _ = finished_tx.send(result);
     });
 
@@ -353,18 +363,41 @@ fn windows_background_process_request(pid_file: &Path) -> String {
         .expect("PID 文件必须位于工作区内")
         .display()
         .to_string();
-    let pid_file = pid_file.display().to_string().replace('\'', "''");
+    let executable = std::env::current_exe()
+        .expect("读取 Windows 测试程序路径失败")
+        .display()
+        .to_string()
+        .replace('\\', "/");
     serde_json::json!({
-        "script": format!(
-            "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList '-t','127.0.0.1' -PassThru -NoNewWindow; [System.IO.File]::WriteAllText('{pid_file}', $child.Id.ToString()); Wait-Process -Id $child.Id"
-        ),
-        "shell": "powershell",
+        "cmd": format!("\"{executable}\""),
+        "args": ["windows_process_tree_helper", "--exact", "--nocapture"],
+        "cwd": workspace.clone(),
         "timeout_secs": 120,
         "workspace": workspace,
         "full_trust": true,
         "allowed_commands": [],
     })
     .to_string()
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_process_tree_helper() {
+    let workspace = std::env::current_dir().expect("读取 Windows helper 工作目录失败");
+    if !workspace.join(WINDOWS_PROCESS_TREE_MARKER).is_file() {
+        return;
+    }
+
+    let ping = PathBuf::from(std::env::var_os("SystemRoot").expect("缺少 SystemRoot"))
+        .join("System32")
+        .join("ping.exe");
+    let mut child = std::process::Command::new(ping)
+        .args(["-t", "127.0.0.1"])
+        .spawn()
+        .expect("启动 Windows 后台进程失败");
+    std::fs::write(workspace.join("background.pid"), child.id().to_string())
+        .expect("写入 Windows 后台进程 PID 失败");
+    child.wait().expect("等待 Windows 后台进程失败");
 }
 
 #[cfg(unix)]
