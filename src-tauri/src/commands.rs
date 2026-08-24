@@ -5054,10 +5054,61 @@ pub async fn plugin_trust_revoke(plugin_id: String) -> Result<(), String> {
 }
 
 /// L4 放开开关（开发者模式：跳过签名门槛，审计留痕）。
+///
+/// 开启必须经宿主原生确认对话框（RFC 0017 D4）；关闭无确认。
 #[tauri::command]
-pub async fn plugin_safety_set_unsafe_mode(enabled: bool) -> Result<(), String> {
+pub async fn plugin_safety_set_unsafe_mode(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    if enabled {
+        let message = "确定要关闭插件安全校验吗？
+
+             开启后未签名插件将可以启动原生 sidecar，获得本机文件与网络能力。             这会显著扩大攻击面，仅建议插件开发调试时临时开启。";
+        let confirmed = tokio::task::spawn_blocking(move || {
+            native_confirm(
+                &app,
+                "关闭插件安全校验（危险）",
+                message,
+                "我了解风险，开启",
+            )
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+        if !confirmed {
+            return Err("用户取消了开启放开开关".to_string());
+        }
+    }
     let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
     store
         .set_unsafe_mode(enabled)
         .map_err(|err| err.to_string())
+}
+
+/// 升级审批票据签发（RFC 0017 S4）：用户在界面上显式批准某命令的全权执行
+/// 后调用，返回一次性短时效票据；Agent 经桥接层无法触达本入口。
+#[tauri::command]
+pub async fn command_escalation_approve(command: String) -> Result<String, String> {
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return Err("command 不能为空".to_string());
+    }
+    Ok(tiangong_sandbox::EscalationBroker::issue(command))
+}
+
+/// 原生确认对话框（阻塞等待用户点击，需在 spawn_blocking 中调用）。
+fn native_confirm(app: &tauri::AppHandle, title: &str, message: &str, ok_label: &str) -> bool {
+    use tauri_plugin_dialog::DialogExt;
+    use tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom;
+
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    app.dialog()
+        .message(message.to_string())
+        .title(title.to_string())
+        .buttons(OkCancelCustom(ok_label.to_string(), "取消".to_string()))
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+    rx.recv_timeout(std::time::Duration::from_secs(600))
+        .unwrap_or(false)
 }

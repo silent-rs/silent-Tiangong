@@ -10,6 +10,7 @@
 
 pub mod copy;
 pub mod engine;
+pub mod escalation;
 pub mod formats;
 pub mod plugin;
 pub mod sandbox;
@@ -17,6 +18,7 @@ pub mod service;
 pub mod trust;
 
 pub use engine::{SnapshotConfig, SnapshotEngine};
+pub use escalation::EscalationBroker;
 pub use formats::{FileChange, FileChangeKind, RestoreReport, SnapshotReason, SnapshotSummary};
 pub use plugin::build_plugin;
 pub use sandbox::{

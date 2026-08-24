@@ -29,6 +29,9 @@ pub struct EscalatedRequest {
     /// 用户批准的依据描述（如批准弹窗中的命令与影响说明）。
     #[serde(default)]
     pub approval_note: String,
+    /// 宿主签发的一次性升级审批票据；宿主转发层核验（无效即剥离声明）。
+    #[serde(default)]
+    pub token: String,
 }
 
 /// `trust_command` 请求：把命令登记进会话信任列表（本会话内免重复审批）。

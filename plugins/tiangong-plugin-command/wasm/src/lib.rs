@@ -254,6 +254,9 @@ fn handle_run_command(arguments: String) -> Result<ToolResult, PluginError> {
             })
             .unwrap_or(0),
         access: state::access_context(),
+        escalated: args
+            .get("escalated")
+            .map(|value| serde_json::from_value(value.clone()).unwrap_or_default()),
     };
     if request.cmd.trim().is_empty() {
         return Ok(tool_failure("run_command 缺少 cmd 参数", "missing cmd"));
@@ -289,6 +292,9 @@ fn handle_run_shell(arguments: String) -> Result<ToolResult, PluginError> {
             })
             .unwrap_or(0),
         access: state::access_context(),
+        escalated: args
+            .get("escalated")
+            .map(|value| serde_json::from_value(value.clone()).unwrap_or_default()),
     };
     if request.script.trim().is_empty() {
         return Ok(tool_failure("run_shell 缺少 script 参数", "missing script"));

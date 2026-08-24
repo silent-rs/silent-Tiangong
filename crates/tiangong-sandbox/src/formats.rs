@@ -119,4 +119,7 @@ pub struct RestoreReport {
 pub struct SessionIndex {
     /// 按拍摄时间升序。
     pub snapshots: Vec<SnapshotSummary>,
+    /// 最近一次快照的工作区路径（重启后恢复/变更集仍可用）。
+    #[serde(default)]
+    pub workspace: Option<String>,
 }

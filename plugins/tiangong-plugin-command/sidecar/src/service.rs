@@ -417,8 +417,10 @@ mod tests {
     fn escalated_request_runs_full_access() {
         let service = service_with("/tmp", false);
         // 升级声明存在时，即使命中高危预分类也全权放行（审计留痕）。
+        // sidecar 收到的请求经宿主转发层核验并剥离 token，此处模拟验证后形态。
         let escalated = EscalatedRequest {
             approval_note: "用户已在对话中批准格式化操作".to_string(),
+            token: String::new(),
         };
         let result = service.apply_sandbox(
             "run_command",
