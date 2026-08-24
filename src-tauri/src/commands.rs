@@ -4975,9 +4975,18 @@ pub async fn command_escalation_approve(
     if !confirmed {
         return Err("用户取消了命令全权执行批准".to_string());
     }
-    Ok(tiangong_sandbox::EscalationBroker::issue(
-        &operation, &command,
-    ))
+    // UI 文本 → 结构化指纹（空白拆分 v1；含引号参数的精确输入待结构化 UI）。
+    let mut parts = command.split_whitespace();
+    let program = parts.next().unwrap_or_default().to_string();
+    let args: Vec<String> = parts.map(String::from).collect();
+    let fingerprint = tiangong_sandbox::escalation::EscalationFingerprint {
+        operation,
+        program,
+        args,
+        script: String::new(),
+        cwd: String::new(),
+    };
+    Ok(tiangong_sandbox::EscalationBroker::issue(fingerprint))
 }
 
 /// 原生确认对话框（阻塞等待用户点击，需在 spawn_blocking 中调用）。

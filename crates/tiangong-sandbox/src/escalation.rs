@@ -17,9 +17,61 @@ use std::time::{Duration, Instant};
 /// 票据有效期：用户批准后 Agent 需在窗口内重试。
 const TICKET_TTL: Duration = Duration::from_secs(300);
 
+/// 无沙箱执行授权指纹（结构化，非拼接字符串——拼接对含空格参数有歧义）。
+/// 至少绑定操作类型、程序、参数、完整脚本与工作目录（Session/Tool Call
+/// 绑定待宿主调用上下文链路，见 RFC 开放问题）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscalationFingerprint {
+    pub operation: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub script: String,
+    pub cwd: String,
+}
+
+impl EscalationFingerprint {
+    /// 从请求负载提取指纹（字段缺失记空串，保证稳定）。
+    pub fn from_payload(operation: &str, payload: &serde_json::Value) -> Self {
+        let str_field = |name: &str| {
+            payload
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let args = payload
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let cwd = payload
+            .get("cwd")
+            .or_else(|| {
+                payload
+                    .get("access")
+                    .and_then(|access| access.get("workspace"))
+            })
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Self {
+            operation: operation.to_string(),
+            program: str_field("cmd"),
+            args,
+            script: str_field("script"),
+            cwd,
+        }
+    }
+}
+
 struct EscalationTicket {
-    operation: String,
-    command: String,
+    fingerprint: EscalationFingerprint,
     expires_at: Instant,
 }
 
@@ -36,33 +88,30 @@ impl EscalationBroker {
         })
     }
 
-    /// 签发票据（仅宿主用户批准入口调用）：绑定操作类型与完整命令文本。
-    pub fn issue(operation: impl Into<String>, command: impl Into<String>) -> String {
-        let operation = operation.into();
-        let command = command.into();
+    /// 签发票据（仅宿主用户批准入口调用）：绑定结构化授权指纹。
+    pub fn issue(fingerprint: EscalationFingerprint) -> String {
         let token = scru128::new().to_string();
         let mut tickets = Self::global().tickets.lock().expect("升级票据库锁已损坏");
         tickets.insert(
             token.clone(),
             EscalationTicket {
-                operation,
-                command,
+                fingerprint,
                 expires_at: Instant::now() + TICKET_TTL,
             },
         );
         token
     }
 
-    /// 按完整命令文本匹配并消费票据：操作与命令文本精确相等才命中。
+    /// 按结构化指纹匹配并消费票据：全字段精确相等才命中。
     /// 不匹配的票据保留（用户批准的那条命令仍可重试；token 不可猜测，
     /// 保留不构成穷举面）；过期票据清理。
-    pub fn consume_by_command(operation: &str, command: &str) -> bool {
+    pub fn consume_by_fingerprint(fingerprint: &EscalationFingerprint) -> bool {
         let mut tickets = Self::global().tickets.lock().expect("升级票据库锁已损坏");
         let now = Instant::now();
         tickets.retain(|_, ticket| now < ticket.expires_at);
         let token = tickets
             .iter()
-            .find(|(_, ticket)| ticket.operation == operation && ticket.command == command)
+            .find(|(_, ticket)| &ticket.fingerprint == fingerprint)
             .map(|(token, _)| token.clone());
         match token {
             Some(token) => tickets.remove(&token).is_some(),
@@ -85,54 +134,86 @@ impl EscalationBroker {
 mod tests {
     use super::*;
 
+    // 全局票据库为进程级单例，测试并行运行时各用例必须使用互异的
+    // 指纹内容，避免跨用例命中。
+    fn run_command_payload(tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "cmd": "docker",
+            "args": ["ps", "-a"],
+            "cwd": format!("/tmp/ws-{tag}"),
+            "access": {"workspace": format!("/tmp/ws-{tag}"), "full_trust": false, "allowed_commands": []},
+        })
+    }
+
+    fn run_shell_payload(tag: &str) -> serde_json::Value {
+        serde_json::json!({"script": format!("cargo build --release #{tag}"), "cwd": "/tmp/ws"})
+    }
+
     #[test]
-    fn approval_matches_exact_command_text_only() {
-        EscalationBroker::issue("command.run_command", "docker ps -a");
-        // 完整文本精确匹配（含参数）。
-        assert!(EscalationBroker::consume_by_command(
+    fn approval_matches_exact_fingerprint() {
+        let payload = run_command_payload("exact");
+        EscalationBroker::issue(EscalationFingerprint::from_payload(
             "command.run_command",
-            "docker ps -a"
+            &payload,
+        ));
+        assert!(EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &payload)
         ));
         // 一次性：再次消费失败。
-        assert!(!EscalationBroker::consume_by_command(
-            "command.run_command",
-            "docker ps -a"
+        assert!(!EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &payload)
         ));
     }
 
     #[test]
-    fn tampered_command_cannot_consume_approval() {
-        // 批准"docker ps"后换成"docker system prune"无法消费。
-        EscalationBroker::issue("command.run_command", "docker ps");
-        assert!(!EscalationBroker::consume_by_command(
+    fn tampered_arguments_cannot_consume_approval() {
+        let approved = run_command_payload("tamper");
+        EscalationBroker::issue(EscalationFingerprint::from_payload(
             "command.run_command",
-            "docker system prune"
+            &approved,
         ));
-        // 原命令仍可消费（不匹配不消费他人批准）。
-        assert!(EscalationBroker::consume_by_command(
-            "command.run_command",
-            "docker ps"
+        // 参数被替换（拼接字符串无法区分的歧义场景）。
+        let mut tampered = run_command_payload("tamper");
+        tampered["args"] = serde_json::json!(["system", "prune"]);
+        assert!(!EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &tampered)
+        ));
+        // cwd 被替换同样失败。
+        let mut moved = run_command_payload("tamper");
+        moved["cwd"] = serde_json::json!("/etc");
+        assert!(!EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &moved)
+        ));
+        // 原指纹仍可消费。
+        assert!(EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &approved)
         ));
     }
 
     #[test]
-    fn operation_must_match() {
-        EscalationBroker::issue("command.run_shell", "cargo build --release");
-        assert!(!EscalationBroker::consume_by_command(
-            "command.run_command",
-            "cargo build --release"
-        ));
-        assert!(EscalationBroker::consume_by_command(
+    fn operation_and_script_must_match() {
+        let payload = run_shell_payload("op");
+        EscalationBroker::issue(EscalationFingerprint::from_payload(
             "command.run_shell",
-            "cargo build --release"
+            &payload,
+        ));
+        let mut wrong_op = run_shell_payload("op");
+        wrong_op["cmd"] = serde_json::json!("cargo");
+        assert!(!EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_command", &wrong_op)
+        ));
+        assert!(EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload("command.run_shell", &payload)
         ));
     }
 
     #[test]
-    fn unapproved_command_never_matches() {
-        assert!(!EscalationBroker::consume_by_command(
-            "command.run_command",
-            "rm -rf /"
+    fn unapproved_never_matches() {
+        assert!(!EscalationBroker::consume_by_fingerprint(
+            &EscalationFingerprint::from_payload(
+                "command.run_command",
+                &run_command_payload("none")
+            )
         ));
     }
 }

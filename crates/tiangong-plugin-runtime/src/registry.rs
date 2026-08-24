@@ -750,9 +750,11 @@ fn invoke_command_ephemeral(
         }
     };
 
-    // 全权判定：仅用户批准的完整命令文本经票据匹配（一次性消费）。
-    let full_access =
-        tiangong_sandbox::EscalationBroker::consume_by_command(operation, &full_command);
+    // 全权判定：仅用户批准的结构化授权指纹（操作/程序/参数/脚本/工作目录）
+    // 经票据匹配（一次性消费）；请求字段不参与其它安全决策。
+    let fingerprint =
+        tiangong_sandbox::escalation::EscalationFingerprint::from_payload(operation, &payload);
+    let full_access = tiangong_sandbox::EscalationBroker::consume_by_fingerprint(&fingerprint);
 
     // 预分类：非全权时拒绝已知高危命令（引导走用户批准通道）。
     if !full_access {

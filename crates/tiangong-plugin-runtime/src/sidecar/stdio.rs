@@ -161,9 +161,11 @@ impl StdioSidecarConnection {
             .with_context(|| format!("打开 sidecar 日志失败: {}", self.config.log.display()))?;
 
         let token = scru128::new().to_string();
-        // OS 沙箱（RFC 0017 D12 继承式）：可写根 = 插件数据目录；宿主数据目录与
-        // 工作区 .git 经防篡改段强制只读；沙箱不可用时降级直跑并告警（快照层兜底）。
-        let sandboxed_argv = if self.config.sandbox {
+        // OS 沙箱（RFC 0017 独立 Launcher 方案）：声明沙箱的 sidecar 一律经
+        // 官方 Launcher 启动——策略经 fd3 继承管道传入（双版本化），
+        // Launcher 校验并应用平台沙箱后 exec 目标进程；stdin/stdout 业务
+        // 通信透传。Launcher 不可用即 fail-closed（拒绝启动，不静默降级）。
+        let launch_policy = if self.config.sandbox {
             let workspace = self
                 .config
                 .sandbox_workspace
@@ -171,35 +173,29 @@ impl StdioSidecarConnection {
                 .unwrap_or_else(|| self.config.data_dir.clone());
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
             policy.allow_network = self.config.sandbox_network;
-            match tiangong_sandbox::wrap(&policy) {
-                tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } => {
-                    tracing::info!(
-                        plugin_id = %self.config.plugin_id,
-                        "stdio sidecar 已包装进 OS 沙箱"
-                    );
-                    Some((program, prefix))
-                }
-                tiangong_sandbox::SandboxedProgram::Direct => None,
-                // 声明了沙箱但平台不可用：拒绝启动（fail loud）。
-                tiangong_sandbox::SandboxedProgram::Unavailable(reason) => {
-                    bail!(
-                        "插件 {} 声明 sidecar.sandbox 但当前平台沙箱不可用：{reason}",
-                        self.config.plugin_id
-                    );
-                }
-            }
+            Some(policy)
         } else {
             None
         };
-        // 包装形态：<wrapper> <prefix...> <binary>：seatbelt 前缀为
-        // `-p <profile>`，bwrap 前缀末尾自带 `--`，均要求被包装命令在最后。
-        let mut command = match &sandboxed_argv {
-            Some((program, prefix)) => {
-                let mut command = Command::new(program);
-                for arg in prefix {
-                    command.arg(arg);
-                }
-                command.arg(&self.config.binary);
+        let mut command = match &launch_policy {
+            Some(policy) => {
+                let launcher =
+                    tiangong_sandbox::launcher_manager::resolve_launcher(&self.config.storage_root)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "插件 {} 声明沙箱但 Launcher 不可用（active/内置均缺失），拒绝启动",
+                                self.config.plugin_id
+                            )
+                        })?;
+                let request = serde_json::json!({
+                    "protocol_version": 1,
+                    "policy_schema": 1,
+                    "policy": policy,
+                    "program": self.config.binary.display().to_string(),
+                    "args": [],
+                });
+                let mut command = Command::new(launcher);
+                prepare_policy_fd(&mut command, request.to_string())?;
                 command
             }
             None => Command::new(&self.config.binary),
@@ -358,6 +354,52 @@ impl StdioSidecarConnection {
         });
         write_line(&mut stdin, &frame)
     }
+}
+
+/// 为 Launcher 准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
+/// 策略写完后立即关闭写端（Launcher 读取到 EOF）；子进程不继承写端。
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (read_fd, write_fd) = {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds 为有效出参缓冲。
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("创建策略管道失败");
+        }
+        (fds[0], fds[1])
+    };
+    // 立即写入策略并关闭写端：Launcher 侧读到 EOF 即策略完整。
+    {
+        use std::io::Write;
+        let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        writer
+            .write_all(policy_json.as_bytes())
+            .and_then(|_| writer.flush())
+            .context("写入策略管道失败")?;
+    }
+    let read_fd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
+    let raw_read = read_fd_owned.as_raw_fd();
+    // pre_exec（fork 后、exec 前）把读端复制到 fd3 并关闭原描述符。
+    // SAFETY: dup2 语义；pre_exec 限制内仅调用异步信号安全函数。
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            if libc::dup2(raw_read, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = raw_read;
+        bail!("Launcher fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
+    }
+    // command 持有 read_fd_owned（存活到 spawn 完成）。
+    std::mem::forget(read_fd_owned);
+    Ok(())
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {
