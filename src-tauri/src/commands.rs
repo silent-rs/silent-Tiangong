@@ -5112,51 +5112,49 @@ pub async fn plugin_safety_set_unsafe_mode(
         .map_err(|err| err.to_string())
 }
 
-/// 升级审批（RFC 0017 S4，命令文本匹配闭环）。
-///
-/// 安全不依赖调用方自觉：本命令自身弹出宿主原生确认对话框，向用户展示
-/// 完整命令文本，批准后入库（5 分钟时效、一次性消费）；Agent 重试同一
-/// 完整命令文本时由宿主路由命中并以一次性全权实例执行。插件协议零审批字段。
+/// 待批准的命令全权执行列表（宿主在命令被高危拒绝或沙箱拦截时登记，
+/// 指纹直接取自实际请求——审批与重试天然同源匹配）。
+#[tauri::command]
+pub async fn command_escalation_pending(
+) -> Result<Vec<tiangong_sandbox::escalation::PendingEscalation>, String> {
+    Ok(tiangong_sandbox::escalation::list_pending())
+}
+
+/// 批准待批准项：原生高危确认后对登记的结构化指纹签发一次性票据；
+/// Agent 重试同一命令（指纹全等）时由宿主命中并全权执行。
 #[tauri::command]
 pub async fn command_escalation_approve(
     app: tauri::AppHandle,
-    operation: Option<String>,
-    command: String,
-) -> Result<String, String> {
-    let operation = operation.unwrap_or_else(|| "command.run_command".to_string());
-    let command = command.trim().to_string();
-    if command.is_empty() {
-        return Err("command 不能为空".to_string());
-    }
-    let message = format!(
-        "是否批准以下命令的全权（无沙箱）执行？\n\n{command}\n\n批准后 5 分钟内，Agent 重试同一完整命令时将以全权执行一次。"
-    );
-    let display_command = command.clone();
-    let confirmed = tokio::task::spawn_blocking(move || {
-        native_confirm(
-            &app,
-            "批准命令全权执行",
-            &message,
-            &format!("批准执行「{display_command}」"),
+    pending_id: String,
+) -> Result<(), String> {
+    let pending = tiangong_sandbox::escalation::list_pending()
+        .into_iter()
+        .find(|item| item.id == pending_id)
+        .ok_or_else(|| format!("待批准项不存在或已过期：{pending_id}"))?;
+    let display = if pending.fingerprint.script.is_empty() {
+        format!(
+            "{} {}",
+            pending.fingerprint.program,
+            pending.fingerprint.args.join(" ")
         )
+    } else {
+        pending.fingerprint.script.clone()
+    };
+    let message = format!(
+        "是否批准以下命令的全权（无沙箱）执行？\n\n{display}\n\n目录：{}\n\n批准后 5 分钟内，Agent 重试同一命令（程序、参数、脚本与目录完全一致）时将以全权执行一次。",
+        pending.fingerprint.cwd
+    );
+    let confirmed = tokio::task::spawn_blocking(move || {
+        native_confirm(&app, "批准命令全权执行", &message, "批准执行")
     })
     .await
     .map_err(|err| err.to_string())?;
     if !confirmed {
         return Err("用户取消了命令全权执行批准".to_string());
     }
-    // UI 文本 → 结构化指纹（空白拆分 v1；含引号参数的精确输入待结构化 UI）。
-    let mut parts = command.split_whitespace();
-    let program = parts.next().unwrap_or_default().to_string();
-    let args: Vec<String> = parts.map(String::from).collect();
-    let fingerprint = tiangong_sandbox::escalation::EscalationFingerprint {
-        operation,
-        program,
-        args,
-        script: String::new(),
-        cwd: String::new(),
-    };
-    Ok(tiangong_sandbox::EscalationBroker::issue(fingerprint))
+    tiangong_sandbox::escalation::approve_pending(&pending_id)
+        .map(|_| ())
+        .ok_or_else(|| "批准失败：待批准项已被消费".to_string())
 }
 
 /// 原生确认对话框（阻塞等待用户点击，需在 spawn_blocking 中调用）。

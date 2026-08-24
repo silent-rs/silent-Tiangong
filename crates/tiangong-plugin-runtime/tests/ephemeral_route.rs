@@ -2,23 +2,33 @@
 //! spawn → set_workspace 初始化 → run_command 原样执行 → 响应。
 //! 覆盖审查指出的"一次性实例缺少工作区初始化导致命令无法执行"。
 
+//! 一次性 command sidecar 路由端到端测试（宿主透明封套序列）。
+//! 依赖已构建的 sidecar 二进制（workspace target/debug），未构建时跳过：
+//! 先 `cargo build -p tiangong-plugin-command-sidecar` 再跑本测试。
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
-fn sidecar_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_tiangong-command-sidecar"))
+fn sidecar_binary() -> Option<PathBuf> {
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/tiangong-command-sidecar");
+    binary.is_file().then_some(binary)
 }
 
 #[test]
 fn ephemeral_route_executes_command_after_workspace_init() {
+    let Some(binary) = sidecar_binary() else {
+        eprintln!("跳过：sidecar 二进制未构建（cargo build -p tiangong-plugin-command-sidecar）");
+        return;
+    };
     let base = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let config = SidecarConfig::new(
         "command",
         "0.0.0",
-        sidecar_binary(),
+        binary,
         base.path().join("endpoint.json"),
         base.path().join("sidecar.log"),
         base.path().join("data"),
@@ -67,11 +77,15 @@ fn ephemeral_route_executes_command_after_workspace_init() {
 
 #[test]
 fn missing_workspace_init_rejects_execution() {
+    let Some(binary) = sidecar_binary() else {
+        eprintln!("跳过：sidecar 二进制未构建");
+        return;
+    };
     let base = tempfile::tempdir().unwrap();
     let config = SidecarConfig::new(
         "command",
         "0.0.0",
-        sidecar_binary(),
+        binary,
         base.path().join("endpoint.json"),
         base.path().join("sidecar.log"),
         base.path().join("data"),

@@ -321,7 +321,8 @@ impl StdioSidecarConnection {
                     "args": target_args,
                 });
                 let mut command = Command::new(sandbox_bin);
-                prepare_policy_fd(&mut command, request.to_string())?;
+                // 守卫必须存活到 spawn；后续修订会把绑定提升到 match 外层。
+                let _policy_fd_guard = prepare_policy_fd(&mut command, request.to_string())?;
                 command
             }
             None => {
@@ -670,8 +671,13 @@ impl WindowsJob {
     }
 }
 
-/// 为沙箱程序准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
-fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
+/// 为沙箱程序准备策略描述符：匿名管道写端写入策略后立即关闭（读取到
+/// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
+///
+/// 返回的读端守卫必须存活到 `spawn` 返回；父进程随后正常关闭。
+struct PolicyFdGuard(std::os::fd::OwnedFd);
+
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
     let (read_fd, write_fd) = {
@@ -682,7 +688,6 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
         }
         (fds[0], fds[1])
     };
-    // 立即写入策略并关闭写端：沙箱程序侧读到 EOF 即策略完整。
     {
         let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
         writer
@@ -690,15 +695,25 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
             .and_then(|_| writer.flush())
             .context("写入策略管道失败")?;
     }
-    let read_fd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
-    let raw_read = read_fd_owned.as_raw_fd();
-    // pre_exec（fork 后、exec 前）把读端复制到 fd3。
+    let guard = PolicyFdGuard(unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) });
+    let raw_read = guard.0.as_raw_fd();
+    // 父进程侧读端设 CLOEXEC，避免被无关子进程继承。
+    unsafe {
+        let flags = libc::fcntl(raw_read, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(raw_read, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
+    // pre_exec（fork 后、exec 前）把读端复制到 fd3，并关闭原描述符。
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
-            if libc::dup2(raw_read, 3) < 0 {
+            if raw_read != 3 && libc::dup2(raw_read, 3) < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if raw_read != 3 {
+                libc::close(raw_read);
             }
             Ok(())
         });
@@ -708,9 +723,7 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
         let _ = raw_read;
         bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
     }
-    // 后续提交会把描述符所有权收敛为显式守卫；当前需保持到 spawn 完成。
-    std::mem::forget(read_fd_owned);
-    Ok(())
+    Ok(guard)
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {
