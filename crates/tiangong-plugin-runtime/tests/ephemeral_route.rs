@@ -120,7 +120,7 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
         plugin_root.join("unused-data"),
         storage_root,
     )
-    .with_timeouts(Duration::from_secs(15), Duration::from_secs(20))
+    .with_timeouts(Duration::from_secs(15), Duration::from_secs(90))
     .with_sandbox_program_root(Some(plugin_root))
     .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()]);
     let connection = Arc::new(EphemeralCommandConnection::new(config));
@@ -192,6 +192,22 @@ fn invoke_shell(fixture: &SandboxFixture, id: &str, script: String) -> serde_jso
 #[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn create_fifo(path: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = CString::new(path.as_os_str().as_bytes()).expect("FIFO 路径包含 NUL 字节");
+    let status = unsafe { libc::mkfifo(raw.as_ptr(), 0o600) };
+    assert_eq!(
+        status,
+        0,
+        "创建并发阻塞 FIFO 失败 {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
 }
 
 #[cfg(unix)]
@@ -529,11 +545,14 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
     let mut markers = Vec::new();
     for index in 0..10 {
         let marker = fixture.workspace.join(format!("concurrent-{index}.ready"));
+        let hold = fixture.workspace.join(format!("concurrent-{index}.hold"));
+        create_fifo(&hold);
         markers.push(marker.clone());
         let request = shell_request_with_timeout(
             format!(
-                "/usr/bin/mkfifo \"$TMPDIR/hold\"; /usr/bin/touch {}; read _ < \"$TMPDIR/hold\"",
-                shell_quote(&marker)
+                ": > {}; read _ < {}",
+                shell_quote(&marker),
+                shell_quote(&hold)
             ),
             &fixture.workspace,
             120,

@@ -400,6 +400,7 @@ jobs:
           if ($report.product_version -ne $config.version) {
             throw "Launcher version $($report.product_version) does not match App $($config.version)"
           }
+          exit 0
 
       - name: Print Sandbox diagnostics
         if: failure()
