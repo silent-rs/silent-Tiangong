@@ -767,15 +767,22 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
         }
     }
     // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
-    // dup2 语义清除目标 fd 的 CLOEXEC，fd3 随 exec 传递给沙箱程序。
+    // dup2 会清除目标 fd 的 CLOEXEC；原描述符恰好已经是 3 时则必须显式
+    // 清除，否则并发 spawn 中拿到 fd3 的 Launcher 会在 exec 后读到 EBADF。
     // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
-            if raw_read != 3 && libc::dup2(raw_read, 3) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if raw_read != 3 {
+            if raw_read == 3 {
+                let flags = libc::fcntl(raw_read, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(raw_read, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else {
+                if libc::dup2(raw_read, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 libc::close(raw_read);
             }
             Ok(())
