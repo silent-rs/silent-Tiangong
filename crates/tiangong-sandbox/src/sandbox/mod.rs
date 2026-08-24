@@ -52,8 +52,12 @@ pub fn availability() -> SandboxAvailability {
 /// 包装后的命令形态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxedProgram {
-    /// 不包装（FullAccess 模式，或平台不可用时的降级直跑）。
+    /// 不包装（仅 FullAccess 模式：用户已批准的全权通道）。
     Direct,
+    /// 平台沙箱不可用（缺 bwrap / 嵌套 Seatbelt / Windows 未实现）。
+    /// 命令默认路径必须拒绝执行，防止"用户以为在沙箱内实则裸奔"；
+    /// 需要执行时走升级审批票据进入全权通道。
+    Unavailable(String),
     /// 实际 program 与其 argv 前缀（前缀 + 原命令 + 原参数 = 完整命令行）。
     Wrapped {
         program: String,
@@ -85,12 +89,15 @@ pub fn wrap(policy: &SandboxPolicy) -> SandboxedProgram {
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
-                SandboxedProgram::Direct
+                SandboxedProgram::Unavailable(
+                    "Windows 沙箱（受限令牌）管道桥接受真实环境验证（RFC 0017 S6）".to_string(),
+                )
             }
         }
         SandboxAvailability::Unsupported(reason) => {
-            tracing::warn!(reason, "沙箱不可用，命令将以无沙箱方式执行（快照层兜底）");
-            SandboxedProgram::Direct
+            // RFC 0017（审查修订）：沙箱不可用时命令默认路径拒绝执行，
+            // 不再静默降级裸奔——快照层无法弥补凭据读取与外传。
+            SandboxedProgram::Unavailable(reason)
         }
     }
 }
@@ -200,5 +207,19 @@ mod tests {
     fn full_access_runs_direct() {
         let policy = SandboxPolicy::full_access();
         assert_eq!(wrap(&policy), SandboxedProgram::Direct);
+    }
+
+    #[test]
+    fn sandboxed_policy_never_degrades_silently() {
+        // 任何沙箱模式（非 FullAccess）在不可用环境必须显式失败，
+        // 不允许静默降级为直跑。
+        let policy = SandboxPolicy::workspace_write("/tmp/ws");
+        match wrap(&policy) {
+            SandboxedProgram::Direct => panic!("沙箱模式不允许静默直跑"),
+            SandboxedProgram::Wrapped { .. } => {}
+            SandboxedProgram::Unavailable(reason) => {
+                assert!(!reason.is_empty());
+            }
+        }
     }
 }

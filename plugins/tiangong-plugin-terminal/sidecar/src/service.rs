@@ -147,6 +147,15 @@ fn terminal_sandbox_prefix(cwd: Option<&str>) -> Option<(String, Vec<String>)> {
             Some((program, prefix))
         }
         tiangong_sandbox::SandboxedProgram::Direct => None,
+        // 用户显式开启沙箱但平台不可用：终端是用户自担风险的交互通道，
+        // 降级为常规终端并醒目告警（与 agent 命令通道的默认拒绝不同）。
+        tiangong_sandbox::SandboxedProgram::Unavailable(reason) => {
+            tracing::error!(
+                reason,
+                "TIANGONG_TERMINAL_SANDBOX=1 但平台沙箱不可用，终端将以非沙箱模式运行"
+            );
+            None
+        }
     }
 }
 

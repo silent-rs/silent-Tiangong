@@ -125,11 +125,17 @@ pub fn plugin_content_hash(directory: &Path) -> String {
         hasher.update(b"plugin.json:");
         hasher.update(strip_volatile_fields(&manifest_text).as_bytes());
     }
-    for entry in walk_files(directory, directory, 0) {
+    for entry in walk_files(directory, directory) {
         hasher.update(entry.as_bytes());
         hasher.update(b"\0");
-        if let Ok(bytes) = fs::read(directory.join(&entry)) {
-            hasher.update(&bytes);
+        match fs::read(directory.join(&entry)) {
+            Ok(bytes) => hasher.update(&bytes),
+            Err(error) => {
+                // 读取失败不能静默跳过：以错误标记参与哈希并告警，
+                // 保证授权前后状态差异可被检测。
+                tracing::warn!(entry = %entry, %error, "信任哈希扫描读取失败");
+                hasher.update(b"<unreadable>");
+            }
         }
         hasher.update(b"\0");
     }
@@ -142,13 +148,12 @@ fn strip_volatile_fields(text: &str) -> String {
     text.to_string()
 }
 
-fn walk_files(base: &Path, dir: &Path, depth: usize) -> Vec<String> {
-    const MAX_DEPTH: usize = 4;
+/// 完整扫描插件目录（无深度上限）：符号链接不跟随（防环），运行产物目录
+/// （runtime/logs/data）与 node_modules 排除——依赖内容经锁文件
+/// （package-lock.json / yarn.lock 等，位于扫描范围内）锚定。
+fn walk_files(base: &Path, dir: &Path) -> Vec<String> {
     const IGNORED: [&str; 4] = ["runtime", "logs", "data", "node_modules"];
     let mut out = Vec::new();
-    if depth > MAX_DEPTH {
-        return out;
-    }
     let Ok(entries) = fs::read_dir(dir) else {
         return out;
     };
@@ -160,8 +165,12 @@ fn walk_files(base: &Path, dir: &Path, depth: usize) -> Vec<String> {
             continue;
         }
         let path = entry.path();
-        if path.is_dir() {
-            out.extend(walk_files(base, &path, depth + 1));
+        // symlink_metadata 判真实类型：符号链接一律按文件路径记录、不跟随。
+        let is_dir = fs::symlink_metadata(&path)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            out.extend(walk_files(base, &path));
         } else {
             out.push(
                 path.strip_prefix(base)
@@ -207,6 +216,24 @@ mod tests {
         store.grant("my-plugin", &plugin_dir, "/tmp/dev").unwrap();
         store.revoke("my-plugin").unwrap();
         assert!(store.trusted_plugins().is_empty());
+    }
+
+    #[test]
+    fn deep_nested_files_are_covered() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin_dir = root.path().join("deep-plugin");
+        // 五层嵌套（超过旧版深度上限 4）。
+        let deep = plugin_dir.join("a/b/c/d/e");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("payload.js"), "original").unwrap();
+
+        let store = PluginSafetyStore::open(root.path());
+        store.grant("deep-plugin", &plugin_dir, "/tmp").unwrap();
+        assert!(store.is_trusted("deep-plugin", &plugin_dir));
+
+        // 深层文件变更必须使授权失效。
+        fs::write(deep.join("payload.js"), "tampered").unwrap();
+        assert!(!store.is_trusted("deep-plugin", &plugin_dir));
     }
 
     #[test]

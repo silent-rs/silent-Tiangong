@@ -704,6 +704,23 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 }
 
 /// 通过插件 ID 调用其 sidecar，入口不需要了解制品位置或传输协议。
+/// 校验本地信任（L3）登记目标：插件已安装、目录一致且未携带官方签名。
+/// 供宿主信任登记命令在用户确认前调用（RFC 0017 D3）。
+pub fn verify_local_trust_target(
+    storage_root: &Path,
+    plugin_id: &str,
+    directory: &Path,
+) -> Result<()> {
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if installed.directory != directory {
+        bail!("目录与插件 {plugin_id} 的安装目录不一致，拒绝登记本地信任");
+    }
+    if installed.signed_release.is_some() {
+        bail!("插件 {plugin_id} 已携带官方签名，无需本地信任");
+    }
+    Ok(())
+}
+
 pub fn invoke_sidecar(
     storage_root: &Path,
     plugin_id: &str,
