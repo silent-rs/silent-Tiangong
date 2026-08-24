@@ -17,10 +17,6 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-
 use crate::protocol::{
     HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcFrame, IpcRequest, PROTOCOL_VERSION,
     Request, Response,
@@ -29,6 +25,8 @@ use crate::sidecar::{
     EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
     STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
 };
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::Value;
 
 /// 子进程环境：传输模式标记。
 pub const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
@@ -213,6 +211,12 @@ impl StdioSidecarConnection {
         let mut policy_fd_guard = None;
         let mut command = match &launch_policy {
             Some(policy) => {
+                let program_sha256 = self
+                    .config
+                    .sandbox_program_sha256
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(|| super::sha256_file(&self.config.binary))?;
                 let sandbox_bin = tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
                     &self.config.storage_root,
                 )
@@ -235,7 +239,7 @@ impl StdioSidecarConnection {
                         .or_else(|| self.config.binary.parent())
                         .map(|path| path.display().to_string())
                         .ok_or_else(|| anyhow!("sidecar 目标程序缺少权威目录"))?,
-                    "program_sha256": sha256_file(&self.config.binary)?,
+                    "program_sha256": program_sha256,
                     "args": [],
                 });
                 let mut command = Command::new(sandbox_bin);
@@ -529,12 +533,6 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
 #[cfg(not(any(unix, windows)))]
 fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
     bail!("当前平台没有可用的 Launcher 策略传输通道")
-}
-
-fn sha256_file(path: &std::path::Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn sanitize_spawn_environment(command: &mut Command) {
