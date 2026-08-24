@@ -287,7 +287,7 @@ impl StdioSidecarConnection {
             }
         };
 
-        // 声明沙箱的 sidecar 一律经官方 Launcher 启动；策略通过继承描述符
+        // 声明沙箱的 sidecar 一律经官方沙箱程序启动；策略通过继承描述符
         // 传入。解释器形态把解释器作为目标程序，入口脚本和固定参数作为参数。
         let launch_policy = if self.config.sandbox {
             let workspace = self
@@ -303,14 +303,16 @@ impl StdioSidecarConnection {
         };
         let mut command = match &launch_policy {
             Some(policy) => {
-                let launcher =
-                    tiangong_sandbox::launcher_manager::resolve_launcher(&self.config.storage_root)
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "插件 {} 声明沙箱但 Launcher 不可用（active/内置均缺失），拒绝启动",
-                                self.config.plugin_id
-                            )
-                        })?;
+                let sandbox_bin =
+                    tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
+                        &self.config.storage_root,
+                    )
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "插件 {} 声明沙箱但 tiangong-sandbox 程序不可用（active/内置均缺失），拒绝启动",
+                            self.config.plugin_id
+                        )
+                    })?;
                 let request = serde_json::json!({
                     "protocol_version": 1,
                     "policy_schema": 1,
@@ -318,7 +320,7 @@ impl StdioSidecarConnection {
                     "program": target_program.display().to_string(),
                     "args": target_args,
                 });
-                let mut command = Command::new(launcher);
+                let mut command = Command::new(sandbox_bin);
                 prepare_policy_fd(&mut command, request.to_string())?;
                 command
             }
@@ -668,7 +670,7 @@ impl WindowsJob {
     }
 }
 
-/// 为 Launcher 准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
+/// 为沙箱程序准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
 fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -680,7 +682,7 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
         }
         (fds[0], fds[1])
     };
-    // 立即写入策略并关闭写端：Launcher 侧读到 EOF 即策略完整。
+    // 立即写入策略并关闭写端：沙箱程序侧读到 EOF 即策略完整。
     {
         let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
         writer
@@ -704,7 +706,7 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
     #[cfg(not(unix))]
     {
         let _ = raw_read;
-        bail!("Launcher fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
+        bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
     }
     // 后续提交会把描述符所有权收敛为显式守卫；当前需保持到 spawn 完成。
     std::mem::forget(read_fd_owned);
