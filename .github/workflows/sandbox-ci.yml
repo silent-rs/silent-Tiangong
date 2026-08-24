@@ -499,7 +499,7 @@ jobs:
           test -n "$package"
           dpkg-deb --contents "$package" \
             | tee "$RUNNER_TEMP/sandbox-diagnostics/bundle-contents.log"
-          rg 'usr/bin/tiangong-sandbox$' \
+          grep -E 'usr/bin/tiangong-sandbox$' \
             "$RUNNER_TEMP/sandbox-diagnostics/bundle-contents.log"
 
       - name: Verify macOS bundle contains runnable Launcher
