@@ -531,7 +531,10 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
         let marker = fixture.workspace.join(format!("concurrent-{index}.ready"));
         markers.push(marker.clone());
         let request = shell_request_with_timeout(
-            format!("/usr/bin/touch {}; /bin/sleep 120", shell_quote(&marker)),
+            format!(
+                "/usr/bin/mkfifo \"$TMPDIR/hold\"; /usr/bin/touch {}; read _ < \"$TMPDIR/hold\"",
+                shell_quote(&marker)
+            ),
             &fixture.workspace,
             120,
         );
@@ -540,16 +543,20 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
         let finished_tx = finished_tx.clone();
         workers.push(std::thread::spawn(move || {
             let result = connection.invoke_with_context(RUN_SHELL_OPERATION, &request, &context);
-            let _ = finished_tx.send(result);
+            let _ = finished_tx.send((index, result));
         }));
     }
     drop(finished_tx);
 
     let deadline = Instant::now() + Duration::from_secs(60);
     while !markers.iter().all(|marker| marker.is_file()) {
+        if let Ok((index, result)) = finished_rx.try_recv() {
+            panic!("并发 command {index} 在取消前提前结束: {result:?}");
+        }
         assert!(
             Instant::now() < deadline,
-            "并发 command 未全部启动；sidecar 日志:\n{}",
+            "并发 command 仅启动 {}/10；sidecar 日志:\n{}",
+            markers.iter().filter(|marker| marker.is_file()).count(),
             read_log(&fixture.sidecar_log)
         );
         std::thread::sleep(Duration::from_millis(50));
@@ -563,10 +570,10 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
     stop.join().unwrap().unwrap();
 
     for _ in 0..10 {
-        finished_rx
+        let (_, result) = finished_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("并发 command 在取消后未及时结束")
-            .ok();
+            .expect("并发 command 在取消后未及时结束");
+        result.ok();
     }
     for worker in workers {
         worker.join().unwrap();
@@ -684,9 +691,8 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let before = host_resource_count();
 
-    for index in 0..20 {
+    let start_and_stop = |index: &str| {
         let instance = root.path().join(format!("instance-{index}"));
         let connection = StdioSidecarConnection::new(
             SidecarConfig::new(
@@ -712,6 +718,16 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
             )
             .unwrap();
         connection.stop().unwrap();
+    };
+
+    // 首次 stdio 调用会初始化进程级全局设施；预热后再取基线，避免把
+    // 一次性常驻句柄误判为逐次泄漏。
+    start_and_stop("warmup");
+    std::thread::sleep(Duration::from_millis(500));
+    let before = host_resource_count();
+
+    for index in 0..20 {
+        start_and_stop(&index.to_string());
     }
 
     let deadline = Instant::now() + Duration::from_secs(5);
