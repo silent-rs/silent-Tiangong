@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -50,6 +51,7 @@ impl EphemeralCommandConnection {
         context: &SidecarInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
+        let started = Instant::now();
         if self.template.plugin_id != "command" {
             bail!("一次性 command 连接的插件身份无效");
         }
@@ -128,6 +130,7 @@ impl EphemeralCommandConnection {
         }
 
         let sidecar_log = config.log.clone();
+        emit_sandbox_diagnostic(&context.invocation_id, "prepared", started, &sidecar_log);
         let connection = Arc::new(StdioSidecarConnection::new(config));
         if let Ok(env) = self.exec_env.lock() {
             connection.update_exec_env(env.clone());
@@ -161,13 +164,34 @@ impl EphemeralCommandConnection {
                 "full_trust": full_trust,
                 "allowed_commands": allowed_commands,
             });
-            connection.invoke(SET_WORKSPACE_OPERATION, &init.to_string())?;
+            let init_result = connection.invoke(SET_WORKSPACE_OPERATION, &init.to_string());
+            emit_sandbox_diagnostic(
+                &context.invocation_id,
+                "workspace-ready",
+                started,
+                &sidecar_log,
+            );
+            init_result?;
             if cancelled.load(Ordering::Acquire) {
                 bail!("command 调用已取消");
             }
-            connection.invoke_with_progress(operation, &request.to_string(), on_progress)
+            let invoke_result =
+                connection.invoke_with_progress(operation, &request.to_string(), on_progress);
+            emit_sandbox_diagnostic(
+                &context.invocation_id,
+                "command-finished",
+                started,
+                &sidecar_log,
+            );
+            invoke_result
         })();
         let _ = connection.stop();
+        emit_sandbox_diagnostic(
+            &context.invocation_id,
+            "process-stopped",
+            started,
+            &sidecar_log,
+        );
         if let Ok(mut active) = self.active.lock() {
             active.remove(&key);
         }
@@ -206,6 +230,21 @@ impl EphemeralCommandConnection {
             connection.stop()?;
         }
         Ok(())
+    }
+}
+
+fn emit_sandbox_diagnostic(
+    invocation_id: &str,
+    stage: &str,
+    started: Instant,
+    sidecar_log: &std::path::Path,
+) {
+    if std::env::var_os("TIANGONG_SANDBOX_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "SANDBOX_DIAGNOSTIC invocation={invocation_id} stage={stage} elapsed_ms={} log={}",
+            started.elapsed().as_millis(),
+            sidecar_log.display()
+        );
     }
 }
 
