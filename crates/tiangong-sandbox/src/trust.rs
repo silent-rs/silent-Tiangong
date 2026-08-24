@@ -125,7 +125,7 @@ pub fn plugin_content_hash(directory: &Path) -> String {
         hasher.update(b"plugin.json:");
         hasher.update(strip_volatile_fields(&manifest_text).as_bytes());
     }
-    for entry in walk_files(directory, 0) {
+    for entry in walk_files(directory, directory, 0) {
         hasher.update(entry.as_bytes());
         hasher.update(b"\0");
         if let Ok(bytes) = fs::read(directory.join(&entry)) {
@@ -142,7 +142,7 @@ fn strip_volatile_fields(text: &str) -> String {
     text.to_string()
 }
 
-fn walk_files(dir: &Path, depth: usize) -> Vec<String> {
+fn walk_files(base: &Path, dir: &Path, depth: usize) -> Vec<String> {
     const MAX_DEPTH: usize = 4;
     const IGNORED: [&str; 4] = ["runtime", "logs", "data", "node_modules"];
     let mut out = Vec::new();
@@ -161,10 +161,10 @@ fn walk_files(dir: &Path, depth: usize) -> Vec<String> {
         }
         let path = entry.path();
         if path.is_dir() {
-            out.extend(walk_files(&path, depth + 1));
+            out.extend(walk_files(base, &path, depth + 1));
         } else {
             out.push(
-                path.strip_prefix(dir)
+                path.strip_prefix(base)
                     .map(|rel| rel.to_string_lossy().replace('\\', "/"))
                     .unwrap_or(name.clone()),
             );

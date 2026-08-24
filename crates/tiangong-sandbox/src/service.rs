@@ -163,7 +163,7 @@ fn handle(engine: &mut SnapshotEngine, request: Request) {
             snapshot_id,
             reply,
         } => {
-            let workspace = engine.known_workspace(&session_id).map(Path::to_path_buf);
+            let workspace = engine.known_workspace(&session_id);
             let result = workspace
                 .ok_or_else(|| anyhow!("该会话尚未登记工作区（未拍摄过快照）").to_string())
                 .and_then(|workspace| {
@@ -178,7 +178,7 @@ fn handle(engine: &mut SnapshotEngine, request: Request) {
             snapshot_id,
             reply,
         } => {
-            let workspace = engine.known_workspace(&session_id).map(Path::to_path_buf);
+            let workspace = engine.known_workspace(&session_id);
             let result = workspace
                 .ok_or_else(|| anyhow!("该会话尚未登记工作区（未拍摄过快照）").to_string())
                 .and_then(|workspace| {
@@ -194,7 +194,7 @@ fn handle(engine: &mut SnapshotEngine, request: Request) {
             rel_path,
             reply,
         } => {
-            let workspace = engine.known_workspace(&session_id).map(Path::to_path_buf);
+            let workspace = engine.known_workspace(&session_id);
             let result = workspace
                 .ok_or_else(|| anyhow!("该会话尚未登记工作区（未拍摄过快照）").to_string())
                 .and_then(|workspace| {

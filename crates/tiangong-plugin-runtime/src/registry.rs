@@ -695,6 +695,11 @@ pub fn invoke_sidecar(
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
     }
+    // 升级审批票据核验（RFC 0017 S4）：escalated 的信任锚是宿主票据库；
+    // 票据无效时 run 类操作剥离声明回退沙箱，trust_command 直接拒绝。
+    let payload =
+        tiangong_sandbox::escalation::enforce_escalation_ticket(plugin_id, operation, payload)
+            .map_err(anyhow::Error::msg)?;
     let connection = sidecar_connection(storage_root, &installed, false)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
     let response = connection.invoke(operation, &payload)?;

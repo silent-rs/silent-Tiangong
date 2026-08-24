@@ -219,10 +219,11 @@ impl SnapshotEngine {
         };
         self.save_meta(&meta)?;
 
-        // 更新索引与保留策略。
+        // 更新索引与保留策略（workspace 一并持久化，重启后恢复链路可用）。
         self.workspaces
             .insert(session_id.to_string(), workspace.to_path_buf());
         let mut index = self.read_index(session_id);
+        index.workspace = Some(workspace.display().to_string());
         index.snapshots.push(SnapshotSummary::from(&meta));
         self.enforce_retention(session_id, &mut index);
         self.write_index(session_id, &index)?;
@@ -260,8 +261,11 @@ impl SnapshotEngine {
         all_paths.extend(ws_map.keys());
         for rel in all_paths {
             match (snap_files.get(rel), ws_map.get(rel)) {
-                (Some((size, _)), Some((wsize, _))) if size == wsize => {
-                    // 大小相同视为未变化（mtime 粒度噪声不放大差异）。
+                (Some((size, mtime)), Some((wsize, wmtime)))
+                    if size == wsize && mtime == wmtime =>
+                {
+                    // 大小与修改时间均相同视为未变化；等长改写（如 true→null）
+                    // 经 mtime 差异进入变更集。
                 }
                 (Some(_), Some(_)) => changes.push(FileChange {
                     kind: FileChangeKind::Modified,
@@ -420,8 +424,13 @@ impl SnapshotEngine {
     }
 
     /// 恢复操作所用的已登记工作区（最近一次快照时的工作区路径）。
-    pub fn known_workspace(&self, session_id: &str) -> Option<&Path> {
-        self.workspaces.get(session_id).map(PathBuf::as_path)
+    /// 内存未命中（如宿主重启后）回落到 index.json 的持久化记录。
+    pub fn known_workspace(&self, session_id: &str) -> Option<PathBuf> {
+        if let Some(workspace) = self.workspaces.get(session_id) {
+            return Some(workspace.clone());
+        }
+        let persisted = self.read_index(session_id).workspace?;
+        (!persisted.is_empty()).then(|| PathBuf::from(persisted))
     }
 
     fn scan_workspace(&self, workspace: &Path) -> Result<(Vec<FileEntry>, Vec<SymlinkEntry>)> {
