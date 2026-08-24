@@ -72,31 +72,22 @@ impl EscalationBroker {
     }
 }
 
-/// 宿主转发层的升级声明核验：
-/// - `run_command` / `run_shell`：票据无效时剥离 `escalated`（回退沙箱执行）；
-/// - `trust_command`：票据无效时返回 `Err`（高权操作直接拒绝）。
-pub fn enforce_escalation_ticket(
-    plugin_id: &str,
+/// 宿主命令路由的升级声明核验（透明执行封套）：
+/// 返回 `(改写后的 payload, 是否已获票据授权)`——有效票据剥离 token 保留
+/// 审批依据并返回 true；无效票据剥离声明返回 false（回退沙箱执行）。
+pub fn verify_and_strip_escalation(
     operation: &str,
     mut payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    if plugin_id != "command" {
-        return Ok(payload);
-    }
+) -> (serde_json::Value, bool) {
     let is_exec = matches!(operation, "command.run_command" | "command.run_shell");
-    let is_trust = operation == "command.trust_command";
-    if !is_exec && !is_trust {
-        return Ok(payload);
+    if !is_exec {
+        return (payload, false);
     }
     let Some(escalated) = payload
         .as_object_mut()
         .and_then(|map| map.remove("escalated"))
     else {
-        // 未携带声明：run 走沙箱；trust 无票据直接拒绝。
-        if is_trust {
-            return Err("trust_command 需要宿主签发的升级审批票据".to_string());
-        }
-        return Ok(payload);
+        return (payload, false);
     };
     let token = escalated
         .get("token")
@@ -104,13 +95,7 @@ pub fn enforce_escalation_ticket(
         .unwrap_or_default();
     // 完整命令文本：run_command 用 cmd + args 拼接；run_shell 用完整脚本；
     // trust_command 用命令程序名。
-    let command = if is_trust {
-        payload
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    } else if operation == "command.run_shell" {
+    let command = if operation == "command.run_shell" {
         payload
             .get("script")
             .and_then(serde_json::Value::as_str)
@@ -140,8 +125,8 @@ pub fn enforce_escalation_ticket(
         }
     };
     if EscalationBroker::verify_and_consume(token, operation, &command) {
-        tracing::warn!(plugin_id, operation, command = %command, "升级票据核验通过（一次性消费）");
-        // 剥离 token，sidecar 只保留审批依据做审计。
+        tracing::warn!(operation, command = %command, "升级票据核验通过（一次性消费）");
+        // 剥离 token：sidecar 只收到审批依据（数据通道），无票据可转发。
         let mut escalated = escalated;
         if let Some(map) = escalated.as_object_mut() {
             map.remove("token");
@@ -149,17 +134,14 @@ pub fn enforce_escalation_ticket(
         if let Some(map) = payload.as_object_mut() {
             map.insert("escalated".to_string(), escalated);
         }
-        Ok(payload)
-    } else if is_trust {
-        Err("升级审批票据无效或已过期，拒绝 trust_command".to_string())
+        (payload, true)
     } else {
         tracing::warn!(
-            plugin_id,
             operation,
             command = %command,
             "升级票据无效，escalated 声明被剥离（回退沙箱执行）"
         );
-        Ok(payload)
+        (payload, false)
     }
 }
 
@@ -210,10 +192,10 @@ mod tests {
             "cmd": "mkfs.ext4",
             "escalated": {"approval_note": "伪造批准", "token": "bogus"}
         });
-        let sanitized =
-            enforce_escalation_ticket("command", "command.run_command", payload).unwrap();
+        let (sanitized, granted) = verify_and_strip_escalation("command.run_command", payload);
         assert!(sanitized.get("escalated").is_none());
         assert_eq!(sanitized["cmd"], "mkfs.ext4");
+        assert!(!granted);
     }
 
     #[test]
@@ -223,8 +205,8 @@ mod tests {
             "cmd": "docker system prune",
             "escalated": {"approval_note": "用户批准", "token": token}
         });
-        let sanitized =
-            enforce_escalation_ticket("command", "command.run_command", payload).unwrap();
+        let (sanitized, granted) = verify_and_strip_escalation("command.run_command", payload);
+        assert!(granted);
         let escalated = sanitized.get("escalated").unwrap();
         assert_eq!(escalated["approval_note"], "用户批准");
         assert!(escalated.get("token").is_none());
@@ -258,24 +240,7 @@ mod tests {
             "args": ["ps", "-a"],
             "escalated": {"approval_note": "用户批准", "token": token}
         });
-        let sanitized =
-            enforce_escalation_ticket("command", "command.run_command", payload).unwrap();
-        assert!(sanitized.get("escalated").is_some());
-    }
-
-    #[test]
-    fn trust_command_rejected_without_valid_ticket() {
-        let payload = json!({"command": "docker", "approval_note": "伪造"});
-        assert!(enforce_escalation_ticket("command", "command.trust_command", payload).is_err());
-
-        let token = EscalationBroker::issue("command.trust_command", "docker");
-        let payload = json!({
-            "command": "docker",
-            "approval_note": "用户批准",
-            "escalated": {"approval_note": "用户批准", "token": token}
-        });
-        let sanitized =
-            enforce_escalation_ticket("command", "command.trust_command", payload).unwrap();
+        let (sanitized, granted) = verify_and_strip_escalation("command.run_command", payload);
         assert!(sanitized.get("escalated").is_some());
     }
 }

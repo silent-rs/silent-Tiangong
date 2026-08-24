@@ -721,6 +721,147 @@ pub fn verify_local_trust_target(
     Ok(())
 }
 
+/// 一次性 command sidecar 路由（透明执行封套第一阶段）：
+/// 预分类 → 票据核验 → 按会话工作区构造策略 → 沙箱/全权实例执行 →
+/// 违规提示附加。插件侧无任何沙箱逻辑，协议原样透传。
+fn invoke_command_ephemeral(
+    storage_root: &Path,
+    installed: &InstalledPlugin,
+    operation: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value> {
+    use tiangong_sandbox::escalation::verify_and_strip_escalation;
+
+    let (payload, escalation_granted) = verify_and_strip_escalation(operation, payload);
+    let full_trust = payload
+        .get("access")
+        .and_then(|access| access.get("full_trust"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let full_access = escalation_granted || full_trust;
+
+    // 预分类：非全权时拒绝已知高危命令（引导走审批通道）。
+    if !full_access {
+        let dangerous = match operation {
+            "command.run_shell" => payload
+                .get("script")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|script| {
+                    tiangong_sandbox::assess_script(script)
+                        == tiangong_sandbox::CommandRisk::KnownDangerous
+                }),
+            _ => {
+                let cmd = payload
+                    .get("cmd")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let args = payload
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                tiangong_sandbox::assess_program(cmd, &args)
+                    == tiangong_sandbox::CommandRisk::KnownDangerous
+            }
+        };
+        if dangerous {
+            bail!(
+                "命令被宿主预分类器判定为高危，未执行。如确需执行，请先调用                  request_user（kind: approval）获得用户批准，再经界面批准的升级                  票据以全权方式执行。"
+            );
+        }
+    }
+
+    // 会话工作区（策略可写根）：请求自带，插件无需感知。
+    let workspace = payload
+        .get("access")
+        .and_then(|access| access.get("workspace"))
+        .or_else(|| payload.get("cwd"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && Path::new(value).is_dir())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| installed.directory.join("data"));
+
+    let sidecar = installed
+        .manifest
+        .sidecar
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
+    let mut binary = installed.directory.join(&sidecar.binary);
+    if !std::env::consts::EXE_SUFFIX.is_empty() {
+        let file_name = binary
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("sidecar 文件名无效"))?;
+        if !file_name.ends_with(std::env::consts::EXE_SUFFIX) {
+            binary.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
+        }
+    }
+    let base = installed
+        .directory
+        .join(format!("ephemeral-{}", scru128::new()));
+    let config = SidecarConfig::new(
+        &installed.manifest.id,
+        &installed.manifest.version,
+        binary,
+        base.join("endpoint.json"),
+        base.join("sidecar.log"),
+        base.join("data"),
+        storage_root.to_path_buf(),
+    )
+    .with_timeouts(
+        Duration::from_millis(sidecar.startup_timeout_ms),
+        Duration::from_millis(sidecar.request_timeout_ms),
+    )
+    // 全权实例不套沙箱（用户已批准的通道）；其余按会话工作区沙箱执行，
+    // 平台沙箱不可用时 spawn 显式失败（不静默降级裸奔）。
+    .with_sandbox(!full_access)
+    .with_sandbox_workspace(if full_access { None } else { Some(workspace) });
+
+    let connection = StdioSidecarConnection::new(config);
+    let payload_text = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
+    let invoke_result = connection.invoke(operation, &payload_text);
+    let response_text = match invoke_result {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = connection.stop();
+            let _ = std::fs::remove_dir_all(&base);
+            return Err(error);
+        }
+    };
+    let _ = connection.stop();
+    let _ = std::fs::remove_dir_all(&base);
+
+    let mut response: serde_json::Value =
+        serde_json::from_str(&response_text).with_context(|| "解析插件响应失败")?;
+    // 沙箱违规归因提示（对模型透明，Agent 可自主改写法或申请升级）。
+    if !full_access
+        && response.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        && let Some(hint) = response
+            .get("stderr")
+            .and_then(serde_json::Value::as_str)
+            .and_then(tiangong_sandbox::explain_violation)
+    {
+        let annotated = response
+            .get("stderr")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(map) = response.as_object_mut() {
+            map.insert(
+                "stderr".to_string(),
+                serde_json::Value::String(format!("{annotated}\n[沙箱提示] {hint}")),
+            );
+        }
+    }
+    Ok(response)
+}
+
 pub fn invoke_sidecar(
     storage_root: &Path,
     plugin_id: &str,
@@ -731,11 +872,11 @@ pub fn invoke_sidecar(
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
     }
-    // 升级审批票据核验（RFC 0017 S4）：escalated 的信任锚是宿主票据库；
-    // 票据无效时 run 类操作剥离声明回退沙箱，trust_command 直接拒绝。
-    let payload =
-        tiangong_sandbox::escalation::enforce_escalation_ticket(plugin_id, operation, payload)
-            .map_err(anyhow::Error::msg)?;
+    // 命令执行操作走一次性沙箱实例（透明执行封套）：宿主按请求自带的
+    // 会话工作区构造策略，每次调用启动独立 command sidecar，插件零感知。
+    if plugin_id == "command" && matches!(operation, "command.run_command" | "command.run_shell") {
+        return invoke_command_ephemeral(storage_root, &installed, operation, payload);
+    }
     let connection = sidecar_connection(storage_root, &installed, false)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
     let response = connection.invoke(operation, &payload)?;

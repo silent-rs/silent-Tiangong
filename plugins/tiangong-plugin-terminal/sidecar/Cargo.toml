@@ -19,7 +19,6 @@ async-trait = "0.1"
 portable-pty = "0.8"
 vte = "0.14"
 scru128 = { workspace = true }
-tiangong-sandbox = { workspace = true }
 tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
