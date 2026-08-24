@@ -152,23 +152,32 @@ jobs:
       - name: Build Launcher and command sidecar
         run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
 
-      - name: Verify native sandbox enforcement
+      - name: Probe native sandbox enforcement
         run: |
           set +e
           report="$(target/debug/tiangong-sandbox --self-check)"
           status=$?
           set -e
           printf '%s\n' "$report"
-          if [[ "$status" -ne 0 ]]; then
+          if [[ "$status" -eq 79 ]]; then
+            python3 -c '
+            import json, sys
+            report = json.load(sys.stdin)
+            assert report["environment_unverifiable"] is True, report
+            assert report["platform"].startswith("environment-restricted:"), report
+            ' <<< "$report"
+            echo "::warning::GitHub macOS runner cannot nest Seatbelt; build, unit, process cleanup, and packaging checks will continue."
+          elif [[ "$status" -ne 0 ]]; then
             exit "$status"
+          else
+            python3 -c '
+            import json, sys
+            report = json.load(sys.stdin)
+            assert report["platform"] == "available", report
+            assert report["workspace_write"] is True, report
+            assert report["outside_write_blocked"] is True, report
+            ' <<< "$report"
           fi
-          python3 -c '
-          import json, sys
-          report = json.load(sys.stdin)
-          assert report["platform"] == "available", report
-          assert report["workspace_write"] is True, report
-          assert report["outside_write_blocked"] is True, report
-          ' <<< "$report"
 
       - name: Test native Launcher and process cleanup
         run: |

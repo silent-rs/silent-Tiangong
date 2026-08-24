@@ -1,21 +1,25 @@
 //! command 一次性沙箱路由的真实执行验证。
 //!
 //! 真实 Launcher 用例依赖已构建的 `tiangong-sandbox` 与 command sidecar；
-//! 平台不支持嵌套沙箱时明确跳过。进程组清理另用无沙箱 stdio 链路验证，
-//! 避免受测试宿主自身沙箱状态影响。
+//! 平台不支持嵌套沙箱时明确跳过。真实 Launcher 与无沙箱 stdio 链路分别
+//! 验证取消和宿主停止后的后代进程清理。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use tiangong_plugin_runtime::sidecar::SidecarInvocationContext;
 use tiangong_plugin_runtime::sidecar::{
-    EphemeralCommandConnection, SidecarConfig, SidecarConnection, SidecarInvocationContext,
-    StdioSidecarConnection,
+    EphemeralCommandConnection, SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
 
 const RUN_SHELL_OPERATION: &str = "command.run_shell";
 const SET_WORKSPACE_OPERATION: &str = "command.set_workspace";
+
+#[cfg(unix)]
+static REAL_SANDBOX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn debug_binary(name: &str) -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -28,6 +32,7 @@ fn command_sidecar_binary() -> Option<PathBuf> {
     debug_binary("tiangong-command-sidecar")
 }
 
+#[cfg(unix)]
 fn sandbox_binaries_ready() -> bool {
     if !matches!(
         tiangong_sandbox::availability(),
@@ -47,13 +52,16 @@ fn sandbox_binaries_ready() -> bool {
     true
 }
 
+#[cfg(unix)]
 struct SandboxFixture {
     _root: tempfile::TempDir,
     workspace: PathBuf,
     outside: PathBuf,
+    sidecar_log: PathBuf,
     connection: Arc<EphemeralCommandConnection>,
 }
 
+#[cfg(unix)]
 fn sandbox_fixture() -> Option<SandboxFixture> {
     if !sandbox_binaries_ready() {
         return None;
@@ -85,12 +93,13 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
     )
     .unwrap();
 
+    let sidecar_log = plugin_root.join("unused-sidecar.log");
     let config = SidecarConfig::new(
         "command",
         "0.0.0",
         binary,
         plugin_root.join("unused-endpoint.json"),
-        plugin_root.join("unused-sidecar.log"),
+        sidecar_log.clone(),
         plugin_root.join("unused-data"),
         storage_root,
     )
@@ -101,10 +110,12 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
         _root: root,
         workspace,
         outside,
+        sidecar_log,
         connection: Arc::new(EphemeralCommandConnection::new(config)),
     })
 }
 
+#[cfg(unix)]
 fn invocation_context(workspace: &Path, invocation_id: &str) -> SidecarInvocationContext {
     SidecarInvocationContext {
         session_id: "session-a".to_string(),
@@ -113,6 +124,7 @@ fn invocation_context(workspace: &Path, invocation_id: &str) -> SidecarInvocatio
     }
 }
 
+#[cfg(unix)]
 fn shell_request(script: String, claimed_workspace: &Path) -> String {
     serde_json::json!({
         "script": script,
@@ -133,6 +145,9 @@ fn shell_quote(path: &Path) -> String {
 #[cfg(unix)]
 #[test]
 fn real_launcher_enforces_workspace_and_dedicated_temp() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(fixture) = sandbox_fixture() else {
         return;
     };
@@ -180,12 +195,16 @@ fn real_launcher_enforces_workspace_and_dedicated_temp() {
 #[cfg(unix)]
 #[test]
 fn real_launcher_cancel_kills_background_process_tree() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(fixture) = sandbox_fixture() else {
         return;
     };
     let pid_file = fixture.workspace.join("background.pid");
+    let heartbeat_file = fixture.workspace.join("background.heartbeat");
     let request = shell_request(
-        "sleep 120 & child=$!; printf '%s' \"$child\" > background.pid; wait".to_string(),
+        unix_background_process_script(&pid_file, &heartbeat_file),
         &fixture.workspace,
     );
     let worker_connection = Arc::clone(&fixture.connection);
@@ -196,13 +215,30 @@ fn real_launcher_cancel_kills_background_process_tree() {
         let _ = finished_tx.send(result);
     });
 
-    let background_pid = wait_for_pid(&pid_file, Duration::from_secs(10));
+    let background_pid = wait_for_pid(
+        &pid_file,
+        &finished_rx,
+        &fixture.sidecar_log,
+        Duration::from_secs(30),
+    );
+    wait_for_heartbeat_growth(
+        &heartbeat_file,
+        &finished_rx,
+        &fixture.sidecar_log,
+        Duration::from_secs(30),
+    );
+    #[cfg(not(target_os = "linux"))]
     assert!(process_exists(background_pid));
+    #[cfg(target_os = "linux")]
+    let _ = background_pid;
     fixture.connection.cancel_session("session-a").unwrap();
     let _ = finished_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("取消会话后 command 执行线程未及时结束");
     worker.join().unwrap();
+    #[cfg(target_os = "linux")]
+    wait_for_heartbeat_stop(&heartbeat_file, Duration::from_secs(5));
+    #[cfg(not(target_os = "linux"))]
     wait_for_process_exit(background_pid, Duration::from_secs(5));
 }
 
@@ -234,6 +270,7 @@ fn stdio_stop_kills_background_process_tree() {
     };
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
+    let sidecar_log = root.path().join("sidecar.log");
     std::fs::create_dir_all(&workspace).unwrap();
     let connection = Arc::new(StdioSidecarConnection::new(
         SidecarConfig::new(
@@ -241,7 +278,7 @@ fn stdio_stop_kills_background_process_tree() {
             "0.0.0",
             binary,
             root.path().join("endpoint.json"),
-            root.path().join("sidecar.log"),
+            sidecar_log.clone(),
             root.path().join("data"),
             root.path().join("storage"),
         )
@@ -261,12 +298,14 @@ fn stdio_stop_kills_background_process_tree() {
 
     let pid_file = workspace.join("background.pid");
     #[cfg(unix)]
+    let heartbeat_file = workspace.join("background.heartbeat");
+    #[cfg(unix)]
     let request = shell_request(
-        "sleep 120 & child=$!; printf '%s' \"$child\" > background.pid; wait".to_string(),
+        unix_background_process_script(&pid_file, &heartbeat_file),
         &workspace,
     );
     #[cfg(windows)]
-    let request = windows_background_process_request(&workspace);
+    let request = windows_background_process_request(&pid_file);
     let worker_connection = Arc::clone(&connection);
     let (finished_tx, finished_rx) = sync_channel(1);
     let worker = std::thread::spawn(move || {
@@ -274,7 +313,19 @@ fn stdio_stop_kills_background_process_tree() {
         let _ = finished_tx.send(result);
     });
 
-    let background_pid = wait_for_pid(&pid_file, Duration::from_secs(10));
+    let background_pid = wait_for_pid(
+        &pid_file,
+        &finished_rx,
+        &sidecar_log,
+        Duration::from_secs(35),
+    );
+    #[cfg(unix)]
+    wait_for_heartbeat_growth(
+        &heartbeat_file,
+        &finished_rx,
+        &sidecar_log,
+        Duration::from_secs(30),
+    );
     assert!(process_exists(background_pid));
     connection.stop().unwrap();
     let _ = finished_rx
@@ -282,22 +333,34 @@ fn stdio_stop_kills_background_process_tree() {
         .expect("停止 sidecar 后执行线程未及时结束");
     worker.join().unwrap();
     wait_for_process_exit(background_pid, Duration::from_secs(5));
+    #[cfg(unix)]
+    wait_for_heartbeat_stop(&heartbeat_file, Duration::from_secs(5));
+}
+
+#[cfg(unix)]
+fn unix_background_process_script(pid_file: &Path, heartbeat_file: &Path) -> String {
+    format!(
+        "(while :; do /usr/bin/printf x >> {}; /bin/sleep 0.1; done) & child=$!; /usr/bin/printf '%s' \"$child\" > {}; wait \"$child\"",
+        shell_quote(heartbeat_file),
+        shell_quote(pid_file),
+    )
 }
 
 #[cfg(windows)]
-fn windows_background_process_request(workspace: &Path) -> String {
+fn windows_background_process_request(pid_file: &Path) -> String {
+    let workspace = pid_file
+        .parent()
+        .expect("PID 文件必须位于工作区内")
+        .display()
+        .to_string();
+    let pid_file = pid_file.display().to_string().replace('\'', "''");
     serde_json::json!({
-        "script": concat!(
-            "$child = Start-Process ",
-            "-FilePath \"$env:SystemRoot\\System32\\ping.exe\" ",
-            "-ArgumentList \"-t\",\"127.0.0.1\" -PassThru; ",
-            "Set-Content -LiteralPath \"background.pid\" ",
-            "-Value $child.Id -NoNewline -Encoding ascii; ",
-            "Wait-Process -Id $child.Id"
+        "script": format!(
+            "$child = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList '-t','127.0.0.1' -PassThru -NoNewWindow; [System.IO.File]::WriteAllText('{pid_file}', $child.Id.ToString()); Wait-Process -Id $child.Id"
         ),
         "shell": "powershell",
         "timeout_secs": 120,
-        "workspace": workspace.display().to_string(),
+        "workspace": workspace,
         "full_trust": true,
         "allowed_commands": [],
     })
@@ -305,7 +368,12 @@ fn windows_background_process_request(workspace: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn wait_for_pid(path: &Path, timeout: Duration) -> i32 {
+fn wait_for_pid(
+    path: &Path,
+    finished: &Receiver<anyhow::Result<String>>,
+    log: &Path,
+    timeout: Duration,
+) -> i32 {
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(raw) = std::fs::read_to_string(path)
@@ -313,13 +381,21 @@ fn wait_for_pid(path: &Path, timeout: Duration) -> i32 {
         {
             return pid;
         }
-        assert!(Instant::now() < deadline, "等待后台进程 PID 超时");
+        ensure_invocation_running(finished, log);
+        if Instant::now() >= deadline {
+            panic!("等待后台进程 PID 超时；sidecar 日志:\n{}", read_log(log));
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 #[cfg(windows)]
-fn wait_for_pid(path: &Path, timeout: Duration) -> u32 {
+fn wait_for_pid(
+    path: &Path,
+    finished: &Receiver<anyhow::Result<String>>,
+    log: &Path,
+    timeout: Duration,
+) -> u32 {
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(raw) = std::fs::read_to_string(path)
@@ -327,8 +403,84 @@ fn wait_for_pid(path: &Path, timeout: Duration) -> u32 {
         {
             return pid;
         }
-        assert!(Instant::now() < deadline, "等待后台进程 PID 超时");
+        ensure_invocation_running(finished, log);
+        if Instant::now() >= deadline {
+            panic!("等待后台进程 PID 超时；sidecar 日志:\n{}", read_log(log));
+        }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn ensure_invocation_running(finished: &Receiver<anyhow::Result<String>>, log: &Path) {
+    match finished.try_recv() {
+        Ok(Ok(response)) => panic!(
+            "后台进程就绪前 command 已返回: {response}；sidecar 日志:\n{}",
+            read_log(log)
+        ),
+        Ok(Err(error)) => panic!(
+            "后台进程就绪前 command 调用失败: {error:#}；sidecar 日志:\n{}",
+            read_log(log)
+        ),
+        Err(TryRecvError::Disconnected) => panic!(
+            "后台进程就绪前 command 执行线程已断开；sidecar 日志:\n{}",
+            read_log(log)
+        ),
+        Err(TryRecvError::Empty) => {}
+    }
+}
+
+fn read_log(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| format!("<读取失败: {error}>"))
+}
+
+#[cfg(unix)]
+fn wait_for_heartbeat_growth(
+    path: &Path,
+    finished: &Receiver<anyhow::Result<String>>,
+    log: &Path,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut first_len = None;
+    loop {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let len = metadata.len();
+            if first_len.is_some_and(|first| len > first) {
+                return;
+            }
+            if len > 0 {
+                first_len.get_or_insert(len);
+            }
+        }
+        ensure_invocation_running(finished, log);
+        if Instant::now() >= deadline {
+            panic!("后台进程心跳未增长；sidecar 日志:\n{}", read_log(log));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_heartbeat_stop(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_len = std::fs::metadata(path)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let mut stable_since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let len = std::fs::metadata(path)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        if len == last_len {
+            if stable_since.elapsed() >= Duration::from_millis(500) {
+                return;
+            }
+        } else {
+            last_len = len;
+            stable_since = Instant::now();
+        }
+        assert!(Instant::now() < deadline, "后台进程在清理后仍持续运行");
     }
 }
 
