@@ -16,6 +16,8 @@ pub mod sandbox;
 /// Windows 上通过进程环境传递一次性 Launcher 请求；Launcher 启动目标前会移除。
 /// Unix 使用 fd3，不使用该变量。
 pub const POLICY_ENV: &str = "TIANGONG_SANDBOX_REQUEST";
+/// Unix fd3 策略帧允许的最大 JSON 长度，防止 Launcher 按不可信长度分配内存。
+pub const MAX_POLICY_FRAME_BYTES: usize = 1024 * 1024;
 
 pub use host_policy::{HostExecutionPolicy, SidecarTransport};
 pub use sandbox::{

@@ -587,6 +587,84 @@ fn child_status(process: &StdioProcess) -> String {
     }
 }
 
+/// 为沙箱程序准备策略描述符：匿名管道写端写入长度前缀和策略正文后立即
+/// 关闭；读端经 pre_exec 复制到 fd3 并关闭原描述符。
+///
+/// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
+/// 标准库管道两端在返回调用方前均已设置 FD_CLOEXEC，避免并发 spawn 继承
+/// 尚未关闭的写端，导致 Launcher 永远等不到策略 EOF。
+#[cfg(unix)]
+struct PolicyFdGuard(std::io::PipeReader);
+
+#[cfg(not(unix))]
+struct PolicyFdGuard;
+
+#[cfg(unix)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    let policy_bytes = policy_json.as_bytes();
+    if policy_bytes.len() > tiangong_sandbox::MAX_POLICY_FRAME_BYTES {
+        bail!(
+            "Launcher 策略超过长度上限: actual={}, max={}",
+            policy_bytes.len(),
+            tiangong_sandbox::MAX_POLICY_FRAME_BYTES
+        );
+    }
+    let length = u32::try_from(policy_bytes.len()).context("Launcher 策略长度无法编码")?;
+    let (read_fd, mut writer) = std::io::pipe().context("创建策略管道失败")?;
+    writer
+        .write_all(&length.to_be_bytes())
+        .and_then(|_| writer.write_all(policy_bytes))
+        .and_then(|_| writer.flush())
+        .context("写入策略管道失败")?;
+    drop(writer);
+
+    let guard = PolicyFdGuard(read_fd);
+    let raw_read = guard.0.as_raw_fd();
+    // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
+    // dup2 会清除目标 fd 的 CLOEXEC；原描述符恰好已经是 3 时则必须显式
+    // 清除，否则并发 spawn 中拿到 fd3 的 Launcher 会在 exec 后读到 EBADF。
+    // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            if raw_read == 3 {
+                let flags = libc::fcntl(raw_read, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(raw_read, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else {
+                if libc::dup2(raw_read, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(raw_read);
+            }
+            Ok(())
+        });
+    }
+    Ok(guard)
+}
+
+#[cfg(windows)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
+    Ok(PolicyFdGuard)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
+    bail!("当前平台没有可用的 Launcher 策略传输通道")
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 fn sanitize_spawn_environment(command: &mut Command) {
     const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
     const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
@@ -725,74 +803,6 @@ impl WindowsJob {
         use std::os::windows::io::AsRawHandle;
         self.handle.as_raw_handle()
     }
-}
-
-/// 为沙箱程序准备策略描述符：匿名管道写端写入策略后立即关闭（读取到
-/// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
-///
-/// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
-/// 标准库管道两端在返回调用方前均已设置 FD_CLOEXEC，避免并发 spawn 继承
-/// 尚未关闭的写端，导致 Launcher 永远等不到策略 EOF。
-#[cfg(unix)]
-struct PolicyFdGuard(std::io::PipeReader);
-
-#[cfg(not(unix))]
-struct PolicyFdGuard;
-
-#[cfg(unix)]
-fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-
-    let (read_fd, mut writer) = std::io::pipe().context("创建策略管道失败")?;
-    writer
-        .write_all(policy_json.as_bytes())
-        .and_then(|_| writer.flush())
-        .context("写入策略管道失败")?;
-    drop(writer);
-
-    let guard = PolicyFdGuard(read_fd);
-    let raw_read = guard.0.as_raw_fd();
-    // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
-    // dup2 会清除目标 fd 的 CLOEXEC；原描述符恰好已经是 3 时则必须显式
-    // 清除，否则并发 spawn 中拿到 fd3 的 Launcher 会在 exec 后读到 EBADF。
-    // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(move || {
-            if raw_read == 3 {
-                let flags = libc::fcntl(raw_read, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(raw_read, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-            } else {
-                if libc::dup2(raw_read, 3) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(raw_read);
-            }
-            Ok(())
-        });
-    }
-    Ok(guard)
-}
-
-#[cfg(windows)]
-fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
-    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
-    Ok(PolicyFdGuard)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
-    bail!("当前平台没有可用的 Launcher 策略传输通道")
-}
-
-fn sha256_file(path: &std::path::Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {

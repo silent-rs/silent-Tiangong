@@ -5,8 +5,8 @@
 //! 继承沙箱约束；插件完全不参与沙箱决策。
 //!
 //! 通信（一次性包装器形态，非常驻守护）：
-//! - Unix 策略经继承文件描述符 fd3 传入；Windows 使用仅 Launcher 读取的
-//!   一次性环境信封（结构化 JSON、双版本化）；
+//! - Unix 策略经继承文件描述符 fd3 以长度前缀帧传入；Windows 使用仅
+//!   Launcher 读取的一次性环境信封（结构化 JSON、双版本化）；
 //! - stdin/stdout 留给目标进程与宿主的业务通信；
 //! - Unix 上以 `exec` 替换自身：应用沙箱约束后变身目标进程，
 //!   管道与生命周期天然继承，无额外转发层；
@@ -130,16 +130,28 @@ fn run_launch() -> Result<()> {
 
 #[cfg(unix)]
 fn read_request() -> Result<LaunchRequest> {
-    let mut raw = String::new();
-    // fd3 由宿主以继承管道提供；读取到 EOF 后由 run_launch 关闭再 exec。
+    // fd3 由宿主以继承管道提供；显式长度避免并发 spawn 意外继承写端时
+    // Launcher 永远等待 EOF。描述符由 run_launch 在 exec 前关闭。
     let mut reader = unsafe {
         use std::os::fd::FromRawFd;
         std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(POLICY_FD))
     };
+    let mut length = [0u8; size_of::<u32>()];
     reader
-        .read_to_string(&mut raw)
-        .context("读取 fd3 策略失败")?;
-    serde_json::from_str(&raw).context("解析 Launcher 策略失败")
+        .read_exact(&mut length)
+        .context("读取 fd3 策略长度失败")?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > tiangong_sandbox::MAX_POLICY_FRAME_BYTES {
+        bail!(
+            "Launcher 策略超过长度上限: actual={length}, max={}",
+            tiangong_sandbox::MAX_POLICY_FRAME_BYTES
+        );
+    }
+    let mut raw = vec![0u8; length];
+    reader
+        .read_exact(&mut raw)
+        .context("读取 fd3 策略正文失败")?;
+    serde_json::from_slice(&raw).context("解析 Launcher 策略失败")
 }
 
 #[cfg(windows)]
