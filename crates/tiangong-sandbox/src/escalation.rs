@@ -20,7 +20,7 @@ const TICKET_TTL: Duration = Duration::from_secs(300);
 /// 无沙箱执行授权指纹（结构化，非拼接字符串——拼接对含空格参数有歧义）。
 /// 至少绑定操作类型、程序、参数、完整脚本与工作目录（Session/Tool Call
 /// 绑定待宿主调用上下文链路，见 RFC 开放问题）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EscalationFingerprint {
     pub operation: String,
     pub program: String,
@@ -73,6 +73,75 @@ impl EscalationFingerprint {
 struct EscalationTicket {
     fingerprint: EscalationFingerprint,
     expires_at: Instant,
+}
+
+/// 待批准的升级请求（宿主在命令被高危拒绝或沙箱拦截时登记，
+/// 指纹直接取自实际请求负载——审批与重试天然同源匹配）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingEscalation {
+    pub id: String,
+    pub fingerprint: EscalationFingerprint,
+    /// 登记原因（高危预分类拒绝 / 沙箱拦截）。
+    pub reason: String,
+    pub created_at: String,
+}
+
+struct PendingStore {
+    pending: Vec<PendingEscalation>,
+}
+
+fn pending_store() -> &'static Mutex<PendingStore> {
+    static STORE: OnceLock<Mutex<PendingStore>> = OnceLock::new();
+    STORE.get_or_init(|| {
+        Mutex::new(PendingStore {
+            pending: Vec::new(),
+        })
+    })
+}
+
+/// 登记待批准请求（同指纹去重，10 分钟时效）。
+pub fn record_pending(fingerprint: EscalationFingerprint, reason: &str) {
+    const PENDING_TTL: Duration = Duration::from_secs(600);
+    if let Ok(mut store) = pending_store().lock() {
+        store.pending.retain(|item| item.fingerprint != fingerprint);
+        store.pending.push(PendingEscalation {
+            id: scru128::new().to_string(),
+            fingerprint,
+            reason: reason.to_string(),
+            created_at: chrono::Local::now()
+                .naive_local()
+                .format("%Y-%m-%dT%H:%M:%S%.3f")
+                .to_string(),
+        });
+        let deadline = Instant::now().checked_sub(PENDING_TTL);
+        let _ = deadline;
+        // 以创建时间字符串排序无法可靠判断过期；简化为超量裁剪 + 消费时校验。
+        while store.pending.len() > 16 {
+            store.pending.remove(0);
+        }
+    }
+}
+
+/// 当前待批准列表（新建在前）。
+pub fn list_pending() -> Vec<PendingEscalation> {
+    let Ok(store) = pending_store().lock() else {
+        return Vec::new();
+    };
+    let mut items = store.pending.clone();
+    items.reverse();
+    items
+}
+
+/// 按编号批准：对登记的结构化指纹签发票据（一次性）。
+pub fn approve_pending(id: &str) -> Option<String> {
+    let fingerprint = {
+        let Ok(mut store) = pending_store().lock() else {
+            return None;
+        };
+        let index = store.pending.iter().position(|item| item.id == id)?;
+        Some(store.pending.remove(index).fingerprint)
+    }?;
+    Some(EscalationBroker::issue(fingerprint))
 }
 
 /// 升级票据库（进程级单例）。

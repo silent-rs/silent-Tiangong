@@ -787,9 +787,11 @@ fn invoke_command_ephemeral(
             }
         };
         if dangerous {
+            // 登记待批准（指纹取自实际请求，审批与重试同源匹配）。
+            tiangong_sandbox::escalation::record_pending(fingerprint.clone(), "高危预分类拒绝");
             bail!(
                 "命令被宿主预分类器判定为高危，未执行：{full_command}。\n\
-如确需执行，请引导用户在宿主界面批准该完整命令（批准后重试同一命令即可全权执行）。"
+如确需执行，请引导用户在宿主界面的待批准列表中确认该命令（批准后重试同一命令即可全权执行）。"
             );
         }
     }

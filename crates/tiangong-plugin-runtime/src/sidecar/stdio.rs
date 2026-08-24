@@ -197,7 +197,8 @@ impl StdioSidecarConnection {
                     "args": [],
                 });
                 let mut command = Command::new(sandbox_bin);
-                prepare_policy_fd(&mut command, request.to_string())?;
+                // 守卫存活至本函数结束（含 spawn），父进程侧读端随后关闭。
+                let _policy_fd_guard = prepare_policy_fd(&mut command, request.to_string())?;
                 command
             }
             None => Command::new(&self.config.binary),
@@ -358,9 +359,14 @@ impl StdioSidecarConnection {
     }
 }
 
-/// 为沙箱程序准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
-/// 策略写完后立即关闭写端（读取到 EOF 即策略完整）；子进程不继承写端。
-fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
+/// 为沙箱程序准备策略描述符：匿名管道写端写入策略后立即关闭（读取到
+/// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
+///
+/// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
+/// 读端在父进程侧设置 FD_CLOEXEC，避免被无关子进程继承。
+struct PolicyFdGuard(std::os::fd::OwnedFd);
+
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
     let (read_fd, write_fd) = {
@@ -379,16 +385,28 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
             .and_then(|_| writer.flush())
             .context("写入策略管道失败")?;
     }
-    let read_fd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
-    let raw_read = read_fd_owned.as_raw_fd();
-    // pre_exec（fork 后、exec 前）把读端复制到 fd3。
-    // SAFETY: dup2 语义；pre_exec 限制内仅调用异步信号安全函数。
+    let guard = PolicyFdGuard(unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) });
+    let raw_read = guard.0.as_raw_fd();
+    // 父进程侧读端设 CLOEXEC：本进程后续 spawn 的无关子进程不会继承它。
+    // SAFETY: fcntl 对有效 fd 的标准操作。
+    unsafe {
+        let flags = libc::fcntl(raw_read, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(raw_read, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
+    // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
+    // dup2 语义清除目标 fd 的 CLOEXEC，fd3 随 exec 传递给沙箱程序。
+    // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
-            if libc::dup2(raw_read, 3) < 0 {
+            if raw_read != 3 && libc::dup2(raw_read, 3) < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if raw_read != 3 {
+                libc::close(raw_read);
             }
             Ok(())
         });
@@ -398,8 +416,7 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
         let _ = raw_read;
         bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
     }
-    std::mem::forget(read_fd_owned);
-    Ok(())
+    Ok(guard)
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {

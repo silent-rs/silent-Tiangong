@@ -138,8 +138,6 @@ impl CommandService {
         {
             return error_response("run_command", e);
         }
-        // 沙箱与审批由宿主透明封套处理（RFC 0017 透明执行封套）：本进程可能
-        // 已被宿主以一次性沙箱实例方式启动，插件不做任何沙箱决策。
         exec::exec_and_collect(&cmd, &cmd_args, &effective_cwd, timeout_ms)
             .await
             .unwrap_or_else(|e| error_response("命令执行", e))

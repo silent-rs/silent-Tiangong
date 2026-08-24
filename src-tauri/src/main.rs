@@ -620,6 +620,7 @@ fn run_gui() {
             tiangong_app::commands::plugin_trust_grant,
             tiangong_app::commands::plugin_trust_revoke,
             tiangong_app::commands::plugin_safety_set_unsafe_mode,
+            tiangong_app::commands::command_escalation_pending,
             tiangong_app::commands::command_escalation_approve,
             tiangong_app::commands::cancel_turn,
             tiangong_app::commands::cancel_agent,

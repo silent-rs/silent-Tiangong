@@ -32,8 +32,10 @@ const PROTOCOL_VERSION: u32 = 1;
 const POLICY_SCHEMA: u32 = 1;
 /// 策略经此继承描述符传入。
 const POLICY_FD: i32 = 3;
-/// fail-closed 退出码（策略/协议/平台不可用）。
+/// fail-closed 退出码（策略/协议/平台不可用/自检失败）。
 const EXIT_SANDBOX_UNAVAILABLE: i32 = 78;
+/// 自检专用：当前宿主环境无法验证（如嵌套沙箱），非制品缺陷。
+const EXIT_ENV_UNVERIFIABLE: i32 = 79;
 
 /// Launcher 启动指令（宿主经 fd3 写入）。
 #[derive(Debug, Deserialize)]
@@ -48,12 +50,11 @@ struct LaunchRequest {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = if args.iter().any(|arg| arg == "--self-check") {
-        run_self_check()
-    } else {
-        run_launch()
-    };
-    if let Err(error) = result {
+    if args.iter().any(|arg| arg == "--self-check") {
+        // 自检有自己的三态退出码语义，不走统一拒绝路径。
+        std::process::exit(run_self_check());
+    }
+    if let Err(error) = run_launch() {
         // 结构化拒绝信息：宿主与审计可解析，绝不静默放行。
         let payload = serde_json::json!({
             "launcher": "tiangong-sandbox",
@@ -122,8 +123,10 @@ fn read_request() -> Result<LaunchRequest> {
     serde_json::from_str(&raw).context("解析 Launcher 策略失败")
 }
 
-/// 激活前自检（核心项；宿主环境已在沙箱内的项自动跳过并标注）。
-fn run_self_check() -> Result<()> {
+/// 激活前自检。三态退出码：0=全部通过；79=当前宿主环境无法验证（如
+/// 嵌套沙箱，非制品缺陷）；78=必需能力失败（制品不可用，版本管理器
+/// 必须拒绝激活）。
+fn run_self_check() -> i32 {
     let mut report = serde_json::Map::new();
     report.insert(
         "product_version".into(),
@@ -151,7 +154,19 @@ fn run_self_check() -> Result<()> {
         },
     );
 
-    if let tiangong_sandbox::SandboxAvailability::Available = availability {
+    if matches!(
+        availability,
+        tiangong_sandbox::SandboxAvailability::Unsupported(_)
+    ) {
+        report.insert(
+            "environment_unverifiable".into(),
+            serde_json::Value::from(true),
+        );
+        println!("{}", serde_json::Value::Object(report));
+        return EXIT_ENV_UNVERIFIABLE;
+    }
+
+    {
         // 真实拦截核心项：工作区内写成功、工作区外写被拒。
         let workspace = tempfile::tempdir().expect("创建自检工作区失败");
         let policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace.path());
@@ -169,10 +184,8 @@ fn run_self_check() -> Result<()> {
             let inside_ok = status.success() && inside.is_file();
             report.insert("workspace_write".into(), serde_json::Value::from(inside_ok));
 
-            let outside = std::env::temp_dir().join(format!(
-                "tiangong-launcher-selfcheck-{}",
-                std::process::id()
-            ));
+            let outside = std::env::temp_dir()
+                .join(format!("tiangong-sandbox-selfcheck-{}", std::process::id()));
             let outside_parent = outside.clone();
             let status = std::process::Command::new(&program)
                 .args(&prefix)
@@ -189,6 +202,20 @@ fn run_self_check() -> Result<()> {
             );
         }
     }
+    // 必需能力失败 → 制品不可用，版本管理器拒绝激活。
+    let required_ok = report
+        .get("workspace_write")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+        && report
+            .get("outside_write_blocked")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    let exit_code = if required_ok {
+        0
+    } else {
+        EXIT_SANDBOX_UNAVAILABLE
+    };
     println!("{}", serde_json::Value::Object(report));
-    Ok(())
+    exit_code
 }

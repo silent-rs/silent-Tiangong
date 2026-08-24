@@ -59,7 +59,6 @@ pub struct RunShellRequest {
     #[serde(flatten)]
     pub access: CommandAccessContext,
 }
-
 pub struct RunShell;
 impl CommandOperation for RunShell {
     const NAME: &'static str = RUN_SHELL_OPERATION;
