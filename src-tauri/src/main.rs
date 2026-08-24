@@ -465,6 +465,41 @@ fn run_gui() {
                 },
             ));
 
+            // plugin-dev 安装确认：宿主原生对话框（非 webview，Agent 的界面
+            // 自动化无法触达），用户是唯一授权主体（RFC 0017 §11：plugin_install
+            // 必须经原生确认弹窗）。未注入时 plugin-dev.install fail-closed。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_plugin_dev_install_confirm(Arc::new(
+                    move |request: &tiangong_plugin_runtime::InstallRequest| -> bool {
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                        let permissions = if request.permissions.is_empty() {
+                            "无（纯 UI 插件）".to_string()
+                        } else {
+                            request.permissions.join("、")
+                        };
+                        let message = format!(
+                            "即将安装自建插件：\n\n插件：{}（id: {}）\n版本：{}\n权限：{}\n来源：{}\n\n安装后该插件将按上述权限运行，请确认内容可信。",
+                            request.name,
+                            request.plugin_id,
+                            request.version,
+                            permissions,
+                            request.directory
+                        );
+                        app_handle
+                            .dialog()
+                            .message(message)
+                            .title("安装自建插件确认")
+                            .kind(MessageDialogKind::Warning)
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "安装".to_string(),
+                                "取消".to_string(),
+                            ))
+                            .blocking_show()
+                    },
+                ));
+            }
+
             // webview 容器原语（第四种声明式容器）：插件经 bridge webview.*
             // 创建/导航/eval 真实 webview 实例；实例按插件隔离
             // （view_id = webview:<plugin_id>），引擎复用 browser 基础设施。

@@ -4746,12 +4746,23 @@ pub async fn plugin_call(
 // - bridge_subscribe / bridge_unsubscribe：事件订阅骨架（事件源在事件接缝接入）
 
 /// 桥接调用：`method` 按命名空间路由（如 `plugin.getConfig` → WASM）。
+///
+/// `plugin-dev.*` 含构建（可长达数分钟）与安装原生确认（等待用户点击），
+/// 经 spawn_blocking 执行，避免阻塞 tokio worker。
 #[tauri::command]
 pub async fn bridge_call(
     plugin_id: String,
     method: String,
     payload: String,
 ) -> Result<String, String> {
+    if method.starts_with("plugin-dev.") {
+        return tokio::task::spawn_blocking(move || {
+            tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string());
+    }
     tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
         .map_err(|error| error.to_string())
 }

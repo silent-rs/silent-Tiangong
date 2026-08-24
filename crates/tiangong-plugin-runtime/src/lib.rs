@@ -19,6 +19,7 @@ mod execution;
 pub mod host_state;
 pub mod loader;
 pub mod manifest;
+pub mod plugin_dev;
 pub mod protocol;
 pub mod registry;
 pub mod seams;
@@ -39,6 +40,7 @@ pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
 };
+pub use plugin_dev::{InstallConfirmHandler, InstallRequest, set_plugin_dev_install_confirm};
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,

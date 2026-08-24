@@ -1,0 +1,150 @@
+{
+  "schema_version": 2,
+  "id": "plugin-creator",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "bridge.call",
+    "plugin-dev.use",
+    "storage.private"
+  ],
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "events": [
+      "tool.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "plugin-creator",
+        "title": "插件创作",
+        "description": "创建、构建与安装自建插件",
+        "entry": "dist/index.html",
+        "open_mode": "singleton"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "name": "plugin_init",
+      "description": "按模板初始化一个自建插件项目骨架到开发目录 ~/.tiangong/plugins-dev/<id>/，返回项目路径与生成的文件数。模板 ui-app 为纯 UI 页面插件（零构建依赖，改完 HTML 即可构建）；ts-tool 为 TypeScript 工具插件（UI 页面 + 向 Agent 提供工具，参考 interaction 插件结构，需要 Node 与 yarn 构建）。id 只能包含字母数字与 - _ .，不得与已安装插件同名；生成后用常规文件编辑能力修改项目内代码，再依次 plugin_validate → plugin_build → plugin_install。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "template": {
+            "type": "string",
+            "enum": [
+              "ui-app",
+              "ts-tool"
+            ],
+            "description": "项目形态模板"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "插件 ID（字母数字与 - _ .，全局唯一）"
+          },
+          "name": {
+            "type": "string",
+            "description": "插件显示名（缺省同 id）"
+          }
+        },
+        "required": [
+          "template",
+          "id"
+        ]
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "plugin_build",
+      "description": "构建开发目录中的插件项目：自动执行 yarn install → yarn build → yarn package，产物组装到项目 release/ 目录并生成内容树清单。需要本机已安装 Node（≥ 20）与 yarn。构建日志在项目 logs/build.log，失败信息自带日志尾部；同一项目不会并发构建。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "项目 ID（plugin_init 时指定的插件 ID）"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "name": "plugin_install",
+      "description": "把项目 release/ 构建产物安装为天工可用插件：宿主会弹出原生确认对话框（展示插件名、版本、权限清单），用户确认后完成安装与启用，用户取消则失败。迭代修改代码后内容变化，需重新 build + install 并再次经用户确认。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "项目 ID"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 300000
+    },
+    {
+      "name": "plugin_validate",
+      "description": "校验项目的 plugin.json 清单与结构（schema、UI 入口存在性、工具与权限声明一致性），返回阻断错误与提示（如尚未构建）。建议在每次构建前调用，尽早发现清单问题。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "项目 ID"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "timeout_ms": 20000
+    },
+    {
+      "name": "plugin_logs",
+      "description": "读取日志辅助诊断。target 为 dev:<项目id> 时读该项目的构建日志（logs/build.log）；target 为 plugin:<插件id> 时读已安装插件的运行日志（如 sidecar.log）。默认返回尾部 100 行。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "description": "日志目标：dev:<项目id> 或 plugin:<插件id>"
+          },
+          "lines": {
+            "type": "number",
+            "description": "返回尾部行数（1-1000，缺省 100）"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "timeout_ms": 20000
+    }
+  ],
+  "prompt": [
+    "自建插件生成规范（plugin creator）：为用户创建插件时遵循——1) 能力最小化：只申请必需权限，默认不加 storage.private/bridge.call 之外的敏感权限，绝不声明 sidecar.invoke；2) 交互类 UI 贡献 slot（session.interaction 等）为官方专属，自建插件只允许使用 extension.tab 与 settings.plugin-page；3) 每引入一个外部 npm 依赖必须在代码注释与说明中写明用途，能用宿主桥接（storage.*、bridge）实现的不要引依赖；4) 工程基于 Node ≥ 20 与 yarn 构建；5) 迭代流程固定为：修改开发目录 ~/.tiangong/plugins-dev/<id>/ 内代码 → plugin_validate → plugin_build → plugin_install（每次内容变化都需用户在原生确认弹窗中重新确认）；6) 诊断问题先 plugin_logs 读取构建日志。",
+    "使用 plugin_init 生成项目骨架后，先浏览项目结构与模板示例理解扩展点，再按用户需求填充实现；不要凭空猜测模板结构。构建失败时把日志尾部中的关键错误读出来解释给用户，修复后重试。"
+  ],
+  "resources": [
+    "templates/"
+  ]
+}

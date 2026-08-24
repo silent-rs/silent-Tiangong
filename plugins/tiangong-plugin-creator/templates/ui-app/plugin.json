@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "id": "{{PLUGIN_ID}}",
+  "version": "0.1.0",
+  "permissions": ["bridge.call", "storage.private"],
+  "ui": {
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "app",
+        "title": "{{PLUGIN_NAME}}",
+        "entry": "app/index.html",
+        "open_mode": "multi"
+      },
+      {
+        "slot": "settings.plugin-page",
+        "id": "app-settings",
+        "entry": "app/index.html"
+      }
+    ]
+  }
+}
