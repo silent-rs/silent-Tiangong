@@ -458,6 +458,7 @@ fn main() {
         [command, plugin_id, output_dir] if command == "new-plugin" => {
             new_plugin(plugin_id, Some(output_dir))
         }
+        [command] if command == "prepare-sandbox" => prepare_sandbox(),
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -496,6 +497,7 @@ fn print_help() {
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
     );
     eprintln!("  cargo run -p xtask -- validate-plugin-catalog <catalog或->");
+    eprintln!("  cargo run -p xtask -- prepare-sandbox");
 }
 
 fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
@@ -1813,6 +1815,86 @@ fn run_cargo(workspace_root: &Path, args: &[&str]) -> io::Result<()> {
             args.join(" ")
         )))
     }
+}
+
+fn prepare_sandbox() -> io::Result<()> {
+    let workspace_root = workspace_root();
+    let target = sandbox_target_triple()?;
+    eprintln!("[xtask] 构建 tiangong-sandbox（target={target}）...");
+    run_cargo(
+        &workspace_root,
+        &[
+            "build",
+            "-p",
+            "tiangong-sandbox",
+            "--release",
+            "--target",
+            &target,
+        ],
+    )?;
+
+    let executable_suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let target_root = non_empty_env_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    let source = target_root
+        .join(&target)
+        .join("release")
+        .join(format!("tiangong-sandbox{executable_suffix}"));
+    require_file(&source)?;
+
+    let binaries = workspace_root.join("src-tauri/binaries");
+    std::fs::create_dir_all(&binaries)?;
+    let destination = binaries.join(format!("tiangong-sandbox-{target}{executable_suffix}"));
+    std::fs::copy(&source, &destination)?;
+    eprintln!("[xtask] Launcher 已放置: {}", destination.display());
+    Ok(())
+}
+
+fn sandbox_target_triple() -> io::Result<String> {
+    for key in ["TAURI_ENV_TARGET_TRIPLE", "CARGO_BUILD_TARGET"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty()
+        {
+            return validate_target_triple(value.trim());
+        }
+    }
+
+    let output = Command::new(env_var_or("RUSTC", "rustc"))
+        .arg("-vV")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("rustc -vV 执行失败"));
+    }
+    let version = String::from_utf8(output.stdout)
+        .map_err(|error| invalid_data(format!("rustc -vV 输出不是 UTF-8: {error}")))?;
+    let host = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| invalid_data("rustc -vV 输出缺少 host triple"))?;
+    validate_target_triple(host)
+}
+
+fn validate_target_triple(value: &str) -> io::Result<String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(invalid_input(format!("无效的 Rust target triple: {value}")));
+    }
+    Ok(value.to_string())
 }
 
 fn run_yarn(directory: &Path, args: &[&str]) -> io::Result<()> {

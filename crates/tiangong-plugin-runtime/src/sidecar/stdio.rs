@@ -17,6 +17,10 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
 use crate::protocol::{
     HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcFrame, IpcRequest, PROTOCOL_VERSION,
     Request, Response,
@@ -25,8 +29,6 @@ use crate::sidecar::{
     EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
     STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
 };
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
 
 /// 子进程环境：传输模式标记。
 pub const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
@@ -296,6 +298,8 @@ impl StdioSidecarConnection {
                 .clone()
                 .unwrap_or_else(|| self.config.data_dir.clone());
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
+            policy.extra_writable = self.config.sandbox_extra_writable.clone();
+            policy.protected_paths = vec![self.config.storage_root.clone()];
             policy.allow_network = self.config.sandbox_network;
             Some(policy)
         } else {
@@ -306,21 +310,29 @@ impl StdioSidecarConnection {
         let mut policy_fd_guard = None;
         let mut command = match &launch_policy {
             Some(policy) => {
-                let sandbox_bin =
-                    tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
-                        &self.config.storage_root,
+                let sandbox_bin = tiangong_sandbox::launcher_manager::resolve_sandbox_binary(
+                    &self.config.storage_root,
+                )
+                .ok_or_else(|| {
+                    anyhow!(
+                        "插件 {} 声明沙箱但随 App 发布的 tiangong-sandbox 程序不可用，拒绝启动",
+                        self.config.plugin_id
                     )
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "插件 {} 声明沙箱但 tiangong-sandbox 程序不可用（active/内置均缺失），拒绝启动",
-                            self.config.plugin_id
-                        )
-                    })?;
+                })?;
                 let request = serde_json::json!({
                     "protocol_version": 1,
                     "policy_schema": 1,
                     "policy": policy,
+                    "plugin_id": self.config.plugin_id,
                     "program": target_program.display().to_string(),
+                    "program_root": self
+                        .config
+                        .sandbox_program_root
+                        .as_deref()
+                        .or_else(|| target_program.parent())
+                        .map(|path| path.display().to_string())
+                        .ok_or_else(|| anyhow!("sidecar 目标程序缺少权威目录"))?,
+                    "program_sha256": sha256_file(&target_program)?,
                     "args": target_args,
                 });
                 let mut command = Command::new(sandbox_bin);
@@ -677,9 +689,15 @@ impl WindowsJob {
 /// 为沙箱程序准备策略描述符：匿名管道写端写入策略后立即关闭（读取到
 /// EOF 即策略完整）；读端经 pre_exec 复制到 fd3 并关闭原描述符。
 ///
-/// 返回的读端守卫必须存活到 `spawn` 返回；父进程随后正常关闭。
+/// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
+/// 读端在父进程侧设置 FD_CLOEXEC，避免被无关子进程继承。
+#[cfg(unix)]
 struct PolicyFdGuard(std::os::fd::OwnedFd);
 
+#[cfg(not(unix))]
+struct PolicyFdGuard;
+
+#[cfg(unix)]
 fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -707,8 +725,9 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
             libc::fcntl(raw_read, libc::F_SETFD, flags | libc::FD_CLOEXEC);
         }
     }
-    // pre_exec（fork 后、exec 前）把读端复制到 fd3，并关闭原描述符。
-    #[cfg(unix)]
+    // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
+    // dup2 语义清除目标 fd 的 CLOEXEC，fd3 随 exec 传递给沙箱程序。
+    // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(move || {
@@ -721,12 +740,24 @@ fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<Polic
             Ok(())
         });
     }
-    #[cfg(not(unix))]
-    {
-        let _ = raw_read;
-        bail!("fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
-    }
     Ok(guard)
+}
+
+#[cfg(windows)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
+    Ok(PolicyFdGuard)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
+    bail!("当前平台没有可用的 Launcher 策略传输通道")
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {

@@ -2,10 +2,13 @@
 //!
 //! 本模块只处理进程、endpoint、鉴权和 JSON Lines 传输，不理解插件业务协议。
 //! TCP 与 stdio 两种传输并存：TCP 为存量默认，stdio 为沙箱友好的新传输
-//! （RFC 0017 D16）。通道由宿主策略决定，插件清单不参与通信通道决策。
+//! （RFC 0017 D16）。当前只有 command 由宿主策略强制使用 stdio，插件清单
+//! 不参与通信通道或沙箱权限决策。
 
+pub mod command;
 pub mod stdio;
 
+pub use command::EphemeralCommandConnection;
 pub use stdio::{StdioSidecarConnection, TRANSPORT_STDIO};
 
 use std::fs::OpenOptions;

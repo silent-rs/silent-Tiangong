@@ -44,6 +44,16 @@ jobs:
             files=()
           fi
 
+          sandbox_only="$(
+            printf '%s\n' "${files[@]}" | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          if [[ "$sandbox_only" == "true" ]]; then
+            echo "Sandbox-only change: App CI is delegated to Sandbox CI"
+            echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+            echo 'frontend=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           check_all=false
           fallback_all=false
           fallback_frontend=false

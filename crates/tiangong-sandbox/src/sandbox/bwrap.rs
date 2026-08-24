@@ -22,16 +22,17 @@ pub fn bwrap_available() -> Option<String> {
 }
 
 /// 编译为 bwrap 参数前缀（不含 `--` 与被包装命令）。
-pub fn wrap_argv(policy: &SandboxPolicy, bwrap_bin: &str) -> Vec<String> {
-    let mut argv = vec![bwrap_bin.to_string()];
+pub fn wrap_argv(policy: &SandboxPolicy) -> Vec<String> {
     // 全盘只读镜像。
-    argv.push("--ro-bind".into());
-    argv.push("/".into());
-    argv.push("/".into());
-    argv.push("--dev".into());
-    argv.push("/dev".into());
-    argv.push("--proc".into());
-    argv.push("/proc".into());
+    let mut argv = vec![
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--proc".into(),
+        "/proc".into(),
+    ];
     // 可写根。
     if policy.mode == SandboxMode::WorkspaceWrite {
         for root in policy.writable_roots() {
@@ -42,7 +43,7 @@ pub fn wrap_argv(policy: &SandboxPolicy, bwrap_bin: &str) -> Vec<String> {
         }
     }
     // 防篡改段：只读 bind 覆盖（在可写 bind 之后声明才生效）。
-    for path in policy.protected_paths() {
+    for path in policy.read_only_roots() {
         if path.exists() {
             let path = path.display().to_string();
             argv.push("--ro-bind".into());
@@ -69,11 +70,12 @@ mod tests {
     #[test]
     fn argv_orders_ro_bind_before_writable_and_protection() {
         let policy = SandboxPolicy::workspace_write("/tmp/ws");
-        let argv = wrap_argv(&policy, "/usr/bin/bwrap");
+        let argv = wrap_argv(&policy);
         let ro_root = argv.iter().position(|a| a == "--ro-bind").unwrap();
         let bind_ws = argv.iter().position(|a| a == "/tmp/ws").unwrap();
         assert!(bind_ws > ro_root);
         assert!(argv.contains(&"--unshare-net".to_string()));
         assert!(argv.last().unwrap() == "--");
+        assert!(!argv.iter().any(|arg| arg.contains("bwrap")));
     }
 }

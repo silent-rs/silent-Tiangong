@@ -1,12 +1,13 @@
-//! 官方沙箱 Launcher（RFC 0017 独立版本化安全组件，第一阶段）。
+//! 随 App 发布的固定沙箱 Launcher。
 //!
-//! 定位：天工决策（策略、审批、版本选择），Launcher 可靠实施——校验策略、
-//! 探测平台能力、应用 OS 沙箱、启动目标进程。目标进程及其全部子进程树
+//! 定位：宿主决定策略，Launcher 负责校验策略、探测平台能力、应用 OS 沙箱
+//! 并启动目标进程。目标进程及其全部子进程树
 //! 继承沙箱约束；插件完全不参与沙箱决策。
 //!
 //! 通信（一次性包装器形态，非常驻守护）：
-//! - 策略经**继承文件描述符 fd3** 传入（结构化 JSON、双版本化），
-//!   stdin/stdout 留给目标进程与宿主的业务通信（exec 后透传）；
+//! - Unix 策略经继承文件描述符 fd3 传入；Windows 使用仅 Launcher 读取的
+//!   一次性环境信封（结构化 JSON、双版本化）；
+//! - stdin/stdout 留给目标进程与宿主的业务通信；
 //! - Unix 上以 `exec` 替换自身：应用沙箱约束后变身目标进程，
 //!   管道与生命周期天然继承，无额外转发层；
 //! - **fail-closed**：协议版本不符、策略非法、平台沙箱不可用一律拒绝
@@ -20,17 +21,22 @@
 //! 子命令：
 //! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项）。
 
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// App ↔ Launcher 通信协议版本。
 const PROTOCOL_VERSION: u32 = 1;
 /// 策略 Schema 版本。
 const POLICY_SCHEMA: u32 = 1;
 /// 策略经此继承描述符传入。
+#[cfg(unix)]
 const POLICY_FD: i32 = 3;
 /// fail-closed 退出码（策略/协议/平台不可用/自检失败）。
 const EXIT_SANDBOX_UNAVAILABLE: i32 = 78;
@@ -43,7 +49,10 @@ struct LaunchRequest {
     protocol_version: u32,
     policy_schema: u32,
     policy: tiangong_sandbox::SandboxPolicy,
+    plugin_id: String,
     program: String,
+    program_root: String,
+    program_sha256: String,
     #[serde(default)]
     args: Vec<String>,
 }
@@ -81,15 +90,9 @@ fn run_launch() -> Result<()> {
         );
     }
     if request.policy.mode == tiangong_sandbox::SandboxMode::FullAccess {
-        bail!("Launcher 拒绝 full_access 策略（无沙箱执行走宿主独立高危通道）");
+        bail!("当前 command Launcher 不接受 full_access 策略");
     }
-    let program_path = std::path::Path::new(&request.program);
-    if !program_path.is_absolute() {
-        bail!("目标程序必须是绝对路径: {}", request.program);
-    }
-    if !program_path.is_file() {
-        bail!("目标程序不存在: {}", request.program);
-    }
+    let program_path = validate_target(&request)?;
 
     // 平台沙箱包装（seatbelt / bwrap）；不可用时 fail-closed。
     let wrapped = match tiangong_sandbox::wrap(&request.policy) {
@@ -106,14 +109,22 @@ fn run_launch() -> Result<()> {
     // stdin/stdout/stderr 全部继承（业务通信由宿主与目标进程直连）。
     let mut command = std::process::Command::new(wrapped.0);
     command.args(&wrapped.1);
-    command.arg(&request.program);
+    command.arg(&program_path);
     command.args(&request.args);
+    command.env_remove(tiangong_sandbox::POLICY_ENV);
+    #[cfg(unix)]
     unsafe {
         libc::close(POLICY_FD);
         Err(command.exec().into())
     }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        bail!("当前平台缺少可保持 stdio 透明传输的沙箱启动能力")
+    }
 }
 
+#[cfg(unix)]
 fn read_request() -> Result<LaunchRequest> {
     let mut raw = String::new();
     // fd3 由宿主以继承管道提供；读取到 EOF 后由 run_launch 关闭再 exec。
@@ -127,9 +138,127 @@ fn read_request() -> Result<LaunchRequest> {
     serde_json::from_str(&raw).context("解析 Launcher 策略失败")
 }
 
-/// 激活前自检。三态退出码：0=全部通过；79=当前宿主环境无法验证（如
-/// 嵌套沙箱，非制品缺陷）；78=必需能力失败（制品不可用，版本管理器
-/// 必须拒绝激活）。
+#[cfg(windows)]
+fn read_request() -> Result<LaunchRequest> {
+    let raw = std::env::var(tiangong_sandbox::POLICY_ENV)
+        .context("读取 Windows Launcher 策略信封失败")?;
+    serde_json::from_str(&raw).context("解析 Launcher 策略失败")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_request() -> Result<LaunchRequest> {
+    bail!("当前平台没有 Launcher 策略传输通道")
+}
+
+fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
+    if request.plugin_id != "command" {
+        bail!("Launcher 当前只允许启动 command 插件");
+    }
+    let root = Path::new(&request.program_root);
+    let program = Path::new(&request.program);
+    if !root.is_absolute() || !program.is_absolute() {
+        bail!("目标程序及插件根目录必须是绝对路径");
+    }
+
+    let root_metadata = std::fs::symlink_metadata(root)
+        .with_context(|| format!("读取插件根目录失败: {}", root.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!("插件根目录必须是实际目录: {}", root.display());
+    }
+    let program_metadata = std::fs::symlink_metadata(program)
+        .with_context(|| format!("读取目标程序失败: {}", program.display()))?;
+    if program_metadata.file_type().is_symlink() || !program_metadata.is_file() {
+        bail!("目标程序必须是实际普通文件: {}", program.display());
+    }
+
+    let canonical_root = std::fs::canonicalize(root).context("规范化插件根目录失败")?;
+    let canonical_program = std::fs::canonicalize(program).context("规范化目标程序失败")?;
+    if canonical_program == canonical_root || !canonical_program.starts_with(&canonical_root) {
+        bail!("目标程序不在 command 插件权威目录内");
+    }
+
+    let manifest_path = canonical_root.join("plugin.json");
+    let manifest_metadata = std::fs::symlink_metadata(&manifest_path)
+        .with_context(|| format!("读取插件清单失败: {}", manifest_path.display()))?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        bail!("插件清单必须是实际普通文件");
+    }
+    let manifest: TargetManifest = serde_json::from_slice(
+        &std::fs::read(&manifest_path).context("读取 command 插件清单失败")?,
+    )
+    .context("解析 command 插件清单失败")?;
+    if manifest.id != request.plugin_id {
+        bail!("Launcher 请求与插件清单身份不一致");
+    }
+    let mut expected_program = canonical_root.join(&manifest.sidecar.binary);
+    if !std::env::consts::EXE_SUFFIX.is_empty()
+        && !expected_program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(std::env::consts::EXE_SUFFIX))
+    {
+        let name = expected_program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("插件清单中的 sidecar 文件名无效")?;
+        expected_program.set_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    }
+    let expected_program =
+        std::fs::canonicalize(expected_program).context("解析清单声明的 sidecar 失败")?;
+    if canonical_program != expected_program {
+        bail!("目标程序与 command 插件清单声明不一致");
+    }
+
+    let actual_sha256 = sha256_file(&canonical_program)?;
+    if !request.program_sha256.eq_ignore_ascii_case(&actual_sha256) {
+        bail!("目标程序摘要不匹配");
+    }
+    validate_unix_permissions(&canonical_program, &program_metadata)?;
+    Ok(canonical_program)
+}
+
+#[derive(Debug, Deserialize)]
+struct TargetManifest {
+    id: String,
+    sidecar: TargetSidecar,
+}
+
+#[derive(Debug, Deserialize)]
+struct TargetSidecar {
+    binary: String,
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("读取目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(unix)]
+fn validate_unix_permissions(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let owner = metadata.uid();
+    let current_user = unsafe { libc::geteuid() };
+    if owner != current_user && owner != 0 {
+        bail!("目标程序所有者不可信: {}", path.display());
+    }
+    if metadata.mode() & 0o022 != 0 {
+        bail!("目标程序不能允许组或其他用户写入: {}", path.display());
+    }
+    if metadata.mode() & 0o111 == 0 {
+        bail!("目标程序没有执行权限: {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_unix_permissions(_path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+/// 制品自检。三态退出码：0=全部通过；79=当前宿主环境无法验证（如
+/// 嵌套沙箱，非制品缺陷）；78=必需能力失败（制品不可用，必须拒绝启动）。
 fn run_self_check() -> i32 {
     let mut report = serde_json::Map::new();
     report.insert(
@@ -155,12 +284,15 @@ fn run_self_check() -> i32 {
             tiangong_sandbox::SandboxAvailability::Unsupported(reason) => {
                 serde_json::Value::String(format!("unavailable: {reason}"))
             }
+            tiangong_sandbox::SandboxAvailability::EnvironmentRestricted(reason) => {
+                serde_json::Value::String(format!("environment-restricted: {reason}"))
+            }
         },
     );
 
     if matches!(
-        availability,
-        tiangong_sandbox::SandboxAvailability::Unsupported(_)
+        &availability,
+        tiangong_sandbox::SandboxAvailability::EnvironmentRestricted(_)
     ) {
         report.insert(
             "environment_unverifiable".into(),
@@ -168,6 +300,13 @@ fn run_self_check() -> i32 {
         );
         println!("{}", serde_json::Value::Object(report));
         return EXIT_ENV_UNVERIFIABLE;
+    }
+    if matches!(
+        &availability,
+        tiangong_sandbox::SandboxAvailability::Unsupported(_)
+    ) {
+        println!("{}", serde_json::Value::Object(report));
+        return EXIT_SANDBOX_UNAVAILABLE;
     }
 
     {
@@ -180,34 +319,33 @@ fn run_self_check() -> i32 {
             let inside = workspace.path().join("selfcheck.txt");
             let status = std::process::Command::new(&program)
                 .args(&prefix)
-                .arg("/bin/bash")
-                .arg("-c")
-                .arg(format!("echo ok > {}", inside.display()))
+                .arg("/usr/bin/touch")
+                .arg(&inside)
                 .status()
                 .expect("自检命令启动失败");
             let inside_ok = status.success() && inside.is_file();
             report.insert("workspace_write".into(), serde_json::Value::from(inside_ok));
 
-            let outside = std::env::temp_dir()
-                .join(format!("tiangong-sandbox-selfcheck-{}", std::process::id()));
-            let outside_parent = outside.clone();
+            let outside_dir = tempfile::Builder::new()
+                .prefix("tiangong-sandbox-selfcheck-")
+                .tempdir()
+                .expect("创建自检外部目录失败");
+            let outside = outside_dir.path().join("blocked.txt");
             let status = std::process::Command::new(&program)
                 .args(&prefix)
-                .arg("/bin/bash")
-                .arg("-c")
-                .arg(format!("echo x > {}", outside_parent.display()))
+                .arg("/usr/bin/touch")
+                .arg(&outside)
                 .status()
                 .expect("自检命令启动失败");
             let blocked = !status.success() || !outside.is_file();
-            let _ =
-                std::fs::remove_dir_all(outside.parent().unwrap_or(std::path::Path::new("/tmp")));
+            drop(outside_dir);
             report.insert(
                 "outside_write_blocked".into(),
                 serde_json::Value::from(blocked),
             );
         }
     }
-    // 必需能力失败 → 制品不可用，版本管理器拒绝激活。
+    // 必需能力失败时制品不可用，宿主必须拒绝启动。
     let required_ok = report
         .get("workspace_write")
         .and_then(|value| value.as_bool())

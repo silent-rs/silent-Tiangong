@@ -45,6 +45,16 @@ jobs:
             files=()
           fi
 
+          sandbox_only="$(
+            printf '%s\n' "${files[@]}" | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          if [[ "$sandbox_only" == "true" ]]; then
+            echo "Sandbox-only change: Plugin CI is delegated to Sandbox CI"
+            echo 'plugins=[]' >> "$GITHUB_OUTPUT"
+            echo 'sidecars=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           check_all=false
           sdk_changed=false
           sidecar_shared_changed=false

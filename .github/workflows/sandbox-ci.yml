@@ -1,0 +1,261 @@
+name: Sandbox CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/sandbox-change-scope.sh"
+      - ".github/workflows/sandbox-ci.yml"
+      - "crates/tiangong-sandbox/**"
+      - "crates/tiangong-plugin-runtime/Cargo.toml"
+      - "crates/tiangong-plugin-runtime/src/adapter.rs"
+      - "crates/tiangong-plugin-runtime/src/host_state.rs"
+      - "crates/tiangong-plugin-runtime/src/loader.rs"
+      - "crates/tiangong-plugin-runtime/src/registry.rs"
+      - "crates/tiangong-plugin-runtime/src/sidecar.rs"
+      - "crates/tiangong-plugin-runtime/src/sidecar/command.rs"
+      - "crates/tiangong-plugin-runtime/src/sidecar/stdio.rs"
+      - "crates/tiangong-plugin-runtime/tests/ephemeral_route.rs"
+      - "crates/tiangong-plugin-sidecar/src/bin/test-stdio-sidecar.rs"
+      - "crates/tiangong-plugin-sidecar/src/lib.rs"
+      - "crates/tiangong-plugin-sidecar/src/server.rs"
+      - "crates/tiangong-plugin-sidecar/src/stdio.rs"
+      - "crates/tiangong-plugin-sidecar/tests/stdio_e2e.rs"
+      - "plugins/tiangong-plugin-command/sidecar/**"
+      - "src-tauri/tauri.conf.json"
+      - "xtask/Cargo.toml"
+      - "xtask/src/main.rs"
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: Sandbox (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify CI isolation routing
+        run: |
+          sandbox_only="$(
+            printf '%s\n' \
+              crates/tiangong-sandbox/src/lib.rs \
+              Cargo.lock \
+              .github/workflows/ci.yml \
+              | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          [[ "$sandbox_only" == "true" ]]
+
+          mixed_change="$(
+            printf '%s\n' crates/tiangong-sandbox/src/lib.rs README.md \
+              | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          [[ "$mixed_change" == "false" ]]
+
+          shared_only="$(
+            printf '%s\n' Cargo.toml Cargo.lock .github/workflows/ci.yml \
+              | bash .github/scripts/sandbox-change-scope.sh
+          )"
+          [[ "$shared_only" == "false" ]]
+
+      - id: setup
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          matrix: '["tiangong-sandbox","tiangong-plugin-runtime","tiangong-plugin-sidecar","tiangong-plugin-command-sidecar"]'
+
+      - name: Install bubblewrap
+        run: sudo apt-get install -y bubblewrap
+
+      - name: Check formatting
+        run: >-
+          cargo fmt
+          -p tiangong-sandbox
+          -p tiangong-plugin-runtime
+          -p tiangong-plugin-sidecar
+          -p tiangong-plugin-command-sidecar
+          -p xtask
+          -- --check
+
+      - name: Lint Sandbox crates
+        run: >-
+          cargo clippy --locked
+          -p tiangong-sandbox
+          -p tiangong-plugin-runtime
+          -p tiangong-plugin-sidecar
+          -p tiangong-plugin-command-sidecar
+          -p xtask
+          --all-targets -- -D warnings
+
+      - name: Build Launcher and command sidecar
+        run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+
+      - name: Verify native sandbox enforcement
+        run: |
+          report="$(target/debug/tiangong-sandbox --self-check)"
+          printf '%s\n' "$report"
+          python3 -c '
+          import json, sys
+          report = json.load(sys.stdin)
+          assert report["platform"] == "available", report
+          assert report["workspace_write"] is True, report
+          assert report["outside_write_blocked"] is True, report
+          ' <<< "$report"
+
+      - name: Test Sandbox and sidecar integration
+        run: >-
+          cargo test --locked
+          -p tiangong-sandbox
+          -p tiangong-plugin-runtime
+          -p tiangong-plugin-sidecar
+          -- --nocapture
+
+      - name: Verify packaged Launcher
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          TAURI_ENV_TARGET_TRIPLE="$target" cargo run --locked -p xtask -- prepare-sandbox
+          test -f "src-tauri/binaries/tiangong-sandbox-$target"
+
+  macos:
+    name: Sandbox (macOS native)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-macos
+
+      - name: Build Launcher and command sidecar
+        run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+
+      - name: Verify native sandbox enforcement
+        run: |
+          report="$(target/debug/tiangong-sandbox --self-check)"
+          printf '%s\n' "$report"
+          python3 -c '
+          import json, sys
+          report = json.load(sys.stdin)
+          assert report["platform"] == "available", report
+          assert report["workspace_write"] is True, report
+          assert report["outside_write_blocked"] is True, report
+          ' <<< "$report"
+
+      - name: Test native Launcher and process cleanup
+        run: |
+          cargo test --locked -p tiangong-sandbox -- --nocapture
+          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture
+          cargo test --locked -p tiangong-plugin-runtime --test ephemeral_route -- --nocapture
+
+      - name: Verify packaged Launcher
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          TAURI_ENV_TARGET_TRIPLE="$target" cargo run --locked -p xtask -- prepare-sandbox
+          test -f "src-tauri/binaries/tiangong-sandbox-$target"
+
+  windows:
+    name: Sandbox (Windows x86_64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-windows-x86_64
+
+      - name: Confirm x86_64 runner
+        shell: pwsh
+        run: |
+          $hostTriple = rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Substring(6) }
+          if ($hostTriple -ne 'x86_64-pc-windows-msvc') {
+            throw "Expected x86_64 Windows host, got $hostTriple"
+          }
+
+      - name: Check Windows Sandbox crates
+        run: >-
+          cargo check --locked
+          -p tiangong-sandbox
+          -p tiangong-plugin-runtime
+          -p tiangong-plugin-sidecar
+          -p tiangong-plugin-command-sidecar
+          -p xtask
+          --all-targets
+
+      - name: Build Launcher and command sidecar
+        run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+
+      - name: Verify Windows refuses incomplete file isolation
+        shell: pwsh
+        run: |
+          $output = & .\target\debug\tiangong-sandbox.exe --self-check | Out-String
+          $exitCode = $LASTEXITCODE
+          Write-Host $output
+          if ($exitCode -ne 78) {
+            throw "Expected self-check exit code 78, got $exitCode"
+          }
+          $report = $output | ConvertFrom-Json
+          if (-not $report.platform.StartsWith('unavailable:') -or
+              -not $report.platform.Contains('完整 command 文件隔离')) {
+            throw "Unexpected Windows self-check report: $output"
+          }
+          exit 0
+
+      - name: Test Windows Job Object process cleanup
+        run: >-
+          cargo test --locked
+          -p tiangong-plugin-runtime
+          --test ephemeral_route
+          stdio_stop_kills_background_process_tree
+          -- --exact --nocapture
+
+      - name: Test Windows Sandbox and stdio transport
+        run: |
+          cargo test --locked -p tiangong-sandbox -- --nocapture
+          cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture
+
+      - name: Verify packaged Launcher
+        shell: pwsh
+        run: |
+          $env:TAURI_ENV_TARGET_TRIPLE = 'x86_64-pc-windows-msvc'
+          cargo run --locked -p xtask -- prepare-sandbox
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $artifact = 'src-tauri/binaries/tiangong-sandbox-x86_64-pc-windows-msvc.exe'
+          if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "Packaged Launcher is missing: $artifact"
+          }
+
+  result:
+    name: Sandbox CI
+    needs: [linux, macos, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check platform results
+        env:
+          LINUX_RESULT: ${{ needs.linux.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+        run: |
+          for result in "$LINUX_RESULT" "$MACOS_RESULT" "$WINDOWS_RESULT"; do
+            if [[ "$result" != "success" ]]; then
+              exit 1
+            fi
+          done

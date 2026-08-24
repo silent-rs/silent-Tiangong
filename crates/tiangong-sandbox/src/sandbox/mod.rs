@@ -1,16 +1,12 @@
-//! 沙箱执行层：策略编译、命令包装与违规归因（RFC 0017 S3）。
+//! 沙箱执行层：策略编译、命令包装与违规归因。
 //!
-//! 平台选型：macOS Seatbelt / Linux bubblewrap / Windows 受限令牌（未实现）。
-//! 平台工具不可用时降级直跑并记录告警——快照恢复层（S1）继续兜底，
-//! 与 RFC "journal-only 弱档" 的定义一致。
+//! 平台选型：macOS Seatbelt / Linux bubblewrap；Windows 的完整文件隔离
+//! 尚未交付，因此明确报告不可用。平台能力缺失时始终拒绝执行。
 
-pub mod assess;
 pub mod bwrap;
 pub mod policy;
 pub mod seatbelt;
-pub mod windows;
 
-pub use assess::{CommandRisk, assess_program, assess_script, denial_hint};
 pub use policy::{SandboxMode, SandboxPolicy};
 
 /// 平台沙箱可用性。
@@ -18,17 +14,23 @@ pub use policy::{SandboxMode, SandboxPolicy};
 pub enum SandboxAvailability {
     /// 平台工具就绪，可执行包装。
     Available,
-    /// 不支持的原因（Windows、无 bwrap 的 Linux 等）。
+    /// 平台实现或必需程序缺失（Windows、无 bwrap 的 Linux 等）。
     Unsupported(String),
+    /// 当前宿主已经处于限制环境，无法再次嵌套应用系统沙箱。
+    EnvironmentRestricted(String),
 }
 
 pub fn availability() -> SandboxAvailability {
     #[cfg(target_os = "macos")]
     {
-        if seatbelt::seatbelt_available() {
+        if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() {
+            SandboxAvailability::Unsupported("未找到 /usr/bin/sandbox-exec".into())
+        } else if seatbelt::seatbelt_available() {
             SandboxAvailability::Available
         } else {
-            SandboxAvailability::Unsupported("未找到 /usr/bin/sandbox-exec".into())
+            SandboxAvailability::EnvironmentRestricted(
+                "当前宿主环境无法嵌套应用 macOS Seatbelt".into(),
+            )
         }
     }
     #[cfg(target_os = "linux")]
@@ -43,8 +45,7 @@ pub fn availability() -> SandboxAvailability {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         SandboxAvailability::Unsupported(
-            "Windows 沙箱（受限令牌）核心原语已就绪，输出捕获桥接受真实环境验证（RFC 0017 S6）"
-                .into(),
+            "当前 Windows 版本尚未提供完整 command 文件隔离，已拒绝执行".into(),
         )
     }
 }
@@ -52,11 +53,11 @@ pub fn availability() -> SandboxAvailability {
 /// 包装后的命令形态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxedProgram {
-    /// 不包装（仅 FullAccess 模式：用户已批准的全权通道）。
+    /// 不包装（仅宿主显式特殊无沙箱路径；Launcher 不接受）。
     Direct,
     /// 平台沙箱不可用（缺 bwrap / 嵌套 Seatbelt / Windows 未实现）。
     /// 命令默认路径必须拒绝执行，防止"用户以为在沙箱内实则裸奔"；
-    /// 需要执行时走升级审批票据进入全权通道。
+    /// 调用方必须报告能力缺失，不得退回裸进程。
     Unavailable(String),
     /// 实际 program 与其 argv 前缀（前缀 + 原命令 + 原参数 = 完整命令行）。
     Wrapped {
@@ -65,7 +66,7 @@ pub enum SandboxedProgram {
     },
 }
 
-/// 把命令包装进沙箱。平台不可用时降级为直跑并告警（快照层兜底）。
+/// 把命令包装进沙箱。平台不可用时返回明确错误，不会降级直跑。
 pub fn wrap(policy: &SandboxPolicy) -> SandboxedProgram {
     if policy.mode == SandboxMode::FullAccess {
         return SandboxedProgram::Direct;
@@ -84,19 +85,19 @@ pub fn wrap(policy: &SandboxPolicy) -> SandboxedProgram {
                 let bin = bwrap::bwrap_available().expect("availability 已确认");
                 SandboxedProgram::Wrapped {
                     program: bin,
-                    prefix: bwrap::wrap_argv(policy, &bin),
+                    prefix: bwrap::wrap_argv(policy),
                 }
             }
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {
                 SandboxedProgram::Unavailable(
-                    "Windows 沙箱（受限令牌）管道桥接受真实环境验证（RFC 0017 S6）".to_string(),
+                    "当前 Windows 版本尚未提供完整 command 文件隔离，已拒绝执行".to_string(),
                 )
             }
         }
-        SandboxAvailability::Unsupported(reason) => {
-            // RFC 0017（审查修订）：沙箱不可用时命令默认路径拒绝执行，
-            // 不再静默降级裸奔——快照层无法弥补凭据读取与外传。
+        SandboxAvailability::Unsupported(reason)
+        | SandboxAvailability::EnvironmentRestricted(reason) => {
+            // 沙箱不可用时拒绝执行，不静默降级裸奔。
             SandboxedProgram::Unavailable(reason)
         }
     }
@@ -112,8 +113,7 @@ pub fn explain_violation(stderr_text: &str) -> Option<&'static str> {
     {
         Some(
             "该操作被沙箱约束拒绝（写入范围或网络未在工作区白名单内）。\
-可以：1) 改为只写工作区内的路径；2) 调用 request_user（kind: approval）\
-向用户说明后申请全权执行。",
+请改为只写当前工作区或本次专用临时目录，并避免访问被禁止的网络。",
         )
     } else {
         None
@@ -169,11 +169,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&inside).unwrap().trim(), "ok");
 
         // 工作区外写：拦截（家目录不在白名单）。
-        let outside_dir = dirs::home_dir()
-            .unwrap()
-            .join(format!(".tiangong-sandbox-test-{}", std::process::id()));
-        std::fs::create_dir_all(&outside_dir).unwrap();
-        let outside = outside_dir.join("blocked.txt");
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("blocked.txt");
         let script = format!("echo x > {}", outside.display());
         let (code, stderr) = run_in_sandbox(&policy, &script);
         assert_ne!(code, 0, "工作区外写入应被沙箱拦截");
@@ -182,7 +179,6 @@ mod tests {
             explain_violation(&stderr).is_some(),
             "应能从失败输出归因到沙箱约束: {stderr}"
         );
-        std::fs::remove_dir_all(&outside_dir).ok();
     }
 
     #[test]

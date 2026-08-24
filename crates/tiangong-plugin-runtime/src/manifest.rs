@@ -221,15 +221,6 @@ pub struct SidecarManifest {
     pub lifecycle: SidecarLifecycle,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
-    // 以下两个字段已降级为开发提示语义（RFC 0017 透明执行封套修订）：
-    // 沙箱与网络能力由宿主权威策略表决定，插件自声明不构成授权——
-    // 伪造 manifest 只能导致插件无法工作，不能获得更高权限。
-    /// （提示性）插件期望进 OS 沙箱；实际决策在宿主策略表。
-    #[serde(default)]
-    pub sandbox: bool,
-    /// （提示性）插件期望沙箱内联网；实际决策在宿主策略表。
-    #[serde(default)]
-    pub sandbox_network: bool,
     #[serde(default)]
     pub business_protocol: u32,
     #[serde(default = "default_startup_timeout_ms")]
