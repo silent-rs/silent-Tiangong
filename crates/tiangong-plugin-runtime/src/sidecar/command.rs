@@ -127,6 +127,7 @@ impl EphemeralCommandConnection {
             config.sandbox_program_root = config.binary.parent().map(PathBuf::from);
         }
 
+        let sidecar_log = config.log.clone();
         let connection = Arc::new(StdioSidecarConnection::new(config));
         if let Ok(env) = self.exec_env.lock() {
             connection.update_exec_env(env.clone());
@@ -170,6 +171,12 @@ impl EphemeralCommandConnection {
         if let Ok(mut active) = self.active.lock() {
             active.remove(&key);
         }
+        let result = result.with_context(|| {
+            format!(
+                "command sidecar 日志（末尾）:\n{}",
+                read_log_tail(&sidecar_log)
+            )
+        });
         drop(invocation_dir);
 
         let response = result?;
@@ -261,6 +268,16 @@ impl SidecarConnection for EphemeralCommandConnection {
     fn plugin_id(&self) -> &str {
         &self.template.plugin_id
     }
+}
+
+fn read_log_tail(path: &std::path::Path) -> String {
+    const MAX_BYTES: usize = 8 * 1024;
+
+    let Ok(bytes) = std::fs::read(path) else {
+        return format!("<无法读取 {}>", path.display());
+    };
+    let start = bytes.len().saturating_sub(MAX_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
 fn annotate_sandbox_violation(response: String) -> Result<String> {
