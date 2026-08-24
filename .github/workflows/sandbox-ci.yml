@@ -44,7 +44,8 @@ defaults:
 jobs:
   linux:
     name: Sandbox (Linux x86_64)
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 的托管运行器禁止 bubblewrap 配置隔离网络。
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -106,8 +107,14 @@ jobs:
 
       - name: Verify native sandbox enforcement
         run: |
+          set +e
           report="$(target/debug/tiangong-sandbox --self-check)"
+          status=$?
+          set -e
           printf '%s\n' "$report"
+          if [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
           python3 -c '
           import json, sys
           report = json.load(sys.stdin)
@@ -131,23 +138,30 @@ jobs:
           test -f "src-tauri/binaries/tiangong-sandbox-$target"
 
   macos:
-    name: Sandbox (macOS native)
-    runs-on: macos-latest
+    name: Sandbox (macOS x86_64 native)
+    # macOS latest 当前为受限的 ARM 运行器，无法嵌套 Seatbelt。
+    runs-on: macos-15-intel
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: sandbox-macos
+          key: sandbox-macos-x86_64
 
       - name: Build Launcher and command sidecar
         run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
 
       - name: Verify native sandbox enforcement
         run: |
+          set +e
           report="$(target/debug/tiangong-sandbox --self-check)"
+          status=$?
+          set -e
           printf '%s\n' "$report"
+          if [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
           python3 -c '
           import json, sys
           report = json.load(sys.stdin)
