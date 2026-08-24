@@ -194,6 +194,55 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
+#[cfg(target_os = "linux")]
+fn concurrent_process_snapshot() -> String {
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-eo", "pid=,ppid=,pgid=,stat=,wchan:32=,args="])
+        .output()
+    else {
+        return "<无法执行 ps>".to_string();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            [
+                "tiangong-sandbox",
+                "tiangong-command-sidecar",
+                "bwrap",
+                "ephemeral_route",
+            ]
+            .iter()
+            .any(|needle| line.contains(needle))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(target_os = "linux")]
+fn concurrent_sidecar_logs() -> String {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return "<无法扫描系统临时目录>".to_string();
+    };
+    let mut logs = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("tiangong-command-")
+        })
+        .map(|entry| entry.path().join("tmp/sidecar.log"))
+        .filter(|path| path.is_file())
+        .map(|path| format!("{}:\n{}", path.display(), read_log(&path)))
+        .collect::<Vec<_>>();
+    logs.sort();
+    if logs.is_empty() {
+        "<未发现一次性 sidecar 日志>".to_string()
+    } else {
+        logs.join("\n\n")
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn real_launcher_enforces_workspace_and_dedicated_temp() {
@@ -553,6 +602,14 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
         }
         if Instant::now() >= deadline {
             let started = markers.iter().filter(|marker| marker.is_file()).count();
+            #[cfg(target_os = "linux")]
+            let pre_stop_diagnostics = format!(
+                "停止前进程:\n{}\n\n停止前 sidecar 日志:\n{}",
+                concurrent_process_snapshot(),
+                concurrent_sidecar_logs()
+            );
+            #[cfg(not(target_os = "linux"))]
+            let pre_stop_diagnostics = "当前平台未收集 Linux 进程诊断".to_string();
             let stop_result = fixture.connection.stop();
             let mut diagnostics = Vec::new();
             for _ in 0..workers.len() {
@@ -573,7 +630,7 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
                 let _ = worker.join();
             }
             panic!(
-                "并发 command 仅启动 {started}/10；停止结果: {stop_result:?}；调用诊断:\n{}",
+                "并发 command 仅启动 {started}/10；{pre_stop_diagnostics}\n\n停止结果: {stop_result:?}；调用诊断:\n{}",
                 diagnostics.join("\n\n")
             );
         }
