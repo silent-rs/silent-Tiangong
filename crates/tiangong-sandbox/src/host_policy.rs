@@ -17,6 +17,16 @@
 
 use std::collections::BTreeMap;
 
+/// sidecar 与宿主的通信通道（宿主权威决定，插件不声明——spawn 时由
+/// 宿主注入环境变量选择，sidecar 通用库自动适配）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarTransport {
+    /// 继承管道：沙箱零网络放行、无监听端口、生命周期与宿主绑定。
+    Stdio,
+    /// 本地回环 + endpoint 文件（存量默认；流式召回等依赖连接对象）。
+    Tcp,
+}
+
 /// 单个插件的宿主侧执行策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecutionPolicy {
@@ -24,13 +34,16 @@ pub struct HostExecutionPolicy {
     pub sandbox: bool,
     /// 沙箱内是否放行网络（仅文件写白名单之外的网络能力）。
     pub allow_network: bool,
+    /// 与宿主的通信通道。
+    pub transport: SidecarTransport,
 }
 
-/// 未知 / 未签名插件的保守默认：进沙箱、断网。
+/// 未知 / 未签名插件的保守默认：进沙箱、断网、管道通信。
 pub fn conservative_default() -> HostExecutionPolicy {
     HostExecutionPolicy {
         sandbox: true,
         allow_network: false,
+        transport: SidecarTransport::Stdio,
     }
 }
 
@@ -53,6 +66,8 @@ const OFFICIAL_NETWORKED: &[&str] = &[
 /// command 不在此列：其执行操作走宿主一次性沙箱实例（透明执行封套）。
 const OFFICIAL_PLATFORM_CARRIERS: &[&str] = &["terminal", "computer-use", "screenshot-input"];
 const OFFICIAL_PENDING_SANDBOX: &[&str] = &["fs", "memory"];
+/// 仍需 TCP 的官方插件（sidecar 的 stdio 适配待改造，见各插件说明）。
+const OFFICIAL_TCP_SIDECARS: &[&str] = &["fs", "memory", "terminal"];
 
 /// 解析插件的宿主执行策略。
 ///
@@ -62,10 +77,16 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     if !official_signed {
         return conservative_default();
     }
+    let tcp = OFFICIAL_TCP_SIDECARS.contains(&plugin_id);
     if OFFICIAL_PLATFORM_CARRIERS.contains(&plugin_id) {
         return HostExecutionPolicy {
             sandbox: false,
             allow_network: false,
+            transport: if tcp {
+                SidecarTransport::Tcp
+            } else {
+                SidecarTransport::Stdio
+            },
         };
     }
     if OFFICIAL_PENDING_SANDBOX.contains(&plugin_id) {
@@ -76,39 +97,28 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
         return HostExecutionPolicy {
             sandbox: false,
             allow_network: false,
+            transport: SidecarTransport::Tcp,
         };
     }
     HostExecutionPolicy {
         sandbox: true,
         allow_network: OFFICIAL_NETWORKED.contains(&plugin_id),
+        transport: if tcp {
+            SidecarTransport::Tcp
+        } else {
+            SidecarTransport::Stdio
+        },
     }
 }
 
 /// 策略表快照（审计与测试用）。
 pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
-    let mut out = BTreeMap::new();
-    for id in OFFICIAL_PLATFORM_CARRIERS
+    OFFICIAL_PLATFORM_CARRIERS
         .iter()
         .chain(OFFICIAL_PENDING_SANDBOX)
-    {
-        out.insert(
-            (*id).to_string(),
-            HostExecutionPolicy {
-                sandbox: false,
-                allow_network: false,
-            },
-        );
-    }
-    for id in OFFICIAL_NETWORKED {
-        out.insert(
-            (*id).to_string(),
-            HostExecutionPolicy {
-                sandbox: true,
-                allow_network: true,
-            },
-        );
-    }
-    out
+        .chain(OFFICIAL_NETWORKED)
+        .map(|id| ((*id).to_string(), resolve(id, true)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -149,5 +159,20 @@ mod tests {
             assert!(!policy.sandbox, "{id} 应保持非沙箱载体");
         }
         assert!(resolve("command", true).sandbox);
+    }
+
+    #[test]
+    fn transport_is_host_decided() {
+        // 沙箱插件一律管道；stdio 适配待改造的存量插件保持 TCP。
+        assert_eq!(resolve("index", true).transport, SidecarTransport::Stdio);
+        assert_eq!(resolve("fetch", true).transport, SidecarTransport::Stdio);
+        for id in ["fs", "memory", "terminal"] {
+            assert_eq!(resolve(id, true).transport, SidecarTransport::Tcp, "{id}");
+        }
+        assert_eq!(
+            resolve("anything", false).transport,
+            SidecarTransport::Stdio,
+            "未签名插件保守默认管道"
+        );
     }
 }

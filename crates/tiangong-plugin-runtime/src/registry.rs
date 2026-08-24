@@ -17,7 +17,7 @@ use crate::loader::{
     instantiate_component,
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
-use crate::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection, TRANSPORT_STDIO};
+use crate::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
@@ -2637,12 +2637,6 @@ fn sidecar_connection(
     let official_signed = signed_release.is_some();
     let host_policy =
         tiangong_sandbox::host_policy::resolve(&installed.manifest.id, official_signed);
-    if host_policy.sandbox && sidecar.transport != TRANSPORT_STDIO {
-        bail!(
-            "插件 {} 按宿主策略需进 OS 沙箱，但未使用 stdio 传输",
-            installed.manifest.id
-        );
-    }
 
     let mut binary = installed.directory.join(&sidecar.binary);
     if !std::env::consts::EXE_SUFFIX.is_empty() {
@@ -2685,11 +2679,14 @@ fn sidecar_connection(
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
     if refresh || !connections.contains_key(&installed.directory) {
-        let connection: Arc<dyn SidecarConnection> = if sidecar.transport == TRANSPORT_STDIO {
-            Arc::new(StdioSidecarConnection::new(config))
-        } else {
-            Arc::new(crate::sidecar::ProcessSidecarConnection::new(config))
-        };
+        // 通信通道由宿主策略表权威决定（插件不声明）：spawn 时注入的
+        // 环境变量即通道选择，sidecar 通用库自动适配。
+        let connection: Arc<dyn SidecarConnection> =
+            if host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio {
+                Arc::new(StdioSidecarConnection::new(config))
+            } else {
+                Arc::new(crate::sidecar::ProcessSidecarConnection::new(config))
+            };
         connections.insert(installed.directory.clone(), connection);
     }
     connections
