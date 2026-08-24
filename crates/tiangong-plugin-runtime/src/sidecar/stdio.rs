@@ -176,6 +176,13 @@ impl StdioSidecarConnection {
                     Some((program, prefix))
                 }
                 tiangong_sandbox::SandboxedProgram::Direct => None,
+                // 声明了沙箱但平台不可用：拒绝启动（fail loud）。
+                tiangong_sandbox::SandboxedProgram::Unavailable(reason) => {
+                    bail!(
+                        "插件 {} 声明 sidecar.sandbox 但当前平台沙箱不可用：{reason}",
+                        self.config.plugin_id
+                    );
+                }
             }
         } else {
             None

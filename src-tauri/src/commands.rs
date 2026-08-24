@@ -4854,14 +4854,41 @@ pub async fn plugin_trust_list() -> Result<Vec<tiangong_sandbox::trust::TrustedP
     Ok(store.trusted_plugins())
 }
 
-/// 登记本地信任（L3，内容哈希锁定；原生确认对话框 UI 见 RFC 开放问题）。
+/// 登记本地信任（L3，内容哈希锁定）。
+///
+/// 安全边界（RFC 0017 D3）：目录必须与已安装插件一致且非官方签名，
+/// 且必须经宿主原生确认对话框由用户显式批准——安全不依赖调用方自觉。
 #[tauri::command]
 pub async fn plugin_trust_grant(
+    app: tauri::AppHandle,
     plugin_id: String,
     directory: String,
     origin: Option<String>,
 ) -> Result<(), String> {
-    let granted = tokio::task::spawn_blocking(move || {
+    // 目录必须是该插件编号的真实安装目录（防任意目录登记）。
+    let storage_root = tiangong_config::io::storage_root();
+    tiangong_plugin_runtime::registry::verify_local_trust_target(
+        &storage_root,
+        &plugin_id,
+        std::path::Path::new(&directory),
+    )
+    .map_err(|err| err.to_string())?;
+
+    // 原生确认对话框：非 webview，Agent 的界面自动化无法触达；
+    // 展示完整的目录与后果说明。
+    let message = format!(
+        "是否信任本地插件「{plugin_id}」？\n\n目录：{directory}\n\n信任后该插件可启动原生 sidecar（获得本机文件与网络能力）。其代码内容将被哈希锁定，任何变更都需要重新确认。"
+    );
+    let confirmed = tokio::task::spawn_blocking(move || {
+        native_confirm(&app, "确认信任本地插件（L3）", &message, "信任并允许")
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    if !confirmed {
+        return Err("用户取消了本地信任登记".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || {
         let store = tiangong_sandbox::PluginSafetyStore::open(&tiangong_config::io::storage_root());
         store
             .grant(
@@ -4872,8 +4899,8 @@ pub async fn plugin_trust_grant(
             .map_err(|err| err.to_string())
     })
     .await
-    .map_err(|err| err.to_string())?;
-    granted.map(|_| ())
+    .map_err(|err| err.to_string())?
+    .map(|_| ())
 }
 
 /// 撤销本地信任。
@@ -4915,15 +4942,41 @@ pub async fn plugin_safety_set_unsafe_mode(
         .map_err(|err| err.to_string())
 }
 
-/// 升级审批票据签发（RFC 0017 S4）：用户在界面上显式批准某命令的全权执行
-/// 后调用，返回一次性短时效票据；Agent 经桥接层无法触达本入口。
+/// 升级审批票据签发（RFC 0017 S4）。
+///
+/// 安全不依赖调用方自觉：本命令自身弹出宿主原生确认对话框，向用户展示
+/// 完整命令文本，用户点批准后才签发一次性短时效票据；取消则拒绝。
 #[tauri::command]
-pub async fn command_escalation_approve(command: String) -> Result<String, String> {
+pub async fn command_escalation_approve(
+    app: tauri::AppHandle,
+    operation: Option<String>,
+    command: String,
+) -> Result<String, String> {
+    let operation = operation.unwrap_or_else(|| "command.run_command".to_string());
     let command = command.trim().to_string();
     if command.is_empty() {
         return Err("command 不能为空".to_string());
     }
-    Ok(tiangong_sandbox::EscalationBroker::issue(command))
+    let message = format!(
+        "是否批准以下命令的全权（无沙箱）执行？\n\n{command}\n\n批准后将生成一次性票据，5 分钟内有效，仅绑定该完整命令文本。"
+    );
+    let display_command = command.clone();
+    let confirmed = tokio::task::spawn_blocking(move || {
+        native_confirm(
+            &app,
+            "批准命令全权执行",
+            &message,
+            &format!("批准执行「{display_command}」"),
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    if !confirmed {
+        return Err("用户取消了命令全权执行批准".to_string());
+    }
+    Ok(tiangong_sandbox::EscalationBroker::issue(
+        &operation, &command,
+    ))
 }
 
 /// 原生确认对话框（阻塞等待用户点击，需在 spawn_blocking 中调用）。

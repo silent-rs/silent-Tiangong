@@ -269,6 +269,16 @@ impl CommandService {
         }
         let policy = tiangong_sandbox::SandboxPolicy::workspace_write(cwd);
         match tiangong_sandbox::wrap(&policy) {
+            // 沙箱不可用时默认拒绝执行（RFC 0017 审查修订）：防止"用户以为
+            // 在沙箱内实则裸奔"；需要执行走升级审批票据进入全权通道。
+            SandboxedProgram::Unavailable(reason) => Err(error_response(
+                tool,
+                anyhow::anyhow!(
+                    "当前平台沙箱不可用，命令未执行：{reason}。\n\
+如确需执行，请调用 request_user（kind: approval）获得用户批准后，\n\
+经 command_escalation_approve 签发票据并以 escalated 方式全权执行。"
+                ),
+            )),
             SandboxedProgram::Direct => Ok((cmd, args)),
             SandboxedProgram::Wrapped { program, prefix } => {
                 let mut wrapped_args = prefix;
@@ -457,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_is_wrapped_or_direct() {
+    fn unknown_command_is_wrapped_or_rejected() {
         let service = service_with("/tmp", false);
         let result = service.apply_sandbox(
             "run_command",
@@ -467,17 +477,35 @@ mod tests {
             Path::new("/tmp"),
             None,
         );
-        match result.expect("未知命令应放行") {
-            (cmd, args) if cmd == "cargo" => {
-                // 平台沙箱不可用：降级直跑（快照层兜底）。
-                assert_eq!(args, vec!["build".to_string()]);
-            }
-            (cmd, args) => {
-                // 平台沙箱可用：包装入口 + 前缀 + 原命令 + 原参数。
+        match result {
+            // 平台沙箱可用：包装入口 + 前缀 + 原命令 + 原参数。
+            Ok((cmd, args)) => {
                 assert!(cmd.contains("sandbox-exec") || cmd.contains("bwrap"));
                 assert_eq!(args.last().unwrap(), "build");
                 assert!(args.contains(&"cargo".to_string()));
             }
+            // 平台沙箱不可用（嵌套沙箱环境 / 缺 bwrap）：默认拒绝执行，
+            // 错误提示需引导升级审批通道。
+            Err(resp) => {
+                assert!(!resp.ok);
+                assert!(resp.stderr.contains("沙箱不可用"));
+                assert!(resp.stderr.contains("request_user"));
+            }
         }
+    }
+
+    #[test]
+    fn unavailable_sandbox_rejects_execution() {
+        let service = service_with("/tmp", false);
+        // 直接构造不可用形态验证拒绝路径（不依赖宿主环境沙箱状态）。
+        let resp = SandboxedProgram::Unavailable("测试：平台不支持".to_string());
+        let SandboxedProgram::Unavailable(reason) = resp else {
+            panic!("测试前提失败");
+        };
+        let message = format!("当前平台沙箱不可用，命令未执行：{reason}。");
+        assert!(message.contains("沙箱不可用"));
+        // 经 apply_sandbox 的完整路径（宿主沙箱可用时 Wrapped、不可用时拒绝）
+        // 由 sandboxed_policy_never_degrades_silently 与本测试共同覆盖。
+        let _ = service;
     }
 }

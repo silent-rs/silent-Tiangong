@@ -37,7 +37,6 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
     // 默认禁写，再逐个放行；/dev/null 是大量脚本的基础依赖。
     sbpl.push_str("(deny file-write*)\n");
     sbpl.push_str("(allow file-write* (literal \"/dev/null\"))\n");
-    sbpl.push_str("(allow file-write* (literal \"/dev/disk0\"))\n");
     let writable = if policy.mode == super::policy::SandboxMode::WorkspaceWrite {
         policy.writable_roots()
     } else {

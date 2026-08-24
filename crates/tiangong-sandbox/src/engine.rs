@@ -153,6 +153,7 @@ impl SnapshotEngine {
         if !workspace.is_dir() {
             bail!("工作区目录不存在：{}", workspace.display());
         }
+        ensure_safe_id(session_id, "会话 ID")?;
         let snapshot_id = scru128::new().to_string();
         let tree_dir = self.tree_dir(session_id, &snapshot_id);
         fs::create_dir_all(&tree_dir)
@@ -237,6 +238,8 @@ impl SnapshotEngine {
         snapshot_id: &str,
         workspace: &Path,
     ) -> Result<Vec<FileChange>> {
+        ensure_safe_id(session_id, "会话 ID")?;
+        ensure_safe_id(snapshot_id, "快照 ID")?;
         let meta = self.load_meta(session_id, snapshot_id)?;
         let snap_files = fingerprint_map(Some(&meta));
         let snap_links: HashMap<String, String> = meta
@@ -309,6 +312,8 @@ impl SnapshotEngine {
         snapshot_id: &str,
         workspace: &Path,
     ) -> Result<RestoreReport> {
+        ensure_safe_id(session_id, "会话 ID")?;
+        ensure_safe_id(snapshot_id, "快照 ID")?;
         if !workspace.is_dir() {
             bail!("工作区目录不存在：{}", workspace.display());
         }
@@ -407,6 +412,9 @@ impl SnapshotEngine {
         rel_path: &str,
         workspace: &Path,
     ) -> Result<()> {
+        ensure_safe_id(session_id, "会话 ID")?;
+        ensure_safe_id(snapshot_id, "快照 ID")?;
+        ensure_safe_rel_path(rel_path)?;
         let src = self.tree_dir(session_id, snapshot_id).join(rel_path);
         if !src.is_file() {
             bail!("快照中不存在该文件：{rel_path}");
@@ -471,6 +479,42 @@ impl SnapshotEngine {
             }
             index.snapshots.remove(0);
         }
+    }
+}
+
+/// 校验外部传入的相对路径：拒绝绝对路径、`..` 组件、反斜杠与空值，
+/// 防止恢复目标逃出工作区（RFC 0017 安全边界）。
+fn ensure_safe_rel_path(rel_path: &str) -> Result<()> {
+    if rel_path.is_empty()
+        || rel_path.starts_with('/')
+        || rel_path.starts_with('\\')
+        || rel_path.contains(":\\")
+        || rel_path.contains('\\')
+    {
+        bail!("非法相对路径：{rel_path}");
+    }
+    let path = Path::new(rel_path);
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("相对路径不允许包含 ..：{rel_path}");
+    }
+    Ok(())
+}
+
+/// 校验外部传入的标识（会话/快照 ID）：仅允许字母数字与 `-_.`，
+/// 防止路径拼接逃逸。
+fn ensure_safe_id(id: &str, label: &str) -> Result<()> {
+    let valid = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        bail!("非法{label}：{id}");
     }
 }
 
@@ -541,4 +585,30 @@ fn move_to_orphan(src: &Path, dst: &Path) -> Result<()> {
     copy::copy_file(src, dst).with_context(|| src.display().to_string())?;
     fs::remove_file(src).with_context(|| src.display().to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod path_guard_tests {
+    use super::*;
+
+    #[test]
+    fn rel_path_escape_is_rejected() {
+        assert!(ensure_safe_rel_path("../meta.json").is_err());
+        assert!(ensure_safe_rel_path("a/../../etc/passwd").is_err());
+        assert!(ensure_safe_rel_path("/etc/passwd").is_err());
+        assert!(ensure_safe_rel_path("C:\\Windows\\system32").is_err());
+        assert!(ensure_safe_rel_path("a\\b").is_err());
+        assert!(ensure_safe_rel_path("").is_err());
+        assert!(ensure_safe_rel_path("src/main.rs").is_ok());
+        assert!(ensure_safe_rel_path("dist/index.html").is_ok());
+    }
+
+    #[test]
+    fn unsafe_ids_are_rejected() {
+        assert!(ensure_safe_id("../evil", "会话 ID").is_err());
+        assert!(ensure_safe_id("a/b", "快照 ID").is_err());
+        assert!(ensure_safe_id("", "会话 ID").is_err());
+        assert!(ensure_safe_id("s1", "会话 ID").is_ok());
+        assert!(ensure_safe_id("0123456789abcdef0123456789abcdef", "快照 ID").is_ok());
+    }
 }
