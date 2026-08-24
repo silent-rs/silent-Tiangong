@@ -2425,10 +2425,14 @@ fn sidecar_connection(
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
     }
-    // OS 沙箱声明依赖 stdio 传输（沙箱内网络禁用会断开 TCP loopback）。
-    if sidecar.sandbox && sidecar.transport != TRANSPORT_STDIO {
+    // 沙箱策略由宿主权威策略表决定（RFC 0017 透明执行封套）：
+    // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
+    let official_signed = signed_release.is_some();
+    let host_policy =
+        tiangong_sandbox::host_policy::resolve(&installed.manifest.id, official_signed);
+    if host_policy.sandbox && sidecar.transport != TRANSPORT_STDIO {
         bail!(
-            "插件 {} 声明 sidecar.sandbox 但未使用 stdio 传输",
+            "插件 {} 按宿主策略需进 OS 沙箱，但未使用 stdio 传输",
             installed.manifest.id
         );
     }
@@ -2467,8 +2471,8 @@ fn sidecar_connection(
         Duration::from_millis(sidecar.request_timeout_ms),
     )
     .with_server_endpoint(server_url, server_token)
-    .with_sandbox(sidecar.sandbox)
-    .with_sandbox_network(sidecar.sandbox_network);
+    .with_sandbox(host_policy.sandbox)
+    .with_sandbox_network(host_policy.allow_network);
 
     let mut connections = sidecar_connections()
         .lock()

@@ -11,9 +11,7 @@
     "business_protocol": 1,
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 120000,
-    "transport": "stdio",
-    "sandbox": true,
-    "sandbox_network": true
+    "transport": "stdio"
   },
   "permissions": [
     "model-config.read",

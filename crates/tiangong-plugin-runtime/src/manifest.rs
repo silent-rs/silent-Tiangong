@@ -167,10 +167,13 @@ pub struct SidecarManifest {
     /// IPC 通道：`tcp`（默认，存量）或 `stdio`（沙箱友好，RFC 0017 D16）。
     #[serde(default)]
     pub transport: String,
-    /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，要求 transport=stdio）。
+    // 以下两个字段已降级为开发提示语义（RFC 0017 透明执行封套修订）：
+    // 沙箱与网络能力由宿主权威策略表决定，插件自声明不构成授权——
+    // 伪造 manifest 只能导致插件无法工作，不能获得更高权限。
+    /// （提示性）插件期望进 OS 沙箱；实际决策在宿主策略表。
     #[serde(default)]
     pub sandbox: bool,
-    /// 沙箱内是否放行网络（文件写白名单不受影响；供 fetch 等网络型插件）。
+    /// （提示性）插件期望沙箱内联网；实际决策在宿主策略表。
     #[serde(default)]
     pub sandbox_network: bool,
     #[serde(default)]
