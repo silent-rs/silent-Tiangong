@@ -6,7 +6,8 @@
 use std::path::{Path, PathBuf};
 
 /// 沙箱模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
     /// 全盘只读，无任何可写路径。
     ReadOnly,
@@ -16,8 +17,8 @@ pub enum SandboxMode {
     FullAccess,
 }
 
-/// 平台无关的沙箱策略。
-#[derive(Debug, Clone)]
+/// 平台无关的沙箱策略（可序列化，经 Launcher 协议传输）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SandboxPolicy {
     pub mode: SandboxMode,
     /// 会话工作区（WorkspaceWrite 模式下的主可写根）。

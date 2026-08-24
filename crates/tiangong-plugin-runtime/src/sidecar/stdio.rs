@@ -241,9 +241,6 @@ impl StdioSidecarConnection {
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
-        if !self.config.binary.is_file() {
-            bail!("sidecar 二进制不存在: {}", self.config.binary.display());
-        }
         if let Some(parent) = self.config.log.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建 sidecar 日志目录失败: {}", parent.display()))?;
@@ -261,10 +258,7 @@ impl StdioSidecarConnection {
             .with_context(|| format!("打开 sidecar 日志失败: {}", self.config.log.display()))?;
 
         let token = scru128::new().to_string();
-        // OS 沙箱路径（经 tiangong-sandbox Launcher 启动）由沙箱覆盖分支
-        // 在本传输层之上叠加；此处仅负责直接 spawn 与 stdio 管道接续。
-        // 解释器形态：以宿主解析的解释器程序运行 entry（本地信任时先复核内容清单）。
-        let mut command = match self.config.interpreter.as_ref() {
+        let (target_program, target_args) = match self.config.interpreter.as_ref() {
             Some(launch) => {
                 if let Some(manifest_path) = &self.config.integrity_manifest {
                     let root = manifest_path
@@ -281,16 +275,57 @@ impl StdioSidecarConnection {
                 if !launch.entry.is_file() {
                     bail!("sidecar 入口脚本不存在: {}", launch.entry.display());
                 }
-                let mut command = Command::new(&launch.program);
-                command.arg(&launch.entry);
-                command.args(&launch.args);
-                command
+                let mut args = vec![launch.entry.display().to_string()];
+                args.extend(launch.args.iter().cloned());
+                (launch.program.clone(), args)
             }
             None => {
                 if !self.config.binary.is_file() {
                     bail!("sidecar 二进制不存在: {}", self.config.binary.display());
                 }
-                Command::new(&self.config.binary)
+                (self.config.binary.clone(), Vec::new())
+            }
+        };
+
+        // 声明沙箱的 sidecar 一律经官方 Launcher 启动；策略通过继承描述符
+        // 传入。解释器形态把解释器作为目标程序，入口脚本和固定参数作为参数。
+        let launch_policy = if self.config.sandbox {
+            let workspace = self
+                .config
+                .sandbox_workspace
+                .clone()
+                .unwrap_or_else(|| self.config.data_dir.clone());
+            let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
+            policy.allow_network = self.config.sandbox_network;
+            Some(policy)
+        } else {
+            None
+        };
+        let mut command = match &launch_policy {
+            Some(policy) => {
+                let launcher =
+                    tiangong_sandbox::launcher_manager::resolve_launcher(&self.config.storage_root)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "插件 {} 声明沙箱但 Launcher 不可用（active/内置均缺失），拒绝启动",
+                                self.config.plugin_id
+                            )
+                        })?;
+                let request = serde_json::json!({
+                    "protocol_version": 1,
+                    "policy_schema": 1,
+                    "policy": policy,
+                    "program": target_program.display().to_string(),
+                    "args": target_args,
+                });
+                let mut command = Command::new(launcher);
+                prepare_policy_fd(&mut command, request.to_string())?;
+                command
+            }
+            None => {
+                let mut command = Command::new(&target_program);
+                command.args(&target_args);
+                command
             }
         };
         sanitize_spawn_environment(&mut command);
@@ -327,9 +362,9 @@ impl StdioSidecarConnection {
         configure_process_lifecycle(&mut command)?;
         #[cfg(windows)]
         let lifecycle = WindowsJob::new().context("创建 sidecar Job Object 失败")?;
-        let mut child = command.spawn().with_context(|| {
-            format!("启动 stdio sidecar 失败: {}", self.config.binary.display())
-        })?;
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("启动 stdio sidecar 失败: {}", target_program.display()))?;
         #[cfg(windows)]
         if let Err(error) = lifecycle.assign(&child) {
             let _ = child.kill();
@@ -631,6 +666,49 @@ impl WindowsJob {
         use std::os::windows::io::AsRawHandle;
         self.handle.as_raw_handle()
     }
+}
+
+/// 为 Launcher 准备策略描述符：匿名管道写端经 pre_exec 复制到 fd3。
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let (read_fd, write_fd) = {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds 为有效出参缓冲。
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("创建策略管道失败");
+        }
+        (fds[0], fds[1])
+    };
+    // 立即写入策略并关闭写端：Launcher 侧读到 EOF 即策略完整。
+    {
+        let mut writer = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        writer
+            .write_all(policy_json.as_bytes())
+            .and_then(|_| writer.flush())
+            .context("写入策略管道失败")?;
+    }
+    let read_fd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(read_fd) };
+    let raw_read = read_fd_owned.as_raw_fd();
+    // pre_exec（fork 后、exec 前）把读端复制到 fd3。
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            if libc::dup2(raw_read, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = raw_read;
+        bail!("Launcher fd3 策略通道仅支持 Unix（Windows 继承句柄见 RFC S6）");
+    }
+    // 后续提交会把描述符所有权收敛为显式守卫；当前需保持到 spawn 完成。
+    std::mem::forget(read_fd_owned);
+    Ok(())
 }
 
 fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {

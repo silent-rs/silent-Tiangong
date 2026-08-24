@@ -13,6 +13,7 @@ pub mod engine;
 pub mod escalation;
 pub mod formats;
 pub mod host_policy;
+pub mod launcher_manager;
 pub mod plugin;
 pub mod sandbox;
 pub mod service;
