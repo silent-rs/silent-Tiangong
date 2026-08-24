@@ -73,8 +73,6 @@ impl DesktopCoreFactory {
             storage_root.clone(),
             child_plugin_factory,
         ));
-        // 快照插件：turn 结束触发工作区快照（RFC 0017 S1），恢复经 snapshot_* 命令。
-        plugins.push(tiangong_sandbox::build_plugin());
         plugins
     }
 }

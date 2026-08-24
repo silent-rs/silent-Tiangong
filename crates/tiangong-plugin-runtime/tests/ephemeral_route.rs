@@ -11,18 +11,19 @@ use std::time::Duration;
 
 use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
-fn sidecar_binary() -> Option<PathBuf> {
+fn sidecar_binary() -> PathBuf {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/debug/tiangong-command-sidecar");
-    binary.is_file().then_some(binary)
+    assert!(
+        binary.is_file(),
+        "sidecar 二进制未构建：先运行 cargo build -p tiangong-plugin-command-sidecar"
+    );
+    binary
 }
 
 #[test]
 fn ephemeral_route_executes_command_after_workspace_init() {
-    let Some(binary) = sidecar_binary() else {
-        eprintln!("跳过：sidecar 二进制未构建（cargo build -p tiangong-plugin-command-sidecar）");
-        return;
-    };
+    let binary = sidecar_binary();
     let base = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let config = SidecarConfig::new(
@@ -77,10 +78,7 @@ fn ephemeral_route_executes_command_after_workspace_init() {
 
 #[test]
 fn missing_workspace_init_rejects_execution() {
-    let Some(binary) = sidecar_binary() else {
-        eprintln!("跳过：sidecar 二进制未构建");
-        return;
-    };
+    let binary = sidecar_binary();
     let base = tempfile::tempdir().unwrap();
     let config = SidecarConfig::new(
         "command",

@@ -704,32 +704,10 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 }
 
 /// 通过插件 ID 调用其 sidecar，入口不需要了解制品位置或传输协议。
-/// 校验本地信任（L3）登记目标：插件已安装、目录一致且未携带官方签名。
-/// 供宿主信任登记命令在用户确认前调用（RFC 0017 D3）。
-pub fn verify_local_trust_target(
-    storage_root: &Path,
-    plugin_id: &str,
-    directory: &Path,
-) -> Result<()> {
-    let installed = find_installed_plugin(storage_root, plugin_id)?;
-    if installed.directory != directory {
-        bail!("目录与插件 {plugin_id} 的安装目录不一致，拒绝登记本地信任");
-    }
-    if installed.signed_release.is_some() {
-        bail!("插件 {plugin_id} 已携带官方签名，无需本地信任");
-    }
-    Ok(())
-}
-
-/// 一次性 command sidecar 路由（透明执行封套）：
-/// 权威工作区解析 → 票据匹配 → 预分类 → 沙箱/全权实例 → set_workspace
-/// 初始化 → 原样执行 → 违规提示。插件零感知，协议原样透传。
-///
-/// 安全决策全部宿主侧：
-/// - 沙箱恒开（唯一例外：用户批准的完整命令文本经票据匹配命中）；
-/// - `full_trust` 等请求字段只影响 sidecar 内部白名单校验的宽松度
-///   （审批语义），不参与沙箱决策；
-/// - 工作区以 core 登记的权威集合为准，请求 `cwd` 仅作候选并校验。
+/// 一次性 command sidecar 路由（透明执行封套，任务边界收敛版）：
+/// 权威工作区解析 → 沙箱实例（恒开）→ set_workspace 初始化 → 原样执行 →
+/// 违规提示。无沙箱重试闭环（审批升级）拆分至 feature/sandbox-escalation：
+/// 沙箱拒绝即返回结构化错误，由调用方引导用户。
 #[allow(clippy::too_many_lines)]
 fn invoke_command_ephemeral(
     storage_root: &Path,
@@ -737,86 +715,8 @@ fn invoke_command_ephemeral(
     operation: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
-    // 完整命令文本（票据匹配与预分类共用）。
-    let full_command = match operation {
-        "command.run_shell" => payload
-            .get("script")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        _ => {
-            let cmd = payload
-                .get("cmd")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let args = payload
-                .get("args")
-                .and_then(serde_json::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .unwrap_or_default();
-            if args.is_empty() {
-                cmd
-            } else {
-                format!("{cmd} {args}")
-            }
-        }
-    };
-
-    // 全权判定：仅用户批准的结构化授权指纹（操作/程序/参数/脚本/工作目录）
-    // 经票据匹配（一次性消费）；请求字段不参与其它安全决策。
-    let fingerprint =
-        tiangong_sandbox::escalation::EscalationFingerprint::from_payload(operation, &payload);
-    let full_access = tiangong_sandbox::EscalationBroker::consume_by_fingerprint(&fingerprint);
-
-    // 预分类：非全权时拒绝已知高危命令（引导走用户批准通道）。
-    if !full_access {
-        let dangerous = match operation {
-            "command.run_shell" => payload
-                .get("script")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|script| {
-                    tiangong_sandbox::assess_script(script)
-                        == tiangong_sandbox::CommandRisk::KnownDangerous
-                }),
-            _ => {
-                let cmd = payload
-                    .get("cmd")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let args = payload
-                    .get("args")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(String::from)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                tiangong_sandbox::assess_program(cmd, &args)
-                    == tiangong_sandbox::CommandRisk::KnownDangerous
-            }
-        };
-        if dangerous {
-            // 登记待批准（指纹取自实际请求，审批与重试同源匹配）。
-            tiangong_sandbox::escalation::record_pending(fingerprint.clone(), "高危预分类拒绝");
-            bail!(
-                "命令被宿主预分类器判定为高危，未执行：{full_command}。\n\
-如确需执行，请引导用户在宿主界面的待批准列表中确认该命令（批准后重试同一命令即可全权执行）。"
-            );
-        }
-    }
-
     // 权威工作区：请求的 cwd 仅作候选，canonicalize 后必须位于 core 登记
-    // 的权威集合内；不合法则回退插件数据目录（命令可写范围受限）。
+    // 的活跃工作区内；不合法则回退插件数据目录（命令可写范围受限）。
     let fallback_workspace = installed.directory.join("data");
     let workspace = payload
         .get("access")
@@ -843,9 +743,13 @@ fn invoke_command_ephemeral(
             binary.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
         }
     }
+    // 每次执行专用临时目录（策略可写根，不放开全局 temp）。
     let base = installed
         .directory
         .join(format!("ephemeral-{}", scru128::new()));
+    std::fs::create_dir_all(base.join("tmp"))
+        .with_context(|| format!("创建专用临时目录失败：{}", base.join("tmp").display()))?;
+    let exec_tmp = base.join("tmp");
     let config = SidecarConfig::new(
         &installed.manifest.id,
         &installed.manifest.version,
@@ -859,18 +763,14 @@ fn invoke_command_ephemeral(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
-    // 沙箱恒开（唯一例外：用户批准命中的全权实例）；
-    // 平台沙箱不可用时 spawn 显式失败（不静默降级裸奔）。
-    .with_sandbox(!full_access)
-    .with_sandbox_workspace(if full_access {
-        None
-    } else {
-        Some(workspace.clone())
-    });
+    // 沙箱恒开；平台不可用时 spawn 显式失败（不静默降级裸奔）。
+    .with_sandbox(true)
+    .with_sandbox_workspace(Some(workspace.clone()))
+    .with_sandbox_extra_writable(vec![exec_tmp]);
 
     let connection = StdioSidecarConnection::new(config);
     // 一次性实例必须先初始化会话工作区，否则 sidecar 拒绝执行。
-    // full_trust 仅保留其审批语义（sidecar 内部白名单校验宽松度），
+    // full_trust 仅保留审批语义（sidecar 内部白名单校验宽松度），
     // 不影响沙箱决策。
     let sidecar_full_trust = payload
         .get("access")
@@ -905,9 +805,8 @@ fn invoke_command_ephemeral(
 
     let mut response: serde_json::Value =
         serde_json::from_str(&response_text).with_context(|| "解析插件响应失败")?;
-    // 沙箱违规归因提示（对模型透明，Agent 可自主改写法或申请升级）。
-    if !full_access
-        && response.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+    // 沙箱违规归因提示（对模型透明，Agent 可自主改写法或求助用户）。
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
         && let Some(hint) = response
             .get("stderr")
             .and_then(serde_json::Value::as_str)

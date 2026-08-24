@@ -301,6 +301,9 @@ impl StdioSidecarConnection {
         } else {
             None
         };
+        // fd 守卫必须存活到 spawn 完成：match 臂内绑定会在臂结束时提前
+        // drop、导致沙箱程序读不到策略（审查修复）。
+        let mut policy_fd_guard = None;
         let mut command = match &launch_policy {
             Some(policy) => {
                 let sandbox_bin =
@@ -321,8 +324,7 @@ impl StdioSidecarConnection {
                     "args": target_args,
                 });
                 let mut command = Command::new(sandbox_bin);
-                // 守卫必须存活到 spawn；后续修订会把绑定提升到 match 外层。
-                let _policy_fd_guard = prepare_policy_fd(&mut command, request.to_string())?;
+                policy_fd_guard = Some(prepare_policy_fd(&mut command, request.to_string())?);
                 command
             }
             None => {
@@ -368,6 +370,7 @@ impl StdioSidecarConnection {
         let mut child = command
             .spawn()
             .with_context(|| format!("启动 stdio sidecar 失败: {}", target_program.display()))?;
+        drop(policy_fd_guard);
         #[cfg(windows)]
         if let Err(error) = lifecycle.assign(&child) {
             let _ = child.kill();

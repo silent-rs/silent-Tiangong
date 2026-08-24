@@ -54,7 +54,9 @@ impl SandboxPolicy {
         if self.mode != SandboxMode::WorkspaceWrite {
             return Vec::new();
         }
-        let mut roots = vec![self.workspace.clone(), std::env::temp_dir()];
+        // 不自动放行全局系统临时目录（审查修订）：每次执行的专用临时目录
+        // 由宿主创建并经 extra_writable 显式传入。
+        let mut roots = vec![self.workspace.clone()];
         roots.extend(self.extra_writable.iter().cloned());
         let mut seen: Vec<PathBuf> = Vec::new();
         roots
@@ -117,11 +119,13 @@ mod tests {
 
     #[test]
     fn writable_roots_are_canonical_and_deduped() {
-        let tmp = std::env::temp_dir();
         let policy = SandboxPolicy::workspace_write("/definitely/not/exists");
         let roots = policy.writable_roots();
-        assert!(roots.contains(&tmp.canonicalize().unwrap()));
-        assert_eq!(roots.len(), 2);
+        // 不自动包含全局系统临时目录：可写根 = 工作区 + 显式 extra。
+        assert_eq!(roots.len(), 1);
+        let mut policy = policy;
+        policy.extra_writable = vec![std::env::temp_dir().join("exec-tmp")];
+        assert_eq!(policy.writable_roots().len(), 2);
     }
 
     #[test]
