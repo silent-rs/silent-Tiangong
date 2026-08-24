@@ -589,14 +589,20 @@ fn run_zero_build(project_dir: &Path, log: &mut std::fs::File) -> Result<()> {
         release_dir.join("plugin.json"),
     )
     .context("复制 plugin.json 到 release 失败")?;
-    // 复制每个 UI 入口所在的顶层目录（如 app/）。
+    // 复制每个 UI 入口所在的顶层目录（如 app/）；入口无目录前缀
+    // （如 index.html）时按单文件复制。
     let mut top_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut single_files: Vec<String> = Vec::new();
     for contribution in manifest.ui_contributions() {
-        let Some(first) = Path::new(&contribution.entry).components().next() else {
-            continue;
-        };
-        if let Some(name) = first.as_os_str().to_str() {
-            top_dirs.insert(name.to_string());
+        let entry = Path::new(&contribution.entry);
+        if entry.components().count() > 1 {
+            if let Some(first) = entry.components().next() {
+                if let Some(name) = first.as_os_str().to_str() {
+                    top_dirs.insert(name.to_string());
+                }
+            }
+        } else {
+            single_files.push(contribution.entry.clone());
         }
     }
     for directory in &top_dirs {
@@ -607,6 +613,16 @@ fn run_zero_build(project_dir: &Path, log: &mut std::fs::File) -> Result<()> {
         copy_tree(&source, &release_dir.join(directory))
             .with_context(|| format!("复制零构建资产目录 {directory} 失败"))?;
         writeln!(log, "# 复制 {directory}/")?;
+    }
+    for file in &single_files {
+        let source = project_dir.join(file);
+        let destination = release_dir.join(file);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&source, &destination)
+            .with_context(|| format!("复制零构建入口文件 {file} 失败"))?;
+        writeln!(log, "# 复制 {file}")?;
     }
     write_content_manifest(&release_dir)?;
     writeln!(log, "# 内容树清单已生成")?;
@@ -800,6 +816,23 @@ fn run_yarn(cwd: &Path, args: &[&str], timeout: Duration) -> Result<std::process
 // ── install ──
 
 fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
+    // 与 build 共用互斥：安装期间（含确认等待）同项目不得并发构建/安装，
+    // 防读到半成品 release 或暂存/导入竞争。
+    {
+        let mut locks = BUILD_LOCKS.lock().expect("plugin-dev 构建锁中毒");
+        if !locks.insert(project_id.to_string()) {
+            bail!("项目 {project_id} 正在构建或安装中，请等待完成后再试");
+        }
+    }
+    let result = install_locked(storage_root, project_id);
+    let _ = BUILD_LOCKS
+        .lock()
+        .expect("plugin-dev 构建锁中毒")
+        .remove(project_id);
+    result
+}
+
+fn install_locked(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     let project_dir = dev_project_dir(storage_root, project_id)?;
     let release_dir = project_dir.join("release");
     let release_manifest = release_dir.join("plugin.json");
@@ -954,9 +987,17 @@ fn read_log_tail(path: &Path, max_bytes: u64) -> String {
     } else {
         text.to_string()
     };
+    // 尾部截断：窗口超出时按保守字符数上限截尾，起点对齐字符边界
+    // （中文等多字节字符落在切片起点会 panic）。
     let max_chars = (max_bytes / 4).max(1024) as usize;
     if text.len() > max_chars {
-        text[text.len() - max_chars..].to_string()
+        let cutoff = text.len() - max_chars;
+        let start = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .find(|&index| index >= cutoff)
+            .unwrap_or(text.len());
+        text[start..].to_string()
     } else {
         text
     }
@@ -1290,5 +1331,64 @@ mod tests {
         );
         // 构建日志已落盘
         assert!(project_dir.join("logs").join(BUILD_LOG_FILE).is_file());
+    }
+
+    /// P1 回归：多字节字符日志超出截断窗口时，尾部切片不得落在字符中间。
+    #[test]
+    fn 日志尾部截断对齐utf8字符边界() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let log_path = root.path().join("build.log");
+        // 每行 16 个汉字（48 字节），写 100 行 ≈ 4.8KB，
+        // 触发 4KB 窗口的尾部截断（max_chars=1024，字节窗口起点在汉字中间）。
+        let mut content = String::new();
+        for index in 0..100 {
+            content.push_str(&format!("{}\n", "构建失败请检查依赖配置".repeat(2)));
+            content.push_str(&format!("line-{index:03}\n"));
+        }
+        std::fs::write(&log_path, &content).unwrap();
+        // 修复前此处 panic：byte index is not a char boundary
+        let tail = read_log_tail(&log_path, 4096);
+        assert!(!tail.is_empty());
+        assert!(tail.contains("line-099"), "尾部应包含最后一行");
+        // 5MB 窗口（max_chars 远大于 1MB）同样验证
+        let big_tail = read_log_tail(&log_path, 5 * 1024 * 1024);
+        assert!(big_tail.contains("line-099"));
+    }
+
+    /// P2 回归：UI 入口无目录前缀（如 index.html）时零构建按单文件复制。
+    #[test]
+    fn 零构建打包_无目录前缀入口按单文件复制() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let project_dir = root.path().join("plugins-dev").join("flat");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("plugin.json"),
+            r#"{"schema_version":2,"id":"flat","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"index.html"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(project_dir.join("index.html"), "<html></html>").unwrap();
+        run_build_steps(&project_dir).expect("零构建打包");
+        let release_dir = project_dir.join("release");
+        assert!(release_dir.join("plugin.json").is_file());
+        assert!(
+            release_dir.join("index.html").is_file(),
+            "无目录前缀的入口应按单文件复制进 release"
+        );
+    }
+
+    /// P3 回归：install 与 build 共用互斥，同项目并发被拒。
+    #[test]
+    fn install_与build共用互斥() {
+        let (root, _caller) = setup();
+        BUILD_LOCKS
+            .lock()
+            .expect("plugin-dev 构建锁中毒")
+            .insert("busy".to_string());
+        let err = install(root.path(), "busy").expect_err("应拒绝并发 install");
+        assert!(err.to_string().contains("正在构建或安装中"));
+        BUILD_LOCKS
+            .lock()
+            .expect("plugin-dev 构建锁中毒")
+            .remove("busy");
     }
 }
