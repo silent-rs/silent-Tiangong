@@ -20,7 +20,7 @@ use crate::loader::{
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::{
     CONTENT_MANIFEST_FILE, InterpreterLaunch, ProcessSidecarConnection, SidecarConfig,
-    SidecarConnection, StdioSidecarConnection, TRANSPORT_STDIO,
+    SidecarConnection, StdioSidecarConnection,
 };
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
@@ -2829,13 +2829,8 @@ fn sidecar_connection_inner(
         .is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
     let host_policy =
         tiangong_sandbox::host_policy::resolve(&installed.manifest.id, official_signed);
-    let use_stdio = interpreter.is_some() || sidecar.transport == TRANSPORT_STDIO;
-    if host_policy.sandbox && !use_stdio {
-        bail!(
-            "插件 {} 按宿主策略需进 OS 沙箱，但未使用 stdio 传输",
-            installed.manifest.id
-        );
-    }
+    let use_stdio =
+        host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio;
 
     // native：插件目录内可执行文件（补平台后缀）；解释器：宿主白名单程序 + 入口。
     let binary = match interpreter.as_ref() {
@@ -2898,8 +2893,7 @@ fn sidecar_connection_inner(
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
     if refresh || !connections.contains_key(&installed.directory) {
-        // 解释器 sidecar 以及明确声明 stdio 的 native sidecar 不开放监听端口；
-        // 其余 native sidecar 保持存量 TCP。
+        // 通信通道由宿主策略表权威决定，插件清单不参与选择。
         let connection: Arc<dyn SidecarConnection> = if use_stdio {
             Arc::new(StdioSidecarConnection::new(config))
         } else {

@@ -221,9 +221,6 @@ pub struct SidecarManifest {
     pub lifecycle: SidecarLifecycle,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
-    /// IPC 通道：`tcp`（默认，存量）或 `stdio`（沙箱友好，RFC 0017 D16）。
-    #[serde(default)]
-    pub transport: String,
     // 以下两个字段已降级为开发提示语义（RFC 0017 透明执行封套修订）：
     // 沙箱与网络能力由宿主权威策略表决定，插件自声明不构成授权——
     // 伪造 manifest 只能导致插件无法工作，不能获得更高权限。
