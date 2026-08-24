@@ -123,6 +123,8 @@ pub struct SidecarConfig {
     pub sandbox: bool,
     /// 沙箱可写根覆盖（一次性实例的会话工作区；None 用数据目录）。
     pub sandbox_workspace: Option<PathBuf>,
+    /// 沙箱额外可写根（每次执行的专用临时目录等）。
+    pub sandbox_extra_writable: Vec<PathBuf>,
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     pub sandbox_network: bool,
 }
@@ -154,6 +156,7 @@ impl SidecarConfig {
             server_token: None,
             sandbox: false,
             sandbox_workspace: None,
+            sandbox_extra_writable: Vec::new(),
             sandbox_network: false,
         }
     }
@@ -200,6 +203,12 @@ impl SidecarConfig {
     /// 覆盖沙箱可写根（一次性实例按会话工作区构造策略）。
     pub fn with_sandbox_workspace(mut self, workspace: Option<PathBuf>) -> Self {
         self.sandbox_workspace = workspace;
+        self
+    }
+
+    /// 沙箱额外可写根（每次执行的专用临时目录等）。
+    pub fn with_sandbox_extra_writable(mut self, extra: Vec<PathBuf>) -> Self {
+        self.sandbox_extra_writable = extra;
         self
     }
 }

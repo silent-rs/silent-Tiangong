@@ -47,76 +47,37 @@ pub fn conservative_default() -> HostExecutionPolicy {
     }
 }
 
-/// 需要网络能力的官方插件（网络白名单随天工发行维护）。
-const OFFICIAL_NETWORKED: &[&str] = &[
-    "fetch",                 // HTTP 抓取是插件本体功能
-    "mcp",                   // 连接外部 MCP server
-    "scheduler",             // 回调宿主 server
-    "generate-image-openai", // 直连 OpenAI 兼容端点
-];
-
-/// 不进沙箱的官方特殊载体。
-///
-/// 区分两类（审查修订）：
-/// - 平台能力载体：terminal（用户交互 PTY）、computer-use（UIA/AX）、
-///   screenshot-input（截图 API）——合法的系统访问需求；
-/// - 过渡期待适配：fs（动态路径，待 invoke 层检查）、memory（recall 流式
-///   依赖 TCP 连接对象）——"暂未适配"不等于永久豁免，宿主启动时审计告警。
-///
-/// command 不在此列：其执行操作走宿主一次性沙箱实例（透明执行封套）。
-const OFFICIAL_PLATFORM_CARRIERS: &[&str] = &["terminal", "computer-use", "screenshot-input"];
-const OFFICIAL_PENDING_SANDBOX: &[&str] = &["fs", "memory"];
-/// 仍需 TCP 的官方插件（sidecar 的 stdio 适配待改造，见各插件说明）。
-const OFFICIAL_TCP_SIDECARS: &[&str] = &["fs", "memory", "terminal"];
-
+/// 任务边界收敛（review 修订）：本表只治理 command（唯一沙箱化的命令通道）。
+/// 其它官方插件（fetch/mcp/scheduler/memory/fs/terminal 等）的沙箱、网络与
+/// transport 逐批迁移决策归 feature/sidecar-sandbox-migration 分支，当前一律
+/// 按存量默认（TCP、不沙箱）运行，避免本分支强制存量 sidecar 走 stdio。
 /// 解析插件的宿主执行策略。
 ///
-/// `official_signed`：插件是否携带有效的官方签名（publisher 为
-/// tiangong-official）。官方插件查内置表；其余一律保守默认。
+/// 收敛语义：command 的执行操作走宿主一次性沙箱实例（`invoke_command_ephemeral`，
+/// 常驻连接同样按沙箱处理）；未签名插件保守默认（进沙箱、断网、管道）；
+/// 其余官方插件按存量默认（TCP、不沙箱）运行。
 pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     if !official_signed {
         return conservative_default();
     }
-    let tcp = OFFICIAL_TCP_SIDECARS.contains(&plugin_id);
-    if OFFICIAL_PLATFORM_CARRIERS.contains(&plugin_id) {
+    if plugin_id == "command" {
         return HostExecutionPolicy {
-            sandbox: false,
+            sandbox: true,
             allow_network: false,
-            transport: if tcp {
-                SidecarTransport::Tcp
-            } else {
-                SidecarTransport::Stdio
-            },
-        };
-    }
-    if OFFICIAL_PENDING_SANDBOX.contains(&plugin_id) {
-        tracing::warn!(
-            plugin_id,
-            "官方插件以过渡期无沙箱方式运行（待沙箱适配），宿主审计记录"
-        );
-        return HostExecutionPolicy {
-            sandbox: false,
-            allow_network: false,
-            transport: SidecarTransport::Tcp,
+            transport: SidecarTransport::Stdio,
         };
     }
     HostExecutionPolicy {
-        sandbox: true,
-        allow_network: OFFICIAL_NETWORKED.contains(&plugin_id),
-        transport: if tcp {
-            SidecarTransport::Tcp
-        } else {
-            SidecarTransport::Stdio
-        },
+        sandbox: false,
+        allow_network: false,
+        transport: SidecarTransport::Tcp,
     }
 }
 
 /// 策略表快照（审计与测试用）。
 pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
-    OFFICIAL_PLATFORM_CARRIERS
+    ["command"]
         .iter()
-        .chain(OFFICIAL_PENDING_SANDBOX)
-        .chain(OFFICIAL_NETWORKED)
         .map(|id| ((*id).to_string(), resolve(id, true)))
         .collect()
 }
@@ -126,53 +87,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unsigned_plugins_always_get_conservative_default() {
-        // 未签名插件即使伪造 manifest 声明，也拿不到网络。
-        let policy = resolve("fetch", false);
+    fn unsigned_plugins_get_conservative_default() {
+        let policy = resolve("anything", false);
         assert!(policy.sandbox);
         assert!(!policy.allow_network);
+        assert_eq!(policy.transport, SidecarTransport::Stdio);
     }
 
     #[test]
-    fn official_networked_plugins_get_network() {
-        let policy = resolve("fetch", true);
+    fn command_is_the_only_sandboxed_official_plugin() {
+        let policy = resolve("command", true);
         assert!(policy.sandbox);
-        assert!(policy.allow_network);
-    }
-
-    #[test]
-    fn official_plain_plugins_are_sandboxed_offline() {
-        let policy = resolve("memory-index-like", true);
-        assert!(policy.sandbox);
-        assert!(!policy.allow_network);
-        let index = resolve("index", true);
-        assert!(index.sandbox);
-        assert!(!index.allow_network);
-    }
-
-    #[test]
-    fn special_carriers_stay_unsandboxed() {
-        // 平台能力载体与过渡期待适配者不套沙箱；command 走一次性实例沙箱，
-        // 常驻路径同样按沙箱处理。
-        for id in ["terminal", "fs", "memory", "computer-use"] {
+        assert_eq!(policy.transport, SidecarTransport::Stdio);
+        // 其它官方插件按存量默认（TCP、不沙箱），逐批迁移归独立分支。
+        for id in [
+            "fetch",
+            "mcp",
+            "scheduler",
+            "memory",
+            "fs",
+            "terminal",
+            "index",
+        ] {
             let policy = resolve(id, true);
-            assert!(!policy.sandbox, "{id} 应保持非沙箱载体");
+            assert!(!policy.sandbox, "{id} 本分支不沙箱化");
+            assert_eq!(policy.transport, SidecarTransport::Tcp, "{id} 保持存量 TCP");
         }
-        assert!(resolve("command", true).sandbox);
-    }
-
-    #[test]
-    fn transport_is_host_decided() {
-        // 沙箱插件一律管道；stdio 适配待改造的存量插件保持 TCP。
-        assert_eq!(resolve("index", true).transport, SidecarTransport::Stdio);
-        assert_eq!(resolve("fetch", true).transport, SidecarTransport::Stdio);
-        for id in ["fs", "memory", "terminal"] {
-            assert_eq!(resolve(id, true).transport, SidecarTransport::Tcp, "{id}");
-        }
-        assert_eq!(
-            resolve("anything", false).transport,
-            SidecarTransport::Stdio,
-            "未签名插件保守默认管道"
-        );
     }
 }

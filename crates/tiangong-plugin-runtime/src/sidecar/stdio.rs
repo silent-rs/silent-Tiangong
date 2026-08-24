@@ -177,6 +177,9 @@ impl StdioSidecarConnection {
         } else {
             None
         };
+        // fd 守卫必须存活到 spawn 完成：match 臂内绑定会在臂结束时提前
+        // drop、导致沙箱程序读不到策略（审查修复）。
+        let mut policy_fd_guard = None;
         let mut command = match &launch_policy {
             Some(policy) => {
                 let sandbox_bin =
@@ -197,8 +200,7 @@ impl StdioSidecarConnection {
                     "args": [],
                 });
                 let mut command = Command::new(sandbox_bin);
-                // 守卫存活至本函数结束（含 spawn），父进程侧读端随后关闭。
-                let _policy_fd_guard = prepare_policy_fd(&mut command, request.to_string())?;
+                policy_fd_guard = Some(prepare_policy_fd(&mut command, request.to_string())?);
                 command
             }
             None => Command::new(&self.config.binary),

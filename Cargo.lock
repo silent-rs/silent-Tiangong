@@ -10446,7 +10446,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-sandbox",
  "tiangong-server",
  "tiangong-toolkit",
  "tiangong-types",

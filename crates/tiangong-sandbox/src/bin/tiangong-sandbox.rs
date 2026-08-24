@@ -83,7 +83,11 @@ fn run_launch() -> Result<()> {
     if request.policy.mode == tiangong_sandbox::SandboxMode::FullAccess {
         bail!("Launcher 拒绝 full_access 策略（无沙箱执行走宿主独立高危通道）");
     }
-    if !std::path::Path::new(&request.program).is_file() {
+    let program_path = std::path::Path::new(&request.program);
+    if !program_path.is_absolute() {
+        bail!("目标程序必须是绝对路径: {}", request.program);
+    }
+    if !program_path.is_file() {
         bail!("目标程序不存在: {}", request.program);
     }
 
@@ -191,11 +195,12 @@ fn run_self_check() -> i32 {
                 .args(&prefix)
                 .arg("/bin/bash")
                 .arg("-c")
-                .arg(format!("echo x > {}/blocked.txt", outside_parent.display()))
+                .arg(format!("echo x > {}", outside_parent.display()))
                 .status()
                 .expect("自检命令启动失败");
-            let blocked = !status.success() || !outside.join("blocked.txt").is_file();
-            let _ = std::fs::remove_dir_all(&outside);
+            let blocked = !status.success() || !outside.is_file();
+            let _ =
+                std::fs::remove_dir_all(outside.parent().unwrap_or(std::path::Path::new("/tmp")));
             report.insert(
                 "outside_write_blocked".into(),
                 serde_json::Value::from(blocked),
