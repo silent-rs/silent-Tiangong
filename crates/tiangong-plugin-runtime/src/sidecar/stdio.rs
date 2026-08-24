@@ -225,8 +225,10 @@ impl StdioSidecarConnection {
             command.env(EXEC_ENV_JSON_ENV, json);
         }
         let mut child = command.spawn().with_context(|| {
+            // spawn 完成：父进程侧策略管道读端即可关闭。
             format!("启动 stdio sidecar 失败: {}", self.config.binary.display())
         })?;
+        drop(policy_fd_guard);
         let stdin = child.stdin.take().context("stdio sidecar 未提供 stdin")?;
         let stdout = child.stdout.take().context("stdio sidecar 未提供 stdout")?;
         let pid = child.id();
