@@ -20,7 +20,7 @@ use crate::loader::{
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::{
     CONTENT_MANIFEST_FILE, InterpreterLaunch, ProcessSidecarConnection, SidecarConfig,
-    SidecarConnection, StdioSidecarConnection,
+    SidecarConnection, StdioSidecarConnection, TRANSPORT_STDIO,
 };
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
@@ -2616,6 +2616,19 @@ fn sidecar_connection_inner(
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
     }
+    // 沙箱策略由宿主权威策略表决定（RFC 0017 透明执行封套）：
+    // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
+    let official_signed = signed_release
+        .is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
+    let host_policy =
+        tiangong_sandbox::host_policy::resolve(&installed.manifest.id, official_signed);
+    let use_stdio = interpreter.is_some() || sidecar.transport == TRANSPORT_STDIO;
+    if host_policy.sandbox && !use_stdio {
+        bail!(
+            "插件 {} 按宿主策略需进 OS 沙箱，但未使用 stdio 传输",
+            installed.manifest.id
+        );
+    }
 
     // native：插件目录内可执行文件（补平台后缀）；解释器：宿主白名单程序 + 入口。
     let binary = match interpreter.as_ref() {
@@ -2651,8 +2664,8 @@ fn sidecar_connection_inner(
         Duration::from_millis(sidecar.request_timeout_ms),
     )
     .with_server_endpoint(server_url, server_token)
-    .with_sandbox(sidecar.sandbox)
-    .with_sandbox_network(sidecar.sandbox_network);
+    .with_sandbox(host_policy.sandbox)
+    .with_sandbox_network(host_policy.allow_network);
     if let Some(signed_release) = signed_release {
         config = config.with_sensitive_storage(
             signed_release.has_permission("model-config.read")
@@ -2668,18 +2681,19 @@ fn sidecar_connection_inner(
     config = config.with_lifecycle(sidecar.lifecycle);
 
     if ephemeral {
-        return Ok(match config.interpreter.as_ref() {
-            Some(_) => Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>,
-            None => Arc::new(ProcessSidecarConnection::new(config)),
+        return Ok(if use_stdio {
+            Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>
+        } else {
+            Arc::new(ProcessSidecarConnection::new(config))
         });
     }
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
     if refresh || !connections.contains_key(&installed.directory) {
-        // 通道由宿主决定：解释器 sidecar 只开放 stdio（无监听端口、生命周期与宿主
-        // 绑定）；native 保持存量 TCP。
-        let connection: Arc<dyn SidecarConnection> = if config.interpreter.is_some() {
+        // 解释器 sidecar 以及明确声明 stdio 的 native sidecar 不开放监听端口；
+        // 其余 native sidecar 保持存量 TCP。
+        let connection: Arc<dyn SidecarConnection> = if use_stdio {
             Arc::new(StdioSidecarConnection::new(config))
         } else {
             Arc::new(ProcessSidecarConnection::new(config))
