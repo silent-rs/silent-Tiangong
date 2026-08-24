@@ -57,6 +57,15 @@ export interface LogsResult {
   lines: string[];
 }
 
+export interface RunResult {
+  ok: boolean;
+  exit_code: number | null;
+  duration_ms: number;
+  command: string;
+  stdout_tail: string;
+  stderr_tail: string;
+}
+
 async function pluginDevCall<T>(
   bridge: HostBridge,
   operation: string,
@@ -78,6 +87,8 @@ export const pluginDev = {
     pluginDevCall<InstallResult>(bridge, 'install', { id }),
   logs: (bridge: HostBridge, target: string, lines?: number) =>
     pluginDevCall<LogsResult>(bridge, 'logs', { target, lines }),
+  run: (bridge: HostBridge, id: string, args: string[]) =>
+    pluginDevCall<RunResult>(bridge, 'run', { id, args }),
   status: (bridge: HostBridge, id: string) =>
     pluginDevCall<Record<string, unknown>>(bridge, 'status', { id }),
 };
@@ -135,6 +146,19 @@ export async function handleAgentTool(
           );
         }
         return result.ok ? ok(lines.join('\n')) : fail(lines.join('\n'));
+      }
+      case 'plugin_run': {
+        const id = String(args.id ?? '');
+        const runArgs = Array.isArray(args.args) ? (args.args as string[]) : [];
+        const result = await pluginDev.run(bridge, id, runArgs);
+        return result.ok
+          ? ok(
+              `试运行成功（退出码 ${result.exit_code ?? 0}，${(result.duration_ms / 1000).toFixed(1)}s）\n命令：${result.command}\n\nstdout：\n${result.stdout_tail || '（空）'}` +
+                (result.stderr_tail ? `\n\nstderr：\n${result.stderr_tail}` : ''),
+            )
+          : fail(
+              `试运行失败（退出码 ${result.exit_code ?? '超时/无'}，${(result.duration_ms / 1000).toFixed(1)}s）\n命令：${result.command}\n\nstdout：\n${result.stdout_tail || '（空）'}\n\nstderr：\n${result.stderr_tail || '（空）'}`,
+            );
       }
       case 'plugin_logs': {
         const target = String(args.target ?? '');

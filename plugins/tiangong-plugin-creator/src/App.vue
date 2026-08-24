@@ -27,6 +27,11 @@ const TEMPLATES = [
     title: 'TS 工具插件',
     description: '页面 + 向 Agent 提供工具（interaction 同款结构），需要 Node 与 yarn。',
   },
+  {
+    id: 'ts-npx',
+    title: 'npx 脚本插件',
+    description: '命令行脚本 + 能力说明书，Agent 经命令通道执行；无构建无 sidecar，需要 Node。',
+  },
 ] as const;
 
 const bridge = ref<HostBridge | null>(null);
@@ -83,10 +88,10 @@ async function createProject() {
   }
 }
 
-async function runAction(action: 'validate' | 'build' | 'install', entry: ProjectEntry) {
+async function runAction(action: 'validate' | 'build' | 'install' | 'run', entry: ProjectEntry) {
   if (!bridge.value || busy.value) return;
   busy.value = true;
-  const labels = { validate: '校验', build: '构建', install: '安装' } as const;
+  const labels = { validate: '校验', build: '构建', install: '安装', run: '试运行' } as const;
   try {
     if (action === 'validate') {
       const result = await pluginDev.validate(bridge.value, entry.id);
@@ -105,6 +110,13 @@ async function runAction(action: 'validate' | 'build' | 'install', entry: Projec
         'success',
         `${entry.id} 构建完成（${(result.duration_ms / 1000).toFixed(1)}s）`,
         `产物：${result.release_dir}\n\n日志尾部：\n${result.log_tail}`,
+      );
+    } else if (action === 'run') {
+      const result = await pluginDev.run(bridge.value, entry.id, []);
+      show(
+        result.ok ? 'success' : 'error',
+        `${entry.id} 试运行${result.ok ? '完成' : '失败'}（${(result.duration_ms / 1000).toFixed(1)}s）`,
+        `命令：${result.command}\n\nstdout：\n${result.stdout_tail || '（空）'}\n\nstderr：\n${result.stderr_tail || '（空）'}`,
       );
     } else {
       const result = await pluginDev.install(bridge.value, entry.id);
@@ -234,6 +246,7 @@ async function recordHistory(text: string) {
           </div>
           <div class="actions">
             <button type="button" :disabled="busy" @click="runAction('validate', entry)">校验</button>
+            <button type="button" :disabled="busy" @click="runAction('run', entry)">试运行</button>
             <button type="button" :disabled="busy" @click="runAction('build', entry)">构建</button>
             <button type="button" :disabled="busy" @click="runAction('install', entry)">安装</button>
             <button type="button" class="ghost" @click="showBuildLog(entry)">日志</button>

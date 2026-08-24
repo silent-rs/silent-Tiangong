@@ -86,6 +86,10 @@ pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
             let request: IdRequest = parse_payload(payload)?;
             serde_json::to_value(install(&storage_root, &request.id)?)?
         }
+        "run" => {
+            let request: RunRequest = parse_payload(payload)?;
+            serde_json::to_value(run(&storage_root, &request)?)?
+        }
         "logs" => {
             let request: LogsRequest = parse_payload(payload)?;
             serde_json::to_value(logs(&storage_root, &request)?)?
@@ -138,6 +142,32 @@ struct LogsRequest {
 
 fn default_log_lines() -> usize {
     100
+}
+
+#[derive(Debug, Deserialize)]
+struct RunRequest {
+    id: String,
+    /// 传给脚本本身的额外参数（追加在 run.json 声明的命令之后）。
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunResult {
+    ok: bool,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    command: String,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+/// 项目试运行声明（开发目录根部 run.json，随模板生成、开发者可改）：
+/// {"pkg": "tsx@4.19.2", "script": "tools/main.ts"}。
+#[derive(Debug, Deserialize)]
+struct RunSpec {
+    pkg: String,
+    script: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -595,12 +625,11 @@ fn run_zero_build(project_dir: &Path, log: &mut std::fs::File) -> Result<()> {
     let mut single_files: Vec<String> = Vec::new();
     for contribution in manifest.ui_contributions() {
         let entry = Path::new(&contribution.entry);
-        if entry.components().count() > 1 {
-            if let Some(first) = entry.components().next() {
-                if let Some(name) = first.as_os_str().to_str() {
-                    top_dirs.insert(name.to_string());
-                }
-            }
+        if entry.components().count() > 1
+            && let Some(first) = entry.components().next()
+            && let Some(name) = first.as_os_str().to_str()
+        {
+            top_dirs.insert(name.to_string());
         } else {
             single_files.push(contribution.entry.clone());
         }
@@ -623,6 +652,16 @@ fn run_zero_build(project_dir: &Path, log: &mut std::fs::File) -> Result<()> {
         std::fs::copy(&source, &destination)
             .with_context(|| format!("复制零构建入口文件 {file} 失败"))?;
         writeln!(log, "# 复制 {file}")?;
+    }
+    // manifest resources 声明的资产目录（随插件分发的脚本等）。
+    for directory in manifest.resources.iter().flatten() {
+        let source = project_dir.join(directory);
+        if !source.is_dir() {
+            continue;
+        }
+        copy_tree(&source, &release_dir.join(directory))
+            .with_context(|| format!("复制零构建资源目录 {directory} 失败"))?;
+        writeln!(log, "# 复制资源 {directory}/")?;
     }
     write_content_manifest(&release_dir)?;
     writeln!(log, "# 内容树清单已生成")?;
@@ -884,6 +923,245 @@ fn install_locked(storage_root: &Path, project_id: &str) -> Result<InstallResult
         state: status.state,
         enabled: status.enabled,
     })
+}
+
+// ── run（开发期试运行）──
+
+/// 试运行时长上限（含 npx 首次下载）。
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+/// stdout/stderr 回传尾部上限。
+const RUN_OUTPUT_TAIL: usize = 16 * 1024;
+
+/// 探测 npx 与 node 工具链（PATH + 常见包管理器位置；Node ≥ 20）。
+fn resolve_npx() -> Result<PathBuf> {
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        if Path::new(extra).exists() && !path.split(':').any(|part| part == extra) {
+            path.push(':');
+            path.push_str(extra);
+        }
+    }
+    let npx_name = if std::env::consts::OS == "windows" {
+        "npx.cmd"
+    } else {
+        "npx"
+    };
+    let npx = path
+        .split(':')
+        .filter(|part| !part.is_empty())
+        .map(PathBuf::from)
+        .map(|dir| dir.join(npx_name))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "未找到 npx。试运行需要 Node ≥ 20（自带 npx），请安装后重试：https://nodejs.org"
+            )
+        })?;
+    let node_name = if std::env::consts::OS == "windows" {
+        "node.exe"
+    } else {
+        "node"
+    };
+    if let Some(node) = path
+        .split(':')
+        .filter(|part| !part.is_empty())
+        .map(PathBuf::from)
+        .map(|dir| dir.join(node_name))
+        .find(|candidate| candidate.is_file())
+        && let Ok(output) = build_command(node.to_str().unwrap_or("node"), &["--version"]).output()
+    {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let major = version
+            .trim_start_matches('v')
+            .split('.')
+            .next()
+            .and_then(|part| part.parse::<u32>().ok());
+        if let Some(major) = major
+            && major < 20
+        {
+            bail!("Node 版本过低（当前 {version}，要求 ≥ 20），请升级 Node 后重试");
+        }
+    }
+    Ok(npx)
+}
+
+/// 校验 run.json 的包规格：`<name>@<精确版本>`（禁范围符号与 latest）。
+fn validate_run_pkg(pkg: &str) -> Result<()> {
+    let (name, version) = pkg
+        .rsplit_once('@')
+        .ok_or_else(|| anyhow::anyhow!("run.json 包规格 {pkg} 缺少精确版本（如 tsx@4.19.2）"))?;
+    if name.is_empty()
+        || !name.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'@')
+        })
+    {
+        bail!("run.json 包名 {name} 含非法字符（npm 包名字符集）");
+    }
+    semver::Version::parse(version)
+        .with_context(|| format!("run.json 包规格 {pkg} 版本必须为精确 semver（禁 ^ ~ latest）"))?;
+    Ok(())
+}
+
+/// 开发期试运行：按项目 run.json 声明执行 `npx -y <pkg> <script> [args...]`，
+/// 捕获输出与退出码（超时终止），日志追加落 logs/run.log。
+/// 供创作页按钮与 Agent 的 plugin_run 工具共用，便于开发迭代自测。
+fn run(storage_root: &Path, request: &RunRequest) -> Result<RunResult> {
+    // 与 build/install 共用互斥：避免读到构建中间态。
+    {
+        let mut locks = BUILD_LOCKS.lock().expect("plugin-dev 构建锁中毒");
+        if !locks.insert(request.id.clone()) {
+            bail!("项目 {} 正在构建/安装/运行中，请等待完成后再试", request.id);
+        }
+    }
+    let result = run_locked(storage_root, request);
+    let _ = BUILD_LOCKS
+        .lock()
+        .expect("plugin-dev 构建锁中毒")
+        .remove(&request.id);
+    result
+}
+
+fn run_locked(storage_root: &Path, request: &RunRequest) -> Result<RunResult> {
+    let project_dir = dev_project_dir(storage_root, &request.id)?;
+    let spec_path = project_dir.join("run.json");
+    if !spec_path.is_file() {
+        bail!(
+            "项目 {} 缺少 run.json（试运行声明：{{\"pkg\": \"tsx@4.19.2\", \"script\": \"tools/main.ts\"}}）",
+            request.id
+        );
+    }
+    let spec: RunSpec = serde_json::from_str(
+        &std::fs::read_to_string(&spec_path)
+            .with_context(|| format!("读取 run.json 失败：{}", spec_path.display()))?,
+    )
+    .context("run.json 格式无效")?;
+    validate_run_pkg(&spec.pkg)?;
+    let script = Path::new(&spec.script);
+    if script.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        bail!("run.json script 必须是项目内安全相对路径：{}", spec.script);
+    }
+    let script_path = project_dir.join(script);
+    if !script_path.is_file() {
+        bail!("run.json script 不存在于项目内：{}", script_path.display());
+    }
+    for arg in &request.args {
+        if arg.len() > 512
+            || arg.contains('\0')
+            || arg.starts_with('/')
+            || arg.split('/').any(|segment| segment == "..")
+        {
+            bail!("试运行参数含非法值：{arg}");
+        }
+    }
+    let npx = resolve_npx()?;
+    let mut argv: Vec<String> = vec![
+        "-y".to_string(),
+        spec.pkg.clone(),
+        script_path.display().to_string(),
+    ];
+    argv.extend(request.args.iter().cloned());
+    let command_display = format!("npx {}", argv[1..].join(" "));
+
+    let logs_dir = project_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)?;
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs_dir.join("run.log"))
+        .with_context(|| "打开试运行日志失败")?;
+    writeln!(
+        log,
+        "\n# 运行 {} {}",
+        chrono::Local::now()
+            .naive_local()
+            .format("%Y-%m-%d %H:%M:%S"),
+        command_display
+    )?;
+
+    let started = Instant::now();
+    let mut command = build_command(npx.to_str().unwrap_or("npx"), &[]);
+    command
+        .args(&argv)
+        .current_dir(&project_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("npm_config_cache", project_dir.join("runtime/npm-cache"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("启动试运行失败：{command_display}"))?;
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    let timed_out = loop {
+        match child.try_wait()? {
+            Some(_) => break false,
+            None if Instant::now() >= deadline => {
+                #[cfg(unix)]
+                {
+                    let pgid = child.id() as i32;
+                    unsafe {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                break true;
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    let output = child.wait_with_output()?;
+    let duration_ms = started.elapsed().as_millis();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let _ = writeln!(
+        log,
+        "# 退出码 {:?}（{} ms）",
+        output.status.code(),
+        duration_ms
+    );
+    let tail = |text: &str| -> String {
+        if text.len() > RUN_OUTPUT_TAIL {
+            let start = text.len() - RUN_OUTPUT_TAIL;
+            // 对齐字符边界，避免截在多字节字符中间。
+            text.char_indices()
+                .map(|(index, _)| index)
+                .find(|&index| index >= start)
+                .map(|index| text[index..].to_string())
+                .unwrap_or_default()
+        } else {
+            text.to_string()
+        }
+    };
+    let result = RunResult {
+        ok: !timed_out && output.status.success(),
+        exit_code: output.status.code(),
+        duration_ms,
+        command: command_display,
+        stdout_tail: tail(&stdout),
+        stderr_tail: tail(&stderr),
+    };
+    if timed_out {
+        writeln!(log, "# 超时终止（上限 {} 秒）", RUN_TIMEOUT.as_secs())?;
+    }
+    tracing::info!(plugin = %request.id, ok = result.ok, "plugin-dev 试运行完成");
+    Ok(result)
 }
 
 // ── logs ──
@@ -1374,6 +1652,38 @@ mod tests {
             release_dir.join("index.html").is_file(),
             "无目录前缀的入口应按单文件复制进 release"
         );
+    }
+
+    /// 零构建打包应复制 manifest resources 声明的资产目录（ts-npx 模板的 tools/）。
+    #[test]
+    fn 零构建打包_复制resources目录() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let project_dir = root.path().join("plugins-dev").join("npxproj");
+        std::fs::create_dir_all(project_dir.join("app")).unwrap();
+        std::fs::create_dir_all(project_dir.join("tools")).unwrap();
+        std::fs::write(
+            project_dir.join("plugin.json"),
+            r#"{"schema_version":2,"id":"npxproj","version":"0.1.0","permissions":[],"resources":["tools/"],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(project_dir.join("app/index.html"), "<html></html>").unwrap();
+        std::fs::write(project_dir.join("tools/main.ts"), "// script").unwrap();
+        run_build_steps(&project_dir).expect("零构建打包");
+        let release_dir = project_dir.join("release");
+        assert!(
+            release_dir.join("tools/main.ts").is_file(),
+            "resources 目录应进入 release"
+        );
+    }
+
+    /// run.json 包规格校验：精确版本必需，范围符号/latest 拒绝。
+    #[test]
+    fn run包规格校验() {
+        assert!(validate_run_pkg("tsx@4.19.2").is_ok());
+        assert!(validate_run_pkg("@scope/pkg@1.2.3").is_ok());
+        for bad in ["tsx", "tsx@latest", "tsx@^4.19.2", "tsx@~4", "Pkg@1.0.0"] {
+            assert!(validate_run_pkg(bad).is_err(), "应拒绝 {bad}");
+        }
     }
 
     /// P3 回归：install 与 build 共用互斥，同项目并发被拒。
