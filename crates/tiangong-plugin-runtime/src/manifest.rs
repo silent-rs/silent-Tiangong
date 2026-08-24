@@ -58,6 +58,21 @@ pub struct PluginManifest {
     /// 供插件携带模板、示例等只读资产；不得声明宿管保留目录。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<String>>,
+    /// @提及声明：声明后插件出现在输入框 @ 候选中，用户可点名调用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention: Option<MentionManifest>,
+}
+
+/// @提及声明（`mention` 字段）。
+///
+/// 候选 value/label 由宿主从插件 id 与 UI 贡献标题推导，插件只声明展示
+/// 副标题（hint）——@skill / @mcp 同款交互，用户点名后 Agent 按插件
+/// 说明（prompt）使用能力。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MentionManifest {
+    /// 候选副标题（一句话能力描述）。
+    pub hint: String,
 }
 
 /// 能力声明（schema v2 的 `capabilities` 字段）。
@@ -241,6 +256,11 @@ impl PluginManifest {
         if self.permissions.iter().any(|item| item.trim().is_empty()) {
             bail!("插件 {} permissions 不能包含空值", self.id);
         }
+        if let Some(mention) = &self.mention
+            && mention.hint.trim().is_empty()
+        {
+            bail!("插件 {} mention.hint 不能为空", self.id);
+        }
         if let Some(resources) = &self.resources {
             for directory in resources {
                 validate_relative_path(Path::new(directory), "resources")?;
@@ -327,6 +347,12 @@ impl PluginManifest {
             if self.resources.is_some() {
                 bail!(
                     "插件 {} 使用 schema_version 1 但声明了 resources 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
+                    self.id
+                );
+            }
+            if self.mention.is_some() {
+                bail!(
+                    "插件 {} 使用 schema_version 1 但声明了 mention 字段，请升级 schema_version 为 {MANIFEST_SCHEMA_VERSION_V2}",
                     self.id
                 );
             }
@@ -662,6 +688,21 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    #[test]
+    fn mention声明_校验() {
+        let json = r#"{"schema_version":2,"id":"m-demo","version":"0.1.0","permissions":[],"mention":{"hint":"问候能力"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        manifest.validate().unwrap();
+        // 空 hint 拒绝
+        let bad = json.replace("问候能力", "  ");
+        let manifest: PluginManifest = serde_json::from_str(&bad).unwrap();
+        assert!(manifest.validate().is_err());
+        // v1 清单拒绝
+        let legacy = json.replace("\"schema_version\":2", "\"schema_version\":1");
+        let manifest: PluginManifest = serde_json::from_str(&legacy).unwrap();
+        assert!(manifest.validate().is_err());
     }
 
     #[test]

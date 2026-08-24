@@ -169,7 +169,7 @@
   "prompt": [
     "自建插件生成规范（plugin creator）：为用户创建插件时遵循——1) 能力最小化：只申请必需权限，默认不加 storage.private/bridge.call 之外的敏感权限，绝不声明 sidecar.invoke；2) 交互类 UI 贡献 slot（session.interaction 等）为官方专属，自建插件只允许使用 extension.tab 与 settings.plugin-page；3) 每引入一个外部 npm 依赖必须在代码注释与说明中写明用途，能用宿主桥接（storage.*、bridge）实现的不要引依赖；4) 工程基于 Node ≥ 20 与 yarn 构建；5) 迭代流程固定为：修改开发目录 ~/.tiangong/plugins-dev/<id>/ 内代码 → plugin_validate → plugin_build → plugin_install（每次内容变化都需用户在原生确认弹窗中重新确认）；6) 诊断问题先 plugin_logs 读取构建日志。",
     "使用 plugin_init 生成项目骨架后，先浏览项目结构与模板示例理解扩展点，再按用户需求填充实现；不要凭空猜测模板结构。构建失败时把日志尾部中的关键错误读出来解释给用户，修复后重试。",
-    "ts-npx 附加规范：脚本保持 CLI 形态——参数经命令行传入、stdout 只输出一个 JSON 结果（日志写 stderr）、非零退出码表示失败；能力说明段必须写清完整命令、参数格式与输出结构，让 Agent 不看代码也能正确调用；包规格使用精确版本（禁 latest/范围符号）；不需要 sidecar 或宿主执行层。"
+    "ts-npx 附加规范：脚本保持 CLI 形态——参数经命令行传入、stdout 只输出一个 JSON 结果（日志写 stderr）、非零退出码表示失败；能力说明段必须写清完整命令、参数格式与输出结构，让 Agent 不看代码也能正确调用；包规格使用精确版本（禁 latest/范围符号）；不需要 sidecar 或宿主执行层。插件应在 plugin.json 声明 mention（hint 为一句话能力描述），让用户可以在输入框 @ 点名调用（如 @plugin:<id>）。"
   ],
   "resources": [
     "templates/"
