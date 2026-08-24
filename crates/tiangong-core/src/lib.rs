@@ -23,3 +23,4 @@ mod stream_throttle;
 pub mod tool;
 pub mod tool_override;
 pub mod turn_context;
+pub mod workspace_registry;

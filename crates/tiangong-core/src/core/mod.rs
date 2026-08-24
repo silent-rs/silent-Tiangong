@@ -314,6 +314,8 @@ impl TiangongCore {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                // 登记权威工作区（沙箱策略校验依据，RFC 0017 透明执行封套）。
+                crate::workspace_registry::register(std::path::Path::new(&ctx.session.cwd));
                 for plugin in &ctx.plugins {
                     plugin.on_session_ready(&mut ctx.session);
                 }

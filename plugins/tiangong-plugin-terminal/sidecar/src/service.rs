@@ -339,9 +339,10 @@ impl TerminalService {
             })
             .context("创建 PTY 失败")?;
 
-        // 脚本走 shell -c；命令直接执行（沙箱由宿主透明封套决策，插件不感知）
+        // 脚本走 shell -c；命令直接执行
         let mut command = if let Some(script) = request.script.as_deref() {
-            let mut builder = CommandBuilder::new(default_shell());
+            let shell = default_shell();
+            let mut builder = CommandBuilder::new(shell);
             builder.arg("-c");
             builder.arg(script);
             builder

@@ -18,21 +18,6 @@ pub struct ExecResponse {
     pub exit_code: i32,
 }
 
-/// 请求级全权执行声明（RFC 0017 S4 升级审批闭环 v1）。
-///
-/// Agent 在预分类拒绝或沙箱拦截后，先经 `request_user`（kind: approval）
-/// 获得用户批准，再携带本声明以全权重跑。`approval_note` 记录批准依据，
-/// 全程审计留痕；宿主验证审批结果的正式闭环见 RFC §14 开放问题。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EscalatedRequest {
-    /// 用户批准的依据描述（如批准弹窗中的命令与影响说明）。
-    #[serde(default)]
-    pub approval_note: String,
-    /// 宿主签发的一次性升级审批票据；宿主转发层核验（无效即剥离声明）。
-    #[serde(default)]
-    pub token: String,
-}
-
 /// `run_command` 工具请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunCommandRequest {
@@ -49,9 +34,6 @@ pub struct RunCommandRequest {
     pub timeout_secs: u64,
     #[serde(flatten)]
     pub access: CommandAccessContext,
-    /// 全权执行声明（S4）：携带即跳过沙箱，审计留痕。
-    #[serde(default)]
-    pub escalated: Option<EscalatedRequest>,
 }
 pub struct RunCommand;
 impl CommandOperation for RunCommand {
@@ -76,9 +58,6 @@ pub struct RunShellRequest {
     pub timeout_secs: u64,
     #[serde(flatten)]
     pub access: CommandAccessContext,
-    /// 全权执行声明（S4）：携带即跳过沙箱，审计留痕。
-    #[serde(default)]
-    pub escalated: Option<EscalatedRequest>,
 }
 
 pub struct RunShell;

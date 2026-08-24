@@ -4942,10 +4942,11 @@ pub async fn plugin_safety_set_unsafe_mode(
         .map_err(|err| err.to_string())
 }
 
-/// 升级审批票据签发（RFC 0017 S4）。
+/// 升级审批（RFC 0017 S4，命令文本匹配闭环）。
 ///
 /// 安全不依赖调用方自觉：本命令自身弹出宿主原生确认对话框，向用户展示
-/// 完整命令文本，用户点批准后才签发一次性短时效票据；取消则拒绝。
+/// 完整命令文本，批准后入库（5 分钟时效、一次性消费）；Agent 重试同一
+/// 完整命令文本时由宿主路由命中并以一次性全权实例执行。插件协议零审批字段。
 #[tauri::command]
 pub async fn command_escalation_approve(
     app: tauri::AppHandle,
@@ -4958,7 +4959,7 @@ pub async fn command_escalation_approve(
         return Err("command 不能为空".to_string());
     }
     let message = format!(
-        "是否批准以下命令的全权（无沙箱）执行？\n\n{command}\n\n批准后将生成一次性票据，5 分钟内有效，仅绑定该完整命令文本。"
+        "是否批准以下命令的全权（无沙箱）执行？\n\n{command}\n\n批准后 5 分钟内，Agent 重试同一完整命令时将以全权执行一次。"
     );
     let display_command = command.clone();
     let confirmed = tokio::task::spawn_blocking(move || {
