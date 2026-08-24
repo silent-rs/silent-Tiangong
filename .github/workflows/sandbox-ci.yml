@@ -151,15 +151,6 @@ jobs:
             -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
 
-      - name: Verify ten concurrent commands can be cancelled and stopped
-        run: |
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --test ephemeral_route \
-            ten_concurrent_commands_can_be_cancelled_and_stopped \
-            -- --exact --ignored --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/concurrency.log"
-
       - name: Verify dangerous commands, environment, resources and lifecycle
         run: |
           cargo test --locked \
@@ -190,6 +181,15 @@ jobs:
           expected_version="$(jq -r .version src-tauri/tauri.conf.json)"
           actual_version="$(jq -r .product_version <<< "$report")"
           [[ "$actual_version" == "$expected_version" ]]
+
+      - name: Verify ten concurrent commands can be cancelled and stopped
+        run: |
+          cargo test --locked \
+            -p tiangong-plugin-runtime \
+            --test ephemeral_route \
+            ten_concurrent_commands_can_be_cancelled_and_stopped \
+            -- --exact --ignored --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/concurrency.log"
 
       - name: Print Sandbox diagnostics
         if: failure()
