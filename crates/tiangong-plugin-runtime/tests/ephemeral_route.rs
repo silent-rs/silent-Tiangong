@@ -517,6 +517,7 @@ fn real_launcher_applies_resource_limits() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "由 Sandbox CI 在独立进程中运行，避免与串行攻击矩阵共享平台资源"]
 fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
     let _serial = REAL_SANDBOX_TEST_LOCK
         .lock()

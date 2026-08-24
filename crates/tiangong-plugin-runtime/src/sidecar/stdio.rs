@@ -404,15 +404,23 @@ impl StdioSidecarConnection {
             }
             match response_rx.recv_timeout(remain.min(Duration::from_millis(200))) {
                 Ok(result) => {
-                    return result.map_err(|message| SidecarInvokeError::Internal(message).into());
+                    return result.map_err(|message| {
+                        let message = if message == "stdio sidecar 已关闭" {
+                            format!("{message}; {}", child_status(process))
+                        } else {
+                            message
+                        };
+                        SidecarInvokeError::Internal(message).into()
+                    });
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // 读线程已退出（进程死亡）：按不可用处理，下次 ensure 重启。
                     remove_pending(process, &request_id);
-                    return Err(SidecarInvokeError::Unavailable(
-                        "stdio sidecar 读通道已关闭".to_string(),
-                    )
+                    return Err(SidecarInvokeError::Unavailable(format!(
+                        "stdio sidecar 读通道已关闭; {}",
+                        child_status(process)
+                    ))
                     .into());
                 }
             }
@@ -437,6 +445,17 @@ impl StdioSidecarConnection {
             payload: serde_json::to_value(request).context("序列化 sidecar 请求失败")?,
         });
         write_line(&mut stdin, &frame)
+    }
+}
+
+fn child_status(process: &StdioProcess) -> String {
+    let Ok(mut child) = process.child.lock() else {
+        return "无法读取子进程状态".to_string();
+    };
+    match child.try_wait() {
+        Ok(Some(status)) => format!("子进程退出状态: {status}"),
+        Ok(None) => "子进程仍在运行但输出已关闭".to_string(),
+        Err(error) => format!("读取子进程状态失败: {error}"),
     }
 }
 
