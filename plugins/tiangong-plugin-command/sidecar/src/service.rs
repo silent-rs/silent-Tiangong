@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -44,6 +45,9 @@ impl CommandService {
 
     /// 按 sidecar 协议分发请求。
     pub async fn dispatch(&self, request: Request) -> Response {
+        let started = Instant::now();
+        let operation = request.operation.clone();
+        tracing::info!(operation, "command sidecar 开始处理请求");
         let request_id = request.request_id.clone();
         if request.protocol_version != PROTOCOL_VERSION {
             return Response::error(
@@ -71,6 +75,11 @@ impl CommandService {
                 );
             }
         };
+        tracing::info!(
+            operation,
+            elapsed_ms = started.elapsed().as_millis(),
+            "command sidecar 请求处理完成"
+        );
         Response::success(&request_id, payload)
     }
 

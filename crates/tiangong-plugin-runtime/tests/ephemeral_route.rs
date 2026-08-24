@@ -243,6 +243,21 @@ fn concurrent_sidecar_logs() -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn invocation_diagnostics(fallback_log: &Path) -> String {
+    format!(
+        "模板日志:\n{}\n\n活动进程:\n{}\n\n一次性 sidecar 日志:\n{}",
+        read_log(fallback_log),
+        concurrent_process_snapshot(),
+        concurrent_sidecar_logs()
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn invocation_diagnostics(fallback_log: &Path) -> String {
+    read_log(fallback_log)
+}
+
 #[cfg(unix)]
 #[test]
 fn real_launcher_enforces_workspace_and_dedicated_temp() {
@@ -888,7 +903,10 @@ fn wait_for_pid(
         }
         ensure_invocation_running(finished, log);
         if Instant::now() >= deadline {
-            panic!("等待后台进程 PID 超时；sidecar 日志:\n{}", read_log(log));
+            panic!(
+                "等待后台进程 PID 超时；调用诊断:\n{}",
+                invocation_diagnostics(log)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -919,16 +937,16 @@ fn wait_for_pid(
 fn ensure_invocation_running(finished: &Receiver<anyhow::Result<String>>, log: &Path) {
     match finished.try_recv() {
         Ok(Ok(response)) => panic!(
-            "后台进程就绪前 command 已返回: {response}；sidecar 日志:\n{}",
-            read_log(log)
+            "后台进程就绪前 command 已返回: {response}；调用诊断:\n{}",
+            invocation_diagnostics(log)
         ),
         Ok(Err(error)) => panic!(
-            "后台进程就绪前 command 调用失败: {error:#}；sidecar 日志:\n{}",
-            read_log(log)
+            "后台进程就绪前 command 调用失败: {error:#}；调用诊断:\n{}",
+            invocation_diagnostics(log)
         ),
         Err(TryRecvError::Disconnected) => panic!(
-            "后台进程就绪前 command 执行线程已断开；sidecar 日志:\n{}",
-            read_log(log)
+            "后台进程就绪前 command 执行线程已断开；调用诊断:\n{}",
+            invocation_diagnostics(log)
         ),
         Err(TryRecvError::Empty) => {}
     }
@@ -981,7 +999,10 @@ fn wait_for_heartbeat_growth(
         }
         ensure_invocation_running(finished, log);
         if Instant::now() >= deadline {
-            panic!("后台进程心跳未增长；sidecar 日志:\n{}", read_log(log));
+            panic!(
+                "后台进程心跳未增长；调用诊断:\n{}",
+                invocation_diagnostics(log)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }

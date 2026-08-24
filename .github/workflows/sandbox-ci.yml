@@ -152,6 +152,8 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
 
       - name: Verify dangerous commands, environment, resources and lifecycle
+        env:
+          TIANGONG_SANDBOX_DIAGNOSTICS: "1"
         run: |
           cargo test --locked \
             -p tiangong-plugin-runtime \
@@ -160,6 +162,8 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/ephemeral-route.log"
 
       - name: Verify background process cleanup explicitly
+        env:
+          TIANGONG_SANDBOX_DIAGNOSTICS: "1"
         run: |
           cargo test --locked \
             -p tiangong-plugin-runtime \
@@ -183,6 +187,8 @@ jobs:
           [[ "$actual_version" == "$expected_version" ]]
 
       - name: Verify ten concurrent commands can be cancelled and stopped
+        env:
+          TIANGONG_SANDBOX_DIAGNOSTICS: "1"
         run: |
           cargo test --locked \
             -p tiangong-plugin-runtime \
