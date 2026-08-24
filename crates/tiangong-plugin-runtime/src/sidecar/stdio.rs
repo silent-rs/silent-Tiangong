@@ -37,6 +37,12 @@ pub const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
 /// 子进程环境：创建并持有 stdio 连接的宿主进程 PID。
 pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
 pub const TRANSPORT_STDIO: &str = "stdio";
+/// command 子进程继承的 CPU 时间上限（秒）。
+pub const SANDBOX_CPU_LIMIT_ENV: &str = "TIANGONG_SANDBOX_CPU_LIMIT_SECONDS";
+/// command 子进程继承的内存上限（十进制字节）。
+pub const SANDBOX_MEMORY_LIMIT_ENV: &str = "TIANGONG_SANDBOX_MEMORY_LIMIT_BYTES";
+/// command 子进程继承的进程数量上限。
+pub const SANDBOX_PROCESS_LIMIT_ENV: &str = "TIANGONG_SANDBOX_PROCESS_LIMIT";
 const PROCESS_GROUP_ENV: &str = "TIANGONG_SIDECAR_OWN_PROCESS_GROUP";
 
 /// stdio 传输连接：单子进程 + 常驻读线程按 request_id 路由响应与进度，
@@ -300,6 +306,10 @@ impl StdioSidecarConnection {
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
             policy.extra_writable = self.config.sandbox_extra_writable.clone();
             policy.protected_paths = vec![self.config.storage_root.clone()];
+            policy.protect_user_credentials(&self.config.storage_root);
+            policy
+                .denied_read_paths
+                .extend(self.config.sandbox_denied_read_paths.clone());
             policy.allow_network = self.config.sandbox_network;
             Some(policy)
         } else {
@@ -321,7 +331,7 @@ impl StdioSidecarConnection {
                 })?;
                 let request = serde_json::json!({
                     "protocol_version": 1,
-                    "policy_schema": 1,
+                    "policy_schema": 2,
                     "policy": policy,
                     "plugin_id": self.config.plugin_id,
                     "program": target_program.display().to_string(),
@@ -359,6 +369,21 @@ impl StdioSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(PROCESS_GROUP_ENV, "1");
+        if let Some(policy) = &launch_policy {
+            command
+                .env(
+                    SANDBOX_CPU_LIMIT_ENV,
+                    policy.resource_limits.max_cpu_time_seconds.to_string(),
+                )
+                .env(
+                    SANDBOX_MEMORY_LIMIT_ENV,
+                    policy.resource_limits.max_memory_bytes.to_string(),
+                )
+                .env(
+                    SANDBOX_PROCESS_LIMIT_ENV,
+                    policy.resource_limits.max_processes.to_string(),
+                );
+        }
         if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
                 bail!("sidecar 专用临时目录无效: {}", temp_dir.display());
@@ -378,7 +403,9 @@ impl StdioSidecarConnection {
         }
         configure_process_lifecycle(&mut command)?;
         #[cfg(windows)]
-        let lifecycle = WindowsJob::new().context("创建 sidecar Job Object 失败")?;
+        let lifecycle =
+            WindowsJob::new(launch_policy.as_ref().map(|policy| policy.resource_limits))
+                .context("创建 sidecar Job Object 失败")?;
         let mut child = command
             .spawn()
             .with_context(|| format!("启动 stdio sidecar 失败: {}", target_program.display()))?;
@@ -630,10 +657,13 @@ struct WindowsJob {
 
 #[cfg(windows)]
 impl WindowsJob {
-    fn new() -> std::io::Result<Self> {
+    fn new(
+        resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    ) -> std::io::Result<Self> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             SetInformationJobObject,
         };
@@ -648,6 +678,17 @@ impl WindowsJob {
         };
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(resource_limits) = resource_limits {
+            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | JOB_OBJECT_LIMIT_JOB_MEMORY
+                | JOB_OBJECT_LIMIT_JOB_TIME;
+            limits.BasicLimitInformation.PerJobUserTimeLimit = resource_limits
+                .max_cpu_time_seconds
+                .saturating_mul(10_000_000)
+                as i64;
+            limits.BasicLimitInformation.ActiveProcessLimit = resource_limits.max_processes;
+            limits.JobMemoryLimit = resource_limits.max_memory_bytes as usize;
+        }
         let configured = unsafe {
             SetInformationJobObject(
                 job.raw_handle(),
@@ -971,13 +1012,16 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn job_object_kills_children_on_close() {
+    fn job_object_applies_process_and_memory_limits() {
         use windows_sys::Win32::System::JobObjects::{
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JobObjectExtendedLimitInformation, QueryInformationJobObject,
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject,
         };
 
-        let job = WindowsJob::new().unwrap();
+        let expected = tiangong_sandbox::SandboxResourceLimits::default();
+        let job = WindowsJob::new(Some(expected)).unwrap();
         let mut actual: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         let queried = unsafe {
             QueryInformationJobObject(
@@ -993,5 +1037,26 @@ mod windows_tests {
             actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             0
         );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            0
+        );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY,
+            0
+        );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_TIME,
+            0
+        );
+        assert_eq!(
+            actual.BasicLimitInformation.PerJobUserTimeLimit,
+            expected.max_cpu_time_seconds as i64 * 10_000_000
+        );
+        assert_eq!(
+            actual.BasicLimitInformation.ActiveProcessLimit,
+            expected.max_processes
+        );
+        assert_eq!(actual.JobMemoryLimit, expected.max_memory_bytes as usize);
     }
 }

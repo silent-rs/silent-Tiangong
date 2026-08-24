@@ -196,7 +196,6 @@ pub struct SidecarConfig {
     #[allow(dead_code)]
     pub sandbox_extra_writable: Vec<PathBuf>,
     /// 除宿主默认凭据路径外额外禁止读取的路径（受控验证使用）。
-    #[allow(dead_code)]
     pub sandbox_denied_read_paths: Vec<PathBuf>,
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,

@@ -7,7 +7,7 @@ pub mod bwrap;
 pub mod policy;
 pub mod seatbelt;
 
-pub use policy::{SandboxMode, SandboxPolicy};
+pub use policy::{SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
 /// 平台沙箱可用性。
 #[derive(Debug, Clone, PartialEq, Eq)]

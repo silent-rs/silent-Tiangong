@@ -46,6 +46,7 @@ pub async fn exec_and_collect(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear();
+    configure_command_lifecycle(&mut command)?;
     for (key, value) in &env_allowlist {
         command.env(key, value);
     }
@@ -56,8 +57,11 @@ pub async fn exec_and_collect(
         command.env(key, value);
     }
 
+    let child = command
+        .spawn()
+        .with_context(|| format!("执行命令失败：{cmd}"))?;
     let output_result = if timeout_ms > 0 {
-        match timeout(Duration::from_millis(timeout_ms), command.output()).await {
+        match timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
             Ok(o) => o,
             Err(_) => {
                 return Ok(ExecResponse {
@@ -69,7 +73,7 @@ pub async fn exec_and_collect(
             }
         }
     } else {
-        command.output().await
+        child.wait_with_output().await
     };
 
     let output = output_result.context(format!("执行命令失败：{cmd}"))?;
@@ -131,8 +135,6 @@ pub fn split_command(raw: &str) -> (String, Vec<String>) {
 ///
 /// 再过滤动态加载器、shell 初始化和追踪类危险 key，避免命令执行环境被劫持。
 fn collect_runtime_env() -> BTreeMap<String, String> {
-    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
-    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
     let Ok(raw) = std::env::var(tiangong_plugin_runtime::sidecar::EXEC_ENV_JSON_ENV) else {
         return BTreeMap::new();
     };
@@ -140,13 +142,7 @@ fn collect_runtime_env() -> BTreeMap<String, String> {
         return BTreeMap::new();
     };
     env.into_iter()
-        .filter(|(key, _)| {
-            let upper = key.to_ascii_uppercase();
-            !DENIED_EXACT.contains(&upper.as_str())
-                && !DENIED_PREFIXES
-                    .iter()
-                    .any(|prefix| upper.starts_with(prefix))
-        })
+        .filter(|(key, _)| is_safe_env_key(key))
         .collect()
 }
 
@@ -170,7 +166,7 @@ fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
                 continue;
             };
             let key = key.trim();
-            if !is_valid_env_key(key) {
+            if !is_valid_env_key(key) || !is_safe_env_key(key) {
                 continue;
             }
             let value = normalize_env_value(value.trim());
@@ -178,6 +174,76 @@ fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
         }
     }
     env
+}
+
+fn is_safe_env_key(key: &str) -> bool {
+    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PATH", "PS4", "TEMP", "TMP", "TMPDIR"];
+    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+    let upper = key.to_ascii_uppercase();
+    !DENIED_EXACT.contains(&upper.as_str())
+        && !DENIED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+fn configure_command_lifecycle(command: &mut Command) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let cpu_limit =
+            std::env::var(tiangong_plugin_runtime::sidecar::stdio::SANDBOX_CPU_LIMIT_ENV)
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .filter(|limit| *limit > 0);
+        let memory_limit =
+            std::env::var(tiangong_plugin_runtime::sidecar::stdio::SANDBOX_MEMORY_LIMIT_ENV)
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .filter(|limit| *limit > 0);
+        #[cfg(target_os = "linux")]
+        let process_limit =
+            std::env::var(tiangong_plugin_runtime::sidecar::stdio::SANDBOX_PROCESS_LIMIT_ENV)
+                .ok()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .filter(|limit| *limit > 0);
+
+        let command = command.as_std_mut();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                if let Some(limit) = cpu_limit {
+                    let limit = libc::rlimit {
+                        rlim_cur: limit as libc::rlim_t,
+                        rlim_max: limit as libc::rlim_t,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_CPU, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                if let Some(limit) = memory_limit {
+                    let limit = libc::rlimit {
+                        rlim_cur: limit as libc::rlim_t,
+                        rlim_max: limit as libc::rlim_t,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(limit) = process_limit {
+                    let limit = libc::rlimit {
+                        rlim_cur: limit as libc::rlim_t,
+                        rlim_max: limit as libc::rlim_t,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_NPROC, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = command;
+    Ok(())
 }
 
 fn is_valid_env_key(key: &str) -> bool {

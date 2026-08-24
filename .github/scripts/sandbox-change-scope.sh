@@ -28,6 +28,7 @@ while IFS= read -r file; do
     crates/tiangong-plugin-sidecar/src/server.rs|\
     crates/tiangong-plugin-sidecar/src/stdio.rs|\
     crates/tiangong-plugin-sidecar/tests/stdio_e2e.rs|\
+    plugins/tiangong-plugin-command/sidecar/*|\
     src-tauri/tauri.conf.json|\
     xtask/Cargo.toml|xtask/src/main.rs)
       sandbox_change=true

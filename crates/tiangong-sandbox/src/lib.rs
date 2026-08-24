@@ -19,6 +19,6 @@ pub const POLICY_ENV: &str = "TIANGONG_SANDBOX_REQUEST";
 
 pub use host_policy::{HostExecutionPolicy, SidecarTransport};
 pub use sandbox::{
-    SandboxAvailability, SandboxMode, SandboxPolicy, SandboxedProgram, availability,
-    explain_violation, wrap,
+    SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits, SandboxedProgram,
+    availability, explain_violation, wrap,
 };
