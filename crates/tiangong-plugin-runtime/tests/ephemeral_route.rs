@@ -551,12 +551,32 @@ fn ten_concurrent_commands_can_be_cancelled_and_stopped() {
         if let Ok((index, result)) = finished_rx.try_recv() {
             panic!("并发 command {index} 在取消前提前结束: {result:?}");
         }
-        assert!(
-            Instant::now() < deadline,
-            "并发 command 仅启动 {}/10；sidecar 日志:\n{}",
-            markers.iter().filter(|marker| marker.is_file()).count(),
-            read_log(&fixture.sidecar_log)
-        );
+        if Instant::now() >= deadline {
+            let started = markers.iter().filter(|marker| marker.is_file()).count();
+            let stop_result = fixture.connection.stop();
+            let mut diagnostics = Vec::new();
+            for _ in 0..workers.len() {
+                match finished_rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok((index, Ok(response))) => {
+                        diagnostics.push(format!("command {index}: {response}"));
+                    }
+                    Ok((index, Err(error))) => {
+                        diagnostics.push(format!("command {index}: {error:#}"));
+                    }
+                    Err(error) => {
+                        diagnostics.push(format!("等待 command 结束失败: {error}"));
+                        break;
+                    }
+                }
+            }
+            for worker in workers {
+                let _ = worker.join();
+            }
+            panic!(
+                "并发 command 仅启动 {started}/10；停止结果: {stop_result:?}；调用诊断:\n{}",
+                diagnostics.join("\n\n")
+            );
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 
