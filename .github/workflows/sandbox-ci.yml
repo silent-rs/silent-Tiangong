@@ -114,7 +114,9 @@ jobs:
           --all-targets -- -D warnings
 
       - name: Build Launcher and command sidecar
-        run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+        run: |
+          cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+          strip --strip-debug target/debug/tiangong-command-sidecar
 
       - name: Verify native sandbox enforcement
         run: |

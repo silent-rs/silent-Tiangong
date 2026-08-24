@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -32,6 +32,7 @@ pub struct EphemeralCommandConnection {
     template: SidecarConfig,
     exec_env: Mutex<BTreeMap<String, String>>,
     active: Mutex<HashMap<String, ActiveInvocation>>,
+    program_sha256: OnceLock<Result<String, String>>,
 }
 
 impl EphemeralCommandConnection {
@@ -41,6 +42,7 @@ impl EphemeralCommandConnection {
             template,
             exec_env: Mutex::new(BTreeMap::new()),
             active: Mutex::new(HashMap::new()),
+            program_sha256: OnceLock::new(),
         }
     }
 
@@ -119,6 +121,14 @@ impl EphemeralCommandConnection {
             .with_context(|| format!("创建 command 临时目录失败: {}", temp_dir.display()))?;
 
         let mut config = self.template.clone();
+        config.sandbox_program_sha256 = Some(
+            self.program_sha256
+                .get_or_init(|| {
+                    super::sha256_file(&self.template.binary).map_err(|error| format!("{error:#}"))
+                })
+                .clone()
+                .map_err(anyhow::Error::msg)?,
+        );
         config.endpoint = temp_dir.join("endpoint.json");
         config.log = temp_dir.join("sidecar.log");
         config.data_dir = temp_dir.join("data");

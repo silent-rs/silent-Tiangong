@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use crate::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcEndpoint, IpcFrame, IpcRequest,
@@ -203,7 +204,6 @@ pub struct SidecarConfig {
     #[allow(dead_code)]
     pub sandbox_program_root: Option<PathBuf>,
     /// 宿主针对当前已安装制品计算的摘要；Launcher 仍会在每次启动时独立复核。
-    #[allow(dead_code)]
     sandbox_program_sha256: Option<String>,
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     #[allow(dead_code)]
@@ -439,6 +439,12 @@ impl SidecarConfig {
         self.sandbox_program_root = root;
         self
     }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// 通过 endpoint 文件连接本地 sidecar，并在不可用时负责启动。
