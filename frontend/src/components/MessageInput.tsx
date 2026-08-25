@@ -401,8 +401,23 @@ export function MessageInput({
     let unlisten: (() => void) | undefined;
     void api.onSessionInputAttachment(({ attachment }) => {
       if (disposed || !cacheKey) return;
+      // 文本输入项（如创作页「开始创建」）：写入草稿并直接发送给当前
+      // 会话的 Agent。经 store 层读写（事件回调里组件闭包可能是旧快照）。
+      if (attachment.kind === 'text') {
+        const content = (attachment.text ?? '').trim();
+        if (!content) return;
+        useStore.getState().setInputCacheText(cacheKey, content);
+        const fresh = useStore.getState().inputCaches[cacheKey];
+        if (!fresh || fresh.is_sending) {
+          // 执行中：留作草稿，遵循会话队列语义。
+          editorRef.current?.focus();
+          return;
+        }
+        void useStore.getState().sendMessage(cacheKey, content, [], fresh.revision, 'full_trust');
+        return;
+      }
       if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;
-      addAttachments([attachment]);
+      addAttachments([attachment as Attachment]);
       editorRef.current?.focus();
     }).then((stop) => {
       if (disposed) stop();
@@ -413,6 +428,8 @@ export function MessageInput({
       unlisten?.();
     };
   }, [addAttachments, cacheKey]);
+
+
 
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
     addAttachments(paths.map(attachmentFromPath));

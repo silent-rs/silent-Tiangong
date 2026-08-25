@@ -41,6 +41,9 @@ async function pluginDevCall<T>(
 
 /** 宿主侧受限通道（安装与只读查询）。 */
 export const pluginDev = {
+  /** 把指令文本直接交给当前会话的 Agent 处理（session.input.sendText）。 */
+  sendToAgent: (bridge: HostBridge, text: string) =>
+    bridge.call('session.input.sendText', JSON.stringify({ text })).then(() => true),
   install: (bridge: HostBridge, id: string) =>
     pluginDevCall<InstallResult>(bridge, 'install', { id }),
   list: (bridge: HostBridge) => pluginDevCall<ProjectEntry[]>(bridge, 'list', {}),

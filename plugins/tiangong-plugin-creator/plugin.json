@@ -9,7 +9,8 @@
     "tool.provide",
     "bridge.call",
     "plugin-dev.use",
-    "storage.private"
+    "storage.private",
+    "session.write"
   ],
   "capabilities": {
     "tools": true,

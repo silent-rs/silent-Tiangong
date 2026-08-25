@@ -541,6 +541,37 @@ fn run_gui() {
                 let app_handle = app.handle().clone();
                 tiangong_plugin_runtime::set_session_input_handler(Arc::new(
                     move |plugin_id: &str, method: &str, payload: &str| {
+                        // 文本发送：插件页面在明确用户手势后把一段指令交给
+                        // 当前会话的 Agent 处理（如创作页「开始创建」）。
+                        if method == "session.input.sendText" {
+                            #[derive(serde::Deserialize)]
+                            struct TextInput {
+                                text: String,
+                            }
+                            let input: TextInput = serde_json::from_str(payload)
+                                .map_err(|error| anyhow::anyhow!("输入文本格式无效：{error}"))?;
+                            if input.text.trim().is_empty() {
+                                anyhow::bail!("输入文本不能为空");
+                            }
+                            if input.text.len() > 10_000 {
+                                anyhow::bail!("输入文本超过 10KB 上限");
+                            }
+                            // 复用截图插件的输入事件通道（同一事件、同一前端
+                            // 监听），文本作为 kind="text" 的输入项分流处理。
+                            app_handle
+                                .emit(
+                                    "session_input_attachment",
+                                    serde_json::json!({
+                                        "plugin_id": plugin_id,
+                                        "attachment": {
+                                            "kind": "text",
+                                            "text": input.text,
+                                        },
+                                    }),
+                                )
+                                .map_err(|error| anyhow::anyhow!("推送输入消息失败：{error}"))?;
+                            return Ok("true".to_string());
+                        }
                         if method != "session.input.addAttachment" {
                             anyhow::bail!("未知输入草稿方法 {method}");
                         }

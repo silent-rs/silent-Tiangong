@@ -30,8 +30,9 @@ const connected = ref('正在连接宿主桥接…');
 const projects = ref<ProjectEntry[]>([]);
 const busy = ref(false);
 const output = ref<OutputPanel | null>(null);
-const newId = ref('');
+const newName = ref('');
 const selectedTemplate = ref<string>('ui-app');
+const sending = ref(false);
 
 let providerStop: (() => void) | null = null;
 let closedStop: (() => void) | null = null;
@@ -49,14 +50,35 @@ async function refreshProjects() {
   }
 }
 
-/** 页面不执行命令：生成 devkit 命令引导（用户转给 Agent 执行）。 */
-function showInitCommand() {
-  const id = newId.value.trim() || '<插件id>';
-  show(
-    'info',
-    '让 Agent 创建项目',
-    `在对话中对 Agent 说「用 plugin creator 创建一个 ${selectedTemplate.value} 插件，id 为 ${id}」，或直接粘贴命令：\n\n${DEVKIT_COMMANDS.init(id)}`,
-  );
+/** 开始创建：把需求（名称 + 模板）直接交给当前会话的 Agent 处理——
+ *  Agent 依名称起合适的插件 id 并执行 devkit init，后续流程在对话中完成。 */
+async function startCreation() {
+  if (!bridge.value || sending.value) return;
+  const name = newName.value.trim();
+  if (!name) {
+    show('error', '缺少插件名称', '请填写插件名称（如「番茄钟」），插件 ID 由 Agent 依名称拟定。');
+    return;
+  }
+  sending.value = true;
+  const templates: Record<string, string> = {
+    'ui-app': '纯 UI 页面插件（无工具）',
+    'ts-tool': 'TypeScript 工具插件（页面 + 向你提供工具）',
+    'ts-npx': 'npx 脚本插件（命令行脚本 + 能力说明书）',
+  };
+  const instruction = [
+    `请为我创建一个天工插件「${name}」。`,
+    `形态：${templates[selectedTemplate.value] ?? selectedTemplate.value}（plugin creator 的 ${selectedTemplate.value} 模板）。`,
+    '请用 plugin creator 的 devkit 开始：为它起一个合适的英文插件 id（小写字母数字与 - _ .），执行 init 生成骨架后浏览模板结构，然后向我确认需求要点，再继续实现、validate、build，完成后用 plugin_install 安装。',
+  ].join('\n');
+  try {
+    await pluginDev.sendToAgent(bridge.value, instruction);
+    show('success', '已发送给 Agent', `创建「${name}」的请求已交给当前会话的 Agent 处理，请查看对话进展。`);
+    newName.value = '';
+  } catch (error) {
+    show('error', '发送失败', error instanceof Error ? error.message : String(error));
+  } finally {
+    sending.value = false;
+  }
 }
 
 function showCommands(id: string) {
@@ -168,12 +190,15 @@ async function recordHistory(text: string) {
         </button>
       </div>
       <div class="row">
-        <input v-model="newId" placeholder="插件 ID（如 my-dashboard）" @keyup.enter="showInitCommand" />
-        <button class="primary" type="button" @click="showInitCommand">生成创建命令</button>
+        <input v-model="newName" placeholder="插件名称（如：番茄钟）" @keyup.enter="startCreation" />
+        <button class="primary" type="button" :disabled="sending" @click="startCreation">
+          {{ sending ? '发送中…' : '开始创建' }}
+        </button>
       </div>
       <p class="hint">
-        项目的生成、构建与试运行由 Agent 经命令通道执行官方 devkit
-        （npx -y @silent-ai/plugin-creator），页面负责看板与安装。
+        点击「开始创建」后，需求会直接交给当前会话的 Agent：它依名称拟定插件
+        ID、经 devkit 生成骨架并继续开发；构建、试运行同样在对话中完成，
+        本页面负责看板与安装。
       </p>
     </section>
 
