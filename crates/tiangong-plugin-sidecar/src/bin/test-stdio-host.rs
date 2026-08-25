@@ -11,6 +11,29 @@ use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSi
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let first = args.next().context("缺少运行模式或 sidecar 路径")?;
+    #[cfg(windows)]
+    if first == "--windows-command-tree-helper" {
+        let command_pid_file = args
+            .next()
+            .map(PathBuf::from)
+            .context("缺少 command PID 文件")?;
+        let child_pid_file = args
+            .next()
+            .map(PathBuf::from)
+            .context("缺少子进程 PID 文件")?;
+        if args.next().is_some() {
+            bail!("参数过多");
+        }
+        return run_windows_command_tree_helper(&command_pid_file, &child_pid_file);
+    }
+    #[cfg(windows)]
+    if first == "--windows-wait-helper" {
+        if args.next().is_some() {
+            bail!("参数过多");
+        }
+        std::thread::sleep(Duration::from_secs(600));
+        return Ok(());
+    }
     if first == "--command-sandbox" {
         let sidecar = args
             .next()
@@ -94,13 +117,16 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
         "HOME".to_string(),
         home.display().to_string(),
     )]));
+    #[cfg(unix)]
     let sidecar_pid_file = workspace.join("sidecar.pid");
     let child_pid_file = workspace.join("child.pid");
+    #[cfg(unix)]
     let script = format!(
         "/usr/bin/printf '%s' \"$PPID\" > {}; /bin/sleep 300 & child=$!; /usr/bin/printf '%s' \"$child\" > {}; wait \"$child\"",
         shell_quote(&sidecar_pid_file),
         shell_quote(&child_pid_file),
     );
+    #[cfg(unix)]
     let request = serde_json::json!({
         "script": script,
         "shell": "sh",
@@ -109,15 +135,56 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
         "full_trust": true,
         "allowed_commands": [],
     });
+    #[cfg(unix)]
+    let operation = "command.run_shell";
+    #[cfg(windows)]
+    let request = {
+        let helper = workspace.join("host-crash-helper.exe");
+        std::fs::copy(std::env::current_exe()?, &helper)
+            .context("复制 Windows 宿主崩溃测试程序失败")?;
+        let helper = helper.display().to_string().replace('\\', "/");
+        serde_json::json!({
+            "cmd": format!("\"{helper}\""),
+            "args": [
+                "--windows-command-tree-helper",
+                workspace.join("command.pid").display().to_string(),
+                child_pid_file.display().to_string(),
+            ],
+            "cwd": workspace.display().to_string(),
+            "timeout_secs": 300,
+            "workspace": workspace.display().to_string(),
+            "full_trust": true,
+            "allowed_commands": [],
+        })
+    };
+    #[cfg(windows)]
+    let operation = "command.run_command";
     let context = SidecarInvocationContext {
         session_id: "host-crash".to_string(),
         invocation_id: "host-crash".to_string(),
         authoritative_workspace: workspace,
     };
-    connection.invoke_with_context("command.run_shell", &request.to_string(), &context)?;
+    connection.invoke_with_context(operation, &request.to_string(), &context)?;
     bail!("command 长请求意外结束")
 }
 
+#[cfg(windows)]
+fn run_windows_command_tree_helper(command_pid_file: &Path, child_pid_file: &Path) -> Result<()> {
+    let command_pid = std::process::id();
+    std::fs::write(command_pid_file, command_pid.to_string())?;
+
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .arg("--windows-wait-helper")
+        .spawn()
+        .context("启动 Windows 宿主崩溃测试子进程失败")?;
+    std::fs::write(child_pid_file, child.id().to_string())?;
+    child
+        .wait()
+        .context("等待 Windows 宿主崩溃测试子进程失败")?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }

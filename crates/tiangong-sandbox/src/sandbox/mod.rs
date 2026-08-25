@@ -1,11 +1,13 @@
 //! 沙箱执行层：策略编译、命令包装与违规归因。
 //!
-//! 平台选型：macOS Seatbelt / Linux bubblewrap；Windows 的完整文件隔离
-//! 尚未交付，因此明确报告不可用。平台能力缺失时始终拒绝执行。
+//! 平台选型：macOS Seatbelt / Linux bubblewrap / Windows AppContainer。
+//! 平台能力缺失时始终拒绝执行。
 
 pub mod bwrap;
 pub mod policy;
 pub mod seatbelt;
+#[cfg(windows)]
+pub mod windows;
 
 pub use policy::{SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
@@ -42,11 +44,13 @@ pub fn availability() -> SandboxAvailability {
             ),
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
     {
-        SandboxAvailability::Unsupported(
-            "当前 Windows 版本尚未提供完整 command 文件隔离，已拒绝执行".into(),
-        )
+        windows::availability()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        SandboxAvailability::Unsupported("当前平台没有可用的原生沙箱".into())
     }
 }
 
@@ -88,11 +92,15 @@ pub fn wrap(policy: &SandboxPolicy) -> SandboxedProgram {
                     prefix: bwrap::wrap_argv(policy),
                 }
             }
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(windows)]
             {
                 SandboxedProgram::Unavailable(
-                    "当前 Windows 版本尚未提供完整 command 文件隔离，已拒绝执行".to_string(),
+                    "Windows 策略必须由 Launcher 的 AppContainer 启动路径执行".to_string(),
                 )
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+            {
+                SandboxedProgram::Unavailable("当前平台没有可用的原生沙箱".to_string())
             }
         }
         SandboxAvailability::Unsupported(reason)

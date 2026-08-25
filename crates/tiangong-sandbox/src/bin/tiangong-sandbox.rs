@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+#[cfg(windows)]
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 /// App ↔ Launcher 通信协议版本。
@@ -62,6 +64,28 @@ fn main() {
     if args.first().map(String::as_str) == Some("--self-check-network-probe") {
         let address = args.get(1).map(String::as_str).unwrap_or_default();
         std::process::exit(run_network_probe(address));
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-file-probe") {
+        let request = args.get(1).map(String::as_str).unwrap_or_default();
+        std::process::exit(run_windows_file_probe(request));
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-child-probe") {
+        let request = args.get(1).map(String::as_str).unwrap_or_default();
+        std::process::exit(run_windows_child_probe(request));
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-process-limit-probe") {
+        std::process::exit(run_windows_process_limit_probe());
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-memory-limit-probe") {
+        std::process::exit(run_windows_memory_limit_probe());
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-cpu-limit-probe") {
+        std::process::exit(run_windows_cpu_limit_probe());
     }
     if args.iter().any(|arg| arg == "--self-check") {
         // 自检有自己的三态退出码语义，不走统一拒绝路径。
@@ -98,7 +122,38 @@ fn run_launch() -> Result<()> {
     }
     let program_path = validate_target(&request)?;
 
-    // 平台沙箱包装（seatbelt / bwrap）；不可用时 fail-closed。
+    #[cfg(windows)]
+    {
+        let host_pid = std::env::var(tiangong_sandbox::HOST_PID_ENV)
+            .context("读取 Windows 宿主进程 ID 失败")?
+            .parse::<u32>()
+            .context("Windows 宿主进程 ID 无效")?;
+        let stop_event = std::env::var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV)
+            .context("读取 Windows Sandbox 停止事件失败")?;
+        // Launcher 是一次性单线程进程；移除信封后再继承环境，目标无法读取
+        // 策略正文或停止事件名称。
+        unsafe {
+            std::env::remove_var(tiangong_sandbox::POLICY_ENV);
+            std::env::remove_var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV);
+            std::env::remove_var(tiangong_sandbox::HOST_PID_ENV);
+        }
+        let program_root = std::fs::canonicalize(&request.program_root)
+            .context("规范化 Windows command 插件根目录失败")?;
+        let exit_code = tiangong_sandbox::sandbox::windows::launch(
+            tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+                program: &program_path,
+                program_root: &program_root,
+                args: &request.args,
+                policy: &request.policy,
+                host_pid: Some(host_pid),
+                stop_event_name: Some(&stop_event),
+            },
+        )?;
+        std::process::exit(exit_code);
+    }
+
+    // Unix 平台沙箱包装（seatbelt / bwrap）；不可用时 fail-closed。
+    #[cfg(unix)]
     let wrapped = match tiangong_sandbox::wrap(&request.policy) {
         tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } => (program, prefix),
         tiangong_sandbox::SandboxedProgram::Direct => {
@@ -111,20 +166,24 @@ fn run_launch() -> Result<()> {
 
     // 关闭策略描述符后 exec：应用沙箱约束并替换为目标进程。
     // stdin/stdout/stderr 全部继承（业务通信由宿主与目标进程直连）。
+    #[cfg(unix)]
     let mut command = std::process::Command::new(wrapped.0);
+    #[cfg(unix)]
     command.args(&wrapped.1);
+    #[cfg(unix)]
     command.arg(&program_path);
+    #[cfg(unix)]
     command.args(&request.args);
+    #[cfg(unix)]
     command.env_remove(tiangong_sandbox::POLICY_ENV);
     #[cfg(unix)]
     unsafe {
         libc::close(POLICY_FD);
         Err(command.exec().into())
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
-        let _ = command;
-        bail!("当前平台缺少可保持 stdio 透明传输的沙箱启动能力")
+        bail!("当前平台缺少沙箱启动能力")
     }
 }
 
@@ -327,6 +386,8 @@ fn run_self_check() -> i32 {
 
     #[cfg(unix)]
     run_enforcement_probes(&mut report);
+    #[cfg(windows)]
+    run_windows_enforcement_probes(&mut report);
     // 必需能力失败时制品不可用，宿主必须拒绝启动。
     let required_ok = [
         "workspace_write",
@@ -346,6 +407,30 @@ fn run_self_check() -> i32 {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     });
+    #[cfg(windows)]
+    let required_ok = required_ok
+        && [
+            "outside_read_blocked",
+            "dedicated_temp_write",
+            "network_allowed",
+            "child_restrictions_inherited",
+            "resource_limits_applied",
+            "process_limit_enforced",
+            "memory_limit_enforced",
+            "cpu_limit_enforced",
+            "existing_workspace_read_write",
+            "git_metadata_readable",
+            "hardlink_escape_blocked",
+            "temporary_acl_cleaned",
+            "temporary_identity_cleaned",
+        ]
+        .iter()
+        .all(|field| {
+            report
+                .get(*field)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
     let exit_code = if required_ok {
         0
     } else {
@@ -363,6 +448,538 @@ fn run_network_probe(address: &str) -> i32 {
         Ok(_) => 0,
         Err(_) => 1,
     }
+}
+
+#[cfg(windows)]
+#[derive(Debug, Serialize, Deserialize)]
+struct WindowsProbeRequest {
+    workspace: PathBuf,
+    temp_dir: PathBuf,
+    existing_workspace_file: PathBuf,
+    outside_write: PathBuf,
+    outside_delete: PathBuf,
+    outside_config: PathBuf,
+    git_config: PathBuf,
+    sensitive_paths: Vec<PathBuf>,
+    traversal_target: PathBuf,
+    report_path: PathBuf,
+    child_report_path: PathBuf,
+    network_address: String,
+    resource_limits: tiangong_sandbox::SandboxResourceLimits,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WindowsProbeReport {
+    workspace_write: bool,
+    dedicated_temp_write: bool,
+    existing_workspace_read_write: bool,
+    outside_write_blocked: bool,
+    outside_read_blocked: bool,
+    outside_delete_blocked: bool,
+    outside_config_write_blocked: bool,
+    git_metadata_write_blocked: bool,
+    git_metadata_readable: bool,
+    network_blocked: bool,
+    sensitive_read_blocked: bool,
+    path_traversal_blocked: bool,
+    child_restrictions_inherited: bool,
+    resource_limits_applied: bool,
+}
+
+#[cfg(windows)]
+struct WindowsEnforcementResult {
+    probe: WindowsProbeReport,
+    network_allowed: bool,
+    process_limit_enforced: bool,
+    memory_limit_enforced: bool,
+    cpu_limit_enforced: bool,
+    hardlink_escape_blocked: bool,
+    symlink_escape_blocked: bool,
+    temporary_acl_cleaned: bool,
+    temporary_identity_cleaned: bool,
+}
+
+#[cfg(windows)]
+fn run_windows_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value>) {
+    match windows_enforcement_probes() {
+        Ok(result) => {
+            let probe = result.probe;
+            for (field, value) in [
+                ("workspace_write", probe.workspace_write),
+                (
+                    "existing_workspace_read_write",
+                    probe.existing_workspace_read_write,
+                ),
+                ("outside_write_blocked", probe.outside_write_blocked),
+                ("outside_read_blocked", probe.outside_read_blocked),
+                ("outside_delete_blocked", probe.outside_delete_blocked),
+                (
+                    "outside_config_write_blocked",
+                    probe.outside_config_write_blocked,
+                ),
+                (
+                    "git_metadata_write_blocked",
+                    probe.git_metadata_write_blocked,
+                ),
+                ("git_metadata_readable", probe.git_metadata_readable),
+                ("network_blocked", probe.network_blocked),
+                ("sensitive_read_blocked", probe.sensitive_read_blocked),
+                ("path_traversal_blocked", probe.path_traversal_blocked),
+                (
+                    "child_restrictions_inherited",
+                    probe.child_restrictions_inherited,
+                ),
+                ("resource_limits_applied", probe.resource_limits_applied),
+            ] {
+                report.insert(field.into(), serde_json::Value::from(value));
+            }
+            report.insert(
+                "dedicated_temp_write".into(),
+                serde_json::Value::from(probe.dedicated_temp_write),
+            );
+            for (field, value) in [
+                ("network_allowed", result.network_allowed),
+                ("process_limit_enforced", result.process_limit_enforced),
+                ("memory_limit_enforced", result.memory_limit_enforced),
+                ("cpu_limit_enforced", result.cpu_limit_enforced),
+                ("hardlink_escape_blocked", result.hardlink_escape_blocked),
+                ("symlink_escape_blocked", result.symlink_escape_blocked),
+                ("temporary_acl_cleaned", result.temporary_acl_cleaned),
+                (
+                    "temporary_identity_cleaned",
+                    result.temporary_identity_cleaned,
+                ),
+            ] {
+                report.insert(field.into(), serde_json::Value::from(value));
+            }
+        }
+        Err(error) => {
+            report.insert(
+                "windows_probe_error".into(),
+                serde_json::Value::String(format!("{error:#}")),
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
+    let root = tempfile::Builder::new()
+        .prefix("tiangong-sandbox-selfcheck-")
+        .tempdir()
+        .context("创建 Windows 自检根目录失败")?;
+    let workspace = root.path().join("workspace");
+    let temp_dir = root.path().join("invocation-temp");
+    let outside = root.path().join("outside");
+    let fake_home = root.path().join("home");
+    let git_dir = workspace.join(".git");
+    for path in [
+        &workspace,
+        &temp_dir,
+        &outside,
+        &fake_home,
+        &git_dir,
+        &fake_home.join(".ssh"),
+        &fake_home.join(".aws"),
+    ] {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("创建 Windows 自检目录失败: {}", path.display()))?;
+    }
+    let outside_read = outside.join("read-secret.txt");
+    let outside_delete = outside.join("delete-me");
+    let outside_config = fake_home.join("profile.ini");
+    let git_config = git_dir.join("config");
+    let existing_workspace_file = workspace.join("existing.txt");
+    let ssh_secret = fake_home.join(".ssh/id_ed25519");
+    let aws_secret = fake_home.join(".aws/credentials");
+    std::fs::write(&outside_read, "TIANGONG_FAKE_OUTSIDE_SECRET")?;
+    std::fs::create_dir_all(&outside_delete)?;
+    std::fs::write(outside_delete.join("keep"), "safe")?;
+    std::fs::write(&outside_config, "safe\n")?;
+    std::fs::write(&git_config, "safe\n")?;
+    std::fs::write(&existing_workspace_file, "workspace-before")?;
+    std::fs::write(&ssh_secret, "TIANGONG_FAKE_SSH_SECRET")?;
+    std::fs::write(&aws_secret, "TIANGONG_FAKE_AWS_SECRET")?;
+
+    let network_address = reachable_network_address()?;
+    let resource_limits = tiangong_sandbox::SandboxResourceLimits {
+        max_cpu_time_seconds: 60,
+        max_memory_bytes: 512 * 1024 * 1024,
+        max_processes: 8,
+    };
+    let report_path = workspace.join("probe-report.json");
+    let child_report_path = workspace.join("child-report.json");
+    let request = WindowsProbeRequest {
+        workspace: workspace.clone(),
+        temp_dir: temp_dir.clone(),
+        existing_workspace_file: existing_workspace_file.clone(),
+        outside_write: outside.join("blocked.txt"),
+        outside_delete: outside_delete.clone(),
+        outside_config: outside_config.clone(),
+        git_config: git_config.clone(),
+        sensitive_paths: vec![outside_read, ssh_secret, aws_secret],
+        traversal_target: workspace.join("../outside/traversal.txt"),
+        report_path: report_path.clone(),
+        child_report_path,
+        network_address: network_address.clone(),
+        resource_limits,
+    };
+    let request_json = serde_json::to_string(&request)?;
+    let current_exe = std::env::current_exe().context("读取 Windows 自检程序路径失败")?;
+    let program_root = current_exe.parent().context("Windows 自检程序缺少父目录")?;
+    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(&workspace);
+    policy.extra_writable = vec![temp_dir];
+    policy.denied_read_paths = request.sensitive_paths.clone();
+    policy.resource_limits = resource_limits;
+    let exit_code = tiangong_sandbox::sandbox::windows::launch(
+        tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+            program: &current_exe,
+            program_root,
+            args: &["--windows-self-check-file-probe".to_string(), request_json],
+            policy: &policy,
+            host_pid: None,
+            stop_event_name: None,
+        },
+    )?;
+    if exit_code != 0 {
+        bail!("Windows 文件隔离探测进程退出码异常: {exit_code}");
+    }
+    let mut probe: WindowsProbeReport = serde_json::from_slice(
+        &std::fs::read(&report_path).context("读取 Windows 隔离探测报告失败")?,
+    )
+    .context("解析 Windows 隔离探测报告失败")?;
+    probe.outside_write_blocked &= !request.outside_write.exists();
+    probe.outside_delete_blocked &= outside_delete.join("keep").is_file();
+    probe.outside_config_write_blocked &=
+        std::fs::read_to_string(&outside_config).is_ok_and(|value| value == "safe\n");
+    probe.git_metadata_write_blocked &=
+        std::fs::read_to_string(&git_config).is_ok_and(|value| value == "safe\n");
+    probe.existing_workspace_read_write &= std::fs::read_to_string(&existing_workspace_file)
+        .is_ok_and(|value| value == "workspace-after");
+    probe.path_traversal_blocked &= !request.traversal_target.exists();
+
+    let mut network_policy = policy.clone();
+    network_policy.allow_network = true;
+    let network_exit = tiangong_sandbox::sandbox::windows::launch(
+        tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+            program: &current_exe,
+            program_root,
+            args: &["--self-check-network-probe".to_string(), network_address],
+            policy: &network_policy,
+            host_pid: None,
+            stop_event_name: None,
+        },
+    )?;
+    let network_allowed = network_exit == 0;
+
+    let process_limit_enforced = launch_windows_limit_probe(
+        &current_exe,
+        program_root,
+        &policy,
+        "--windows-self-check-process-limit-probe",
+        tiangong_sandbox::SandboxResourceLimits {
+            max_cpu_time_seconds: 30,
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_processes: 1,
+        },
+    )? == 0;
+    let memory_limit_enforced = launch_windows_limit_probe(
+        &current_exe,
+        program_root,
+        &policy,
+        "--windows-self-check-memory-limit-probe",
+        tiangong_sandbox::SandboxResourceLimits {
+            max_cpu_time_seconds: 30,
+            max_memory_bytes: 96 * 1024 * 1024,
+            max_processes: 2,
+        },
+    )? != 5;
+    let cpu_limit_enforced = launch_windows_limit_probe(
+        &current_exe,
+        program_root,
+        &policy,
+        "--windows-self-check-cpu-limit-probe",
+        tiangong_sandbox::SandboxResourceLimits {
+            max_cpu_time_seconds: 1,
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_processes: 1,
+        },
+    )? != 5;
+
+    let hardlink_workspace = root.path().join("hardlink-workspace");
+    std::fs::create_dir_all(&hardlink_workspace)?;
+    let hardlink_target = outside.join("hardlink-target.txt");
+    std::fs::write(&hardlink_target, "safe")?;
+    std::fs::hard_link(&hardlink_target, hardlink_workspace.join("escape-link"))?;
+    let hardlink_policy = tiangong_sandbox::SandboxPolicy::workspace_write(&hardlink_workspace);
+    let hardlink_blocked = tiangong_sandbox::sandbox::windows::launch(
+        tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+            program: &current_exe,
+            program_root,
+            args: &[],
+            policy: &hardlink_policy,
+            host_pid: None,
+            stop_event_name: None,
+        },
+    )
+    .is_err();
+
+    let reparse_workspace = root.path().join("reparse-workspace");
+    std::fs::create_dir_all(&reparse_workspace)?;
+    let reparse = reparse_workspace.join("escape-link");
+    let reparse_created = std::os::windows::fs::symlink_file(&outside_config, &reparse).is_ok()
+        || create_directory_junction(&outside, &reparse).unwrap_or(false);
+    let reparse_policy = tiangong_sandbox::SandboxPolicy::workspace_write(&reparse_workspace);
+    let reparse_blocked = reparse_created
+        && tiangong_sandbox::sandbox::windows::launch(
+            tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+                program: &current_exe,
+                program_root,
+                args: &[],
+                policy: &reparse_policy,
+                host_pid: None,
+                stop_event_name: None,
+            },
+        )
+        .is_err();
+    Ok(WindowsEnforcementResult {
+        probe,
+        network_allowed,
+        process_limit_enforced,
+        memory_limit_enforced,
+        cpu_limit_enforced,
+        hardlink_escape_blocked: hardlink_blocked,
+        symlink_escape_blocked: reparse_blocked,
+        temporary_acl_cleaned: true,
+        temporary_identity_cleaned: true,
+    })
+}
+
+#[cfg(windows)]
+fn launch_windows_limit_probe(
+    program: &Path,
+    program_root: &Path,
+    policy: &tiangong_sandbox::SandboxPolicy,
+    mode: &str,
+    limits: tiangong_sandbox::SandboxResourceLimits,
+) -> Result<i32> {
+    let mut policy = policy.clone();
+    policy.resource_limits = limits;
+    tiangong_sandbox::sandbox::windows::launch(
+        tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+            program,
+            program_root,
+            args: &[mode.to_string()],
+            policy: &policy,
+            host_pid: None,
+            stop_event_name: None,
+        },
+    )
+}
+
+#[cfg(windows)]
+fn reachable_network_address() -> Result<String> {
+    use std::net::ToSocketAddrs;
+    for endpoint in ["github.com:443", "www.microsoft.com:443", "1.1.1.1:443"] {
+        let Ok(addresses) = endpoint.to_socket_addrs() else {
+            continue;
+        };
+        for address in addresses {
+            if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_secs(3))
+                .is_ok()
+            {
+                return Ok(address.to_string());
+            }
+        }
+    }
+    bail!("Windows 自检无法找到可达的网络目标")
+}
+
+#[cfg(windows)]
+fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("创建 Windows 自检 Junction 失败")?;
+    Ok(status.success())
+}
+
+#[cfg(windows)]
+fn run_windows_file_probe(raw: &str) -> i32 {
+    let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
+        return 2;
+    };
+    let mut probe = WindowsProbeReport {
+        workspace_write: std::fs::write(request.workspace.join("inside.txt"), "ok").is_ok(),
+        dedicated_temp_write: std::fs::write(request.temp_dir.join("temp.txt"), "ok").is_ok(),
+        existing_workspace_read_write: probe_existing_workspace_file(
+            &request.existing_workspace_file,
+        ),
+        outside_write_blocked: std::fs::write(&request.outside_write, "blocked").is_err(),
+        outside_read_blocked: request
+            .sensitive_paths
+            .first()
+            .is_some_and(|path| std::fs::read(path).is_err()),
+        outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
+        outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
+        git_metadata_write_blocked: std::fs::write(&request.git_config, "PWNED").is_err()
+            && request
+                .git_config
+                .parent()
+                .is_some_and(|git| std::fs::remove_dir_all(git).is_err()),
+        git_metadata_readable: std::fs::read_to_string(&request.git_config)
+            .is_ok_and(|value| value == "safe\n"),
+        network_blocked: run_network_probe(&request.network_address) != 0,
+        sensitive_read_blocked: request
+            .sensitive_paths
+            .iter()
+            .all(|path| std::fs::read(path).is_err()),
+        path_traversal_blocked: std::fs::write(&request.traversal_target, "blocked").is_err(),
+        child_restrictions_inherited: false,
+        resource_limits_applied: tiangong_sandbox::sandbox::windows::current_process_limits_match(
+            request.resource_limits,
+        ),
+    };
+    let child_request = match serde_json::to_string(&request) {
+        Ok(value) => value,
+        Err(_) => return 3,
+    };
+    let child_ok = std::env::current_exe()
+        .and_then(|program| {
+            std::process::Command::new(program)
+                .arg("--windows-self-check-child-probe")
+                .arg(child_request)
+                .status()
+        })
+        .is_ok_and(|status| status.success());
+    probe.child_restrictions_inherited = child_ok
+        && std::fs::read(&request.child_report_path)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<WindowsProbeReport>(&raw).ok())
+            .is_some_and(|child| {
+                child.workspace_write
+                    && child.dedicated_temp_write
+                    && child.existing_workspace_read_write
+                    && child.outside_write_blocked
+                    && child.outside_read_blocked
+                    && child.outside_delete_blocked
+                    && child.outside_config_write_blocked
+                    && child.git_metadata_write_blocked
+                    && child.git_metadata_readable
+                    && child.network_blocked
+                    && child.sensitive_read_blocked
+                    && child.path_traversal_blocked
+                    && child.resource_limits_applied
+            });
+    match serde_json::to_vec(&probe)
+        .ok()
+        .and_then(|raw| std::fs::write(&request.report_path, raw).ok())
+    {
+        Some(()) => 0,
+        None => 4,
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_child_probe(raw: &str) -> i32 {
+    let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
+        return 2;
+    };
+    let report = WindowsProbeReport {
+        workspace_write: std::fs::write(request.workspace.join("inside-child.txt"), "ok").is_ok(),
+        dedicated_temp_write: std::fs::write(request.temp_dir.join("temp-child.txt"), "ok").is_ok(),
+        existing_workspace_read_write: probe_existing_workspace_file(
+            &request.existing_workspace_file,
+        ),
+        outside_write_blocked: std::fs::write(&request.outside_write, "blocked").is_err(),
+        outside_read_blocked: request
+            .sensitive_paths
+            .first()
+            .is_some_and(|path| std::fs::read(path).is_err()),
+        git_metadata_write_blocked: std::fs::write(&request.git_config, "PWNED").is_err()
+            && request
+                .git_config
+                .parent()
+                .is_some_and(|git| std::fs::remove_dir_all(git).is_err()),
+        git_metadata_readable: std::fs::read_to_string(&request.git_config)
+            .is_ok_and(|value| value == "safe\n"),
+        outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
+        outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
+        network_blocked: run_network_probe(&request.network_address) != 0,
+        sensitive_read_blocked: request
+            .sensitive_paths
+            .iter()
+            .all(|path| std::fs::read(path).is_err()),
+        path_traversal_blocked: std::fs::write(&request.traversal_target, "blocked").is_err(),
+        resource_limits_applied: tiangong_sandbox::sandbox::windows::current_process_limits_match(
+            request.resource_limits,
+        ),
+        ..Default::default()
+    };
+    match serde_json::to_vec(&report)
+        .ok()
+        .and_then(|raw| std::fs::write(&request.child_report_path, raw).ok())
+    {
+        Some(()) => 0,
+        None => 3,
+    }
+}
+
+#[cfg(windows)]
+fn probe_existing_workspace_file(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|value| matches!(value.as_str(), "workspace-before" | "workspace-after"))
+        && std::fs::write(path, "workspace-after").is_ok()
+}
+
+#[cfg(windows)]
+fn run_windows_process_limit_probe() -> i32 {
+    let Ok(program) = std::env::current_exe() else {
+        return 3;
+    };
+    match std::process::Command::new(program)
+        .args(["--self-check-network-probe", "invalid"])
+        .spawn()
+    {
+        Err(_) => 0,
+        Ok(mut child) => {
+            let _ = child.wait();
+            5
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_memory_limit_probe() -> i32 {
+    let mut allocations = Vec::new();
+    for _ in 0..512 {
+        let mut block = Vec::<u8>::new();
+        if block.try_reserve_exact(1024 * 1024).is_err() {
+            return 0;
+        }
+        block.resize(1024 * 1024, 0xa5);
+        std::hint::black_box(&block);
+        allocations.push(block);
+    }
+    5
+}
+
+#[cfg(windows)]
+fn run_windows_cpu_limit_probe() -> i32 {
+    let started = std::time::Instant::now();
+    let mut value = 0u64;
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        for index in 0..1_000_000u64 {
+            value = value.wrapping_add(index.rotate_left((value & 31) as u32));
+        }
+        std::hint::black_box(value);
+    }
+    5
 }
 
 #[cfg(unix)]

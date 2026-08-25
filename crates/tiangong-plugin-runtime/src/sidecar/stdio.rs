@@ -65,7 +65,7 @@ struct StdioProcess {
     /// 本进程是否已发送过 Auth 首帧。
     authenticated: AtomicBool,
     #[cfg(windows)]
-    job: WindowsJob,
+    lifecycle: WindowsLifecycle,
 }
 
 #[derive(Clone)]
@@ -288,6 +288,16 @@ impl StdioSidecarConnection {
                 .env("TMP", temp_dir)
                 .env("TEMP", temp_dir);
         }
+        #[cfg(windows)]
+        let sandbox_stop = launch_policy
+            .as_ref()
+            .map(|_| WindowsStopEvent::new())
+            .transpose()
+            .context("创建 Windows Sandbox 停止事件失败")?;
+        #[cfg(windows)]
+        if let Some(stop) = &sandbox_stop {
+            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, &stop.name);
+        }
         if self.config.allow_sensitive_storage {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
@@ -298,14 +308,18 @@ impl StdioSidecarConnection {
         }
         configure_process_lifecycle(&mut command)?;
         #[cfg(windows)]
-        let job = WindowsJob::new(launch_policy.as_ref().map(|policy| policy.resource_limits))
-            .context("创建 sidecar Job Object 失败")?;
+        let lifecycle = match sandbox_stop {
+            Some(stop) => WindowsLifecycle::Sandbox(stop),
+            None => WindowsLifecycle::Job(
+                WindowsJob::new(None).context("创建 sidecar Job Object 失败")?,
+            ),
+        };
         let mut child = command.spawn().with_context(|| {
             // spawn 完成：父进程侧策略管道读端即可关闭。
             format!("启动 stdio sidecar 失败: {}", self.config.binary.display())
         })?;
         #[cfg(windows)]
-        if let Err(error) = job.assign(&child) {
+        if let Err(error) = lifecycle.assign(&child) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(error).context("将 sidecar 加入 Job Object 失败");
@@ -331,7 +345,7 @@ impl StdioSidecarConnection {
             token,
             authenticated: AtomicBool::new(false),
             #[cfg(windows)]
-            job,
+            lifecycle,
         })
     }
 
@@ -592,11 +606,91 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
     #[cfg(windows)]
-    process.job.terminate();
+    process.lifecycle.terminate(child);
     #[cfg(not(windows))]
     let _ = process;
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(windows)]
+enum WindowsLifecycle {
+    Job(WindowsJob),
+    Sandbox(WindowsStopEvent),
+}
+
+#[cfg(windows)]
+impl WindowsLifecycle {
+    fn assign(&self, child: &Child) -> std::io::Result<()> {
+        match self {
+            Self::Job(job) => job.assign(child),
+            // Sandbox Launcher 在恢复目标线程前自行创建并应用内层 Job，避免
+            // spawn 与宿主 AssignProcessToJobObject 之间出现逃逸窗口。
+            Self::Sandbox(_) => Ok(()),
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        match self {
+            Self::Job(job) => job.terminate(),
+            Self::Sandbox(stop) => stop.signal_and_wait(child),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsStopEvent {
+    handle: std::os::windows::io::OwnedHandle,
+    name: String,
+}
+
+#[cfg(windows)]
+impl WindowsStopEvent {
+    fn new() -> std::io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let name = format!("Local\\TiangongSandboxStop-{}", scru128::new());
+        let wide = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Sandbox 停止事件名称冲突",
+            ));
+        }
+        Ok(Self {
+            handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
+            name,
+        })
+    }
+
+    fn signal_and_wait(&self, child: &mut Child) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::SetEvent;
+
+        unsafe {
+            SetEvent(self.handle.as_raw_handle());
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if child.try_wait().is_ok_and(|status| status.is_some()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 #[cfg(windows)]
