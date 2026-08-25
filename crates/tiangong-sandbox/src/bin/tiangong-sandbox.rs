@@ -147,6 +147,7 @@ fn run_launch() -> Result<()> {
                 policy: &request.policy,
                 host_pid: Some(host_pid),
                 stop_event_name: Some(&stop_event),
+                timeout: None,
             },
         )?;
         std::process::exit(exit_code);
@@ -565,6 +566,7 @@ fn run_windows_enforcement_probes(report: &mut serde_json::Map<String, serde_jso
 
 #[cfg(windows)]
 fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
+    eprintln!("Windows Sandbox 自检阶段: 准备隔离路径");
     let root = tempfile::Builder::new()
         .prefix("tiangong-sandbox-selfcheck-")
         .tempdir()
@@ -602,6 +604,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
     std::fs::write(&ssh_secret, "TIANGONG_FAKE_SSH_SECRET")?;
     std::fs::write(&aws_secret, "TIANGONG_FAKE_AWS_SECRET")?;
 
+    eprintln!("Windows Sandbox 自检阶段: 查找可达网络目标");
     let network_address = reachable_network_address()?;
     let resource_limits = tiangong_sandbox::SandboxResourceLimits {
         max_cpu_time_seconds: 60,
@@ -632,6 +635,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
     policy.extra_writable = vec![temp_dir];
     policy.denied_read_paths = request.sensitive_paths.clone();
     policy.resource_limits = resource_limits;
+    eprintln!("Windows Sandbox 自检阶段: 文件、断网与子进程继承");
     let exit_code = tiangong_sandbox::sandbox::windows::launch(
         tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
             program: &current_exe,
@@ -640,6 +644,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
             policy: &policy,
             host_pid: None,
             stop_event_name: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
         },
     )?;
     if exit_code != 0 {
@@ -661,6 +666,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
 
     let mut network_policy = policy.clone();
     network_policy.allow_network = true;
+    eprintln!("Windows Sandbox 自检阶段: 显式联网能力");
     let network_exit = tiangong_sandbox::sandbox::windows::launch(
         tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
             program: &current_exe,
@@ -669,10 +675,12 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
             policy: &network_policy,
             host_pid: None,
             stop_event_name: None,
+            timeout: Some(std::time::Duration::from_secs(15)),
         },
     )?;
     let network_allowed = network_exit == 0;
 
+    eprintln!("Windows Sandbox 自检阶段: 进程数上限");
     let process_limit_enforced = launch_windows_limit_probe(
         &current_exe,
         program_root,
@@ -684,6 +692,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
             max_processes: 1,
         },
     )? == 0;
+    eprintln!("Windows Sandbox 自检阶段: 内存上限");
     let memory_limit_enforced = launch_windows_limit_probe(
         &current_exe,
         program_root,
@@ -695,6 +704,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
             max_processes: 2,
         },
     )? != 5;
+    eprintln!("Windows Sandbox 自检阶段: CPU 上限");
     let cpu_limit_enforced = launch_windows_limit_probe(
         &current_exe,
         program_root,
@@ -707,6 +717,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
         },
     )? != 5;
 
+    eprintln!("Windows Sandbox 自检阶段: 硬链接拒绝");
     let hardlink_workspace = root.path().join("hardlink-workspace");
     std::fs::create_dir_all(&hardlink_workspace)?;
     let hardlink_target = outside.join("hardlink-target.txt");
@@ -721,10 +732,12 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
             policy: &hardlink_policy,
             host_pid: None,
             stop_event_name: None,
+            timeout: Some(std::time::Duration::from_secs(15)),
         },
     )
     .is_err();
 
+    eprintln!("Windows Sandbox 自检阶段: 重解析点拒绝");
     let reparse_workspace = root.path().join("reparse-workspace");
     std::fs::create_dir_all(&reparse_workspace)?;
     let reparse = reparse_workspace.join("escape-link");
@@ -740,6 +753,7 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
                 policy: &reparse_policy,
                 host_pid: None,
                 stop_event_name: None,
+                timeout: Some(std::time::Duration::from_secs(15)),
             },
         )
         .is_err();
@@ -774,6 +788,7 @@ fn launch_windows_limit_probe(
             policy: &policy,
             host_pid: None,
             stop_event_name: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
         },
     )
 }

@@ -83,6 +83,7 @@ pub struct WindowsLaunchRequest<'a> {
     pub policy: &'a SandboxPolicy,
     pub host_pid: Option<u32>,
     pub stop_event_name: Option<&'a str>,
+    pub timeout: Option<Duration>,
 }
 
 pub fn availability() -> SandboxAvailability {
@@ -700,13 +701,22 @@ fn run_restricted_process(
     if let Some(handle) = &stop_event {
         handles.push(raw_handle(handle));
     }
+    let wait_timeout = request
+        .timeout
+        .map(|timeout| timeout.as_millis().min((INFINITE - 1) as u128) as u32)
+        .unwrap_or(INFINITE);
     let wait =
-        unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE) };
+        unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_timeout) };
     if wait == WAIT_FAILED {
         let error = std::io::Error::last_os_error();
         job.terminate_and_wait()
             .context("等待失败后清理 AppContainer Job 失败")?;
         return Err(error).context("等待 AppContainer 进程失败");
+    }
+    if wait == WAIT_TIMEOUT {
+        job.terminate_and_wait()
+            .context("超时后清理 AppContainer Job 失败")?;
+        bail!("等待 AppContainer 进程超过 {:?}", request.timeout.unwrap());
     }
     let target_exited = wait == WAIT_OBJECT_0;
     let mut exit_code = 1;
