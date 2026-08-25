@@ -18,13 +18,16 @@ pub fn map_openai_error(error: &async_openai::error::OpenAIError) -> LlmError {
 }
 
 pub fn is_retryable_openai_error(err: &async_openai::error::OpenAIError) -> bool {
-    // 传输层失败（连接被重置/断开、DNS 抖动等）是暂时性的，直接重试。
+    // 只重试真正可能恢复的传输层故障（连接被重置/断开、DNS 抖动等）。
     // reqwest 的 Display 只有 "error sending request for url (...)"，
-    // 底层原因藏在 source 链里，靠字符串匹配 "connection reset" 永远命中不了。
-    // 请求构建失败（is_builder）与超时（is_timeout）不是暂时性错误，保持不重试。
+    // 底层原因藏在 source 链里，无法靠字符串匹配识别。
+    // 构建失败、超时、响应体解析失败、重定向错误都是确定性失败，重试无益：
+    // 格式错误的响应重发只会重复计费并推迟报错。
     if let async_openai::error::OpenAIError::Reqwest(e) = err
         && !e.is_builder()
         && !e.is_timeout()
+        && !e.is_decode()
+        && !e.is_redirect()
     {
         return true;
     }

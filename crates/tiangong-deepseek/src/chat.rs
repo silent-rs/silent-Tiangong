@@ -1,4 +1,3 @@
-use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, stream};
 
 use crate::client::DeepSeekClient;
@@ -78,10 +77,15 @@ impl<'c> Chat<'c> {
         // 仅当请求携带 tools 时才启用文本协议兜底缓冲。即使 tool_choice=none，调用方
         // 也可能保留 tools schema；若模型仍返回文本工具调用，流末会完整识别并交由上层续作。
         let enable_buffer = request.tools.is_some();
-        let response = self
-            .client
-            .post_stream_raw("/chat/completions", &request)
-            .await?;
+        // 建连与等待响应头受用户配置的请求超时约束，避免网关建连后
+        // 不返回响应头导致永久等待；SSE 建流成功后不受总时限限制。
+        let timeout = self.client.stream_timeout();
+        let mut response = tokio::time::timeout(
+            timeout,
+            self.client.post_stream_raw("/chat/completions", &request),
+        )
+        .await
+        .map_err(|_| DeepSeekError::Timeout(format!("{} ms", timeout.as_millis())))??;
 
         let content_type = response
             .headers()
@@ -91,33 +95,34 @@ impl<'c> Chat<'c> {
             .to_ascii_lowercase();
 
         let flat: EventStream = if content_type.contains("text/event-stream") {
-            let sse_stream = response.bytes_stream().eventsource();
-            // 第一层：SSE message → Vec<StreamEvent>（单个 chunk 可能产出多个事件）。
-            let chunk_stream = stream::unfold(sse_stream, |mut sse_stream| async move {
-                match sse_stream.next().await {
-                    Some(Ok(message)) => {
-                        if message.data == "[DONE]" {
-                            Some((vec![Ok(StreamEvent::Done)], sse_stream))
-                        } else {
-                            Some((parse_stream_chunk(&message.data), sse_stream))
-                        }
-                    }
-                    Some(Err(err)) => Some((
-                        vec![Err(DeepSeekError::Stream(err.to_string()))],
-                        sse_stream,
-                    )),
-                    None => None,
-                }
-            });
-            Box::pin(chunk_stream.flat_map(stream::iter))
+            Box::pin(chat_sse_chunk_stream(response.bytes_stream()))
         } else {
-            // 网关忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些行全部当
-            // 未知字段丢弃且不报错，在 SDK 内按完整响应接住并合成事件流。
-            let complete: ChatCompletionResponse =
-                crate::client::parse_json_response(response).await?;
-            Box::pin(stream::iter(
-                complete_response_events(complete).into_iter().map(Ok),
-            ))
+            // 类型不明确（部分网关漏标或错标）时按首块内容探测：
+            // JSON 以 `{`/`[` 开头，SSE 事件以 `data:` 等开头。
+            let first = response
+                .chunk()
+                .await
+                .map_err(|err| DeepSeekError::Transport(err.to_string()))?
+                .unwrap_or_default();
+            if content_type.contains("json") || looks_like_json(&first) {
+                // 网关忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些行全部当
+                // 未知字段丢弃且不报错，在 SDK 内按完整响应接住并合成事件流。
+                // 完整读取受超时约束，避免迟迟不结束的响应永久等待。
+                let complete: ChatCompletionResponse = crate::client::read_complete_response(
+                    response,
+                    first,
+                    self.client.stream_timeout(),
+                )
+                .await?;
+                Box::pin(stream::iter(
+                    complete_response_events(complete).into_iter().map(Ok),
+                ))
+            } else {
+                // 首块不是 JSON：按 SSE 流解析，把首块拼回流头。
+                let byte_stream = stream::once(async move { Ok::<_, reqwest::Error>(first) })
+                    .chain(response.bytes_stream());
+                Box::pin(chat_sse_chunk_stream(byte_stream))
+            }
         };
 
         // 第二层：文本协议兜底缓冲。普通文本正常透传；确认命中文本工具协议后，
@@ -136,6 +141,43 @@ impl<'c> Chat<'c> {
 
         Ok(Box::pin(buffered))
     }
+}
+
+/// SSE 字节流 → Vec<StreamEvent> 流（单个 chunk 可能产出多个事件）。
+fn chat_sse_chunk_stream<S>(
+    byte_stream: S,
+) -> impl futures_util::Stream<Item = Result<StreamEvent, DeepSeekError>>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    use eventsource_stream::Eventsource;
+    use futures_util::StreamExt;
+    let sse_stream = Box::pin(byte_stream.eventsource());
+    let chunk_stream = stream::unfold(sse_stream, |mut sse_stream| async move {
+        match sse_stream.next().await {
+            Some(Ok(message)) => {
+                if message.data == "[DONE]" {
+                    Some((vec![Ok(StreamEvent::Done)], sse_stream))
+                } else {
+                    Some((parse_stream_chunk(&message.data), sse_stream))
+                }
+            }
+            Some(Err(err)) => Some((
+                vec![Err(DeepSeekError::Stream(err.to_string()))],
+                sse_stream,
+            )),
+            None => None,
+        }
+    });
+    chunk_stream.flat_map(stream::iter)
+}
+
+/// 判断响应首块是否是 JSON（跳过空白后以 `{` 或 `[` 开头）。
+fn looks_like_json(first: &[u8]) -> bool {
+    first
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'{' || *byte == b'[')
 }
 
 /// 文本协议缓冲状态机。

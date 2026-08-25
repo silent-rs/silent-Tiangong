@@ -34,6 +34,11 @@ impl DeepSeekClient {
 
     // ── 能力访问器 ──────────────────────────────────────────
 
+    /// 流式请求读取一次性完整响应的总时限。
+    pub(crate) fn stream_timeout(&self) -> std::time::Duration {
+        self.config.timeout
+    }
+
     pub fn chat(&self) -> Chat<'_> {
         Chat::new(self)
     }
@@ -210,6 +215,34 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
             String::from_utf8_lossy(&body[..body.len().min(512)])
         ))
     })
+}
+
+/// 聚合首块与剩余响应体并解析为完整响应，整体受 timeout 约束。
+/// 供 chat/responses 流式入口在服务端忽略 stream 参数返回一次性 JSON 时使用。
+pub(crate) async fn read_complete_response<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    first: bytes::Bytes,
+    timeout: std::time::Duration,
+) -> Result<T, DeepSeekError> {
+    let read = async {
+        let mut buf = first.to_vec();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| DeepSeekError::Transport(err.to_string()))?
+        {
+            buf.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<T>(&buf).map_err(|err| {
+            DeepSeekError::Serialization(format!(
+                "{err}: {}",
+                String::from_utf8_lossy(&buf[..buf.len().min(256)])
+            ))
+        })
+    };
+    tokio::time::timeout(timeout, read)
+        .await
+        .map_err(|_| DeepSeekError::Timeout(format!("{} ms", timeout.as_millis())))?
 }
 
 fn classify_http_error(status: reqwest::StatusCode, body_text: String) -> DeepSeekError {

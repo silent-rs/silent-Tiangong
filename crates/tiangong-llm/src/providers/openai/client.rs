@@ -54,16 +54,20 @@ impl ResponsesClient {
             .map_err(|err| LlmError::Configuration(err.to_string()))?;
         let url = format!("{base}/responses");
         let api_key = self.config.api_key.clone();
+        let request_timeout = self.config.timeout;
         self.with_retry("openai_stream", model, true, move || {
             let url = url.clone();
             let api_key = api_key.clone();
             let payload = payload.clone();
+            let request_timeout = request_timeout;
             async move {
-                // 不设总超时：流式响应允许长时间增量生成，总时长上限交给上层；
-                // 连接阶段卡死由 connect_timeout 兜住。
-                let client = reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(30))
-                    .build()?;
+                use crate::providers::openai_chatcompletions::client::{
+                    StreamBody, resolve_stream_body, stream_timeout_error,
+                };
+                // 建连、等待响应头与一次性响应体的读取均受用户配置的请求
+                // 超时约束。SSE 流本身允许长时间增量生成，建流成功后不再
+                // 受总时限限制。
+                let client = reqwest::Client::builder().build()?;
                 let mut request = client
                     .post(&url)
                     .header(reqwest::header::ACCEPT, "text/event-stream")
@@ -71,7 +75,9 @@ impl ResponsesClient {
                 if !api_key.trim().is_empty() {
                     request = request.bearer_auth(&api_key);
                 }
-                let response = request.send().await?;
+                let response = tokio::time::timeout(request_timeout, request.send())
+                    .await
+                    .map_err(|_| stream_timeout_error(request_timeout))??;
                 let status = response.status();
                 if !status.is_success() {
                     let body = response.text().await.unwrap_or_default();
@@ -87,29 +93,19 @@ impl ResponsesClient {
                         },
                     ));
                 }
-                let content_type = response
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if content_type.contains("text/event-stream") {
-                    Ok(ResponsesStreamResponse::Sse(Box::pin(
-                        crate::providers::openai_chatcompletions::client::sse_value_stream(
-                            response,
-                        ),
-                    )))
-                } else {
-                    // 服务端忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些
-                    // 行全部当未知字段丢弃且不报错，必须在 llm 层按完整响应接住。
-                    tracing::info!(
-                        operation = "openai_stream",
-                        provider = "openai",
-                        model,
-                        "服务端未按 SSE 流式返回，转按一次性完整响应处理"
-                    );
-                    let value = response.json::<Value>().await?;
-                    Ok(ResponsesStreamResponse::Complete(value))
+                match resolve_stream_body(response, request_timeout).await? {
+                    StreamBody::Sse(stream) => Ok(ResponsesStreamResponse::Sse(stream)),
+                    StreamBody::Complete(value) => {
+                        // 服务端忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些
+                        // 行全部当未知字段丢弃且不报错，必须在 llm 层按完整响应接住。
+                        tracing::info!(
+                            operation = "openai_stream",
+                            provider = "openai",
+                            model,
+                            "服务端未按 SSE 流式返回，转按一次性完整响应处理"
+                        );
+                        Ok(ResponsesStreamResponse::Complete(value))
+                    }
                 }
             }
         })

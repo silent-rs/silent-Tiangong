@@ -2190,6 +2190,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_stream_sniffs_sse_body_when_content_type_mislabeled() {
+        // 部分网关返回标准 SSE 数据但漏标/错标响应类型：不能一律当成一次性 JSON，
+        // 应按首块内容探测后仍走流式解析，避免流式能力回退。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                concat!(
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"漏标类型的流式回复\"}}]}\n\n",
+                    "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+                "application/octet-stream",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: serde_json::Value::Object(serde_json::Map::new()),
+        });
+        let request = ModelRequest {
+            user_input: "检查项目".to_string(),
+            context: vec![Message::new(MessageRole::System, "system")],
+            reasoning_effort: ReasoningEffort::None,
+            max_output_tokens: None,
+        };
+        let functions: Vec<ToolSpec> = Vec::new();
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls(request, functions, chunk_tx)
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "漏标类型的流式回复");
+        let mut streamed_text = String::new();
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            streamed_text.push_str(&chunk.content);
+        }
+        assert_eq!(streamed_text, "漏标类型的流式回复");
+    }
+
+    #[tokio::test]
     async fn openai_stream_accepts_server_ignoring_stream_flag() {
         // 部分网关忽略 stream 参数，返回 application/json 的一次性完整响应；
         // llm 层应按完整结果接住并合成流事件，而不是让 SSE 解析器静默丢弃。

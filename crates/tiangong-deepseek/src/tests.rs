@@ -1267,3 +1267,53 @@ async fn chat_stream_accepts_server_ignoring_stream_flag() {
     assert_eq!(text, "一次性完整回复");
     assert!(done, "应收到终止事件");
 }
+
+#[tokio::test]
+async fn chat_stream_sniffs_sse_body_when_content_type_mislabeled() {
+    // 部分网关返回标准 SSE 数据但漏标/错标响应类型：应按首块内容探测后
+    // 仍走流式解析，而不是当成一次性 JSON 读取失败。
+    use futures_util::StreamExt;
+
+    let sse = concat!(
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"漏标类型的流式回复\"}}]}\n\n",
+        "data: {\"id\":\"c2\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = MockServer::start(vec![http_response(
+        "200 OK",
+        "application/octet-stream",
+        sse.as_bytes(),
+    )]);
+    let client = mock_client(&server.addr);
+
+    let mut stream = client
+        .chat()
+        .create_stream(crate::types::ChatCompletionRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            messages: vec![crate::types::ChatMessage {
+                role: crate::types::MessageRole::User,
+                content: Some(json!("你好")),
+                reasoning_content: None,
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                prefix: false,
+            }],
+            stream: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(event) = stream.next().await {
+        match event.expect("流事件应无错误") {
+            crate::types::StreamEvent::TextDelta(delta) => text.push_str(&delta),
+            crate::types::StreamEvent::Done => done = true,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "漏标类型的流式回复");
+    assert!(done, "应收到终止事件");
+}

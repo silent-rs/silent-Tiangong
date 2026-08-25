@@ -11,6 +11,7 @@ pub fn map_anthropic_error(error: AnthropicError) -> LlmError {
         AnthropicError::RateLimited(err) => LlmError::RateLimited(err),
         AnthropicError::Serialization(err) => LlmError::Serialization(err),
         AnthropicError::Stream(err) => LlmError::Stream(err),
+        AnthropicError::Timeout(_) => LlmError::Timeout(0),
         AnthropicError::Api(err) => LlmError::Provider {
             provider: "anthropic",
             message: err,
