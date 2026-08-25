@@ -307,7 +307,11 @@ pub fn set_session_input_handler(handler: SessionInputHandler) {
 }
 
 fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
-    if method != "session.input.addAttachment" {
+    // 方法白名单：新增输入方法须在此放行（宿主 handler 负责各自校验）。
+    if !matches!(
+        method,
+        "session.input.addAttachment" | "session.input.sendText"
+    ) {
         bail!("未知输入草稿桥接方法 {method}");
     }
     let handler = SESSION_INPUT_HANDLER
