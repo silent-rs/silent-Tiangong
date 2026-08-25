@@ -32,8 +32,8 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, NO_INHERITANCE,
     OBJECT_INHERIT_ACE, PSID, SECURITY_CAPABILITIES, SECURITY_MAX_SID_SIZE,
     SECURITY_RESOURCE_MANAGER_AUTHORITY, SID_AND_ATTRIBUTES, SetTokenInformation,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY,
-    TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenUser, WinAuthenticatedUserSid,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
+    TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenUser, WinAuthenticatedUserSid,
     WinBuiltinUsersSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
     WinRestrictedCodeSid, WinWorldSid,
 };
@@ -348,7 +348,7 @@ impl RestrictedToken {
         if unsafe {
             OpenProcessToken(
                 GetCurrentProcess(),
-                TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+                TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
                 &mut source,
             )
         } == 0
