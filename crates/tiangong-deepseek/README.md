@@ -8,6 +8,8 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 - **Thinking Mode** — `thinking`（enabled/disabled）+ `reasoning_effort`（low/high/max）分档控制，`reasoning_content` 思考内容解析
 - **Text Protocol Fallback** — 内置工具调用文本协议兜底（原生 + DSML），SDK 自动从 `content` 文本中识别并解析
 - **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错
+- **Responses API** — OpenAI Responses 兼容格式（适配 Codex 场景），非流式 + 流式，支持图片输入（`image_url` / `file_id`）、function / web_search 工具、reasoning effort
+- **Files API** — 图片文件上传（multipart，支持有效期）、列出、查询、删除，`file_id` 可在对话中引用
 - **Model Listing** — list available models
 - **Balance Queries** — check account balance (CNY / USD)
 - **Context Caching** — `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` exposed in usage
@@ -82,6 +84,160 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 >
 > 当前模型为 `deepseek-v4-pro`（满配）与 `deepseek-v4-flash`（轻量），两者均支持思考模式与工具调用。
 
+## Responses API
+
+DeepSeek 原生支持 OpenAI Responses API 格式（为适配 Codex 等编码场景推出），可用模型为 `deepseek-v4-pro` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`（`types` 模块导出了对应常量）。
+
+该 API 为**无状态**设计：服务端不存储响应与会话，多轮对话需要客户端在每次请求的 `input` 中回传完整历史；不支持 `previous_response_id` / `store` / `conversation` 等参数（传入会被忽略）。输入超出上下文窗口时服务端直接返回 400。
+
+```rust
+use tiangong_deepseek::types::*;
+
+// 非流式：input 可传纯字符串（视作一条 user 消息），instructions 作为首条 system 消息
+let response = client.responses().create(CreateResponseRequest {
+    model: MODEL_V4_FLASH.into(),
+    input: Some(ResponseInput::Text("用一句话解释 Rust".into())),
+    instructions: Some("你是简洁的技术助手".into()),
+    reasoning: Some(ReasoningConfig { effort: Some(ReasoningEffortLevel::High) }),
+    ..Default::default()
+}).await?;
+println!("{}", response.output_text());  // 拼接全部输出文本（等价官方 response.output_text）
+```
+
+```rust
+// 流式：事件序列与 OpenAI Responses 兼容，无 [DONE] 标记，
+// 以 response.completed / incomplete / failed 结束
+let mut stream = client.responses().create_stream(CreateResponseRequest {
+    model: MODEL_V4_FLASH.into(),
+    input: Some(ResponseInput::Items(vec![ResponseInputItem::Message(InputMessage {
+        role: Some(ResponseRole::User),
+        content: Some(MessageContent::Text("写一个斐波那契函数".into())),
+    })])),
+    tools: Some(vec![ResponsesTool::Function(ResponsesFunctionTool {
+        name: "run_code".into(),
+        description: Some("执行代码".into()),
+        parameters: None,
+    })]),
+    ..Default::default()
+}).await?;
+
+use futures_util::StreamExt;
+while let Some(event) = stream.next().await {
+    match event? {
+        ResponsesStreamEvent::ReasoningTextDelta { delta, .. } => eprint!("\r[思考] {delta}"),
+        ResponsesStreamEvent::OutputTextDelta { delta, .. } => print!("{delta}"),
+        ResponsesStreamEvent::OutputItemDone {
+            item: ResponseOutputItem::FunctionCall(call), ..
+        } => println!("\n[工具调用] {}: {}", call.name, call.arguments),
+        ResponsesStreamEvent::ResponseCompleted { response, .. } => {
+            if let Some(usage) = response.usage {
+                println!("\n[usage] input {} (cached {}), output {} (reasoning {})",
+                    usage.input_tokens,
+                    usage.input_tokens_details.map(|d| d.cached_tokens).unwrap_or(0),
+                    usage.output_tokens,
+                    usage.output_tokens_details.map(|d| d.reasoning_tokens).unwrap_or(0));
+            }
+        }
+        ResponsesStreamEvent::Unknown { event_type } => {
+            // 服务端新增而 SDK 尚未支持的事件，保留事件名透传，不中断流
+        }
+        _ => {}
+    }
+}
+```
+
+### 多轮与工具调用回传
+
+`input` 为输入项列表，支持 `message` / `function_call` / `function_call_output` / `custom_tool_call` / `custom_tool_call_output` / `reasoning` / `web_search_call`。工具调用的配对规则：每个 `function_call` 必须有同 `call_id` 的 `function_call_output`；`web_search_call` 原样回传即可（SDK 保留未知字段），服务端自动恢复搜索结果。
+
+```rust
+let history = vec![
+    ResponseInputItem::Message(InputMessage {
+        role: Some(ResponseRole::User),
+        content: Some(MessageContent::Text("北京今天多少度？".into())),
+    }),
+    ResponseInputItem::FunctionCall(FunctionCallInputItem {
+        call_id: "call_0".into(),
+        name: "get_weather".into(),
+        arguments: "{\"city\": \"北京\"}".into(),
+    }),
+    ResponseInputItem::FunctionCallOutput(FunctionCallOutputInputItem {
+        call_id: "call_0".into(),
+        output: FunctionOutputContent::Text("晴，32℃".into()),
+    }),
+];
+```
+
+### 图片输入
+
+`input_image` 内容块支持两种来源，**互斥**（都不传或都传返回 400）：
+
+| 字段 | 说明 |
+|------|------|
+| `image_url` | http(s) URL（≤8192 字符）或 base64 data URL，支持 JPEG / PNG / GIF / WebP |
+| `file_id` | Files API 上传返回的 `file-api-...` ID，不受 32 MiB 内联限制（单张最大 64 MiB），此时 `detail` 被忽略 |
+
+仅 `deepseek-v4-flash-vision-exp` 真正处理图片，其他模型将图片替换为占位文本；图片只能出现在 user / developer 消息及工具输出中，system / assistant 消息含图片返回 400。
+
+```rust
+ResponseInputItem::Message(InputMessage {
+    role: Some(ResponseRole::User),
+    content: Some(MessageContent::Blocks(vec![
+        ContentBlock::InputText(TextBlock { text: "描述这张图".into() }),
+        ContentBlock::InputImage(InputImageBlock {
+            file_id: Some("file-api-0a1b2c3d4e5f60718293a4b5c6d7e8f9".into()),
+            detail: Some(ImageDetail::High),
+            ..Default::default()
+        }),
+    ])),
+})
+```
+
+### 参数支持速览
+
+| 参数 | 说明 |
+|------|------|
+| `model` / `input` / `instructions` / `stream` | 完整支持；`input` 与 `instructions` 至少传一个 |
+| `temperature` / `top_p` | 支持，思考模式下不生效 |
+| `max_output_tokens` / `top_logprobs`（0–20）/ `user` | 支持 |
+| `tools` / `tool_choice` | function、web_search（含 `web_search_2025_08_26`）；tool_choice 支持 none / auto / required / 指定工具 |
+| `reasoning.effort` | `none`–`max` 七档：none 关闭，minimal/low → low，medium/high/xhigh → high，max 最高 |
+| `text.format` | text / json_object / json_schema |
+| `parallel_tool_calls` / `store` / `previous_response_id` 等 | 不支持，传入被静默忽略 |
+
+## Files API
+
+上传图片文件并在对话中通过 `file_id` 引用，适合多请求复用同一图片或发送超过内联限制的大图。文件归属 API key，可被 Chat Completions 与 Responses API 共同引用。
+
+```rust
+// 上传：格式按文件实际内容判断（JPEG/PNG/GIF/WebP），支持设置有效期（3600–2592000 秒，
+// 即 1 小时至 30 天），None 表示永久有效
+let png = std::fs::read("chart.png")?;
+let file = client.files().upload("chart.png", png, Some(7 * 24 * 3600)).await?;
+println!("{} -> {} bytes, 过期于 {}", file.id, file.bytes,
+    file.expires_at.map(|t| t.to_string()).unwrap_or_else(|| "永久".into()));
+
+// 列出：游标分页
+let page = client.files().list(ListFilesParams {
+    limit: Some(20),
+    order: Some(ListOrder::Desc),
+    ..Default::default()
+}).await?;
+if page.has_more {
+    let next = client.files().list(ListFilesParams {
+        after: page.last_id,
+        ..Default::default()
+    }).await?;
+}
+
+// 查询 / 删除
+let info = client.files().retrieve(&file.id).await?;
+let deleted = client.files().delete(&file.id).await?;
+assert!(deleted.deleted);
+```
+
+限制速览：单文件最大 64 MiB，文件名最长 512 字符，单用户 25 GiB / 10000 个文件，上传须在 10 分钟内完成。
+
 ## Thinking Mode
 
 DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回思维链。开关与强度控制：
@@ -134,10 +290,21 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 | Endpoint | Method | Status |
 |----------|--------|--------|
 | `/chat/completions` | POST | Supported (sync + SSE stream, thinking mode, tool calling, text protocol fallback) |
+| `/responses` | POST | Supported (sync + SSE stream, images via `image_url`/`file_id`, function/web_search tools, reasoning effort) |
+| `/files` | POST | Supported (multipart upload with `expires_after`) |
+| `/files` | GET | Supported (cursor pagination: after / limit / order / purpose) |
+| `/files/{file_id}` | GET | Supported |
+| `/files/{file_id}` | DELETE | Supported |
 | `/models` | GET | Supported |
 | `/user/balance` | GET | Supported |
 
 ## Changelog
+
+### Unreleased
+
+- **Responses API**：`client.responses()` 非流式与流式调用（`create` / `create_stream`）；输入项覆盖 message / function_call / function_call_output / custom_tool_call / custom_tool_call_output / reasoning / web_search_call（保留未知字段支持原样回传）；图片 `image_url` / `file_id` 互斥二选一；reasoning effort 七档；流式事件全量解析，终止事件（completed / incomplete / failed）后结束流，未知事件降级为 `Unknown` 透传不中断；`ResponseObject::output_text()` 便捷拼接
+- **Files API**：`client.files()` 上传（multipart 手工构造，零新增依赖，`expires_after` 支持 1 小时–30 天有效期）、列出（游标分页）、查询、删除；上传 Content-Type 按文件实际内容嗅探（JPEG / PNG / GIF / WebP）
+- **HTTP 层**：client 新增 `get_with_query` / `delete` / `post_multipart` 通用方法
 
 ### 0.1.1
 
