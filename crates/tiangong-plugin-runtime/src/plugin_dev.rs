@@ -402,7 +402,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             project.join("release/plugin.json"),
-            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"dist/index.html"}]}}"#,
+            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"hint":"安装链验证能力"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"安装链验证","entry":"dist/index.html"}]}}"#,
         )
         .unwrap();
         std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
@@ -435,6 +435,14 @@ mod tests {
         assert!(
             crate::registry::plugin_manifest("inst-demo").is_some(),
             "注册表应可见已装插件"
+        );
+        // @提及候选实时聚合：安装后立即可见（不依赖会话 Core 快照）。
+        let mentions = crate::registry::collect_mention_candidates();
+        assert!(
+            mentions
+                .iter()
+                .any(|candidate| candidate.value == "@plugin:inst-demo"),
+            "安装后 mention 候选应立即可见：{mentions:?}"
         );
     }
 

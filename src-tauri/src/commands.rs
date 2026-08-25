@@ -1862,15 +1862,13 @@ pub async fn stop_audio() -> Result<(), String> {
 
 /// 获取 @提及补全候选列表。
 ///
-/// 经 Core 聚合（CoreManager::get_any_mentions 遍历任意活跃 Core 的全部插件，
-/// 含 native 与 WASM 插件经 mention 标准接口贡献的候选）。原硬编码的 skill/mcp
-/// 调用已迁入各自 WASM 插件的 mention-candidates 导出，host 不再区分插件类型。
-/// 无活跃 Core 时返回空列表。
+/// 经插件注册表实时聚合（WASM 与 TS 插件的 mention 候选）。原取活跃 Core
+/// 的插件快照——会话创建后新装插件的适配器不进已有 Core，@ 候选看不到；
+/// 注册表聚合让安装/卸载/启停立即反映。原硬编码的 skill/mcp 调用早已迁入
+/// 各插件的 mention-candidates 导出。
 #[tauri::command]
-pub async fn get_mention_candidates(
-    state: State<'_, TiangongApp>,
-) -> Result<Vec<MentionCandidate>, String> {
-    Ok(state.core_manager.get_any_mentions())
+pub async fn get_mention_candidates() -> Result<Vec<MentionCandidate>, String> {
+    Ok(tiangong_plugin_runtime::registry::collect_mention_candidates())
 }
 
 /// 获取输入框缓存。

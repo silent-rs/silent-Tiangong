@@ -159,6 +159,21 @@ impl MentionCandidateProvider for TsPluginAdapter {
     }
 }
 
+/// 按清单静态生成 @提及候选（未声明 mention 返回 None）。
+/// 供注册表实时聚合使用——TS 插件的候选是纯清单数据，不依赖适配器实例
+///（适配器弱引用由会话 Core 构建时填充，安装后不存在）。
+pub(crate) fn mention_candidate_from_manifest(
+    manifest: &PluginManifest,
+) -> Option<tiangong_core::MentionCandidate> {
+    let (label, hint) = mention_candidate_parts(manifest)?;
+    Some(tiangong_core::MentionCandidate {
+        value: format!("@plugin:{}", manifest.id),
+        label,
+        kind: "plugin".to_string(),
+        hint,
+    })
+}
+
 /// 从清单推导 @提及候选的展示字段：label 取首个 UI 贡献标题（缺省插件 id），
 /// hint 取 mention.hint（未声明 mention 则无候选）。
 fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String)> {

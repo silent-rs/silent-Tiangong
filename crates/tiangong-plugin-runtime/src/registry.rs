@@ -702,6 +702,36 @@ pub fn invoke_sidecar(
 }
 
 /// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
+/// 实时聚合全部已加载插件（WASM 与 TS）的 @提及候选。
+///
+/// 不依赖会话 Core 的插件快照——Core 的插件列表在会话创建时定档，运行中
+/// 新装插件的适配器不会进入已有 Core；经注册表聚合则安装/卸载/启停立即
+/// 反映（与 `get_mentions` 对各 Core 的遍历结果一致，因为 adapter 同源）。
+pub fn collect_mention_candidates() -> Vec<tiangong_core::MentionCandidate> {
+    use tiangong_core::tool_override::MentionCandidateProvider;
+
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for loaded in plugins.values() {
+        if !loaded.enabled {
+            continue;
+        }
+        // WASM 插件：候选经适配器动态收集（wasm 导出，如 skill/mcp 列表）。
+        for adapter in loaded.instances.iter().filter_map(std::sync::Weak::upgrade) {
+            out.extend(adapter.mention_candidates());
+        }
+        // TS 插件：mention 是纯清单数据，静态生成——适配器弱引用由会话
+        // Core 构建时填充，安装后不可达；静态生成让安装即进候选。
+        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&loaded.manifest)
+        {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
 pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     let plugins = loaded_plugins().lock().ok()?;
     let loaded = plugins.get(plugin_id)?;
