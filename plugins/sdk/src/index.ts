@@ -313,6 +313,40 @@ export function createToolProvider(bridge: HostBridge) {
 }
 
 /** 便捷的存储读写（storage.* 封装，值为字符串）。 */
+/** 保存文件请求（saveFileDialog）。 */
+export interface SaveFileRequest {
+  suggestedName: string;
+  /** 文本原样写入；二进制先 base64 并置 encoding。 */
+  contents: string;
+  encoding?: 'base64';
+}
+
+/** 保存文件结果：cancelled 为 true 表示用户取消了对话框。 */
+export interface SaveFileResult {
+  cancelled: boolean;
+  path?: string;
+}
+
+/**
+ * 经宿主原生保存对话框把内容写入用户选择的位置（权限 dialog.use）。
+ * 宿主 webview 是 WebKit（macOS），没有浏览器的 File System Access API
+ * （showSaveFilePicker 等）——插件导出文件必须走本通道。
+ */
+export async function saveFileDialog(
+  bridge: HostBridge,
+  request: SaveFileRequest,
+): Promise<SaveFileResult> {
+  const raw = await bridge.call(
+    'dialog.saveFile',
+    JSON.stringify({
+      suggested_name: request.suggestedName,
+      contents: request.contents,
+      ...(request.encoding ? { encoding: request.encoding } : {}),
+    }),
+  );
+  return JSON.parse(raw) as SaveFileResult;
+}
+
 export const pluginStorage = {
   async get(bridge: HostBridge, key: string): Promise<string | null> {
     const result = await bridge.call('storage.get', JSON.stringify({ key }));

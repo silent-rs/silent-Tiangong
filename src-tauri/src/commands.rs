@@ -4753,7 +4753,7 @@ pub async fn bridge_call(
     method: String,
     payload: String,
 ) -> Result<String, String> {
-    if method.starts_with("plugin-dev.") {
+    if method.starts_with("plugin-dev.") || method.starts_with("dialog.") {
         return tokio::task::spawn_blocking(move || {
             tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
         })

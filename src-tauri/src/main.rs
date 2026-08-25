@@ -500,6 +500,67 @@ fn run_gui() {
                 ));
             }
 
+            // 系统对话框原语：插件保存文件（导出结果等）。宿主 webview 是
+            // WebKit（macOS），无 File System Access API——保存必须经原生
+            // 对话框由宿主落盘；写入位置由用户在对话框中显式选择。
+            {
+                use tauri_plugin_dialog::DialogExt;
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_dialog_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| {
+                        if method != "dialog.saveFile" {
+                            anyhow::bail!("未知对话框方法 {method}");
+                        }
+                        #[derive(serde::Deserialize)]
+                        struct SaveRequest {
+                            suggested_name: String,
+                            /// 文件内容（文本原样写入；二进制请先 base64 并带 encoding 字段）。
+                            contents: String,
+                            #[serde(default)]
+                            encoding: Option<String>,
+                        }
+                        let request: SaveRequest = serde_json::from_str(payload)
+                            .map_err(|error| anyhow::anyhow!("保存请求格式无效：{error}"))?;
+                        if request.suggested_name.trim().is_empty() {
+                            anyhow::bail!("suggested_name 不能为空");
+                        }
+                        if request.contents.len() > 100 * 1024 * 1024 {
+                            anyhow::bail!("内容超过 100MB 上限");
+                        }
+                        let bytes: Vec<u8> = match request.encoding.as_deref() {
+                            Some("base64") => {
+                                use base64::Engine;
+                                base64::engine::general_purpose::STANDARD
+                                    .decode(request.contents.as_bytes())
+                                    .map_err(|error| anyhow::anyhow!("base64 内容无效：{error}"))?
+                            }
+                            _ => request.contents.into_bytes(),
+                        };
+                        // 原生保存对话框（阻塞等待用户选择，与安装确认同款
+                        // 后台线程语义——bridge 层调用方已 spawn_blocking）。
+                        let handle = app_handle.clone();
+                        let picked = tokio::task::block_in_place(|| {
+                            handle
+                                .dialog()
+                                .file()
+                                .set_file_name(&request.suggested_name)
+                                .blocking_save_file()
+                        });
+                        let Some(path) = picked else {
+                            return Ok(r#"{"cancelled":true}"#.to_string());
+                        };
+                        let path = path
+                            .into_path()
+                            .map_err(|error| anyhow::anyhow!("保存路径无效：{error}"))?;
+                        std::fs::write(&path, bytes)
+                            .map_err(|error| anyhow::anyhow!("写入文件失败：{}：{error}", path.display()))?;
+                        tracing::info!(plugin_id, path = %path.display(), "插件经对话框保存文件");
+                        Ok(serde_json::json!({ "cancelled": false, "path": path.display().to_string() })
+                            .to_string())
+                    },
+                ));
+            }
+
             // webview 容器原语（第四种声明式容器）：插件经 bridge webview.*
             // 创建/导航/eval 真实 webview 实例；实例按插件隔离
             // （view_id = webview:<plugin_id>），引擎复用 browser 基础设施。
