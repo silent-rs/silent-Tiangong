@@ -863,14 +863,32 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         Ok(value) => value,
         Err(_) => return 3,
     };
-    let child_ok = std::env::current_exe()
-        .and_then(|program| {
-            std::process::Command::new(program)
-                .arg("--windows-self-check-child-probe")
-                .arg(child_request)
-                .status()
-        })
-        .is_ok_and(|status| status.success());
+    let child_result = std::env::current_exe().and_then(|program| {
+        std::process::Command::new(program)
+            .arg("--windows-self-check-child-probe")
+            .arg(child_request)
+            .current_dir(&request.workspace)
+            .output()
+    });
+    let child_ok = match child_result {
+        Ok(output) => {
+            if !output.status.success() {
+                eprintln!(
+                    "Windows 文件隔离探针: 受限子进程退出失败 ({})，stderr={}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            output.status.success()
+        }
+        Err(error) => {
+            eprintln!(
+                "Windows 文件隔离探针: 启动受限子进程失败: {error:?} (os={:?})",
+                error.raw_os_error()
+            );
+            false
+        }
+    };
     eprintln!("Windows 文件隔离探针: 读取子进程报告");
     probe.child_restrictions_inherited = child_ok
         && std::fs::read(&request.child_report_path)
