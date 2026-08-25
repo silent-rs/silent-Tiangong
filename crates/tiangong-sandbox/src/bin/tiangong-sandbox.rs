@@ -830,6 +830,8 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         return 2;
     };
     eprintln!("Windows 文件隔离探针: 验证父进程边界");
+    let (git_metadata_write_blocked, git_metadata_readable) =
+        probe_windows_git_metadata(&request.git_config, "父进程");
     let mut probe = WindowsProbeReport {
         workspace_write: std::fs::write(request.workspace.join("inside.txt"), "ok").is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp.txt"), "ok").is_ok(),
@@ -843,13 +845,8 @@ fn run_windows_file_probe(raw: &str) -> i32 {
             .is_some_and(|path| std::fs::read(path).is_err()),
         outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
         outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
-        git_metadata_write_blocked: std::fs::write(&request.git_config, "PWNED").is_err()
-            && request
-                .git_config
-                .parent()
-                .is_some_and(|git| std::fs::remove_dir_all(git).is_err()),
-        git_metadata_readable: std::fs::read_to_string(&request.git_config)
-            .is_ok_and(|value| value == "safe\n"),
+        git_metadata_write_blocked,
+        git_metadata_readable,
         network_blocked: run_network_probe(&request.network_address) != 0,
         sensitive_read_blocked: request
             .sensitive_paths
@@ -910,6 +907,8 @@ fn run_windows_child_probe(raw: &str) -> i32 {
         return 2;
     };
     eprintln!("Windows 文件隔离探针: 验证子进程边界");
+    let (git_metadata_write_blocked, git_metadata_readable) =
+        probe_windows_git_metadata(&request.git_config, "子进程");
     let report = WindowsProbeReport {
         workspace_write: std::fs::write(request.workspace.join("inside-child.txt"), "ok").is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp-child.txt"), "ok").is_ok(),
@@ -921,13 +920,8 @@ fn run_windows_child_probe(raw: &str) -> i32 {
             .sensitive_paths
             .first()
             .is_some_and(|path| std::fs::read(path).is_err()),
-        git_metadata_write_blocked: std::fs::write(&request.git_config, "PWNED").is_err()
-            && request
-                .git_config
-                .parent()
-                .is_some_and(|git| std::fs::remove_dir_all(git).is_err()),
-        git_metadata_readable: std::fs::read_to_string(&request.git_config)
-            .is_ok_and(|value| value == "safe\n"),
+        git_metadata_write_blocked,
+        git_metadata_readable,
         outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
         outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
         network_blocked: run_network_probe(&request.network_address) != 0,
@@ -949,6 +943,23 @@ fn run_windows_child_probe(raw: &str) -> i32 {
         Some(()) => 0,
         None => 3,
     }
+}
+
+#[cfg(windows)]
+fn probe_windows_git_metadata(path: &Path, process: &str) -> (bool, bool) {
+    let write = std::fs::write(path, "PWNED");
+    let delete = path.parent().map(std::fs::remove_dir_all);
+    let read = std::fs::read_to_string(path);
+    let write_blocked = write.is_err();
+    let delete_blocked = delete.as_ref().is_some_and(|result| result.is_err());
+    let readable = read.as_ref().is_ok_and(|value| value == "safe\n");
+    eprintln!(
+        "Windows 文件隔离探针: {process} Git 写入拒绝={write_blocked} ({:?})，删除拒绝={delete_blocked} ({:?})，只读内容保持={readable} ({:?})",
+        write.as_ref().err(),
+        delete.as_ref().and_then(|result| result.as_ref().err()),
+        read.as_ref().map(String::as_str),
+    );
+    (write_blocked && delete_blocked, readable)
 }
 
 #[cfg(windows)]
