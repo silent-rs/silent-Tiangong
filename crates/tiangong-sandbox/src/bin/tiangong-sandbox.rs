@@ -833,9 +833,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     let (git_metadata_write_blocked, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "父进程");
     let mut probe = WindowsProbeReport {
-        workspace_write: tiangong_sandbox::canonicalize_path(&request.workspace)
-            .and_then(|workspace| std::fs::write(workspace.join("inside.txt"), "ok"))
-            .is_ok(),
+        workspace_write: probe_windows_workspace_write(&request.workspace, "inside.txt", "父进程"),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp.txt"), "ok").is_ok(),
         existing_workspace_read_write: probe_existing_workspace_file(
             &request.existing_workspace_file,
@@ -912,9 +910,11 @@ fn run_windows_child_probe(raw: &str) -> i32 {
     let (git_metadata_write_blocked, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "子进程");
     let report = WindowsProbeReport {
-        workspace_write: tiangong_sandbox::canonicalize_path(&request.workspace)
-            .and_then(|workspace| std::fs::write(workspace.join("inside-child.txt"), "ok"))
-            .is_ok(),
+        workspace_write: probe_windows_workspace_write(
+            &request.workspace,
+            "inside-child.txt",
+            "子进程",
+        ),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp-child.txt"), "ok").is_ok(),
         existing_workspace_read_write: probe_existing_workspace_file(
             &request.existing_workspace_file,
@@ -946,6 +946,28 @@ fn run_windows_child_probe(raw: &str) -> i32 {
     {
         Some(()) => 0,
         None => 3,
+    }
+}
+
+#[cfg(windows)]
+fn probe_windows_workspace_write(workspace: &Path, filename: &str, process: &str) -> bool {
+    let workspace = match tiangong_sandbox::canonicalize_path(workspace) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            eprintln!("Windows 文件隔离探针: {process}解析工作区失败: {error}");
+            return false;
+        }
+    };
+    let target = workspace.join(filename);
+    match std::fs::write(&target, "ok") {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "Windows 文件隔离探针: {process}写入工作区失败 ({}): {error}",
+                target.display()
+            );
+            false
+        }
     }
 }
 
