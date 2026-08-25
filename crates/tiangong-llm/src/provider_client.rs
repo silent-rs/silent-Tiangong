@@ -689,59 +689,12 @@ impl SingleProviderClient {
         tool_choice: Option<ToolChoice>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
+        // 流式失败直接失败，不回退非流式：中途断开时已推送内容会与非流式
+        // 完整响应拼接重复，且非流式整包等待更容易超时。不支持流式的服务不再兼容。
         let response = self
-            .stream_function_calls_attempt(&req, &functions, tool_choice, &chunk_tx)
+            .stream_function_calls_streaming(&req, &functions, tool_choice, &chunk_tx)
             .await?;
         filter_invalid_openai_tool_calls(self.protocol(), &functions, response)
-    }
-
-    async fn stream_function_calls_attempt(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
-    ) -> Result<ModelFunctionResponse> {
-        match self
-            .stream_function_calls_streaming(req, functions, tool_choice.clone(), chunk_tx)
-            .await
-        {
-            Ok(response) => Ok(response),
-            Err(err) => {
-                // 确定性失败（400/401 等）换非流式重发同样失败，直接失败不再回退。
-                if is_deterministic_llm_error(&err) {
-                    return Err(err);
-                }
-                if let Some(on_retry) = &self.on_retry {
-                    on_retry(1, MAX_RETRIES, 0, &err.to_string());
-                }
-                // 直接 await provider future；上层 abort 流任务时 HTTP future 会随之
-                // drop，不能使用不可取消的 spawn_blocking，否则旧请求会越过轮次屏障。
-                let response = self
-                    .complete_with_functions_with_tool_choice_async_once(
-                        req,
-                        functions,
-                        tool_choice,
-                    )
-                    .await
-                    .context("流式失败后回退非流式调用失败")?;
-                if !response.reasoning_content.is_empty() {
-                    let _ = chunk_tx.send(ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        usage: None,
-                    });
-                }
-                if !response.text.is_empty() {
-                    let _ = chunk_tx.send(ModelStreamChunk {
-                        content: response.text.clone(),
-                        reasoning_content: String::new(),
-                        usage: None,
-                    });
-                }
-                Ok(response)
-            }
-        }
     }
 
     async fn stream_function_calls_streaming(
@@ -942,35 +895,13 @@ impl SingleProviderClient {
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
         if use_stream_mode() {
-            match self.complete_with_functions_stream_impl_with_tool_choice(
+            // 流式失败直接失败，不回退非流式（同 async 路径）。
+            self.complete_with_functions_stream_impl_with_tool_choice(
                 req,
                 functions,
-                tool_choice.clone(),
+                tool_choice,
                 on_delta,
-            ) {
-                Ok(resp) => Ok(resp),
-                Err(err) if is_deterministic_llm_error(&err) => Err(err),
-                Err(_) => {
-                    // 流式失败，回退到非流式，一次性推送 reasoning + content
-                    let resp =
-                        self.complete_with_functions_with_tool_choice(req, functions, tool_choice)?;
-                    if !resp.reasoning_content.is_empty() {
-                        on_delta(&ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: resp.reasoning_content.clone(),
-                            usage: None,
-                        });
-                    }
-                    if !resp.text.is_empty() {
-                        on_delta(&ModelStreamChunk {
-                            content: resp.text.clone(),
-                            reasoning_content: String::new(),
-                            usage: None,
-                        });
-                    }
-                    Ok(resp)
-                }
-            }
+            )
         } else {
             let resp =
                 self.complete_with_functions_with_tool_choice(req, functions, tool_choice)?;
@@ -1894,22 +1825,6 @@ fn block_on_provider_stream(
 
 fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
     anyhow::Error::new(error)
-}
-
-/// 判断错误是否为确定性失败（配置、认证、请求无效类）。
-///
-/// 这类错误与调用方式（流式/非流式）无关，换非流式重发同样失败，
-/// 流式失败后不应回退非流式重试。
-fn is_deterministic_llm_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<crate::error::LlmError>()
-        .is_some_and(|error| {
-            matches!(
-                error,
-                crate::error::LlmError::Configuration(_)
-                    | crate::error::LlmError::Authentication(_)
-                    | crate::error::LlmError::InvalidRequest(_)
-            )
-        })
 }
 
 // ── 重试相关 ──────────────────────────────────────────────
