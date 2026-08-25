@@ -880,6 +880,15 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     });
     eprintln!("Windows 文件隔离探针: 原程序派生结果={current_exe_result:?}");
 
+    let null_read = std::fs::OpenOptions::new().read(true).open("NUL");
+    let null_write = std::fs::OpenOptions::new().write(true).open("NUL");
+    eprintln!(
+        "Windows 文件隔离探针: 直接打开空设备读取={:?}，写入={:?}",
+        null_read.as_ref().map(|_| ()),
+        null_write.as_ref().map(|_| ())
+    );
+    let null_device_ok = null_read.is_ok() && null_write.is_ok();
+
     let inherited_result = std::process::Command::new(&request.workspace_executable)
         .arg("--windows-self-check-child-probe")
         .arg(&child_request)
@@ -888,6 +897,63 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     eprintln!("Windows 文件隔离探针: 继承输出派生结果={inherited_result:?}");
     let inherited_ok = inherited_result.is_ok_and(|status| status.success());
     let _ = std::fs::remove_file(&request.child_report_path);
+
+    let stdin_null_result = std::process::Command::new(&request.workspace_executable)
+        .arg("--windows-self-check-child-probe")
+        .arg(&child_request)
+        .current_dir(&request.workspace)
+        .stdin(std::process::Stdio::null())
+        .status();
+    eprintln!("Windows 文件隔离探针: 仅空输入派生结果={stdin_null_result:?}");
+    let stdin_null_ok = stdin_null_result.is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&request.child_report_path);
+
+    let piped_stdout_result = std::process::Command::new(&request.workspace_executable)
+        .arg("--windows-self-check-child-probe")
+        .arg(&child_request)
+        .current_dir(&request.workspace)
+        .stdout(std::process::Stdio::piped())
+        .status();
+    eprintln!("Windows 文件隔离探针: 仅输出管道派生结果={piped_stdout_result:?}");
+    let piped_stdout_ok = piped_stdout_result.is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&request.child_report_path);
+
+    let file_stdout_path = request.workspace.join("child-stdio.stdout");
+    let file_stderr_path = request.workspace.join("child-stdio.stderr");
+    let file_stdio_result = match (
+        std::fs::File::open(&request.existing_workspace_file),
+        std::fs::File::create(&file_stdout_path),
+        std::fs::File::create(&file_stderr_path),
+    ) {
+        (Ok(stdin), Ok(stdout), Ok(stderr)) => {
+            std::process::Command::new(&request.workspace_executable)
+                .arg("--windows-self-check-child-probe")
+                .arg(&child_request)
+                .current_dir(&request.workspace)
+                .stdin(std::process::Stdio::from(stdin))
+                .stdout(std::process::Stdio::from(stdout))
+                .stderr(std::process::Stdio::from(stderr))
+                .status()
+        }
+        (stdin, stdout, stderr) => {
+            eprintln!(
+                "Windows 文件隔离探针: 准备工作区 stdio 文件失败，输入={:?}，输出={:?}，错误={:?}",
+                stdin.as_ref().map(|_| ()),
+                stdout.as_ref().map(|_| ()),
+                stderr.as_ref().map(|_| ())
+            );
+            Err(stdin
+                .err()
+                .or_else(|| stdout.err())
+                .or_else(|| stderr.err())
+                .unwrap_or_else(|| std::io::Error::other("准备工作区 stdio 文件失败")))
+        }
+    };
+    eprintln!("Windows 文件隔离探针: 工作区文件 stdio 派生结果={file_stdio_result:?}");
+    let file_stdio_ok = file_stdio_result.is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&request.child_report_path);
+    let _ = std::fs::remove_file(file_stdout_path);
+    let _ = std::fs::remove_file(file_stderr_path);
 
     let null_result = std::process::Command::new(&request.workspace_executable)
         .arg("--windows-self-check-child-probe")
@@ -927,6 +993,10 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     };
     eprintln!("Windows 文件隔离探针: 读取子进程报告");
     probe.child_restrictions_inherited = inherited_ok
+        && null_device_ok
+        && stdin_null_ok
+        && piped_stdout_ok
+        && file_stdio_ok
         && null_ok
         && child_ok
         && std::fs::read(&request.child_report_path)

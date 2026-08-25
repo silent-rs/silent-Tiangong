@@ -28,11 +28,14 @@ use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    CONTAINER_INHERIT_ACE, CreateRestrictedToken, CreateWellKnownSid, DACL_SECURITY_INFORMATION,
-    DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, NO_INHERITANCE, OBJECT_INHERIT_ACE, PSID,
-    SECURITY_CAPABILITIES, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, SetTokenInformation,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_QUERY,
-    TokenDefaultDacl, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
+    AllocateAndInitializeSid, CONTAINER_INHERIT_ACE, CreateRestrictedToken, CreateWellKnownSid,
+    DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, NO_INHERITANCE,
+    OBJECT_INHERIT_ACE, PSID, SECURITY_CAPABILITIES, SECURITY_MAX_SID_SIZE,
+    SECURITY_RESOURCE_MANAGER_AUTHORITY, SID_AND_ATTRIBUTES, SetTokenInformation,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
+    TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenUser, WinAuthenticatedUserSid,
+    WinBuiltinUsersSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
+    WinRestrictedCodeSid, WinWorldSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
@@ -67,6 +70,7 @@ use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCE
 use super::{SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
 const SE_GROUP_ENABLED: u32 = 4;
+const SE_GROUP_LOGON_ID: u32 = 0xc000_0000;
 const ACL_MUTATION_MUTEX: &str = "Local\\TiangongSandboxAclMutation-v1";
 const FILE_WRITE_ACCESS: u32 = FILE_WRITE_DATA
     | FILE_APPEND_DATA
@@ -115,11 +119,18 @@ pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
     let capabilities = CapabilitySet::new(request.policy.allow_network)?;
     trace_self_check(&request, "创建临时 AppContainer 身份");
     let mut profile = AppContainerProfile::create(&capabilities)?;
+    trace_self_check(&request, "创建临时受限身份");
+    let restriction = RestrictionSid::new()?;
     trace_self_check(&request, "应用临时目录授权");
-    let mut grants = AclGrants::apply(profile.sid, request.program, request.policy)?;
+    let mut grants = AclGrants::apply(
+        profile.sid,
+        restriction.sid,
+        request.program,
+        request.policy,
+    )?;
 
     trace_self_check(&request, "启动受限目标进程");
-    let execution = run_restricted_process(&request, &profile, &capabilities);
+    let execution = run_restricted_process(&request, &profile, &restriction, &capabilities);
     trace_self_check(&request, "受限目标进程已结束");
     let acl_cleanup = grants.revoke();
     trace_self_check(&request, "临时目录授权已撤销");
@@ -308,10 +319,50 @@ impl CapabilitySet {
     }
 }
 
+struct RestrictionSid {
+    sid: PSID,
+}
+
+impl RestrictionSid {
+    fn new() -> Result<Self> {
+        let value = scru128::new().to_u128();
+        let mut sid = std::ptr::null_mut();
+        let created = unsafe {
+            AllocateAndInitializeSid(
+                &SECURITY_RESOURCE_MANAGER_AUTHORITY,
+                4,
+                (value >> 96) as u32,
+                (value >> 64) as u32,
+                (value >> 32) as u32,
+                value as u32,
+                0,
+                0,
+                0,
+                0,
+                &mut sid,
+            )
+        };
+        if created == 0 {
+            return Err(std::io::Error::last_os_error()).context("创建 Windows 临时受限 SID 失败");
+        }
+        Ok(Self { sid })
+    }
+}
+
+impl Drop for RestrictionSid {
+    fn drop(&mut self) {
+        if !self.sid.is_null() {
+            unsafe {
+                FreeSid(self.sid);
+            }
+        }
+    }
+}
+
 struct RestrictedToken(OwnedHandle);
 
 impl RestrictedToken {
-    fn new(appcontainer_sid: PSID) -> Result<Self> {
+    fn new(restriction_sid: PSID, appcontainer_sid: PSID) -> Result<Self> {
         let mut source = std::ptr::null_mut();
         if unsafe {
             OpenProcessToken(
@@ -326,6 +377,66 @@ impl RestrictedToken {
         }
         let source = unsafe { OwnedHandle::from_raw_handle(source) };
 
+        let user_storage = token_information(raw_handle(&source), TokenUser, "用户")?;
+        let user = unsafe { &*user_storage.as_ptr().cast::<TOKEN_USER>() };
+        let group_storage = token_information(raw_handle(&source), TokenGroups, "用户组")?;
+        let groups = unsafe { &*group_storage.as_ptr().cast::<TOKEN_GROUPS>() };
+        let group_entries = unsafe {
+            std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize)
+        };
+
+        let mut sid_storage = Vec::new();
+        for kind in [
+            WinWorldSid,
+            WinBuiltinUsersSid,
+            WinAuthenticatedUserSid,
+            WinRestrictedCodeSid,
+        ] {
+            let mut storage = vec![0u8; SECURITY_MAX_SID_SIZE as usize].into_boxed_slice();
+            let mut size = storage.len() as u32;
+            if unsafe {
+                CreateWellKnownSid(
+                    kind,
+                    std::ptr::null_mut(),
+                    storage.as_mut_ptr().cast(),
+                    &mut size,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error())
+                    .context("创建 Windows 受限令牌兼容 SID 失败");
+            }
+            sid_storage.push(storage);
+        }
+
+        let mut restrictions = vec![
+            SID_AND_ATTRIBUTES {
+                Sid: restriction_sid,
+                Attributes: 0,
+            },
+            SID_AND_ATTRIBUTES {
+                Sid: appcontainer_sid,
+                Attributes: 0,
+            },
+            SID_AND_ATTRIBUTES {
+                Sid: user.User.Sid,
+                Attributes: 0,
+            },
+        ];
+        if let Some(logon) = group_entries
+            .iter()
+            .find(|group| group.Attributes & SE_GROUP_LOGON_ID != 0)
+        {
+            restrictions.push(SID_AND_ATTRIBUTES {
+                Sid: logon.Sid,
+                Attributes: 0,
+            });
+        }
+        restrictions.extend(sid_storage.iter_mut().map(|storage| SID_AND_ATTRIBUTES {
+            Sid: storage.as_mut_ptr().cast(),
+            Attributes: 0,
+        }));
+
         let mut token = std::ptr::null_mut();
         if unsafe {
             CreateRestrictedToken(
@@ -335,8 +446,8 @@ impl RestrictedToken {
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
-                0,
-                std::ptr::null(),
+                restrictions.len() as u32,
+                restrictions.as_ptr(),
                 &mut token,
             )
         } == 0
@@ -344,8 +455,9 @@ impl RestrictedToken {
             return Err(std::io::Error::last_os_error()).context("创建 Windows 受限主令牌失败");
         }
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
-        // 子进程对象沿用令牌默认 DACL，需允许同一 AppContainer 访问。
-        grant_token_default_access(raw_handle(&token), &[appcontainer_sid])?;
+        // 子进程对象沿用令牌默认 DACL；缺少这两个身份时 AppContainer 内的
+        // CreateProcess 会在文件权限已放行的情况下仍返回拒绝访问。
+        grant_token_default_access(raw_handle(&token), &[appcontainer_sid, restriction_sid])?;
         Ok(Self(token))
     }
 
@@ -507,7 +619,12 @@ struct AclGrants {
 }
 
 impl AclGrants {
-    fn apply(appcontainer_sid: PSID, program: &Path, policy: &SandboxPolicy) -> Result<Self> {
+    fn apply(
+        appcontainer_sid: PSID,
+        restriction_sid: PSID,
+        program: &Path,
+        policy: &SandboxPolicy,
+    ) -> Result<Self> {
         let mut grants = Self {
             roots: Vec::new(),
             active: true,
@@ -522,6 +639,13 @@ impl AclGrants {
                 NO_INHERITANCE,
                 false,
             )?;
+            grants.add(
+                restriction_sid,
+                program,
+                FILE_PROGRAM_ACCESS,
+                NO_INHERITANCE,
+                false,
+            )?;
             let writable = policy.writable_roots();
             for root in &writable {
                 grants.add(
@@ -531,11 +655,18 @@ impl AclGrants {
                     OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
                     true,
                 )?;
+                grants.add(
+                    restriction_sid,
+                    root,
+                    FILE_WORKSPACE_ACCESS,
+                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                    true,
+                )?;
             }
             for path in policy.read_only_roots() {
                 if path.exists() {
                     grants.deny(
-                        appcontainer_sid,
+                        restriction_sid,
                         &path,
                         FILE_WRITE_ACCESS,
                         OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
@@ -545,7 +676,7 @@ impl AclGrants {
             for path in policy.denied_read_roots() {
                 if path.exists() && writable.iter().any(|root| path.starts_with(root)) {
                     grants.deny(
-                        appcontainer_sid,
+                        restriction_sid,
                         &path,
                         FILE_ALL_ACCESS,
                         OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
@@ -744,6 +875,7 @@ impl Drop for AclMutationLock {
 fn run_restricted_process(
     request: &WindowsLaunchRequest<'_>,
     profile: &AppContainerProfile,
+    restriction: &RestrictionSid,
     capabilities: &CapabilitySet,
 ) -> Result<i32> {
     trace_self_check(request, "创建受限 Job");
@@ -766,7 +898,7 @@ fn run_restricted_process(
         &child_process_policy,
     )?;
     trace_self_check(request, "创建受限进程令牌");
-    let token = RestrictedToken::new(profile.sid)?;
+    let token = RestrictedToken::new(restriction.sid, profile.sid)?;
 
     let application = wide_os(request.program.as_os_str());
     let mut command_line = windows_command_line(request.program.as_os_str(), request.args);
@@ -808,7 +940,9 @@ fn run_restricted_process(
     let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess) };
     let thread = unsafe { OwnedHandle::from_raw_handle(process_info.hThread) };
     trace_self_check(request, "配置目标进程令牌默认访问表");
-    if let Err(error) = grant_process_token_default_access(raw_handle(&process), &[profile.sid]) {
+    if let Err(error) =
+        grant_process_token_default_access(raw_handle(&process), &[profile.sid, restriction.sid])
+    {
         unsafe {
             TerminateProcess(raw_handle(&process), 1);
             WaitForSingleObject(raw_handle(&process), INFINITE);
