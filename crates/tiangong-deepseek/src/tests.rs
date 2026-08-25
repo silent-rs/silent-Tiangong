@@ -527,3 +527,700 @@ fn tool_spec_serialization() {
             .contains_key("strict")
     );
 }
+
+// ── Responses API 请求序列化 ────────────────────────
+
+#[test]
+fn responses_request_full_serialization() {
+    use crate::types::{
+        ContentBlock, CreateResponseRequest, FunctionCallInputItem, FunctionCallOutputInputItem,
+        FunctionOutputContent, ImageDetail, InputImageBlock, InputMessage, MODEL_V4_FLASH,
+        MessageContent, ReasoningConfig, ReasoningEffortLevel, ResponseInput, ResponseInputItem,
+        ResponseRole, ResponsesFunctionTool, ResponsesTool, TextBlock, TextFormat,
+        TextFormatConfig,
+    };
+
+    let request = CreateResponseRequest {
+        model: MODEL_V4_FLASH.into(),
+        input: Some(ResponseInput::Items(vec![
+            ResponseInputItem::Message(InputMessage {
+                role: Some(ResponseRole::User),
+                content: Some(MessageContent::Blocks(vec![
+                    ContentBlock::InputText(TextBlock {
+                        text: "描述这张图".into(),
+                    }),
+                    ContentBlock::InputImage(InputImageBlock {
+                        image_url: None,
+                        detail: Some(ImageDetail::High),
+                        file_id: Some("file-api-abc".into()),
+                    }),
+                ])),
+            }),
+            ResponseInputItem::FunctionCall(FunctionCallInputItem {
+                call_id: "call_0".into(),
+                name: "get_weather".into(),
+                arguments: "{}".into(),
+            }),
+            ResponseInputItem::FunctionCallOutput(FunctionCallOutputInputItem {
+                call_id: "call_0".into(),
+                output: FunctionOutputContent::Text("晴".into()),
+            }),
+        ])),
+        instructions: Some("你是助手".into()),
+        reasoning: Some(ReasoningConfig {
+            effort: Some(ReasoningEffortLevel::High),
+        }),
+        max_output_tokens: Some(4096),
+        temperature: Some(1.5),
+        top_p: Some(0.9),
+        tools: Some(vec![ResponsesTool::Function(ResponsesFunctionTool {
+            name: "get_weather".into(),
+            description: Some("查天气".into()),
+            parameters: Some(json!({"type": "object"})),
+        })]),
+        text: Some(TextFormatConfig {
+            format: Some(TextFormat::Text),
+        }),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["model"], "deepseek-v4-flash");
+    assert_eq!(value["instructions"], "你是助手");
+    assert_eq!(value["reasoning"]["effort"], "high");
+    assert_eq!(value["input"][0]["type"], "message");
+    assert_eq!(value["input"][0]["role"], "user");
+    assert_eq!(value["input"][0]["content"][0]["type"], "input_text");
+    assert_eq!(value["input"][0]["content"][1]["type"], "input_image");
+    assert_eq!(value["input"][0]["content"][1]["file_id"], "file-api-abc");
+    assert_eq!(value["input"][0]["content"][1]["detail"], "high");
+    assert_eq!(value["input"][1]["type"], "function_call");
+    assert_eq!(value["input"][2]["type"], "function_call_output");
+    assert_eq!(value["input"][2]["output"], "晴");
+    assert_eq!(value["tools"][0]["type"], "function");
+    assert_eq!(value["tools"][0]["name"], "get_weather");
+    assert_eq!(value["text"]["format"]["type"], "text");
+    // 未设置的字段不应出现
+    assert!(value.get("stream").is_none());
+    assert!(value.get("user").is_none());
+    assert!(value.get("tool_choice").is_none());
+}
+
+#[test]
+fn responses_request_input_text_shorthand() {
+    use crate::types::{CreateResponseRequest, MODEL_V4_PRO, ResponseInput};
+
+    let request = CreateResponseRequest {
+        model: MODEL_V4_PRO.into(),
+        input: Some(ResponseInput::Text("你好".into())),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["input"], "你好");
+}
+
+#[test]
+fn responses_web_search_call_item_keeps_unknown_fields() {
+    use crate::types::ResponseInputItem;
+
+    let item: ResponseInputItem = serde_json::from_value(json!({
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "rust"},
+        "future_field": 42
+    }))
+    .unwrap();
+    // 原样回传：未知字段保留在 extra 中
+    let value = serde_json::to_value(&item).unwrap();
+    assert_eq!(value["future_field"], 42);
+    assert_eq!(value["action"]["query"], "rust");
+}
+
+// ── Responses API 响应反序列化 ──────────────────────
+
+#[test]
+fn responses_object_all_output_item_kinds() {
+    use crate::types::{ResponseObject, ResponseOutputItem, ResponseStatus};
+
+    let response: ResponseObject = serde_json::from_value(json!({
+        "id": "resp_1",
+        "object": "response",
+        "created_at": 1756000000,
+        "status": "completed",
+        "model": "deepseek-v4-flash",
+        "output": [
+            {"type": "reasoning", "id": "rs_1", "status": "completed",
+             "content": [{"type": "reasoning_text", "text": "思考"}]},
+            {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+             "content": [{"type": "output_text", "text": "你好"}]},
+            {"type": "function_call", "id": "fc_1", "status": "completed",
+             "call_id": "call_0", "name": "get_weather", "arguments": "{\"city\":\"北京\"}"},
+            {"type": "custom_tool_call", "id": "ct_1", "status": "completed",
+             "call_id": "call_1", "name": "apply_patch", "input": "*** Begin Patch"},
+            {"type": "web_search_call", "id": "ws_1", "status": "completed",
+             "action": {"type": "search", "query": "rust"}}
+        ],
+        "usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 80},
+            "output_tokens": 50,
+            "output_tokens_details": {"reasoning_tokens": 20},
+            "total_tokens": 150
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(response.status, ResponseStatus::Completed);
+    assert_eq!(response.output.len(), 5);
+    assert_eq!(response.output_text(), "你好");
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, 100);
+    assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, 80);
+    assert_eq!(usage.output_tokens_details.unwrap().reasoning_tokens, 20);
+    assert_eq!(usage.total_tokens, 150);
+    match &response.output[2] {
+        ResponseOutputItem::FunctionCall(call) => {
+            assert_eq!(call.call_id, "call_0");
+            assert_eq!(call.arguments, "{\"city\":\"北京\"}");
+        }
+        other => panic!("第 3 项应为 function_call：{other:?}"),
+    }
+    match &response.output[3] {
+        ResponseOutputItem::CustomToolCall(call) => assert_eq!(call.name, "apply_patch"),
+        other => panic!("第 4 项应为 custom_tool_call：{other:?}"),
+    }
+}
+
+#[test]
+fn responses_object_failed_and_incomplete() {
+    use crate::types::{ResponseObject, ResponseStatus};
+
+    let failed: ResponseObject = serde_json::from_value(json!({
+        "id": "resp_2", "object": "response", "status": "failed", "model": "m",
+        "output": [],
+        "error": {"code": "server_error", "message": "boom"}
+    }))
+    .unwrap();
+    assert_eq!(failed.status, ResponseStatus::Failed);
+    assert_eq!(
+        failed.error.as_ref().unwrap().code.as_deref(),
+        Some("server_error")
+    );
+
+    let incomplete: ResponseObject = serde_json::from_value(json!({
+        "id": "resp_3", "object": "response", "status": "incomplete", "model": "m",
+        "output": [],
+        "incomplete_details": {"reason": "max_output_tokens"}
+    }))
+    .unwrap();
+    assert_eq!(incomplete.status, ResponseStatus::Incomplete);
+    assert_eq!(
+        incomplete.incomplete_details.unwrap().reason.as_deref(),
+        Some("max_output_tokens")
+    );
+}
+
+#[test]
+fn responses_output_text_concatenates_only_message_text() {
+    use crate::types::{OutputContentBlock, OutputMessage, ResponseObject, ResponseOutputItem};
+
+    let response = ResponseObject {
+        output: vec![
+            ResponseOutputItem::Reasoning(Default::default()),
+            ResponseOutputItem::Message(OutputMessage {
+                content: vec![
+                    OutputContentBlock::OutputText(crate::types::TextBlock {
+                        text: "第一段，".into(),
+                    }),
+                    OutputContentBlock::OutputText(crate::types::TextBlock {
+                        text: "第二段".into(),
+                    }),
+                ],
+                ..Default::default()
+            }),
+            ResponseOutputItem::FunctionCall(Default::default()),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(response.output_text(), "第一段，第二段");
+}
+
+// ── Responses API 流式事件解析 ──────────────────────
+
+#[test]
+fn responses_stream_event_delta_and_item_events() {
+    use crate::responses::parse_stream_event;
+    use crate::types::ResponsesStreamEvent;
+
+    let delta = parse_stream_event(
+        r#"{"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"你好"}"#,
+    ).unwrap();
+    match delta {
+        ResponsesStreamEvent::OutputTextDelta {
+            sequence_number,
+            item_id,
+            output_index,
+            content_index,
+            delta,
+        } => {
+            assert_eq!(sequence_number, 5);
+            assert_eq!(item_id, "msg_1");
+            assert_eq!(output_index, 1);
+            assert_eq!(content_index, 0);
+            assert_eq!(delta, "你好");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let reasoning = parse_stream_event(
+        r#"{"type":"response.reasoning_text.delta","sequence_number":2,"delta":"思考中"}"#,
+    )
+    .unwrap();
+    assert!(matches!(reasoning,
+        ResponsesStreamEvent::ReasoningTextDelta { delta, .. } if delta == "思考中"));
+
+    let args_done = parse_stream_event(
+        r#"{"type":"response.function_call_arguments.done","sequence_number":8,"item_id":"fc_1","output_index":2,"arguments":"{\"x\":1}"}"#,
+    ).unwrap();
+    assert!(matches!(args_done,
+        ResponsesStreamEvent::FunctionCallArgumentsDone { arguments, .. } if arguments == "{\"x\":1}"));
+
+    let custom_input = parse_stream_event(
+        r#"{"type":"response.custom_tool_call_input.delta","sequence_number":9,"delta":"*** Begin"}"#,
+    ).unwrap();
+    assert!(matches!(custom_input,
+        ResponsesStreamEvent::CustomToolCallInputDelta { delta, .. } if delta == "*** Begin"));
+
+    let item_added = parse_stream_event(
+        r#"{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}"#,
+    ).unwrap();
+    match item_added {
+        ResponsesStreamEvent::OutputItemAdded {
+            output_index, item, ..
+        } => {
+            assert_eq!(output_index, 0);
+            assert!(matches!(item, crate::types::ResponseOutputItem::Message(_)));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let web_search = parse_stream_event(
+        r#"{"type":"response.web_search_call.in_progress","sequence_number":3,"output_index":4,"item":{"type":"web_search_call","id":"ws_1"}}"#,
+    ).unwrap();
+    assert!(matches!(
+        web_search,
+        ResponsesStreamEvent::WebSearchCallInProgress { .. }
+    ));
+
+    let content_part = parse_stream_event(
+        r#"{"type":"response.content_part.done","sequence_number":6,"item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"你好"}}"#,
+    ).unwrap();
+    assert!(matches!(
+        content_part,
+        ResponsesStreamEvent::ContentPartDone { .. }
+    ));
+}
+
+#[test]
+fn responses_stream_terminal_events_carry_response() {
+    use crate::responses::parse_stream_event;
+    use crate::types::ResponsesStreamEvent;
+
+    let completed = parse_stream_event(
+        r#"{"type":"response.completed","sequence_number":10,"response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}"#,
+    ).unwrap();
+    match completed {
+        ResponsesStreamEvent::ResponseCompleted {
+            sequence_number,
+            response,
+        } => {
+            assert_eq!(sequence_number, 10);
+            assert_eq!(response.usage.unwrap().total_tokens, 15);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let failed = parse_stream_event(
+        r#"{"type":"response.failed","sequence_number":11,"response":{"id":"resp_1","status":"failed","error":{"message":"boom"}}}"#,
+    ).unwrap();
+    assert!(matches!(
+        failed,
+        ResponsesStreamEvent::ResponseFailed { .. }
+    ));
+}
+
+#[test]
+fn responses_stream_unknown_event_falls_back() {
+    use crate::responses::parse_stream_event;
+    use crate::types::ResponsesStreamEvent;
+
+    let unknown =
+        parse_stream_event(r#"{"type":"response.brand_new_event","sequence_number":99}"#).unwrap();
+    assert!(matches!(unknown,
+        ResponsesStreamEvent::Unknown { event_type } if event_type == "response.brand_new_event"));
+
+    // 非 JSON 数据仍是硬错误
+    assert!(parse_stream_event("not-json").is_err());
+    assert!(parse_stream_event("").is_err());
+}
+
+// ── Files API 类型 ──────────────────────────────────
+
+#[test]
+fn files_types_serde() {
+    use crate::types::{DeleteFileResponse, FileObject, ListFilesResponse};
+
+    let file: FileObject = serde_json::from_value(json!({
+        "id": "file-api-0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "object": "file",
+        "bytes": 102400,
+        "created_at": 1700000000,
+        "filename": "image.jpg",
+        "purpose": "user_data",
+        "expires_at": 1700086400
+    }))
+    .unwrap();
+    assert_eq!(file.expires_at, Some(1700086400));
+    // expires_at 可选
+    let permanent: FileObject = serde_json::from_value(json!({
+        "id": "f", "object": "file", "bytes": 1, "created_at": 1,
+        "filename": "a.png", "purpose": "user_data"
+    }))
+    .unwrap();
+    assert_eq!(permanent.expires_at, None);
+
+    let listed: ListFilesResponse = serde_json::from_value(json!({
+        "object": "list", "data": [file], "first_id": "file-api-0a1b",
+        "last_id": "file-api-0a1b", "has_more": true
+    }))
+    .unwrap();
+    assert_eq!(listed.data.len(), 1);
+    assert!(listed.has_more);
+    assert_eq!(listed.first_id.as_deref(), Some("file-api-0a1b"));
+
+    let deleted: DeleteFileResponse = serde_json::from_value(json!({
+        "id": "file-api-0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+        "object": "file", "deleted": true
+    }))
+    .unwrap();
+    assert!(deleted.deleted);
+}
+
+// ── multipart 表单与图片嗅探 ────────────────────────
+
+#[test]
+fn multipart_form_encoding() {
+    use crate::client::MultipartForm;
+
+    let png_bytes: Vec<u8> = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 1, 2];
+    let form = MultipartForm::new()
+        .field("purpose", "user_data")
+        .field("expires_after[anchor]", "created_at")
+        .field("expires_after[seconds]", "7200")
+        .file("file", "图.png", png_bytes.clone());
+    let (content_type, body) = form.encode();
+
+    assert!(content_type.starts_with("multipart/form-data; boundary="));
+    let boundary = content_type
+        .trim_start_matches("multipart/form-data; boundary=")
+        .to_string();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.starts_with(&format!("--{boundary}\r\n")));
+    assert!(text.contains("Content-Disposition: form-data; name=\"purpose\"\r\n\r\nuser_data\r\n"));
+    assert!(text.contains(
+        "Content-Disposition: form-data; name=\"expires_after[anchor]\"\r\n\r\ncreated_at\r\n"
+    ));
+    assert!(text.contains(
+        "Content-Disposition: form-data; name=\"expires_after[seconds]\"\r\n\r\n7200\r\n"
+    ));
+    assert!(text.contains(
+        "Content-Disposition: form-data; name=\"file\"; filename=\"图.png\"\r\nContent-Type: image/png\r\n\r\n"
+    ));
+    assert!(text.ends_with(&format!("--{boundary}--\r\n")));
+
+    // 二进制内容原样保留（PNG 头中的 \r\n 不能被破坏）
+    let needle = b"image/png\r\n\r\n";
+    let pos = body
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("应找到文件部分的头部结束标记");
+    assert_eq!(
+        &body[pos + needle.len()..pos + needle.len() + png_bytes.len()],
+        &png_bytes[..]
+    );
+}
+
+#[test]
+fn multipart_form_filename_escaping() {
+    use crate::client::MultipartForm;
+
+    let form = MultipartForm::new().file("file", "a\"b\\c\nd.png", vec![0]);
+    let (_, body) = form.encode();
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("filename=\"a\\\"b\\\\c d.png\""),
+        "引号/反斜杠应转义、换行替换为空格：{text}"
+    );
+}
+
+#[test]
+fn image_content_type_sniffing() {
+    use crate::client::sniff_image_content_type;
+
+    assert_eq!(
+        sniff_image_content_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
+        "image/jpeg"
+    );
+    assert_eq!(
+        sniff_image_content_type(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']),
+        "image/png"
+    );
+    assert_eq!(sniff_image_content_type(b"GIF87a"), "image/gif");
+    assert_eq!(sniff_image_content_type(b"GIF89a"), "image/gif");
+    assert_eq!(
+        sniff_image_content_type(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+        "image/webp"
+    );
+    // RIFF 但不是 WEBP
+    assert_eq!(
+        sniff_image_content_type(b"RIFF\x00\x00\x00\x00WAVE"),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        sniff_image_content_type(b"plain text"),
+        "application/octet-stream"
+    );
+    assert_eq!(sniff_image_content_type(&[]), "application/octet-stream");
+}
+
+// ── 百分号编码 ──────────────────────────────────────
+
+#[test]
+fn percent_encoding_keeps_unreserved_and_escapes_rest() {
+    use crate::client::percent_encode;
+
+    // 非保留字符（RFC 3986）原样保留
+    assert_eq!(percent_encode("file-api-0a1b.c~d"), "file-api-0a1b.c~d");
+    // 查询分隔符与特殊字符
+    assert_eq!(percent_encode("a&b=c#d e"), "a%26b%3Dc%23d%20e");
+    assert_eq!(percent_encode("a/b?g"), "a%2Fb%3Fg");
+    // 非 ASCII 按 UTF-8 字节转义
+    assert_eq!(percent_encode("文件"), "%E6%96%87%E4%BB%B6");
+    assert_eq!(percent_encode(""), "");
+}
+
+// ── HTTP 层（本地 mock 服务器）─────────────────────
+
+/// 极简同步 HTTP mock：按连接顺序弹出一个预置响应，记录收到的请求。
+struct MockServer {
+    addr: String,
+    requests: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+}
+
+impl MockServer {
+    fn start(responses: Vec<Vec<u8>>) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut queue = responses.into_iter();
+            for mut stream in listener.incoming().flatten() {
+                let Some(response) = queue.next() else { break };
+                if let Some((request_line, body)) = read_request(&stream) {
+                    let _ = tx.send((request_line, body));
+                    use std::io::Write;
+                    let _ = stream.write_all(&response);
+                }
+            }
+        });
+        Self { addr, requests: rx }
+    }
+
+    fn request_line(&self) -> String {
+        self.requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("mock 服务器应收到请求")
+            .0
+    }
+
+    fn body(&self) -> Vec<u8> {
+        self.requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("mock 服务器应收到请求")
+            .1
+    }
+}
+
+fn read_request(mut stream: &std::net::TcpStream) -> Option<(String, Vec<u8>)> {
+    use std::io::Read;
+
+    let mut header = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        stream.read_exact(&mut byte).ok()?;
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_text = String::from_utf8_lossy(&header).to_string();
+    let content_length = header_text
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        stream.read_exact(&mut body).ok()?;
+    }
+    let request_line = header_text.lines().next().unwrap_or_default().to_string();
+    Some((request_line, body))
+}
+
+fn http_response(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+fn sse_response(events: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}"
+    )
+    .into_bytes()
+}
+
+fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
+    crate::client::DeepSeekClient::from_config(crate::config::DeepSeekConfig {
+        api_key: "test-key".into(),
+        base_url: format!("http://{addr}"),
+        timeout: std::time::Duration::from_secs(5),
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn responses_create_forces_non_stream() {
+    let body =
+        br#"{"id":"resp_1","object":"response","status":"completed","model":"m","output":[]}"#;
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+
+    let response = client
+        .responses()
+        .create(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            instructions: Some("hi".into()),
+            stream: Some(true), // 故意传入 true，方法应强制关闭
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.status, crate::types::ResponseStatus::Completed);
+
+    let sent: serde_json::Value = serde_json::from_slice(&server.body()).unwrap();
+    assert_eq!(sent["stream"], false, "create() 应强制 stream=false");
+}
+
+#[tokio::test]
+async fn responses_stream_stops_after_terminal_event() {
+    use crate::types::ResponsesStreamEvent;
+    use futures_util::StreamExt;
+
+    let sse = concat!(
+        "data: {\"type\":\"response.created\",\"sequence_number\":0}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"delta\":\"你好\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg_1\",\"delta\":\"不应出现\"}\n\n",
+    );
+    let server = MockServer::start(vec![sse_response(sse)]);
+    let client = mock_client(&server.addr);
+
+    let mut stream = client
+        .responses()
+        .create_stream(crate::types::CreateResponseRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            input: Some(crate::types::ResponseInput::Text("hi".into())),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("流事件应无错误"));
+    }
+    assert_eq!(events.len(), 3, "终止事件后流应结束：{events:?}");
+    assert!(matches!(
+        events[0],
+        ResponsesStreamEvent::ResponseCreated { .. }
+    ));
+    assert!(matches!(&events[1],
+        ResponsesStreamEvent::OutputTextDelta { delta, .. } if delta == "你好"));
+    assert!(matches!(
+        events[2],
+        ResponsesStreamEvent::ResponseCompleted { .. }
+    ));
+
+    // 请求体应自动注入 stream=true
+    let sent: serde_json::Value = serde_json::from_slice(&server.body()).unwrap();
+    assert_eq!(sent["stream"], true);
+}
+
+#[tokio::test]
+async fn files_list_query_parameters_are_encoded() {
+    let body = br#"{"object":"list","data":[],"has_more":false}"#;
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+
+    client
+        .files()
+        .list(crate::types::ListFilesParams {
+            after: Some("file api#1&x=2".into()),
+            limit: Some(20),
+            order: Some(crate::types::ListOrder::Desc),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let path = server.request_line().split(' ').nth(1).unwrap().to_string();
+    assert!(
+        path.contains("after=file%20api%231%26x%3D2"),
+        "after 值应完整编码：{path}"
+    );
+    assert!(path.contains("limit=20"));
+    assert!(path.contains("order=desc"));
+}
+
+#[tokio::test]
+async fn files_retrieve_and_delete_encode_file_id_in_path() {
+    let file_body = br#"{"id":"x","object":"file","bytes":1,"created_at":1,"filename":"a","purpose":"user_data"}"#;
+    let deleted_body = br#"{"id":"x","object":"file","deleted":true}"#;
+    let server = MockServer::start(vec![
+        http_response("200 OK", "application/json", file_body),
+        http_response("200 OK", "application/json", deleted_body),
+    ]);
+    let client = mock_client(&server.addr);
+
+    client.files().retrieve("file api/1?a=b").await.unwrap();
+    let retrieve_path = server.request_line().split(' ').nth(1).unwrap().to_string();
+    assert!(
+        retrieve_path.starts_with("/files/file%20api%2F1%3Fa%3Db"),
+        "file_id 应作为路径段编码：{retrieve_path}"
+    );
+
+    client.files().delete("file api/1?a=b").await.unwrap();
+    let delete_line = server.request_line();
+    assert!(
+        delete_line.starts_with("DELETE /files/file%20api%2F1%3Fa%3Db"),
+        "删除路径应编码：{delete_line}"
+    );
+}

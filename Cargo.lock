@@ -10580,7 +10580,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-deepseek"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eventsource-stream",
  "futures-util",
@@ -10588,6 +10588,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
