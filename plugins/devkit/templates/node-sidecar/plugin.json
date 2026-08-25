@@ -46,9 +46,7 @@
       "timeout_ms": 30000
     }
   ],
-  "resources": [
-    "sidecar/"
-  ],
+  "resources": [],
   "sidecar": {
     "runtime": "node",
     "entry": "sidecar/main.mjs",
