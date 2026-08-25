@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_SHARING_VIOLATION, ERROR_SUCCESS,
-    GetHandleInformation, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-    LocalFree, SetHandleInformation, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, WAIT_ABANDONED,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -36,7 +36,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileInformationByHandle,
     OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
 };
@@ -111,12 +111,7 @@ pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
     trace_self_check(&request, "创建临时 AppContainer 身份");
     let mut profile = AppContainerProfile::create(&capabilities)?;
     trace_self_check(&request, "应用临时目录授权");
-    let mut grants = AclGrants::apply(
-        profile.sid,
-        request.program,
-        request.program_root,
-        request.policy,
-    )?;
+    let mut grants = AclGrants::apply(profile.sid, request.program, request.policy)?;
 
     trace_self_check(&request, "启动受限目标进程");
     let execution = run_restricted_process(&request, &profile, &capabilities);
@@ -375,31 +370,19 @@ struct AclGrants {
 }
 
 impl AclGrants {
-    fn apply(
-        sid: PSID,
-        program: &Path,
-        program_root: &Path,
-        policy: &SandboxPolicy,
-    ) -> Result<Self> {
+    fn apply(sid: PSID, program: &Path, policy: &SandboxPolicy) -> Result<Self> {
         let mut grants = Self {
             sid,
             roots: Vec::new(),
             active: true,
         };
         let result = (|| {
-            grants.add_ancestor_traversal(sid, program_root)?;
-            grants.add(
-                sid,
-                program_root,
-                FILE_PROGRAM_ACCESS,
-                NO_INHERITANCE,
-                false,
-            )?;
+            // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
+            // 子树传播继承项，因此只授权最终程序和策略根。
             grants.add(sid, program, FILE_PROGRAM_ACCESS, NO_INHERITANCE, false)?;
 
             let writable = policy.writable_roots();
             for root in &writable {
-                grants.add_ancestor_traversal(sid, root)?;
                 grants.add(
                     sid,
                     root,
@@ -438,19 +421,6 @@ impl AclGrants {
             };
         }
         Ok(grants)
-    }
-
-    fn add_ancestor_traversal(&mut self, sid: PSID, path: &Path) -> Result<()> {
-        for ancestor in path.ancestors().skip(1) {
-            if !ancestor.as_os_str().is_empty() {
-                match self.add(sid, ancestor, FILE_TRAVERSE, NO_INHERITANCE, false) {
-                    Ok(()) => {}
-                    Err(error) if is_locked_ancestor(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        Ok(())
     }
 
     fn add(
@@ -595,17 +565,6 @@ fn modify_acl(path: &Path, sid: PSID, permissions: u32, inheritance: u32, mode: 
 
 fn win32_error(status: u32) -> std::io::Error {
     std::io::Error::from_raw_os_error(i32::from_ne_bytes(status.to_ne_bytes()))
-}
-
-fn is_locked_ancestor(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .and_then(std::io::Error::raw_os_error)
-            .is_some_and(|code| {
-                code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32
-            })
-    })
 }
 
 struct AclMutationLock(OwnedHandle);
