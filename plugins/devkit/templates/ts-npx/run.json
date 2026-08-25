@@ -1,0 +1,4 @@
+{
+  "pkg": "tsx@4.19.2",
+  "script": "tools/main.ts"
+}

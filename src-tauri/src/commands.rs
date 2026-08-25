@@ -1862,15 +1862,13 @@ pub async fn stop_audio() -> Result<(), String> {
 
 /// 获取 @提及补全候选列表。
 ///
-/// 经 Core 聚合（CoreManager::get_any_mentions 遍历任意活跃 Core 的全部插件，
-/// 含 native 与 WASM 插件经 mention 标准接口贡献的候选）。原硬编码的 skill/mcp
-/// 调用已迁入各自 WASM 插件的 mention-candidates 导出，host 不再区分插件类型。
-/// 无活跃 Core 时返回空列表。
+/// 经插件注册表实时聚合（WASM 与 TS 插件的 mention 候选）。原取活跃 Core
+/// 的插件快照——会话创建后新装插件的适配器不进已有 Core，@ 候选看不到；
+/// 注册表聚合让安装/卸载/启停立即反映。原硬编码的 skill/mcp 调用早已迁入
+/// 各插件的 mention-candidates 导出。
 #[tauri::command]
-pub async fn get_mention_candidates(
-    state: State<'_, TiangongApp>,
-) -> Result<Vec<MentionCandidate>, String> {
-    Ok(state.core_manager.get_any_mentions())
+pub async fn get_mention_candidates() -> Result<Vec<MentionCandidate>, String> {
+    Ok(tiangong_plugin_runtime::registry::collect_mention_candidates())
 }
 
 /// 获取输入框缓存。
@@ -4746,12 +4744,23 @@ pub async fn plugin_call(
 // - bridge_subscribe / bridge_unsubscribe：事件订阅骨架（事件源在事件接缝接入）
 
 /// 桥接调用：`method` 按命名空间路由（如 `plugin.getConfig` → WASM）。
+///
+/// `plugin-dev.*` 含构建（可长达数分钟）与安装原生确认（等待用户点击），
+/// 经 spawn_blocking 执行，避免阻塞 tokio worker。
 #[tauri::command]
 pub async fn bridge_call(
     plugin_id: String,
     method: String,
     payload: String,
 ) -> Result<String, String> {
+    if method.starts_with("plugin-dev.") || method.starts_with("dialog.") {
+        return tokio::task::spawn_blocking(move || {
+            tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string());
+    }
     tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
         .map_err(|error| error.to_string())
 }

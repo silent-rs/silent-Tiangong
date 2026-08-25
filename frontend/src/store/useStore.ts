@@ -69,6 +69,17 @@ function newQueuedMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 直接由文本构造一条队列消息（不触碰草稿——用于外部文本在发送事务
+ *  或执行中投递：草稿可能属于进行中的提交，不得被再次入队或覆盖）。 */
+function queuedTextMessage(text: string): QueuedInputMessage {
+  return {
+    id: newQueuedMessageId(),
+    text,
+    attachments: [],
+    queuedAt: Date.now(),
+  };
+}
+
 /** 把当前草稿快照为一条队列消息（不修改草稿）。 */
 function queuedMessageFromCache(cache: InputCache): QueuedInputMessage {
   return {
@@ -867,6 +878,13 @@ export interface AppState {
   steerQueuedInputMessage: (cacheKey: string, messageId: string) => Promise<boolean>;
   /** turn 结束（runStatus 回 idle）且草稿为空时自动放行队首；失败不自动重试。 */
   dequeueNextQueuedInput: (cacheKey: string) => Promise<boolean>;
+  /**
+   * 插件外部文本按「用户普通 Enter」语义投递：保护现有草稿（先入队，不
+   * 覆盖）→ 运行中入队等待 turn 结束自动放行（是否立即引导由用户在队列
+   * 里决定）→ 空闲立即发送；信任模式用调用方传入的界面当前选择。
+   * 不走 appendMessage（立即引导是用户的决定权，插件不得代行）。
+   */
+  submitExternalText: (cacheKey: string, content: string, trustMode: string) => void;
 
   // 流式消息状态
   streamingMessageId: string | null;
@@ -1650,6 +1668,44 @@ export const useStore = create<AppState>((set, get) => ({
     }));
     get().setInputCacheText(cacheKey, '');
     get().setInputCacheAttachments(cacheKey, []);
+  },
+
+  submitExternalText: (cacheKey, content, trustMode) => {
+    const text = content.trim();
+    if (!text) return;
+    const state = get();
+    const cache = state.inputCaches[cacheKey];
+    if (!cache) return;
+    const queueExternal = () => {
+      set((current) => ({
+        inputQueues: {
+          ...current.inputQueues,
+          [cacheKey]: [...(current.inputQueues[cacheKey] ?? []), queuedTextMessage(text)],
+        },
+      }));
+    };
+    // 发送事务中：当前草稿属于正在提交的输入，不得把它再次入队（重复
+    // 发送风险）——外部文本直接构造队列项，不触碰草稿。
+    if (cache.is_sending) {
+      queueExternal();
+      return;
+    }
+    // 保护用户草稿（非发送事务的草稿才入队）：先入队再投递外部文本，
+    // 任何状态都不覆盖用户未发送内容。
+    if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
+      state.enqueueInputMessage(cacheKey);
+    }
+    // 与既有队列逻辑一致的运行判断：状态表存在非空值即运行中。
+    const running = Boolean(state.sessionRunStatuses[cacheKey]);
+    if (running) {
+      queueExternal();
+      return;
+    }
+    // 空闲：写入草稿并发送（sendMessage 自管 is_sending/revision/清缓存）。
+    get().setInputCacheText(cacheKey, text);
+    const fresh = get().inputCaches[cacheKey];
+    if (!fresh) return;
+    void get().sendMessage(cacheKey, text, [], fresh.revision, trustMode);
   },
 
   removeQueuedInputMessage: (cacheKey, messageId) => {

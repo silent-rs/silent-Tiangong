@@ -19,6 +19,7 @@ mod execution;
 pub mod host_state;
 pub mod loader;
 pub mod manifest;
+pub mod plugin_dev;
 pub mod protocol;
 pub mod registry;
 pub mod seams;
@@ -31,14 +32,15 @@ mod ts_tools;
 pub use adapter::WasmPluginAdapter;
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call, bridge_emit,
-    bridge_subscribe, bridge_unsubscribe, set_app_handler, set_browser_handler, set_event_emitter,
-    set_session_input_handler, set_terminal_handler, set_webview_handler,
+    bridge_subscribe, bridge_unsubscribe, set_app_handler, set_browser_handler, set_dialog_handler,
+    set_event_emitter, set_session_input_handler, set_terminal_handler, set_webview_handler,
 };
 pub use config::PluginRuntimeConfig;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
 };
+pub use plugin_dev::{InstallConfirmHandler, InstallRequest, set_plugin_dev_install_confirm};
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,

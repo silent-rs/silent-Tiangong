@@ -202,10 +202,66 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         }
     }
 
+    for directory in manifest.resources.iter().flatten() {
+        copy_resource_tree(source, Path::new(directory), &staged.path)?;
+    }
+
     for directory in ["runtime", "logs", "data"] {
         std::fs::create_dir_all(staged.path.join(directory))?;
     }
     Ok(staged)
+}
+
+/// 递归复制 manifest `resources` 声明的静态资产目录（拒绝符号链接）。
+///
+/// 跳过 `node_modules` 与 `.git`（防止开发者误打包本地依赖与仓库元数据）。
+fn copy_resource_tree(
+    source_root: &Path,
+    relative_dir: &Path,
+    destination_root: &Path,
+) -> Result<()> {
+    let mut source = source_root.to_path_buf();
+    for component in relative_dir.components() {
+        source.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&source)
+            .with_context(|| format!("读取插件资源目录失败: {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("插件资源路径不能包含符号链接: {}", source.display());
+        }
+    }
+    if !source.is_dir() {
+        bail!("插件资源目录不存在: {}", source.display());
+    }
+    let mut stack = vec![source.clone()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .with_context(|| format!("读取插件资源目录失败: {}", directory.display()))?
+        {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.file_type().is_symlink() {
+                bail!("插件资源路径不能包含符号链接: {}", entry.path().display());
+            }
+            let name = entry.file_name();
+            if metadata.is_dir() {
+                if name == "node_modules" || name == ".git" {
+                    continue;
+                }
+                stack.push(entry.path());
+            } else {
+                let entry_path = entry.path();
+                let relative = entry_path
+                    .strip_prefix(source_root)
+                    .context("插件资源相对路径推算失败")?;
+                let destination = destination_root.join(relative);
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                copy_regular_file(&entry.path(), &destination, "插件资源文件")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 下载进度回调：`(downloaded_bytes, total_bytes)`。total 为 0 表示总大小未知。
@@ -787,4 +843,46 @@ fn set_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// resources 声明目录随导入递归进入暂存区（plugin-dev 模板分发链路）。
+    #[test]
+    fn stage_local_plugin_复制resources目录() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let source = root.path().join("source");
+        std::fs::create_dir_all(source.join("app")).expect("入口目录");
+        std::fs::create_dir_all(source.join("templates/ui-app/app")).expect("模板目录");
+        std::fs::write(
+            source.join("plugin.json"),
+            r#"{"schema_version":2,"id":"res-demo","version":"0.1.0","permissions":[],"resources":["templates/"],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#,
+        )
+        .expect("清单");
+        std::fs::write(source.join("app/index.html"), "<html></html>").expect("入口");
+        std::fs::write(source.join("templates/ui-app/plugin.json"), "{}").expect("模板清单");
+        std::fs::write(source.join("templates/ui-app/app/index.html"), "x").expect("模板页");
+        // node_modules 应被跳过
+        std::fs::create_dir_all(source.join("templates/ui-app/node_modules/pkg"))
+            .expect("依赖目录");
+        std::fs::write(
+            source.join("templates/ui-app/node_modules/pkg/index.js"),
+            "x",
+        )
+        .expect("依赖文件");
+
+        let staged = stage_local_plugin(root.path(), &source).expect("暂存");
+        assert!(staged.path().join("plugin.json").is_file());
+        assert!(staged.path().join("app/index.html").is_file());
+        assert!(staged.path().join("templates/ui-app/plugin.json").is_file());
+        assert!(
+            staged
+                .path()
+                .join("templates/ui-app/app/index.html")
+                .is_file()
+        );
+        assert!(!staged.path().join("templates/ui-app/node_modules").exists());
+    }
 }

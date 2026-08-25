@@ -192,6 +192,9 @@ export function TabsContainer({
 }: TabsContainerProps) {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const newConversationId = useStore((state) => state.newConversationId);
+  /** 插件 tab 的刷新代次（右键「刷新」+1 强制重挂：重拉 entry 与资源，
+   *  用于插件迭代重装后快速试用新版本）。 */
+  const [reloadGenerations, setReloadGenerations] = useState<Record<string, number>>({});
   const [tabs, setTabs] = useState<TabState[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
   const [hydrateVersion, setHydrateVersion] = useState(0);
@@ -810,6 +813,18 @@ export function TabsContainer({
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
+                  {tab.kind === 'plugin' && !webviewPlugin && (
+                    <ContextMenuItem
+                      onClick={() => {
+                        setReloadGenerations((prev) => ({
+                          ...prev,
+                          [tab.id]: (prev[tab.id] ?? 0) + 1,
+                        }));
+                      }}
+                    >
+                      刷新（重载插件页面）
+                    </ContextMenuItem>
+                  )}
                   {webviewPlugin && (
                     <ContextMenuItem onClick={() => {
                       if (tab.plugin_id && tab.contribution_id) {
@@ -888,7 +903,7 @@ export function TabsContainer({
             </div>
           ) : (
             <PluginAppTabContent
-              key={`${terminalSessionId}:${tab.id}`}
+              key={`${terminalSessionId}:${tab.id}:${reloadGenerations[tab.id] ?? 0}`}
               tab={tab}
               isActive={isVisible && mode === 'app' && tab.id === activeTab?.id}
               sessionId={terminalSessionId || null}

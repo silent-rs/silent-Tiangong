@@ -567,7 +567,8 @@ export interface SlotContributionEntry {
 
 export interface SessionInputAttachmentPayload {
   plugin_id: string;
-  attachment: RawAttachment;
+  /** kind="text" 为插件指令文本（session.input.sendText），其余同附件。 */
+  attachment: Omit<RawAttachment, 'kind'> & { kind: RawAttachment['kind'] | 'text'; text?: string };
 }
 
 /** 插件入口资源响应（字节数组 + MIME）。 */
@@ -1152,6 +1153,7 @@ export const api = {
 
   onSessionInputAttachment: (callback: (event: SessionInputAttachmentPayload) => void) =>
     listen<SessionInputAttachmentPayload>('session_input_attachment', (event) => callback(event.payload)),
+
 
   onBridgeEvent: (callback: (event: BridgeEventPayload) => void) =>
     listen<BridgeEventPayload>('bridge_event', (event) => callback(event.payload)),

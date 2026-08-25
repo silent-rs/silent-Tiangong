@@ -465,6 +465,102 @@ fn run_gui() {
                 },
             ));
 
+            // plugin-dev 安装确认：宿主原生对话框（非 webview，Agent 的界面
+            // 自动化无法触达），用户是唯一授权主体（RFC 0017 §11：plugin_install
+            // 必须经原生确认弹窗）。未注入时 plugin-dev.install fail-closed。
+            {
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_plugin_dev_install_confirm(Arc::new(
+                    move |request: &tiangong_plugin_runtime::InstallRequest| -> bool {
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                        let permissions = if request.permissions.is_empty() {
+                            "无（纯 UI 插件）".to_string()
+                        } else {
+                            request.permissions.join("、")
+                        };
+                        let message = format!(
+                            "即将安装自建插件：\n\n插件：{}（id: {}）\n版本：{}\n权限：{}\n来源：{}\n\n安装后该插件将按上述权限运行，请确认内容可信。",
+                            request.name,
+                            request.plugin_id,
+                            request.version,
+                            permissions,
+                            request.directory
+                        );
+                        app_handle
+                            .dialog()
+                            .message(message)
+                            .title("安装自建插件确认")
+                            .kind(MessageDialogKind::Warning)
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "安装".to_string(),
+                                "取消".to_string(),
+                            ))
+                            .blocking_show()
+                    },
+                ));
+            }
+
+            // 系统对话框原语：插件保存文件（导出结果等）。宿主 webview 是
+            // WebKit（macOS），无 File System Access API——保存必须经原生
+            // 对话框由宿主落盘；写入位置由用户在对话框中显式选择。
+            {
+                use tauri_plugin_dialog::DialogExt;
+                let app_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_dialog_handler(Arc::new(
+                    move |plugin_id: &str, method: &str, payload: &str| {
+                        if method != "dialog.saveFile" {
+                            anyhow::bail!("未知对话框方法 {method}");
+                        }
+                        #[derive(serde::Deserialize)]
+                        struct SaveRequest {
+                            suggested_name: String,
+                            /// 文件内容（文本原样写入；二进制请先 base64 并带 encoding 字段）。
+                            contents: String,
+                            #[serde(default)]
+                            encoding: Option<String>,
+                        }
+                        let request: SaveRequest = serde_json::from_str(payload)
+                            .map_err(|error| anyhow::anyhow!("保存请求格式无效：{error}"))?;
+                        if request.suggested_name.trim().is_empty() {
+                            anyhow::bail!("suggested_name 不能为空");
+                        }
+                        if request.contents.len() > 100 * 1024 * 1024 {
+                            anyhow::bail!("内容超过 100MB 上限");
+                        }
+                        let bytes: Vec<u8> = match request.encoding.as_deref() {
+                            Some("base64") => {
+                                use base64::Engine;
+                                base64::engine::general_purpose::STANDARD
+                                    .decode(request.contents.as_bytes())
+                                    .map_err(|error| anyhow::anyhow!("base64 内容无效：{error}"))?
+                            }
+                            _ => request.contents.into_bytes(),
+                        };
+                        // 原生保存对话框（阻塞等待用户选择，与安装确认同款
+                        // 后台线程语义——bridge 层调用方已 spawn_blocking）。
+                        let handle = app_handle.clone();
+                        let picked = tokio::task::block_in_place(|| {
+                            handle
+                                .dialog()
+                                .file()
+                                .set_file_name(&request.suggested_name)
+                                .blocking_save_file()
+                        });
+                        let Some(path) = picked else {
+                            return Ok(r#"{"cancelled":true}"#.to_string());
+                        };
+                        let path = path
+                            .into_path()
+                            .map_err(|error| anyhow::anyhow!("保存路径无效：{error}"))?;
+                        std::fs::write(&path, bytes)
+                            .map_err(|error| anyhow::anyhow!("写入文件失败：{}：{error}", path.display()))?;
+                        tracing::info!(plugin_id, path = %path.display(), "插件经对话框保存文件");
+                        Ok(serde_json::json!({ "cancelled": false, "path": path.display().to_string() })
+                            .to_string())
+                    },
+                ));
+            }
+
             // webview 容器原语（第四种声明式容器）：插件经 bridge webview.*
             // 创建/导航/eval 真实 webview 实例；实例按插件隔离
             // （view_id = webview:<plugin_id>），引擎复用 browser 基础设施。
@@ -506,6 +602,37 @@ fn run_gui() {
                 let app_handle = app.handle().clone();
                 tiangong_plugin_runtime::set_session_input_handler(Arc::new(
                     move |plugin_id: &str, method: &str, payload: &str| {
+                        // 文本发送：插件页面在明确用户手势后把一段指令交给
+                        // 当前会话的 Agent 处理（如创作页「开始创建」）。
+                        if method == "session.input.sendText" {
+                            #[derive(serde::Deserialize)]
+                            struct TextInput {
+                                text: String,
+                            }
+                            let input: TextInput = serde_json::from_str(payload)
+                                .map_err(|error| anyhow::anyhow!("输入文本格式无效：{error}"))?;
+                            if input.text.trim().is_empty() {
+                                anyhow::bail!("输入文本不能为空");
+                            }
+                            if input.text.len() > 10_000 {
+                                anyhow::bail!("输入文本超过 10KB 上限");
+                            }
+                            // 复用截图插件的输入事件通道（同一事件、同一前端
+                            // 监听），文本作为 kind="text" 的输入项分流处理。
+                            app_handle
+                                .emit(
+                                    "session_input_attachment",
+                                    serde_json::json!({
+                                        "plugin_id": plugin_id,
+                                        "attachment": {
+                                            "kind": "text",
+                                            "text": input.text,
+                                        },
+                                    }),
+                                )
+                                .map_err(|error| anyhow::anyhow!("推送输入消息失败：{error}"))?;
+                            return Ok("true".to_string());
+                        }
                         if method != "session.input.addAttachment" {
                             anyhow::bail!("未知输入草稿方法 {method}");
                         }

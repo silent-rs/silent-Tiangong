@@ -107,6 +107,9 @@ export function MessageInput({
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
+  // 事件回调（非渲染流）读取信任模式的最新值。
+  const trustModeRef = useRef(trustMode);
+  trustModeRef.current = trustMode;
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   useLayoutEffect(() => {
@@ -401,8 +404,19 @@ export function MessageInput({
     let unlisten: (() => void) | undefined;
     void api.onSessionInputAttachment(({ attachment }) => {
       if (disposed || !cacheKey) return;
+      // 文本输入项（如创作页「开始创建」）：写入草稿并直接发送给当前
+      // 会话的 Agent。经 store 层读写（事件回调里组件闭包可能是旧快照）。
+      if (attachment.kind === 'text') {
+        const content = (attachment.text ?? '').trim();
+        if (!content) return;
+        // 「用户普通 Enter」语义：保护草稿、运行中入队、空闲发送、
+        // 信任模式用界面当前选择——是否立即引导由用户决定。
+        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current);
+        editorRef.current?.focus();
+        return;
+      }
       if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;
-      addAttachments([attachment]);
+      addAttachments([attachment as Attachment]);
       editorRef.current?.focus();
     }).then((stop) => {
       if (disposed) stop();
@@ -413,6 +427,8 @@ export function MessageInput({
       unlisten?.();
     };
   }, [addAttachments, cacheKey]);
+
+
 
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
     addAttachments(paths.map(attachmentFromPath));

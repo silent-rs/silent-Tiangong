@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "id": "{{PLUGIN_ID}}",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide"
+  ],
+  "capabilities": {
+    "tools": true,
+    "events": [
+      "tool.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "app",
+        "title": "{{PLUGIN_NAME}}",
+        "entry": "dist/index.html",
+        "open_mode": "singleton"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "name": "hello",
+      "description": "示例工具：返回一句问候。请以此为基础改造成你自己的工具：修改本声明（name/description/input_schema）并在 src/App.vue 的 handleToolCall 中实现处理逻辑；不需要工具的插件可删除 tools 与 capabilities.tools 声明。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "要问候的名字（缺省用「天工」）"
+          }
+        },
+        "required": []
+      },
+      "timeout_ms": 20000
+    }
+  ],
+  "mention": {
+    "hint": "{{PLUGIN_NAME}}（请改为一句话能力描述）"
+  }
+}

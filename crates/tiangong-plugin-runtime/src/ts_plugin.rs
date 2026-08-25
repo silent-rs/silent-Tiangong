@@ -22,6 +22,8 @@ use crate::manifest::{PluginManifest, TsToolDecl};
 struct TsPluginState {
     tools: Vec<TsToolDecl>,
     prompts: Vec<String>,
+    /// @提及展示：候选 label（UI 贡献标题或插件 id）与副标题（mention.hint）。
+    mention: Option<(String, String)>,
 }
 
 pub struct TsPluginAdapter {
@@ -37,6 +39,7 @@ impl TsPluginAdapter {
             state: RwLock::new(TsPluginState {
                 tools: manifest.tools.clone().unwrap_or_default(),
                 prompts: manifest.prompt.clone().unwrap_or_default(),
+                mention: mention_candidate_parts(manifest),
             }),
             enabled: AtomicBool::new(enabled),
         }
@@ -46,6 +49,7 @@ impl TsPluginAdapter {
         let next = TsPluginState {
             tools: manifest.tools.clone().unwrap_or_default(),
             prompts: manifest.prompt.clone().unwrap_or_default(),
+            mention: mention_candidate_parts(manifest),
         };
         match self.state.write() {
             Ok(mut state) => *state = next,
@@ -133,4 +137,118 @@ impl PromptSectionProvider for TsPluginAdapter {
     }
 }
 
-impl MentionCandidateProvider for TsPluginAdapter {}
+impl MentionCandidateProvider for TsPluginAdapter {
+    fn mention_candidates(&self) -> Vec<tiangong_core::MentionCandidate> {
+        if !self.is_enabled() {
+            return Vec::new();
+        }
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .mention
+            .as_ref()
+            .map(|(label, hint)| {
+                vec![tiangong_core::MentionCandidate {
+                    value: format!("@plugin:{}", self.id),
+                    label: label.clone(),
+                    kind: "plugin".to_string(),
+                    hint: hint.clone(),
+                }]
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// 按清单静态生成 @提及候选（未声明 mention 返回 None）。
+/// 供注册表实时聚合使用——TS 插件的候选是纯清单数据，不依赖适配器实例
+///（适配器弱引用由会话 Core 构建时填充，安装后不存在）。
+pub(crate) fn mention_candidate_from_manifest(
+    manifest: &PluginManifest,
+) -> Option<tiangong_core::MentionCandidate> {
+    let (label, hint) = mention_candidate_parts(manifest)?;
+    Some(tiangong_core::MentionCandidate {
+        value: format!("@plugin:{}", manifest.id),
+        label,
+        kind: "plugin".to_string(),
+        hint,
+    })
+}
+
+/// 从清单推导 @提及候选的展示字段：label 取首个 UI 贡献标题（缺省插件 id），
+/// hint 取 mention.hint（未声明 mention 则无候选）。
+fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String)> {
+    let mention = manifest.mention.as_ref()?;
+    let label = manifest
+        .ui
+        .as_ref()
+        .and_then(|ui| ui.contributions.first())
+        .map(|contribution| {
+            if contribution.title.is_empty() {
+                manifest.id.clone()
+            } else {
+                contribution.title.clone()
+            }
+        })
+        .unwrap_or_else(|| manifest.id.clone());
+    Some((label, mention.hint.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::MentionManifest;
+
+    fn manifest_with_mention(hint: Option<&str>) -> PluginManifest {
+        let mention = hint.map(|hint| {
+            serde_json::from_str::<MentionManifest>(&format!(r#"{{"hint":"{hint}"}}"#)).unwrap()
+        });
+        PluginManifest {
+            schema_version: 2,
+            id: "demo".into(),
+            version: "0.1.0".into(),
+            wasm: None,
+            sidecar: None,
+            permissions: vec![],
+            entrypoints: None,
+            model_requirements: None,
+            storage_access: false,
+            capabilities: None,
+            ui: Some(serde_json::from_str(
+                r#"{"contributions":[{"slot":"extension.tab","id":"app","title":"演示插件","entry":"app/index.html"}]}"#,
+            )
+            .unwrap()),
+            tools: None,
+            prompt: None,
+            resources: None,
+            mention,
+        }
+    }
+
+    #[test]
+    fn mention候选_声明时生成_禁用时为空() {
+        let adapter =
+            TsPluginAdapter::from_manifest(&manifest_with_mention(Some("问候能力")), true);
+        let candidates = MentionCandidateProvider::mention_candidates(&adapter);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].value, "@plugin:demo");
+        assert_eq!(candidates[0].label, "演示插件");
+        assert_eq!(candidates[0].kind, "plugin");
+        assert_eq!(candidates[0].hint, "问候能力");
+
+        adapter.set_enabled(false);
+        assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
+
+        // 未声明 mention：无候选
+        let adapter = TsPluginAdapter::from_manifest(&manifest_with_mention(None), true);
+        assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
+    }
+
+    #[test]
+    fn mention候选_无ui标题时用插件id() {
+        let mut manifest = manifest_with_mention(Some("能力"));
+        manifest.ui = None;
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        let candidates = MentionCandidateProvider::mention_candidates(&adapter);
+        assert_eq!(candidates[0].label, "demo");
+    }
+}

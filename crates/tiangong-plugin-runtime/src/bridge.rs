@@ -73,6 +73,16 @@ pub const BRIDGE_NAMESPACES: &[BridgeNamespace] = &[
         permission: "sidecar.invoke",
         description: "本插件 sidecar 原生逻辑层",
     },
+    BridgeNamespace {
+        prefix: "plugin-dev.",
+        permission: "plugin-dev.use",
+        description: "插件开发受限通道（写范围锁定 plugins-dev 开发目录，RFC 0017 D23）",
+    },
+    BridgeNamespace {
+        prefix: "dialog.",
+        permission: "dialog.use",
+        description: "系统对话框原语（保存文件：原生目录选择 + 宿主落盘）",
+    },
 ];
 
 /// 事件订阅的合法命名空间前缀（设计文档 7.7）。
@@ -227,6 +237,12 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
         "tool." if method.starts_with("browser.") => {
             native_service_call(&BROWSER_HANDLER, "browser", plugin_id, method, payload)
         }
+        // plugin-dev.*：插件开发受限通道（模板 init/构建/安装/校验/日志），
+        // 服务实现见 plugin_dev 模块；写范围锁定开发目录（RFC 0017 D23）。
+        "plugin-dev." => crate::plugin_dev::call(plugin_id, method, payload),
+        // dialog.*：系统对话框原语（保存文件）。宿主 webview 是 WebKit，
+        // 无 File System Access API——文件保存必须经宿主原生对话框。
+        "dialog." => native_service_call(&DIALOG_HANDLER, "dialog", plugin_id, method, payload),
         // 其余命名空间已定形白名单，宿主服务路由按接缝任务渐进接入。
         _ => {
             tracing::info!(plugin_id, method, "bridge.call 命名空间尚未接入宿主服务");
@@ -246,6 +262,7 @@ static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
 pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
 
 static TERMINAL_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
+static DIALOG_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static BROWSER_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static WEBVIEW_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 static APP_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
@@ -253,6 +270,11 @@ static APP_HANDLER: OnceLock<NativeServiceHandler> = OnceLock::new();
 /// 注入终端原生服务（PTY 会话管理，桌面入口启动时调用）。
 pub fn set_terminal_handler(handler: NativeServiceHandler) {
     let _ = TERMINAL_HANDLER.set(handler);
+}
+
+/// 注入系统对话框原生服务（保存文件等，桌面入口启动时调用）。
+pub fn set_dialog_handler(handler: NativeServiceHandler) {
+    let _ = DIALOG_HANDLER.set(handler);
 }
 
 /// 注入浏览器原生服务（webview 管理，桌面入口启动时调用）。
@@ -299,7 +321,11 @@ pub fn set_session_input_handler(handler: SessionInputHandler) {
 }
 
 fn session_input_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
-    if method != "session.input.addAttachment" {
+    // 方法白名单：新增输入方法须在此放行（宿主 handler 负责各自校验）。
+    if !matches!(
+        method,
+        "session.input.addAttachment" | "session.input.sendText"
+    ) {
         bail!("未知输入草稿桥接方法 {method}");
     }
     let handler = SESSION_INPUT_HANDLER
