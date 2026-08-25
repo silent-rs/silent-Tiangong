@@ -348,10 +348,24 @@ jobs:
       - name: Verify native Windows sandbox enforcement
         shell: pwsh
         run: |
-          $output = & .\target\debug\tiangong-sandbox.exe --self-check | Out-String
-          $exitCode = $LASTEXITCODE
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.stderr"
+          $process = Start-Process -FilePath '.\target\debug\tiangong-sandbox.exe' `
+            -ArgumentList '--self-check' -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Windows sandbox self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
           Write-Host $output
-          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.json"
           $exitCode | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.exit-code"
           if ($exitCode -ne 0) {
             throw "Expected self-check exit code 0, got $exitCode"
@@ -435,9 +449,23 @@ jobs:
           if ($null -ne $item.LinkType) {
             throw "Packaged Launcher must not be a symbolic link: $artifact"
           }
-          $output = & $artifact --self-check | Out-String
-          $exitCode = $LASTEXITCODE
-          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.json"
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.stderr"
+          $process = Start-Process -FilePath $artifact -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Packaged Windows Launcher self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
           if ($exitCode -ne 0) {
             throw "Expected packaged self-check exit code 0, got $exitCode"
           }
@@ -592,9 +620,23 @@ jobs:
           if ($null -eq $launcher) {
             throw 'Extracted Windows installer is missing tiangong-sandbox.exe'
           }
-          $output = & $launcher.FullName --self-check | Out-String
-          $exitCode = $LASTEXITCODE
-          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\bundled-self-check.json"
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\bundled-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\bundled-self-check.stderr"
+          $process = Start-Process -FilePath $launcher.FullName -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Bundled Windows Launcher self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
           if ($exitCode -ne 0) {
             throw "Bundled Windows Launcher self-check failed with $exitCode: $output"
           }
