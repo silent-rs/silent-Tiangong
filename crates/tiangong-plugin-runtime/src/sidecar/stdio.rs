@@ -143,6 +143,11 @@ impl StdioSidecarConnection {
             );
             state.process = None;
         }
+        self.start_fresh(state)
+    }
+
+    /// 启动全新进程并完成握手（写入 state.process）。
+    fn start_fresh(&self, state: &mut StdioState) -> Result<Arc<StdioProcess>> {
         let process = Arc::new(self.spawn()?);
         state.process = Some(Arc::clone(&process));
         if let Err(error) = self.handshake(&process) {
@@ -157,6 +162,30 @@ impl StdioSidecarConnection {
             "stdio sidecar 已就绪"
         );
         Ok(process)
+    }
+
+    /// 按需调用：每次请求独立进程（spawn → 握手 → 请求 → 清理），
+    /// 不复用也不保留进程——工具型调用的最小存活窗口。
+    fn invoke_on_demand(
+        &self,
+        operation: &str,
+        payload: Value,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<Value> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+        if self.stopped.load(Ordering::Acquire) {
+            bail!("stdio sidecar 已停止");
+        }
+        let process = self.start_fresh(&mut state)?;
+        let result = self.round_trip(&process, operation, payload, on_progress);
+        if let Ok(mut child) = process.child.lock() {
+            terminate_process_tree(&process, &mut child);
+        }
+        state.process = None;
+        result
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
@@ -654,29 +683,41 @@ impl SidecarConnection for StdioSidecarConnection {
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
-        let process = {
-            let mut state = self.state.lock().map_err(|_| {
-                anyhow!(SidecarInvokeError::Unavailable(
-                    "stdio sidecar 状态锁已损坏".to_string()
-                ))
-            })?;
-            self.ensure_running(&mut state).map_err(|error| {
-                if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                    error
-                } else {
-                    SidecarInvokeError::Unavailable(error.to_string()).into()
-                }
-            })?
+        let response = match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => self
+                .invoke_on_demand(operation, payload, on_progress)
+                .map_err(|error| {
+                    if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                        error
+                    } else {
+                        SidecarInvokeError::Unavailable(error.to_string()).into()
+                    }
+                })?,
+            crate::manifest::SidecarLifecycle::Resident => {
+                let process = {
+                    let mut state = self.state.lock().map_err(|_| {
+                        anyhow!(SidecarInvokeError::Unavailable(
+                            "stdio sidecar 状态锁已损坏".to_string()
+                        ))
+                    })?;
+                    self.ensure_running(&mut state).map_err(|error| {
+                        if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                            error
+                        } else {
+                            SidecarInvokeError::Unavailable(error.to_string()).into()
+                        }
+                    })?
+                };
+                self.round_trip(&process, operation, payload, on_progress)
+                    .map_err(|error| {
+                        if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                            error
+                        } else {
+                            SidecarInvokeError::Internal(error.to_string()).into()
+                        }
+                    })?
+            }
         };
-        let response = self
-            .round_trip(&process, operation, payload, on_progress)
-            .map_err(|error| {
-                if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                    error
-                } else {
-                    SidecarInvokeError::Internal(error.to_string()).into()
-                }
-            })?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }
 

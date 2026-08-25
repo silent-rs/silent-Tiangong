@@ -19,6 +19,13 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
+// 按需 node sidecar：自包含 bundle 产物（devkit 工具链 + 协议库已内联）。
+const sidecarEntry = manifest_sidecar_entry();
+mkdirSync(join(release, 'sidecar'), { recursive: true });
+cpSync(join(pluginRoot, 'build/sidecar-main.mjs'), join(release, sidecarEntry));
+// devkit 模板随插件分发：bundle 产物按自身位置回溯 ../templates 定位
+//（与 npm 包内布局一致），四个模板仅数十 KB。
+cpSync(join(pluginRoot, '../devkit/templates'), join(release, 'templates'), { recursive: true });
 
 // 打包即校验：清单、entry 与 resources 就位，避免导入时才发现问题
 const manifest = JSON.parse(readFileSync(join(release, 'plugin.json'), 'utf8'));
@@ -27,6 +34,17 @@ if (!entry) throw new Error('plugin.json 缺少 ui.contributions[].entry');
 readFileSync(join(release, entry));
 for (const dir of manifest.resources ?? []) {
   statSync(join(release, dir));
+}
+
+function manifest_sidecar_entry() {
+  const sidecar = JSON.parse(readFileSync(join(pluginRoot, 'plugin.json'), 'utf8')).sidecar;
+  if (!sidecar || sidecar.runtime !== 'node' || !sidecar.entry) {
+    throw new Error('plugin.json 必须声明 sidecar.runtime=node 与 entry');
+  }
+  if (!statSync(join(pluginRoot, 'build/sidecar-main.mjs')).isFile()) {
+    throw new Error('缺少 build/sidecar-main.mjs（build 脚本会生成）');
+  }
+  return sidecar.entry;
 }
 
 // 内容树清单：release/ 内除清单自身外全部文件的路径 + sha256

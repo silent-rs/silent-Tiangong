@@ -635,6 +635,7 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         staging.join("plugin.json"),
     )?;
     stage_plugin_ui(&workspace_root, &staging, config)?;
+    stage_interpreter_sidecar(&workspace_root, &staging, config)?;
     for directory in PRESERVED_DIRS {
         std::fs::create_dir_all(staging.join(directory))?;
     }
@@ -1448,6 +1449,92 @@ fn remove_dir_if_exists(path: &Path) -> io::Result<()> {
 fn sha256(path: &Path) -> io::Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// 解释器形态 sidecar 插件（如 plugin-creator）：部署自包含 sidecar 产物、
+/// 随行资源与内容清单，并落本地信任锚。官方签名与解释器形态互斥（一期），
+/// dev 部署即信任（kind: dev-deploy），运行时按内容清单复核防篡改。
+fn stage_interpreter_sidecar(
+    workspace_root: &Path,
+    staging: &Path,
+    config: &PluginConfig,
+) -> io::Result<()> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(workspace_root.join(config.plugin_manifest))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let Some(sidecar) = manifest.get("sidecar") else {
+        return Ok(());
+    };
+    let runtime = sidecar.get("runtime").and_then(serde_json::Value::as_str);
+    if runtime.is_none_or(|value| value == "native") {
+        return Ok(());
+    }
+    let entry = sidecar
+        .get("entry")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("解释器 sidecar 缺少 entry"))?;
+    let plugin_root = workspace_root.join(config.plugin_root);
+    // 产物由该插件的 yarn build（scripts/build-sidecar.mjs）生成。
+    let bundled = plugin_root.join("build/sidecar-main.mjs");
+    require_file(&bundled)?;
+    let destination = staging.join(entry);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&bundled, &destination)?;
+    eprintln!("[xtask] sidecar sha256: {}", sha256(&destination)?);
+
+    // creator 专属随行资源：devkit 模板（bundle 内按 ../templates 相对定位）。
+    if config.id == "plugin-creator" {
+        copy_dir_recursive(
+            &workspace_root.join("plugins/devkit/templates"),
+            &staging.join("templates"),
+        )?;
+    }
+
+    // 内容清单：staging 全树（排除清单自身），路径 + sha256。
+    fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                walk_files(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk_files(staging, &mut files)?;
+    files.sort();
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .filter(|path| !path.ends_with("content-manifest.json"))
+        .map(|path| {
+            Ok(serde_json::json!({
+                "path": path.strip_prefix(staging).unwrap().to_string_lossy().replace('\\', "/"),
+                "sha256": sha256(path)?,
+            }))
+        })
+        .collect::<io::Result<_>>()?;
+    let content = serde_json::json!({ "algorithm": "sha256", "files": entries });
+    let content_raw = serde_json::to_vec_pretty(&content)
+        .map_err(|error| invalid_data(format!("序列化内容清单失败: {error}")))?;
+    std::fs::write(staging.join("content-manifest.json"), &content_raw)?;
+    let anchor = hex::encode(Sha256::digest(&content_raw));
+    let trust = serde_json::json!({
+        "kind": "dev-deploy",
+        "content_sha256": anchor,
+        "created_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or_default(),
+    });
+    let trust_raw = serde_json::to_vec_pretty(&trust)
+        .map_err(|error| invalid_data(format!("序列化信任锚失败: {error}")))?;
+    std::fs::write(staging.join("local-trust.json"), trust_raw)?;
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {

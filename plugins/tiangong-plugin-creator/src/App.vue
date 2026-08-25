@@ -10,7 +10,7 @@ import {
   type HostBridge,
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
-import { DEVKIT_COMMANDS, handleAgentTool, pluginDev, type ProjectEntry } from './tools';
+import { devkitCommand, handleAgentTool, pluginDev, type ProjectEntry } from './tools';
 
 type OutputKind = 'info' | 'success' | 'error';
 interface OutputPanel {
@@ -81,14 +81,24 @@ async function startCreation() {
   }
 }
 
-function showCommands(id: string) {
-  show(
-    'info',
-    `${id} 的 devkit 命令`,
-    Object.values(DEVKIT_COMMANDS)
-      .map((command) => command(id))
-      .join('\n'),
-  );
+/** 页面直连按需 sidecar 构建（与 Agent 工具同一后端）。 */
+async function buildProject(entry: ProjectEntry) {
+  if (!bridge.value || busy.value) return;
+  busy.value = true;
+  try {
+    const result = await devkitCommand(bridge.value, 'build', [entry.id]);
+    if (result.ok) {
+      show('success', `${entry.id} 构建完成`, '产物在项目 release/ 目录，可直接安装。');
+      await recordHistory(`构建 ${entry.id}`);
+    } else {
+      show('error', `${entry.id} 构建失败`, `${result.error ?? '未知错误'}（可让 Agent 用 plugin_devkit logs 读完整日志）`);
+    }
+    await refreshProjects();
+  } catch (error) {
+    show('error', `${entry.id} 构建失败`, error instanceof Error ? error.message : String(error));
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function installProject(entry: ProjectEntry) {
@@ -214,7 +224,7 @@ async function recordHistory(text: string) {
             <span class="versions">{{ versionLabel(entry) }}</span>
           </div>
           <div class="actions">
-            <button type="button" class="ghost" @click="showCommands(entry.id)">命令</button>
+            <button type="button" class="ghost" :disabled="busy" @click="buildProject(entry)">构建</button>
             <button type="button" :disabled="busy" @click="installProject(entry)">安装</button>
           </div>
         </li>

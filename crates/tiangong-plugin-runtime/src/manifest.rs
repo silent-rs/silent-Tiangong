@@ -190,6 +190,18 @@ pub enum SidecarRuntime {
     Python,
 }
 
+/// sidecar 进程生命周期：按需调用即起即清，常驻跨调用复用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarLifecycle {
+    /// 每次调用独立进程（spawn → 握手 → 请求 → 清理）；无进程内状态，
+    /// 存活窗口最小。工具型调用的安全默认；推送/长连接不可用。
+    #[default]
+    OnDemand,
+    /// 常驻复用（懒启动、崩溃换代重启、通知推送可用）。
+    Resident,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarManifest {
     /// 相对插件目录的可执行文件名，不包含平台可执行后缀（native 形态必填）。
@@ -204,6 +216,9 @@ pub struct SidecarManifest {
     /// 传给入口的固定参数（受数量与长度约束）。
     #[serde(default)]
     pub args: Vec<String>,
+    /// 进程生命周期（按需默认；常驻需显式声明）。
+    #[serde(default)]
+    pub lifecycle: SidecarLifecycle,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
     #[serde(default)]

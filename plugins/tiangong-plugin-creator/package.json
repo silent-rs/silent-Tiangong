@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "vue-tsc --noEmit",
-    "build": "yarn typecheck && vite build",
+    "build": "yarn typecheck && vite build && node scripts/build-sidecar.mjs",
     "package": "node scripts/package.mjs"
   },
   "dependencies": {
@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "esbuild": "^0.25.0",
     "typescript": "~5.6.2",
     "vite": "^6.0.5",
     "vite-plugin-singlefile": "^2.1.0",

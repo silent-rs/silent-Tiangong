@@ -2543,6 +2543,7 @@ fn sidecar_connection(
             .with_interpreter(launch)
             .with_integrity_manifest(installed.directory.join(CONTENT_MANIFEST_FILE));
     }
+    config = config.with_lifecycle(sidecar.lifecycle);
 
     let mut connections = sidecar_connections()
         .lock()

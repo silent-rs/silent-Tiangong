@@ -171,6 +171,8 @@ pub struct SidecarConfig {
     pub server_token: Option<String>,
     /// 解释器启动规格；存在时以「程序 + entry + args」替代直接启动 binary。
     pub interpreter: Option<InterpreterLaunch>,
+    /// 进程生命周期：按需（默认，每次调用独立进程即起即清）或常驻复用。
+    pub lifecycle: crate::manifest::SidecarLifecycle,
     /// 内容哈希清单（本地信任解释器 sidecar 的 spawn 前复核锚）。
     pub integrity_manifest: Option<PathBuf>,
     // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
@@ -225,6 +227,7 @@ impl SidecarConfig {
             server_url: None,
             server_token: None,
             interpreter: None,
+            lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
             integrity_manifest: None,
             sandbox: false,
             sandbox_workspace: None,
@@ -245,6 +248,12 @@ impl SidecarConfig {
     /// 设置解释器启动规格（存在时 spawn 以解释器运行 entry 而非直接启动 binary）。
     pub fn with_interpreter(mut self, launch: InterpreterLaunch) -> Self {
         self.interpreter = Some(launch);
+        self
+    }
+
+    /// 设置进程生命周期（按需默认；常驻需显式声明）。
+    pub fn with_lifecycle(mut self, lifecycle: crate::manifest::SidecarLifecycle) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 

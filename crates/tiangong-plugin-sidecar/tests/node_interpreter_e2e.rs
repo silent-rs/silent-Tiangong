@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use tiangong_plugin_runtime::manifest::SidecarLifecycle;
 use tiangong_plugin_runtime::sidecar::{
     InterpreterLaunch, SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
@@ -52,7 +53,7 @@ await runSidecar({{
   dispatch(operation, payload, ctx) {{
     if (operation === 'demo.echo') {{
       ctx.progress('echo 处理中');
-      return {{ payload: {{ text: payload?.text ?? '', marker: '{text_marker}' }} }};
+      return {{ payload: {{ text: typeof payload?.text === 'string' ? payload.text : '', marker: '{text_marker}', pid: process.pid }} }};
     }}
     if (operation === 'demo.crash') {{
       process.exit(1);
@@ -72,6 +73,15 @@ fn connection(
     entry: PathBuf,
     integrity_manifest: Option<PathBuf>,
 ) -> StdioSidecarConnection {
+    connection_with_lifecycle(node, entry, integrity_manifest, SidecarLifecycle::Resident)
+}
+
+fn connection_with_lifecycle(
+    node: &std::path::Path,
+    entry: PathBuf,
+    integrity_manifest: Option<PathBuf>,
+    lifecycle: SidecarLifecycle,
+) -> StdioSidecarConnection {
     let base = entry.parent().unwrap().parent().unwrap().to_path_buf();
     let config = SidecarConfig::new(
         "node-e2e",
@@ -83,6 +93,7 @@ fn connection(
         base.join("storage"),
     )
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(15))
+    .with_lifecycle(lifecycle)
     .with_interpreter(InterpreterLaunch {
         program: node.to_path_buf(),
         entry,
@@ -125,6 +136,42 @@ fn node_interpreter_roundtrip_and_restart() {
 
     connection.stop().unwrap();
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn node_interpreter_lifecycle_on_demand_vs_resident() {
+    let Some(node) = find_node() else {
+        eprintln!("跳过：PATH 中未找到 node");
+        return;
+    };
+    let invoke_pid = |lifecycle: SidecarLifecycle| -> (i64, i64) {
+        let base = std::env::temp_dir().join(format!(
+            "tiangong-node-lifecycle-{:?}-{}",
+            lifecycle,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let entry = write_sidecar_project(&base, "lc");
+        let connection = connection_with_lifecycle(&node, entry, None, lifecycle);
+        let first: serde_json::Value =
+            serde_json::from_str(&connection.invoke("demo.echo", r#"{"text":"a"}"#).unwrap())
+                .unwrap();
+        let second: serde_json::Value =
+            serde_json::from_str(&connection.invoke("demo.echo", r#"{"text":"b"}"#).unwrap())
+                .unwrap();
+        connection.stop().unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        (
+            first["pid"].as_i64().unwrap(),
+            second["pid"].as_i64().unwrap(),
+        )
+    };
+
+    // 按需：每次调用独立进程（pid 不同）；常驻：跨调用复用（pid 相同）。
+    let (a, b) = invoke_pid(SidecarLifecycle::OnDemand);
+    assert_ne!(a, b, "按需模式两次调用应为不同进程");
+    let (a, b) = invoke_pid(SidecarLifecycle::Resident);
+    assert_eq!(a, b, "常驻模式两次调用应复用同一进程");
 }
 
 #[test]
