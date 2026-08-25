@@ -51,7 +51,11 @@ jobs:
           python3 - "$plugin_id" >> "$GITHUB_OUTPUT" <<'PY'
           import json, os, sys
           plugin_id = sys.argv[1]
-          for root in (f"plugins/tiangong-plugin-{plugin_id}", f"plugins/{plugin_id}"):
+          for root in (
+              f"plugins/tiangong-plugin-{plugin_id}",
+              f"plugins/tiangong-{plugin_id}",
+              f"plugins/{plugin_id}",
+          ):
               if os.path.isfile(f"{root}/plugin.json"):
                   manifest = json.load(open(f"{root}/plugin.json"))
                   has_wasm = "true" if manifest.get("wasm") else "false"
@@ -122,7 +126,7 @@ jobs:
     needs: [resolve-plugin, build-wasm, build-ui]
     # 纯 UI 插件会跳过 build-wasm；显式判定 needs 结果，避免
     # skipped 状态传播导致整条发布链被跳过。
-    if: ${{ !cancelled() && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
