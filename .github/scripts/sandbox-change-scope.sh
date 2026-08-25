@@ -23,6 +23,7 @@ while IFS= read -r file; do
     crates/tiangong-plugin-runtime/src/sidecar/command.rs|\
     crates/tiangong-plugin-runtime/src/sidecar/stdio.rs|\
     crates/tiangong-plugin-runtime/tests/ephemeral_route.rs|\
+    crates/tiangong-plugin-sidecar/src/bin/test-stdio-host.rs|\
     crates/tiangong-plugin-sidecar/src/bin/test-stdio-sidecar.rs|\
     crates/tiangong-plugin-sidecar/src/lib.rs|\
     crates/tiangong-plugin-sidecar/src/server.rs|\
