@@ -17,7 +17,8 @@ npx -y @silent-ai/plugin-creator@1.0.2 logs dev:my-dashboard
 
 | 命令 | 说明 |
 |---|---|
-| `init` | 按模板生成骨架（模板随本包分发：ui-app / ts-tool / ts-npx），占位符替换，防劫持与重复初始化 |
+| `init` | 按模板生成骨架（模板随本包分发：ui-app / ts-tool / ts-npx / node-sidecar），占位符替换，防劫持与重复初始化 |
+| `add` | 为工程模板项目添加依赖（`yarn add --exact` 锁定精确版本；包名校验拒绝注入与 file:/git 等本地依赖） |
 | `validate` | 清单校验（plugin.json 解析、字段、UI 入口存在性、sidecar 权限一致性） |
 | `build` | 工程模板 yarn install→build→package；零构建模板内建打包（含内容树清单） |
 | `run` | 按项目 run.json 试运行（npx 子进程、120s 超时、npm 缓存隔离） |

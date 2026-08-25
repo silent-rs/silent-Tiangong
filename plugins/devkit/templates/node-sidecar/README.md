@@ -10,7 +10,8 @@ sidecar 是工程构建：`yarn install` 后 `build` 用 esbuild 把
 `package.json` 的 `dependencies`）打成**单个自包含文件**进 `release/`。
 安装后的 sidecar 运行时零依赖、零网络（构建期才需要网络装依赖）。
 
-- 添加第三方依赖：`yarn add <包>`，在 `sidecar/main.mjs` 正常 `import`。
+- 添加第三方依赖：`npx -y @silent-ai/plugin-creator@1.0.2 add <id> <包名>`
+  （经命令通道执行，锁定精确版本），在 `sidecar/main.mjs` 正常 `import`。
 - 限制：原生 `.node` 模块暂不支持打包；需要时用官方插件链路（Rust）。
 
 ## 结构
