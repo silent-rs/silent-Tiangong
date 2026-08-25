@@ -6,6 +6,8 @@ on:
       - ".github/scripts/sandbox-change-scope.sh"
       - ".github/workflows/sandbox-ci.yml"
       - "crates/tiangong-sandbox/**"
+      - "crates/tiangong-toolkit/Cargo.toml"
+      - "crates/tiangong-toolkit/src/lib.rs"
       - "crates/tiangong-plugin-runtime/Cargo.toml"
       - "crates/tiangong-plugin-runtime/src/adapter.rs"
       - "crates/tiangong-plugin-runtime/src/host_state.rs"
@@ -59,6 +61,7 @@ jobs:
           sandbox_only="$(
             printf '%s\n' \
               crates/tiangong-sandbox/src/lib.rs \
+              crates/tiangong-toolkit/src/lib.rs \
               Cargo.lock \
               .github/workflows/ci.yml \
               | bash .github/scripts/sandbox-change-scope.sh
@@ -80,7 +83,11 @@ jobs:
           [[ "$mixed_change" == "false" ]]
 
           shared_only="$(
-            printf '%s\n' Cargo.toml Cargo.lock .github/workflows/ci.yml \
+            printf '%s\n' \
+              Cargo.toml \
+              Cargo.lock \
+              .github/workflows/ci.yml \
+              crates/tiangong-toolkit/src/lib.rs \
               | bash .github/scripts/sandbox-change-scope.sh
           )"
           [[ "$shared_only" == "false" ]]
@@ -89,7 +96,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-          matrix: '["tiangong-sandbox","tiangong-plugin-runtime","tiangong-plugin-sidecar","tiangong-plugin-command-sidecar"]'
+          matrix: '["tiangong-sandbox","tiangong-toolkit","tiangong-plugin-runtime","tiangong-plugin-sidecar","tiangong-plugin-command-sidecar"]'
 
       - name: Install bubblewrap
         run: sudo apt-get install -y bubblewrap
@@ -98,6 +105,7 @@ jobs:
         run: >-
           cargo fmt
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar
@@ -108,6 +116,7 @@ jobs:
         run: >-
           cargo clippy --locked
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar
@@ -334,6 +343,7 @@ jobs:
         run: >-
           cargo check --locked
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar

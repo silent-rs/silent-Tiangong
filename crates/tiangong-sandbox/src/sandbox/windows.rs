@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation,
-    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
-    SetHandleInformation, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, WAIT_ABANDONED,
+    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -40,9 +40,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-    GetFileInformationByHandle, OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileInformationByHandle,
+    OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -80,7 +80,6 @@ const FILE_WRITE_ACCESS: u32 = FILE_WRITE_DATA
 const FILE_WORKSPACE_ACCESS: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const FILE_PROGRAM_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
-const FILE_ANCESTOR_PATH_ACCESS: u32 = FILE_GENERIC_EXECUTE | FILE_LIST_DIRECTORY;
 
 /// Windows Launcher 的原生启动参数。
 pub struct WindowsLaunchRequest<'a> {
@@ -553,8 +552,8 @@ impl AclGrants {
             active: true,
         };
         let result = (|| {
-            // Windows 规范化路径时会逐级查询目录名。祖先权限不继承，
-            // 因而只暴露当前层目录项，不会放行其中任何文件内容。
+            // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
+            // 子树传播继承项，因此只授权最终程序和策略根。
             grants.add(
                 appcontainer_sid,
                 program,
@@ -572,7 +571,6 @@ impl AclGrants {
 
             let writable = policy.writable_roots();
             for root in &writable {
-                grants.add_path_resolution_ancestors(appcontainer_sid, root)?;
                 grants.add(
                     appcontainer_sid,
                     root,
@@ -618,41 +616,6 @@ impl AclGrants {
             };
         }
         Ok(grants)
-    }
-
-    fn add_path_resolution_ancestors(&mut self, sid: PSID, root: &Path) -> Result<()> {
-        for ancestor in root.ancestors().skip(1) {
-            if ancestor.parent().is_none() {
-                break;
-            }
-            if self
-                .roots
-                .iter()
-                .any(|entry| entry.sid == sid && entry.path == ancestor)
-            {
-                continue;
-            }
-            match modify_acl(
-                ancestor,
-                sid,
-                FILE_ANCESTOR_PATH_ACCESS,
-                NO_INHERITANCE,
-                GRANT_ACCESS,
-            ) {
-                Ok(()) => self.roots.push(AclRoot {
-                    sid,
-                    path: ancestor.to_path_buf(),
-                    recursive: false,
-                }),
-                Err(error) if is_access_denied(&error) => break,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("授予 Windows 目录穿越权限失败: {}", ancestor.display())
-                    });
-                }
-            }
-        }
-        Ok(())
     }
 
     fn add(
@@ -714,15 +677,6 @@ impl AclGrants {
             bail!(failures.join("; "))
         }
     }
-}
-
-fn is_access_denied(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .and_then(std::io::Error::raw_os_error)
-            == Some(ERROR_ACCESS_DENIED as i32)
-    })
 }
 
 impl Drop for AclGrants {

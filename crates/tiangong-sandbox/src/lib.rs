@@ -11,6 +11,7 @@
 
 pub mod host_policy;
 pub mod launcher_manager;
+mod path;
 pub mod sandbox;
 
 /// Windows 上通过进程环境传递一次性 Launcher 请求；Launcher 启动目标前会移除。
@@ -24,6 +25,7 @@ pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
 pub const MAX_POLICY_FRAME_BYTES: usize = 1024 * 1024;
 
 pub use host_policy::{HostExecutionPolicy, SidecarTransport};
+pub use path::canonicalize_path;
 pub use sandbox::{
     SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits, SandboxedProgram,
     availability, explain_violation, wrap,

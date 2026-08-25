@@ -833,7 +833,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     let (git_metadata_write_blocked, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "父进程");
     let mut probe = WindowsProbeReport {
-        workspace_write: std::fs::canonicalize(&request.workspace)
+        workspace_write: tiangong_sandbox::canonicalize_path(&request.workspace)
             .and_then(|workspace| std::fs::write(workspace.join("inside.txt"), "ok"))
             .is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp.txt"), "ok").is_ok(),
@@ -912,7 +912,7 @@ fn run_windows_child_probe(raw: &str) -> i32 {
     let (git_metadata_write_blocked, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "子进程");
     let report = WindowsProbeReport {
-        workspace_write: std::fs::canonicalize(&request.workspace)
+        workspace_write: tiangong_sandbox::canonicalize_path(&request.workspace)
             .and_then(|workspace| std::fs::write(workspace.join("inside-child.txt"), "ok"))
             .is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp-child.txt"), "ok").is_ok(),
