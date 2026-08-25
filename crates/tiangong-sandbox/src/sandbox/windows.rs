@@ -59,11 +59,13 @@ use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessAsUserW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenEventW, OpenProcess,
-    OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, PROCESS_SYNCHRONIZE,
-    ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SYNCHRONIZATION_SYNCHRONIZE,
-    TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects, WaitForSingleObject,
+    OpenProcessToken, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForMultipleObjects, WaitForSingleObject,
 };
+use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_OVERRIDE;
 
 use super::{SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
@@ -869,7 +871,12 @@ fn run_restricted_process(
     };
     trace_self_check(request, "准备标准输入输出句柄");
     let stdio = InheritableStdio::prepare()?;
-    let mut attributes = ProcessAttributes::new(&security_capabilities, &stdio.handles)?;
+    let child_process_policy = PROCESS_CREATION_CHILD_PROCESS_OVERRIDE;
+    let mut attributes = ProcessAttributes::new(
+        &security_capabilities,
+        &stdio.handles,
+        &child_process_policy,
+    )?;
     trace_self_check(request, "创建受限进程令牌");
     let token = RestrictedToken::new(restriction.sid, profile.sid)?;
 
@@ -1067,17 +1074,21 @@ struct ProcessAttributes {
 }
 
 impl ProcessAttributes {
-    fn new(capabilities: &SECURITY_CAPABILITIES, inherited_handles: &[HANDLE]) -> Result<Self> {
+    fn new(
+        capabilities: &SECURITY_CAPABILITIES,
+        inherited_handles: &[HANDLE],
+        child_process_policy: &u32,
+    ) -> Result<Self> {
         let mut bytes = 0usize;
         let initialized =
-            unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut bytes) };
+            unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 3, 0, &mut bytes) };
         if initialized != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
             return Err(std::io::Error::last_os_error())
                 .context("计算 Windows 进程属性列表长度失败");
         }
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let pointer = storage.as_mut_ptr().cast();
-        if unsafe { InitializeProcThreadAttributeList(pointer, 2, 0, &mut bytes) } == 0 {
+        if unsafe { InitializeProcThreadAttributeList(pointer, 3, 0, &mut bytes) } == 0 {
             return Err(std::io::Error::last_os_error()).context("初始化 Windows 进程属性失败");
         }
         if unsafe {
@@ -1113,6 +1124,24 @@ impl ProcessAttributes {
                 DeleteProcThreadAttributeList(pointer);
             }
             return Err(std::io::Error::last_os_error()).context("限制 AppContainer 继承句柄失败");
+        }
+        if unsafe {
+            UpdateProcThreadAttribute(
+                pointer,
+                0,
+                PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
+                (child_process_policy as *const u32).cast(),
+                size_of::<u32>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            unsafe {
+                DeleteProcThreadAttributeList(pointer);
+            }
+            return Err(std::io::Error::last_os_error())
+                .context("允许 AppContainer 子进程继承隔离策略失败");
         }
         Ok(Self { storage })
     }
