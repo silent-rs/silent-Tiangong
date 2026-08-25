@@ -107,6 +107,9 @@ export function MessageInput({
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
+  // 事件回调（非渲染流）读取信任模式的最新值。
+  const trustModeRef = useRef(trustMode);
+  trustModeRef.current = trustMode;
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   useLayoutEffect(() => {
@@ -406,14 +409,10 @@ export function MessageInput({
       if (attachment.kind === 'text') {
         const content = (attachment.text ?? '').trim();
         if (!content) return;
-        useStore.getState().setInputCacheText(cacheKey, content);
-        const fresh = useStore.getState().inputCaches[cacheKey];
-        if (!fresh || fresh.is_sending) {
-          // 执行中：留作草稿，遵循会话队列语义。
-          editorRef.current?.focus();
-          return;
-        }
-        void useStore.getState().sendMessage(cacheKey, content, [], fresh.revision, 'full_trust');
+        // 「用户普通 Enter」语义：保护草稿、运行中入队、空闲发送、
+        // 信任模式用界面当前选择——是否立即引导由用户决定。
+        useStore.getState().submitExternalText(cacheKey, content, trustModeRef.current);
+        editorRef.current?.focus();
         return;
       }
       if (attachment.kind !== 'image' || attachment.mime_type !== 'image/png') return;

@@ -1,0 +1,83 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { useStore } from '@/store/useStore';
+import { emptyInputCache } from '@/store/inputCache';
+
+/**
+ * 插件 sendText 的「用户普通 Enter」语义：session.input.sendText 经
+ * submitExternalText 投递——保护现有草稿（先入队不覆盖）、执行中入队
+ * （不立即引导，由用户决定）、空闲立即发送、信任模式用界面当前选择。
+ */
+const KEY = 'session-sendtext-test';
+
+function prepareSession(options: { running?: boolean; draft?: string } = {}) {
+  useStore.setState({
+    activeSessionId: KEY,
+    inputCaches: { [KEY]: { ...emptyInputCache(), text: options.draft ?? '' } },
+    inputQueues: {},
+    sessionRunStatuses: options.running ? { [KEY]: 'executing' } : {},
+  });
+}
+
+function spyActions() {
+  // 只替换 sendMessage（避免真实 Tauri 调用）；入队走真实实现，
+  // 行为经队列结果断言。
+  const send = vi.fn().mockResolvedValue(true);
+  useStore.setState({ sendMessage: send as never });
+  return { send };
+}
+
+describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () => {
+  beforeEach(() => {
+    prepareSession();
+  });
+
+  it('Agent 空闲：立即发送，透传界面当前信任模式', () => {
+    const { send } = spyActions();
+    useStore.getState().submitExternalText(KEY, '开始创建插件', 'supervised');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toBe('开始创建插件');
+    expect(send.mock.calls[0][4]).toBe('supervised');
+    expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
+  });
+
+  it('Agent 运行中：进入前端队列，不发送不引导', () => {
+    const { send } = spyActions();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '再来一个插件', 'full_trust');
+    expect(send).not.toHaveBeenCalled();
+    const queue = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queue).toHaveLength(1);
+    expect(queue[0].text).toBe('再来一个插件');
+    // 插件消息入队后草稿清空（等待自动放行或用户立即引导）。
+    expect(useStore.getState().inputCaches[KEY].text).toBe('');
+  });
+
+  it('输入框已有草稿：先入队保护，不覆盖', () => {
+    const { send } = spyActions();
+    prepareSession({ running: true, draft: '用户未发送的草稿' });
+    useStore.getState().submitExternalText(KEY, '插件消息', 'full_trust');
+    expect(send).not.toHaveBeenCalled();
+    const queue = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queue).toHaveLength(2);
+    expect(queue[0].text).toBe('用户未发送的草稿');
+    expect(queue[1].text).toBe('插件消息');
+  });
+
+  it('连续两次调用：两条都进队列，不丢失不覆盖', () => {
+    spyActions();
+    prepareSession({ running: true });
+    useStore.getState().submitExternalText(KEY, '第一条', 'full_trust');
+    useStore.getState().submitExternalText(KEY, '第二条', 'full_trust');
+    const queue = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queue.map((message) => message.text)).toEqual(['第一条', '第二条']);
+  });
+
+  it('空文本：不做任何投递', () => {
+    const { send } = spyActions();
+    useStore.getState().submitExternalText(KEY, '   ', 'full_trust');
+    expect(send).not.toHaveBeenCalled();
+    expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
+    expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(0);
+  });
+});

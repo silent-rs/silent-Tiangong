@@ -867,6 +867,13 @@ export interface AppState {
   steerQueuedInputMessage: (cacheKey: string, messageId: string) => Promise<boolean>;
   /** turn 结束（runStatus 回 idle）且草稿为空时自动放行队首；失败不自动重试。 */
   dequeueNextQueuedInput: (cacheKey: string) => Promise<boolean>;
+  /**
+   * 插件外部文本按「用户普通 Enter」语义投递：保护现有草稿（先入队，不
+   * 覆盖）→ 运行中入队等待 turn 结束自动放行（是否立即引导由用户在队列
+   * 里决定）→ 空闲立即发送；信任模式用调用方传入的界面当前选择。
+   * 不走 appendMessage（立即引导是用户的决定权，插件不得代行）。
+   */
+  submitExternalText: (cacheKey: string, content: string, trustMode: string) => void;
 
   // 流式消息状态
   streamingMessageId: string | null;
@@ -1650,6 +1657,29 @@ export const useStore = create<AppState>((set, get) => ({
     }));
     get().setInputCacheText(cacheKey, '');
     get().setInputCacheAttachments(cacheKey, []);
+  },
+
+  submitExternalText: (cacheKey, content, trustMode) => {
+    const text = content.trim();
+    if (!text) return;
+    const state = get();
+    const cache = state.inputCaches[cacheKey];
+    if (!cache) return;
+    // 保护用户草稿：非空（文本或附件）先入队，避免被外部文本覆盖丢失。
+    if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
+      state.enqueueInputMessage(cacheKey);
+    }
+    get().setInputCacheText(cacheKey, text);
+    const fresh = get().inputCaches[cacheKey];
+    if (!fresh) return;
+    // 与普通 Enter 一致的分流：执行中入队（等待自动放行或用户立即引导），
+    // 空闲立即开新轮发送。
+    const running = get().sessionRunStatuses[cacheKey] === 'executing';
+    if (running || fresh.is_sending) {
+      get().enqueueInputMessage(cacheKey);
+      return;
+    }
+    void get().sendMessage(cacheKey, text, [], fresh.revision, trustMode);
   },
 
   removeQueuedInputMessage: (cacheKey, messageId) => {
