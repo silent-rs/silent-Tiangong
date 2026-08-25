@@ -20,6 +20,7 @@ tempfile = { workspace = true }
 scru128 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+dunce = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

@@ -6,10 +6,18 @@ use std::path::{Path, PathBuf};
 /// 普通进程仍必须完成真实路径解析。
 pub fn canonicalize_path(path: &Path) -> io::Result<PathBuf> {
     #[cfg(windows)]
-    if windows::current_process_is_app_container().unwrap_or(false) {
-        return std::path::absolute(path);
+    {
+        let resolved = if windows::current_process_is_app_container().unwrap_or(false) {
+            std::path::absolute(path)?
+        } else {
+            std::fs::canonicalize(path)?
+        };
+        Ok(dunce::simplified(&resolved).to_path_buf())
     }
-    std::fs::canonicalize(path)
+    #[cfg(not(windows))]
+    {
+        std::fs::canonicalize(path)
+    }
 }
 
 #[cfg(windows)]
