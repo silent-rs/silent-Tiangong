@@ -1,0 +1,66 @@
+name: Publish devkit to npm
+
+# @tiangong/plugin-creator（devkit CLI）自动发布到 npm。
+# 触发：推 tag `devkit/v<版本>`（与 package.json 版本一致，不一致即拒绝），
+# 或手动 workflow_dispatch（按 package.json 当前版本发布）。
+# 前置（一次性）：npm 创建 tiangong org → 生成 Automation 类型 token →
+# 仓库 Secrets 配置 NPM_TOKEN。
+
+on:
+  push:
+    tags:
+      - "devkit/v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # npm provenance（供应链来源证明，attestation 随包发布）
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish @tiangong/plugin-creator
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: plugins/devkit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#devkit/v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag 版本 $TAG_VERSION 与 package.json 版本 $PKG_VERSION 不一致"
+            exit 1
+          fi
+          echo "发布版本：$PKG_VERSION"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # 发布前干跑校验：files 清单完整、bin 可执行位、无多余文件
+      - name: 发布前校验（pack 干跑）
+        run: |
+          npm pack --dry-run
+          node --check bin/cli.mjs
+          node --check src/init.mjs
+          node --check src/validate.mjs
+          node --check src/build.mjs
+          node --check src/run.mjs
+          node --check src/logs.mjs
+
+      - name: 发布到 npm（含 provenance）
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 发布摘要
+        run: |
+          echo "已发布 @tiangong/plugin-creator@$(node -p "require('./package.json').version")"
+          echo "Agent 命令引用（同步更新插件说明书与 tools.ts 的 DEVKIT_VERSION）："
+          echo "npx -y @tiangong/plugin-creator@$(node -p "require('./package.json').version") <命令>"
