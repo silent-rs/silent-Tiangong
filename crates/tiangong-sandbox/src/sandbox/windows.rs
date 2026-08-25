@@ -58,12 +58,12 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateMutexW, CreateProcessAsUserW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenEventW, OpenProcess,
-    OpenProcessToken, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+    GetExitCodeProcess, GetProcessMitigationPolicy, INFINITE, InitializeProcThreadAttributeList,
+    OpenEventW, OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
-    PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForMultipleObjects, WaitForSingleObject,
+    PROCESS_INFORMATION, PROCESS_SYNCHRONIZE, ProcessChildProcessPolicy, ReleaseMutex,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SYNCHRONIZATION_SYNCHRONIZE,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects, WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_OVERRIDE;
 
@@ -182,6 +182,23 @@ pub fn current_process_limits_match(expected: SandboxResourceLimits) -> bool {
             == expected.max_cpu_time_seconds as i64 * 10_000_000
         && actual.BasicLimitInformation.ActiveProcessLimit == expected.max_processes
         && actual.JobMemoryLimit == expected.max_memory_bytes as usize
+}
+
+/// 由受限目标读取系统实际应用的子进程策略标志。
+pub fn current_process_child_policy_flags() -> Result<u32> {
+    let mut flags = 0u32;
+    if unsafe {
+        GetProcessMitigationPolicy(
+            GetCurrentProcess(),
+            ProcessChildProcessPolicy,
+            (&raw mut flags).cast(),
+            size_of::<u32>(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("读取 Windows 子进程策略失败");
+    }
+    Ok(flags)
 }
 
 fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {

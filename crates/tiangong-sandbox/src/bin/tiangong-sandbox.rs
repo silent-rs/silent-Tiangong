@@ -864,10 +864,43 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         ),
     };
     eprintln!("Windows 文件隔离探针: 启动受限子进程");
+    eprintln!(
+        "Windows 文件隔离探针: 子进程策略={:?}，工作区程序读取={:?}",
+        tiangong_sandbox::sandbox::windows::current_process_child_policy_flags(),
+        std::fs::read(&request.workspace_executable).map(|raw| raw.len())
+    );
     let child_request = match serde_json::to_string(&request) {
         Ok(value) => value,
         Err(_) => return 3,
     };
+    let current_exe_result = std::env::current_exe().and_then(|program| {
+        std::process::Command::new(program)
+            .args(["--self-check-network-probe", "invalid"])
+            .status()
+    });
+    eprintln!("Windows 文件隔离探针: 原程序派生结果={current_exe_result:?}");
+
+    let inherited_result = std::process::Command::new(&request.workspace_executable)
+        .arg("--windows-self-check-child-probe")
+        .arg(&child_request)
+        .current_dir(&request.workspace)
+        .status();
+    eprintln!("Windows 文件隔离探针: 继承输出派生结果={inherited_result:?}");
+    let inherited_ok = inherited_result.is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&request.child_report_path);
+
+    let null_result = std::process::Command::new(&request.workspace_executable)
+        .arg("--windows-self-check-child-probe")
+        .arg(&child_request)
+        .current_dir(&request.workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    eprintln!("Windows 文件隔离探针: 空设备输出派生结果={null_result:?}");
+    let null_ok = null_result.is_ok_and(|status| status.success());
+    let _ = std::fs::remove_file(&request.child_report_path);
+
     let child_result = std::process::Command::new(&request.workspace_executable)
         .arg("--windows-self-check-child-probe")
         .arg(child_request)
@@ -893,7 +926,9 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         }
     };
     eprintln!("Windows 文件隔离探针: 读取子进程报告");
-    probe.child_restrictions_inherited = child_ok
+    probe.child_restrictions_inherited = inherited_ok
+        && null_ok
+        && child_ok
         && std::fs::read(&request.child_report_path)
             .ok()
             .and_then(|raw| serde_json::from_slice::<WindowsProbeReport>(&raw).ok())
