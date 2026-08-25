@@ -221,6 +221,12 @@ fn notification_sender() -> &'static tokio::sync::broadcast::Sender<(String, Str
     NOTIFICATIONS.get_or_init(|| tokio::sync::broadcast::channel(256).0)
 }
 
+/// 通知广播订阅入口（stdio 模式的通知写出任务使用）。
+pub(crate) fn notification_broadcast() -> &'static tokio::sync::broadcast::Sender<(String, String)>
+{
+    notification_sender()
+}
+
 /// service 主动推送通知（如 PTY 输出流）。无活跃订阅者时静默丢弃
 /// （容量 256 满时丢最旧，调用方不需处理背压——流式场景可容忍）。
 pub fn emit_notification(channel: impl Into<String>, payload: impl Into<String>) {

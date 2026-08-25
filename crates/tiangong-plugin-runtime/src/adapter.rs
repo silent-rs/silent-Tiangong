@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::sidecar::SidecarConnection;
+use crate::sidecar::SidecarInvocationContext;
 use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
@@ -294,6 +295,18 @@ impl Plugin for WasmPluginAdapter {
             sidecar.update_exec_env(env);
         }
     }
+
+    fn on_cancel<'a>(
+        &'a self,
+        session: &mut Session,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        if let Some(sidecar) = &self.sidecar
+            && let Err(error) = sidecar.cancel_session(&session.id)
+        {
+            tracing::warn!(plugin_id = %self.id, session_id = %session.id, %error, "取消 sidecar 调用失败");
+        }
+        Box::pin(async {})
+    }
 }
 
 impl WasmPluginAdapter {
@@ -405,7 +418,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &mut tiangong_core::session::Session,
+        session: &mut tiangong_core::session::Session,
         _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         if !self.is_enabled() {
@@ -417,13 +430,20 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             name: call.name.clone(),
             arguments,
         };
+        let invocation_context = SidecarInvocationContext {
+            session_id: session.id.clone(),
+            invocation_id: call.id.clone(),
+            authoritative_workspace: std::path::PathBuf::from(session.cwd.trim()),
+        };
         let Some(inner) = self.current_inner() else {
             return Box::pin(async { None });
         };
         let config = self.config.clone();
         Box::pin(async move {
             let result = task::spawn_blocking(move || {
-                call_wasm_off_runtime(inner, move |plugin| plugin.handle_tool(wit_call, &config))
+                call_wasm_off_runtime(inner, move |plugin| {
+                    plugin.handle_tool_with_context(wit_call, &config, invocation_context)
+                })
             })
             .await
             .ok()?
