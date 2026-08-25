@@ -280,7 +280,10 @@ fn normalize_windows_command_program(request: &mut serde_json::Map<String, serde
         return;
     }
 
-    let mut normalized = format!("\"{}\"", program.display().to_string().replace('\\', "/"));
+    // command 的既有解析器会把反斜杠当作转义符，因此宿主需要成对传入；
+    // 解析后交给 CreateProcess 的仍是标准 Windows 反斜杠路径。
+    let escaped_program = program.display().to_string().replace('\\', "\\\\");
+    let mut normalized = format!("\"{escaped_program}\"");
     if !remainder.is_empty() {
         normalized.push(' ');
         normalized.push_str(remainder);

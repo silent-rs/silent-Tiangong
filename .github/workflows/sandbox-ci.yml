@@ -648,7 +648,7 @@ jobs:
           }
           $exitCode = $process.ExitCode
           if ($exitCode -ne 0) {
-            throw "Bundled Windows Launcher self-check failed with $exitCode: $output"
+            throw "Bundled Windows Launcher self-check failed with ${exitCode}: $output"
           }
           $report = $output | ConvertFrom-Json
           $config = Get-Content -Raw -LiteralPath 'src-tauri/tauri.conf.json' | ConvertFrom-Json
