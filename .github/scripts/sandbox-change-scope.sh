@@ -8,9 +8,10 @@ other_change=false
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
   case "$file" in
-    .gitignore|Cargo.toml|Cargo.lock|.github/workflows/ci.yml|.github/workflows/plugin-ci.yml)
-      # Shared metadata may accompany a Sandbox-only change, but does not make
-      # an otherwise unrelated change Sandbox-only by itself.
+    .gitignore|Cargo.toml|Cargo.lock|.github/workflows/ci.yml|.github/workflows/plugin-ci.yml|\
+    crates/tiangong-toolkit/Cargo.toml|crates/tiangong-toolkit/src/lib.rs)
+      # Shared metadata and the command path-policy companion may accompany a
+      # Sandbox-only change, but do not make an unrelated change Sandbox-only.
       ;;
     .github/scripts/sandbox-change-scope.sh|.github/workflows/sandbox-ci.yml|\
     crates/tiangong-sandbox/*|\

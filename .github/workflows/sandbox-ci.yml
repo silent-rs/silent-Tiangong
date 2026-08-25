@@ -6,6 +6,8 @@ on:
       - ".github/scripts/sandbox-change-scope.sh"
       - ".github/workflows/sandbox-ci.yml"
       - "crates/tiangong-sandbox/**"
+      - "crates/tiangong-toolkit/Cargo.toml"
+      - "crates/tiangong-toolkit/src/lib.rs"
       - "crates/tiangong-plugin-runtime/Cargo.toml"
       - "crates/tiangong-plugin-runtime/src/adapter.rs"
       - "crates/tiangong-plugin-runtime/src/host_state.rs"
@@ -59,6 +61,7 @@ jobs:
           sandbox_only="$(
             printf '%s\n' \
               crates/tiangong-sandbox/src/lib.rs \
+              crates/tiangong-toolkit/src/lib.rs \
               Cargo.lock \
               .github/workflows/ci.yml \
               | bash .github/scripts/sandbox-change-scope.sh
@@ -80,7 +83,11 @@ jobs:
           [[ "$mixed_change" == "false" ]]
 
           shared_only="$(
-            printf '%s\n' Cargo.toml Cargo.lock .github/workflows/ci.yml \
+            printf '%s\n' \
+              Cargo.toml \
+              Cargo.lock \
+              .github/workflows/ci.yml \
+              crates/tiangong-toolkit/src/lib.rs \
               | bash .github/scripts/sandbox-change-scope.sh
           )"
           [[ "$shared_only" == "false" ]]
@@ -89,7 +96,7 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           components: rustfmt, clippy
-          matrix: '["tiangong-sandbox","tiangong-plugin-runtime","tiangong-plugin-sidecar","tiangong-plugin-command-sidecar"]'
+          matrix: '["tiangong-sandbox","tiangong-toolkit","tiangong-plugin-runtime","tiangong-plugin-sidecar","tiangong-plugin-command-sidecar"]'
 
       - name: Install bubblewrap
         run: sudo apt-get install -y bubblewrap
@@ -98,6 +105,7 @@ jobs:
         run: >-
           cargo fmt
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar
@@ -108,6 +116,7 @@ jobs:
         run: >-
           cargo clippy --locked
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar
@@ -318,6 +327,8 @@ jobs:
       - name: Prepare diagnostics directory
         run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: sandbox-windows-x86_64
@@ -334,55 +345,83 @@ jobs:
         run: >-
           cargo check --locked
           -p tiangong-sandbox
+          -p tiangong-toolkit
           -p tiangong-plugin-runtime
           -p tiangong-plugin-sidecar
           -p tiangong-plugin-command-sidecar
           -p xtask
           --all-targets
 
-      - name: Build Launcher and command sidecar
-        run: cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+      - name: Lint Windows Sandbox crate
+        run: >-
+          cargo clippy --locked
+          -p tiangong-sandbox
+          --all-targets -- -D warnings
 
-      - name: Verify Windows refuses incomplete file isolation
+      - name: Build Launcher and stdio test host
+        run: |
+          cargo build --locked -p tiangong-sandbox
+          cargo build --locked -p tiangong-plugin-sidecar --bin test-stdio-host
+
+      - name: Verify native Windows sandbox enforcement
         shell: pwsh
         run: |
-          $output = & .\target\debug\tiangong-sandbox.exe --self-check | Out-String
-          $exitCode = $LASTEXITCODE
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.stderr"
+          $process = Start-Process -FilePath '.\target\debug\tiangong-sandbox.exe' `
+            -ArgumentList '--self-check' -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Windows sandbox self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
           Write-Host $output
-          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.json"
           $exitCode | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\launcher-self-check.exit-code"
-          if ($exitCode -ne 78) {
-            throw "Expected self-check exit code 78, got $exitCode"
+          if ($exitCode -ne 0) {
+            throw "Expected self-check exit code 0, got $exitCode"
           }
           $report = $output | ConvertFrom-Json
-          if (-not $report.platform.StartsWith('unavailable:') -or
-              -not $report.platform.Contains('完整 command 文件隔离')) {
-            throw "Unexpected Windows self-check report: $output"
+          if ($report.platform -ne 'available') {
+            throw "Windows sandbox is unavailable: $output"
+          }
+          $required = @(
+            'workspace_write',
+            'existing_workspace_read_write',
+            'dedicated_temp_write',
+            'outside_write_blocked',
+            'outside_read_blocked',
+            'outside_delete_blocked',
+            'outside_config_write_blocked',
+            'git_metadata_write_blocked',
+            'git_metadata_readable',
+            'network_blocked',
+            'network_allowed',
+            'sensitive_read_blocked',
+            'symlink_escape_blocked',
+            'hardlink_escape_blocked',
+            'path_traversal_blocked',
+            'child_restrictions_inherited',
+            'resource_limits_applied',
+            'process_limit_enforced',
+            'memory_limit_enforced',
+            'cpu_limit_enforced',
+            'temporary_acl_cleaned',
+            'temporary_identity_cleaned'
+          )
+          foreach ($field in $required) {
+            if ($report.$field -ne $true) {
+              throw "Windows sandbox check failed: $field; report=$output"
+            }
           }
           exit 0
-
-      - name: Test Windows Job Object process cleanup
-        run: |
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --test ephemeral_route \
-            stdio_stop_kills_background_process_tree \
-            -- --exact --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/process-cleanup.log"
-
-      - name: Test Windows resource limits and handle cleanup
-        run: |
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --lib sidecar::stdio::windows_tests::job_object_applies_process_and_memory_limits \
-            -- --exact --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/resource-limits.log"
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --test ephemeral_route \
-            repeated_stdio_start_stop_does_not_leak_host_resources \
-            -- --exact --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/handle-cleanup.log"
 
       - name: Test Windows Sandbox and stdio transport
         run: |
@@ -390,6 +429,49 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/sandbox-tests.log"
           cargo test --locked -p tiangong-plugin-sidecar --test stdio_e2e -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/stdio-e2e.log"
+          cargo test --locked \
+            -p tiangong-plugin-runtime --lib \
+            sidecar::stdio::windows_tests::job_object_applies_process_and_memory_limits \
+            -- --exact --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/resource-limits.log"
+
+      - name: Verify native Windows Launcher lifecycle
+        shell: pwsh
+        run: |
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\lifecycle-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\lifecycle-self-check.stderr"
+          $process = Start-Process -FilePath '.\target\debug\tiangong-sandbox.exe' `
+            -ArgumentList '--windows-lifecycle-self-check' -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(240000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Windows Launcher lifecycle self-check timed out after 240 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          Write-Host $output
+          if ($process.ExitCode -ne 0) {
+            throw "Expected lifecycle self-check exit code 0, got $($process.ExitCode)"
+          }
+          $report = $output | ConvertFrom-Json
+          $required = @(
+            'timeout_cleanup',
+            'stop_event_cleanup',
+            'host_exit_cleanup',
+            'process_tree_cleanup',
+            'concurrent_cleanup'
+          )
+          foreach ($field in $required) {
+            if ($report.$field -ne $true) {
+              throw "Windows Launcher lifecycle check failed: $field; report=$output"
+            }
+          }
+          exit 0
 
       - name: Verify packaged Launcher
         shell: pwsh
@@ -407,14 +489,31 @@ jobs:
           if ($null -ne $item.LinkType) {
             throw "Packaged Launcher must not be a symbolic link: $artifact"
           }
-          $output = & $artifact --self-check | Out-String
-          $exitCode = $LASTEXITCODE
-          $output | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.json"
-          if ($exitCode -ne 78) {
-            throw "Expected packaged self-check exit code 78, got $exitCode"
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\packaged-self-check.stderr"
+          $process = Start-Process -FilePath $artifact -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Packaged Windows Launcher self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
+          if ($exitCode -ne 0) {
+            throw "Expected packaged self-check exit code 0, got $exitCode"
           }
           $report = $output | ConvertFrom-Json
           $config = Get-Content -Raw -LiteralPath 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          if ($report.platform -ne 'available') {
+            throw "Packaged Windows Launcher sandbox is unavailable: $output"
+          }
           if ($report.product_version -ne $config.version) {
             throw "Launcher version $($report.product_version) does not match App $($config.version)"
           }
@@ -537,7 +636,7 @@ jobs:
           [[ "$status" -eq 0 || "$status" -eq 79 ]]
           [[ "$(jq -r .product_version <<< "$report")" == "$(jq -r .version src-tauri/tauri.conf.json)" ]]
 
-      - name: Verify Windows installer contains Launcher
+      - name: Verify Windows installer contains runnable Launcher
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -549,6 +648,42 @@ jobs:
           $contents | Set-Content -LiteralPath "$env:RUNNER_TEMP\sandbox-diagnostics\bundle-contents.log"
           if ($contents -notmatch 'tiangong-sandbox\.exe') {
             throw "NSIS installer does not contain tiangong-sandbox.exe: $($installer.FullName)"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP 'tiangong-nsis-extracted'
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          & 7z x $installer.FullName "-o$extract" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to extract NSIS installer: $($installer.FullName)"
+          }
+          $launcher = Get-ChildItem -LiteralPath $extract -Recurse -File -Filter 'tiangong-sandbox.exe' |
+            Select-Object -First 1
+          if ($null -eq $launcher) {
+            throw 'Extracted Windows installer is missing tiangong-sandbox.exe'
+          }
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\bundled-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\bundled-self-check.stderr"
+          $process = Start-Process -FilePath $launcher.FullName -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(180000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Bundled Windows Launcher self-check timed out after 180 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          $exitCode = $process.ExitCode
+          if ($exitCode -ne 0) {
+            throw "Bundled Windows Launcher self-check failed with ${exitCode}: $output"
+          }
+          $report = $output | ConvertFrom-Json
+          $config = Get-Content -Raw -LiteralPath 'src-tauri/tauri.conf.json' | ConvertFrom-Json
+          if ($report.platform -ne 'available' -or $report.product_version -ne $config.version) {
+            throw "Bundled Windows Launcher identity mismatch: $output"
           }
 
       - name: Upload bundle diagnostics

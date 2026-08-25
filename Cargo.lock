@@ -11564,12 +11564,15 @@ name = "tiangong-sandbox"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "dunce",
  "hex",
  "libc",
+ "scru128",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11630,6 +11633,7 @@ name = "tiangong-toolkit"
 version = "0.15.2"
 dependencies = [
  "anyhow",
+ "tiangong-sandbox",
  "tiangong-types",
  "tokio",
 ]

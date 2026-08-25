@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use tiangong_sandbox::canonicalize_path;
 
 use super::{
     SidecarConfig, SidecarConnection, SidecarInvocationContext, SidecarInvokeError,
@@ -57,13 +58,12 @@ impl EphemeralCommandConnection {
         if self.template.plugin_id != "command" {
             bail!("一次性 command 连接的插件身份无效");
         }
-        let workspace =
-            std::fs::canonicalize(&context.authoritative_workspace).with_context(|| {
-                format!(
-                    "本次工具调用的工作区无效: {}",
-                    context.authoritative_workspace.display()
-                )
-            })?;
+        let workspace = canonicalize_path(&context.authoritative_workspace).with_context(|| {
+            format!(
+                "本次工具调用的工作区无效: {}",
+                context.authoritative_workspace.display()
+            )
+        })?;
         if !workspace.is_dir() {
             bail!("本次工具调用的工作区不是目录: {}", workspace.display());
         }
@@ -73,6 +73,28 @@ impl EphemeralCommandConnection {
         let request_object = request
             .as_object_mut()
             .ok_or_else(|| anyhow!("command 请求必须是 JSON 对象"))?;
+        // Windows AppContainer 无法展开宿主短路径别名，启动前由宿主统一 cwd。
+        let requested_cwd = request_object
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .map(PathBuf::from);
+        if let Some(requested_cwd) = requested_cwd {
+            let candidate = if requested_cwd.is_absolute() {
+                requested_cwd
+            } else {
+                workspace.join(requested_cwd)
+            };
+            if let Ok(canonical_cwd) = canonicalize_path(&candidate) {
+                request_object.insert(
+                    "cwd".to_string(),
+                    serde_json::Value::String(canonical_cwd.display().to_string()),
+                );
+            }
+        }
+        #[cfg(windows)]
+        normalize_windows_command_program(request_object);
         // CommandAccessContext 使用 serde(flatten)，现行字段位于请求顶层；同时
         // 兼容早期嵌套 access 形态。两种形态中的 workspace 都只作输入兼容，
         // 最终统一覆盖为本次宿主调用的权威工作区。
@@ -241,6 +263,54 @@ impl EphemeralCommandConnection {
         }
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn normalize_windows_command_program(request: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(raw) = request.get("cmd").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let Some((program, remainder)) = split_windows_command_program(raw.trim()) else {
+        return;
+    };
+    let Ok(program) = canonicalize_path(std::path::Path::new(program)) else {
+        return;
+    };
+    if !program.is_file() {
+        return;
+    }
+
+    // command 的既有解析器会把反斜杠当作转义符，因此宿主需要成对传入；
+    // 解析后交给 CreateProcess 的仍是标准 Windows 反斜杠路径。
+    let escaped_program = program.display().to_string().replace('\\', "\\\\");
+    let mut normalized = format!("\"{escaped_program}\"");
+    if !remainder.is_empty() {
+        normalized.push(' ');
+        normalized.push_str(remainder);
+    }
+    request.insert("cmd".to_string(), serde_json::Value::String(normalized));
+}
+
+#[cfg(windows)]
+fn split_windows_command_program(raw: &str) -> Option<(&str, &str)> {
+    let first = raw.chars().next()?;
+    if matches!(first, '\'' | '"') {
+        let end = raw[first.len_utf8()..].find(first)? + first.len_utf8();
+        let remainder = &raw[end + first.len_utf8()..];
+        if remainder
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            return None;
+        }
+        return Some((&raw[first.len_utf8()..end], remainder.trim_start()));
+    }
+    let end = raw
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))
+        .unwrap_or(raw.len());
+    Some((&raw[..end], raw[end..].trim_start()))
 }
 
 fn emit_sandbox_diagnostic(

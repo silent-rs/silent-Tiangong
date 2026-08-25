@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use tiangong_sandbox::canonicalize_path;
 
 pub mod process;
 
@@ -65,14 +66,13 @@ pub fn app_storage_root() -> PathBuf {
 /// 避免隐式依赖 `SESSION_CWD`。应用存储根（`~/.tiangong/`）天然可信，
 /// 始终追加，无需插件经 hook 声明。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
-    let workspace_canonical = workspace
-        .canonicalize()
+    let workspace_canonical = canonicalize_path(workspace)
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
 
     let mut roots = vec![workspace_canonical];
     // 应用自管存储根（~/.tiangong/），始终允许。
     let storage = app_storage_root();
-    let storage_canonical = storage.canonicalize().unwrap_or(storage);
+    let storage_canonical = canonicalize_path(&storage).unwrap_or(storage);
     if !roots.iter().any(|r| r == &storage_canonical) {
         roots.push(storage_canonical);
     }
@@ -87,9 +87,8 @@ pub fn write_allowed_roots() -> Result<Vec<PathBuf>> {
 /// 基于 `base` 工作目录校验路径是否落在允许写入的根目录内。
 fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path) -> Result<()> {
     let roots = write_allowed_roots_with(base)?;
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
+    let canonical =
+        canonicalize_path(path).with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
             "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
@@ -103,8 +102,7 @@ fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path
 pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
     let value = raw.unwrap_or(".").trim();
     let cwd = if value.is_empty() {
-        base.canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", base.display()))?
+        canonicalize_path(base).with_context(|| format!("解析工作目录失败：{}", base.display()))?
     } else {
         resolve_path_from_base(value, base)?
     };
@@ -128,7 +126,7 @@ pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<Pat
     }
     let candidate = resolve_path_candidate(raw, base);
     // 存在时 canonicalize 解析符号链接，不存在时直接返回
-    Ok(candidate.canonicalize().unwrap_or(candidate))
+    Ok(canonicalize_path(&candidate).unwrap_or(candidate))
 }
 
 pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
@@ -138,8 +136,7 @@ pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     }
 
     let candidate = resolve_path_candidate(raw, base);
-    let canonical = candidate
-        .canonicalize()
+    let canonical = canonicalize_path(&candidate)
         .with_context(|| format!("解析路径失败：{}", candidate.display()))?;
     Ok(canonical)
 }
@@ -161,8 +158,7 @@ pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
         };
         anchor = next;
     }
-    let parent_canonical = anchor
-        .canonicalize()
+    let parent_canonical = canonicalize_path(&anchor)
         .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
     let roots = write_allowed_roots_with(base)?;
 
@@ -193,9 +189,8 @@ fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
 
 fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
     let roots = write_allowed_roots()?;
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
+    let canonical =
+        canonicalize_path(path).with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
             "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
@@ -304,8 +299,7 @@ fn ensure_command_arg_path_allowed(raw: &str, base_dir: &Path, roots: &[PathBuf]
         parent
     };
 
-    let canonical = anchor
-        .canonicalize()
+    let canonical = canonicalize_path(&anchor)
         .with_context(|| format!("解析命令参数路径失败：{}", anchor.display()))?;
     if !is_path_in_allowed_roots(&canonical, roots) {
         return Err(anyhow!(
@@ -347,7 +341,7 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// 相对工作目录的路径展示（显式传入工作目录，供插件 handler 使用）。
 pub fn display_rel_path_with(path: &Path, base: &Path) -> String {
-    let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let root = canonicalize_path(base).unwrap_or_else(|_| base.to_path_buf());
     path.strip_prefix(&root)
         .map(|rel| {
             let rel_text = rel.display().to_string();
