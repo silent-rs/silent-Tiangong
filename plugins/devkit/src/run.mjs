@@ -1,8 +1,8 @@
 // run：开发期试运行——按项目 run.json 声明执行 npx -y <pkg> <script> [args]。
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { fail, killTree, requireProject, spawnOptions } from './common.mjs';
+import { assertNoSymlinkPath, fail, killTree, requireProject, resolveInside, spawnOptions } from './common.mjs';
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL = 16 * 1024;
@@ -20,30 +20,48 @@ export async function run(argv, ctx) {
     return fail(error.message);
   }
   const specPath = join(projectDir, 'run.json');
-  if (!existsSync(specPath)) {
+  let specRaw;
+  try {
+    specRaw = readFileSync(specPath, 'utf8');
+  } catch {
     return fail('项目缺少 run.json（试运行声明：{"pkg": "tsx@4.19.2", "script": "tools/main.ts"}）');
   }
   let spec;
   try {
-    spec = JSON.parse(readFileSync(specPath, 'utf8'));
+    spec = JSON.parse(specRaw);
   } catch (error) {
     return fail(`run.json 解析失败：${error.message}`);
   }
   if (!/^[a-z0-9@/._-]+@\d+\.\d+\.\d+$/.test(spec.pkg ?? '')) {
     return fail(`run.json pkg 必须为 <name>@<精确版本>（禁范围符号与 latest）：${spec.pkg}`);
   }
-  if ((spec.script ?? '').startsWith('/') || (spec.script ?? '').split('/').includes('..')) {
-    return fail(`run.json script 必须是项目内安全相对路径：${spec.script}`);
+  if (typeof spec.script !== 'string' || spec.script.trim() === '') {
+    return fail('run.json script 不能为空');
   }
-  if (!existsSync(join(projectDir, spec.script))) {
+  let scriptPath;
+  try {
+    scriptPath = resolveInside(projectDir, spec.script, 'run.json script');
+    // 逐级断言无符号链接：path.resolve 是纯字符串运算不解析链接，
+    // 必须 lstat 逐级检查，确保执行的是项目内真实文件。
+    assertNoSymlinkPath(projectDir, scriptPath);
+  } catch (error) {
+    return fail(error.message);
+  }
+  let scriptStat;
+  try {
+    scriptStat = lstatSync(scriptPath);
+  } catch {
     return fail(`run.json script 不存在：${spec.script}`);
+  }
+  if (!scriptStat.isFile()) {
+    return fail(`run.json script 必须是普通文件：${spec.script}`);
   }
   for (const arg of extraArgs) {
     if (arg.length > 512 || arg.startsWith('/') || arg.split('/').includes('..')) {
       return fail(`试运行参数含非法值：${arg}`);
     }
   }
-  const argvList = ['-y', spec.pkg, join(projectDir, spec.script), ...extraArgs];
+  const argvList = ['-y', spec.pkg, scriptPath, ...extraArgs];
   const commandDisplay = `npx ${argvList.slice(1).join(' ')}`;
   mkdirSync(join(projectDir, 'logs'), { recursive: true });
   appendFileSync(

@@ -1,7 +1,7 @@
 // validate：清单与结构校验（plugin.json 解析、必要字段、UI 入口存在性）。
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fail, requireProject, resolveInside } from './common.mjs';
+import { assertNoSymlinkPath, fail, requireProject, resolveInside } from './common.mjs';
 
 export async function validate(argv, ctx) {
   const [id] = argv;
@@ -40,6 +40,7 @@ export async function validate(argv, ctx) {
     let resolved;
     try {
       resolved = resolveInside(projectDir, entry, `UI 入口 ${entry}`);
+      assertNoSymlinkPath(projectDir, resolved);
     } catch (error) {
       errors.push(error.message);
       continue;
@@ -50,7 +51,8 @@ export async function validate(argv, ctx) {
   }
   for (const directory of manifest.resources ?? []) {
     try {
-      resolveInside(projectDir, directory, `资源目录 ${directory}`);
+      const resolved = resolveInside(projectDir, directory, `资源目录 ${directory}`);
+      assertNoSymlinkPath(projectDir, resolved);
     } catch (error) {
       errors.push(error.message);
     }

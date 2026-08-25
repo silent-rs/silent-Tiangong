@@ -1,6 +1,6 @@
 // devkit 公共约定：路径、校验、输出与子进程辅助。
 import { existsSync, lstatSync } from 'node:fs';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 
@@ -55,6 +55,31 @@ export function resolveInside(root, relativePath, label) {
     throw Object.assign(new Error(`${label} 路径越界：${relativePath}`), { code: 'PATH_ESCAP' });
   }
   return resolved;
+}
+
+/**
+ * 逐级断言 root → target 的每个路径分量都不是符号链接。
+ * path.resolve 是纯字符串运算、不解析符号链接，resolveInside 无法发现
+ * 链接指向项目外的实体；必须在文件系统层面逐级 lstat（任何一级为
+ * 符号链接即拒绝，含中间目录与目标自身）。
+ */
+export function assertNoSymlinkPath(root, target) {
+  const resolvedRoot = resolve(root);
+  const parts = relative(resolvedRoot, resolve(target)).split(/[\\/]+/).filter((part) => part && part !== '.');
+  let current = resolvedRoot;
+  for (const part of parts) {
+    current = join(current, part);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      // 后续分量不存在：由调用方的存在性检查负责，此处不再深入。
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      throw Object.assign(new Error(`路径含符号链接，拒绝读取：${current}`), { code: 'SYMLINK' });
+    }
+  }
 }
 
 /** 目标存在且为目录内普通实体（拒绝符号链接）。 */

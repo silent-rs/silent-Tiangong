@@ -1,11 +1,11 @@
 // build：工程模板走 yarn install → build → package；零构建模板走内建打包
 //（plugin.json + UI 入口目录 + resources 目录 + 内容树清单）。
 // 全部路径经 resolveInside 约束在项目/发布目录内，复制逐项校验拒绝符号链接。
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { join, relative } from 'node:path';
-import { fail, isRealDirectory, killTree, requireProject, resolveInside, spawnOptions } from './common.mjs';
+import { assertNoSymlinkPath, fail, isRealDirectory, killTree, requireProject, resolveInside, spawnOptions } from './common.mjs';
 
 const BUILD_TIMEOUT_MS = 240_000;
 
@@ -26,6 +26,8 @@ export async function build(argv, ctx) {
     try {
       result = zeroBuild(projectDir);
     } catch (error) {
+      // 失败不留半成品：release 可能已复制部分文件（含越界内容），整体清除。
+      rmSync(join(projectDir, 'release'), { recursive: true, force: true });
       result = { ok: false, error: error.message };
     }
   }
@@ -132,8 +134,9 @@ function zeroBuild(projectDir) {
     const entry = contribution.entry ?? '';
     if (!entry) continue;
     const source = resolveInside(projectDir, entry, `UI 入口 ${entry}`);
+    assertNoSymlinkPath(projectDir, source);
     const target = resolveInside(releaseDir, relative(projectDir, source), `发布目标 ${entry}`);
-    if (statSync(source).isDirectory()) {
+    if (isRealDirectory(source)) {
       copyTree(source, target);
     } else {
       copyChecked(source, target, `UI 入口 ${entry}`);
@@ -141,7 +144,13 @@ function zeroBuild(projectDir) {
   }
   for (const directory of manifest.resources ?? []) {
     const source = resolveInside(projectDir, directory, `资源目录 ${directory}`);
+    if (existsSync(source) && !isRealDirectory(source)) {
+      throw Object.assign(new Error(`资源目录 ${directory} 不是真实目录（拒绝符号链接等）：${source}`), {
+        code: 'SYMLINK',
+      });
+    }
     if (!isRealDirectory(source)) continue;
+    assertNoSymlinkPath(projectDir, source);
     const target = resolveInside(releaseDir, relative(projectDir, source), `发布目标 ${directory}`);
     copyTree(source, target);
   }
@@ -160,9 +169,9 @@ function zeroBuild(projectDir) {
 }
 
 import { dirname } from 'node:path';
-/** 复制前校验源为普通文件（拒绝符号链接与特殊类型），并确保父目录存在。 */
+/** 复制前校验源为普通文件（lstat 不跟随链接），并确保父目录存在。 */
 function copyChecked(from, to, label) {
-  const stat = statSync(from);
+  const stat = lstatSync(from);
   if (stat.isSymbolicLink() || !stat.isFile()) {
     throw Object.assign(new Error(`${label} 必须是普通文件（拒绝符号链接）：${from}`), { code: 'SYMLINK' });
   }
@@ -170,13 +179,13 @@ function copyChecked(from, to, label) {
   copyFileSync(from, to);
 }
 
-/** 逐项校验的递归复制：目录/普通文件之外的实体（符号链接等）拒绝。 */
+/** 逐项校验的递归复制：lstat 不跟随链接，目录/普通文件之外的实体拒绝。 */
 function copyTree(source, target) {
   mkdirSync(target, { recursive: true });
   for (const name of readdirSync(source)) {
     const from = join(source, name);
     const to = join(target, name);
-    const stat = statSync(from);
+    const stat = lstatSync(from);
     if (stat.isSymbolicLink()) {
       throw Object.assign(new Error(`构建产物不能包含符号链接：${from}`), { code: 'SYMLINK' });
     }
@@ -194,7 +203,11 @@ function walk(dir) {
   const out = [];
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) out.push(...walk(path));
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      throw Object.assign(new Error(`内容清单不允许符号链接：${path}`), { code: 'SYMLINK' });
+    }
+    if (stat.isDirectory()) out.push(...walk(path));
     else out.push(path);
   }
   return out;
