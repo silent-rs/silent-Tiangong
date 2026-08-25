@@ -4,6 +4,11 @@
   "description": "天工插件创作工具链（devkit）：init/validate/build/run/logs，经命令通道执行",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/silent-rs/silent-Tiangong.git",
+    "directory": "plugins/devkit"
+  },
   "bin": {
     "plugin-creator": "bin/cli.mjs"
   },

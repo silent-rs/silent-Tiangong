@@ -3,8 +3,10 @@ name: Publish devkit to npm
 # @silent-ai/plugin-creator（devkit CLI）自动发布到 npm。
 # 触发：推 tag `devkit/v<版本>`（与 package.json 版本一致，不一致即拒绝），
 # 或手动 workflow_dispatch（按 package.json 当前版本发布）。
-# 前置（一次性）：npm 创建 silent-ai org → 生成 Automation 类型 token →
-# 仓库 Secrets 配置 NPM_TOKEN。
+# 认证：OIDC 可信发布（npm Trusted Publishing）——无长期 token。
+# 前置（一次性）：本地手动发布首版后，在 npm 包设置页登记 Trusted
+# Publisher（org: silent-rs / repo: silent-Tiangong /
+# workflow: publish-devkit.yml / 勾选 npm publish），之后 CI 免 token。
 
 on:
   push:
@@ -42,6 +44,11 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      # 可信发布要求 npm ≥ 11.5.1（OIDC 支持）；Node 22 自带 npm 10.x，先升级
+      - name: 升级 npm（OIDC 可信发布要求 ≥ 11.5.1）
+        run: npm install -g npm@latest && npm --version
 
       # 发布前干跑校验：files 清单完整、bin 可执行位、无多余文件
       - name: 发布前校验（pack 干跑）
@@ -54,10 +61,10 @@ jobs:
           node --check src/run.mjs
           node --check src/logs.mjs
 
-      - name: 发布到 npm（含 provenance）
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # 裸 npm publish：npm 自动探测 OIDC 环境完成认证，无需 token；
+      # provenance 随可信发布自动生成。
+      - name: 发布到 npm（OIDC 可信发布）
+        run: npm publish --access public
 
       - name: 发布摘要
         run: |
