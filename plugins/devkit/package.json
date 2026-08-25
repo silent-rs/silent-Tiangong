@@ -1,5 +1,5 @@
 {
-  "name": "@tiangong/plugin-creator",
+  "name": "@silent-ai/plugin-creator",
   "version": "1.0.0",
   "description": "天工插件创作工具链（devkit）：init/validate/build/run/logs，经命令通道执行",
   "type": "module",

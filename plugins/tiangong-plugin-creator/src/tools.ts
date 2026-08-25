@@ -1,7 +1,7 @@
 // 工具处理核心：Agent 工具调用与创作页共用同一后端。
 // 外置化后插件侧只保留安装通道（plugin-dev.install）与只读查询
 //（plugin-dev.list/status）；init/validate/build/run/logs 由 Agent 经
-// 命令通道执行 @tiangong/plugin-creator devkit（见 plugin.json 说明书）。
+// 命令通道执行 @silent-ai/plugin-creator devkit（见 plugin.json 说明书）。
 import type { HostBridge } from '@tiangong/plugin-sdk';
 
 /** 工具结果（宿主 ts_tools 契约：ok/summary/exit_code 必填）。 */
@@ -49,11 +49,11 @@ export const pluginDev = {
 /** devkit 命令模板（页面展示引导，实际由 Agent 经命令通道执行）。 */
 export const DEVKIT_VERSION = '1.0.0';
 export const DEVKIT_COMMANDS: Record<string, (id: string) => string> = {
-  init: (id) => `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} init <模板> ${id} --name <显示名>`,
-  validate: (id) => `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} validate ${id}`,
-  build: (id) => `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} build ${id}`,
-  run: (id) => `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} run ${id} -- <参数>`,
-  logs: (id) => `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} logs dev:${id}`,
+  init: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} init <模板> ${id} --name <显示名>`,
+  validate: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} validate ${id}`,
+  build: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} build ${id}`,
+  run: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} run ${id} -- <参数>`,
+  logs: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} logs dev:${id}`,
 };
 
 function ok(summary: string): ToolOutcome {
@@ -74,7 +74,7 @@ export async function handleAgentTool(
     if (name !== 'plugin_install') {
       return fail(
         `未知工具 ${name}。开发操作（init/validate/build/run/logs）请经命令通道执行：` +
-          `npx -y @tiangong/plugin-creator@${DEVKIT_VERSION} <命令>`,
+          `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} <命令>`,
       );
     }
     const id = String(args.id ?? '');

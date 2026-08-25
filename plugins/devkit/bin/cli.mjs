@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// @tiangong/plugin-creator（devkit CLI）——天工插件创作工具链。
+// @silent-ai/plugin-creator（devkit CLI）——天工插件创作工具链。
 //
-// 经命令通道执行：npx -y @tiangong/plugin-creator@1.0.0 <command> ...
+// 经命令通道执行：npx -y @silent-ai/plugin-creator@1.0.0 <command> ...
 // 约定：stdout 输出单个 JSON 结果（{ok, ...}）；人读信息写 stderr；
 // 非零退出码表示失败。开发目录固定 ~/.tiangong/plugins-dev/<id>/
 // （TIANGONG_PLUGINS_DEV 或 --root 覆盖）。
@@ -15,7 +15,7 @@ const VERSION = '1.0.0';
 
 function usage() {
   return [
-    `@tiangong/plugin-creator devkit v${VERSION}`,
+    `@silent-ai/plugin-creator devkit v${VERSION}`,
     '',
     '用法（stdout 输出 JSON 结果）：',
     '  plugin-creator init <template> <id> [--name 显示名]    按模板生成项目骨架',

@@ -1,6 +1,6 @@
 name: Publish devkit to npm
 
-# @tiangong/plugin-creator（devkit CLI）自动发布到 npm。
+# @silent-ai/plugin-creator（devkit CLI）自动发布到 npm。
 # 触发：推 tag `devkit/v<版本>`（与 package.json 版本一致，不一致即拒绝），
 # 或手动 workflow_dispatch（按 package.json 当前版本发布）。
 # 前置（一次性）：npm 创建 tiangong org → 生成 Automation 类型 token →
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish @tiangong/plugin-creator
+    name: Publish @silent-ai/plugin-creator
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -61,6 +61,6 @@ jobs:
 
       - name: 发布摘要
         run: |
-          echo "已发布 @tiangong/plugin-creator@$(node -p "require('./package.json').version")"
+          echo "已发布 @silent-ai/plugin-creator@$(node -p "require('./package.json').version")"
           echo "Agent 命令引用（同步更新插件说明书与 tools.ts 的 DEVKIT_VERSION）："
-          echo "npx -y @tiangong/plugin-creator@$(node -p "require('./package.json').version") <命令>"
+          echo "npx -y @silent-ai/plugin-creator@$(node -p "require('./package.json').version") <命令>"

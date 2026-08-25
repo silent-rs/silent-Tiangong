@@ -1,8 +1,8 @@
 //! plugin-dev 受限桥接服务（plugin creator 的宿主承载，外置化后的瘦形态）。
 //!
 //! 业务工具链（init / validate / build / run / logs）已外置到 npm 包
-//! `@tiangong/plugin-creator`（devkit CLI），由 Agent 经命令通道执行
-//! `npx -y @tiangong/plugin-creator@<版本> <命令>`——沙箱、联网审批、
+//! `@silent-ai/plugin-creator`（devkit CLI），由 Agent 经命令通道执行
+//! `npx -y @silent-ai/plugin-creator@<版本> <命令>`——沙箱、联网审批、
 //! 会话信任复用命令通道现成机制。宿主只保留必须落在宿主侧的操作：
 //!
 //! - `install`：构建产物写入 plugins/ 注册表 + 原生确认（fail-closed）
@@ -65,7 +65,7 @@ pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
         }
         _ => bail!(
             "plugin-dev 未知方法 {method}（宿主仅提供 install/list/status；\
-             init/validate/build/run/logs 经命令通道执行 @tiangong/plugin-creator devkit）"
+             init/validate/build/run/logs 经命令通道执行 @silent-ai/plugin-creator devkit）"
         ),
     };
     serde_json::to_string(&result).context("序列化 plugin-dev 结果失败")
@@ -204,7 +204,7 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     if !release_manifest.is_file() {
         bail!(
             "项目 {project_id} 尚无构建产物（{} 不存在），先执行构建\
-            （npx -y @tiangong/plugin-creator@1.0.0 build {project_id}）",
+            （npx -y @silent-ai/plugin-creator@1.0.0 build {project_id}）",
             release_manifest.display()
         );
     }
@@ -388,7 +388,7 @@ mod tests {
         make_project(root.path(), "demo");
         let error = install(root.path(), "demo").unwrap_err();
         assert!(
-            error.to_string().contains("@tiangong/plugin-creator"),
+            error.to_string().contains("@silent-ai/plugin-creator"),
             "应指引 devkit 命令：{error}"
         );
     }

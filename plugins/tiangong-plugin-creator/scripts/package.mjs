@@ -1,5 +1,5 @@
 // 开发期打包：构建 UI 并组装可直接「导入本地插件」的插件包目录（release/）。
-// 产物 = plugin.json + dist/（开发工具链外置于 @tiangong/plugin-creator npm 包，
+// 产物 = plugin.json + dist/（开发工具链外置于 @silent-ai/plugin-creator npm 包，
 //   模板与 CLI 随 devkit 分发）+ 内容树清单（路径 + sha256 逐条）。
 import { cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';

@@ -173,7 +173,7 @@ async function recordHistory(text: string) {
       </div>
       <p class="hint">
         项目的生成、构建与试运行由 Agent 经命令通道执行官方 devkit
-        （npx -y @tiangong/plugin-creator），页面负责看板与安装。
+        （npx -y @silent-ai/plugin-creator），页面负责看板与安装。
       </p>
     </section>
 
