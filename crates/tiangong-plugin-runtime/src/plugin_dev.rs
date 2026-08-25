@@ -387,6 +387,57 @@ mod tests {
         assert!(!result.exists);
     }
 
+    /// 安装完整链（功能验证）：确认桩 → 暂存（不可变副本）→ 导入 → 安装目录
+    /// 与注册表就位；确认信息（版本）来自暂存副本而非可变的 release/。
+    #[test]
+    fn install_完整链_暂存确认导入与注册表() {
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(root.path());
+        let project = root.path().join(PLUGIN_DEV_DIR).join("inst-demo");
+        std::fs::create_dir_all(project.join("release/dist")).unwrap();
+        std::fs::write(
+            project.join(PROJECT_META_FILE),
+            r#"{"plugin_id":"inst-demo","name":"安装链验证","template":"ts-npx","created_at":"t"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("release/plugin.json"),
+            r#"{"schema_version":2,"id":"inst-demo","version":"9.9.9","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"dist/index.html"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
+
+        let confirmed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&confirmed);
+        set_plugin_dev_install_confirm(Arc::new(move |request: &InstallRequest| {
+            sink.lock()
+                .unwrap()
+                .push((request.plugin_id.clone(), request.version.clone()));
+            true
+        }));
+        let result = install(root.path(), "inst-demo").expect("安装完整链");
+        assert_eq!(result.plugin_id, "inst-demo");
+        assert_eq!(result.version, "9.9.9");
+        assert!(result.enabled, "安装后应启用");
+        // 确认信息来自暂存副本（版本正确）
+        let confirmed = confirmed.lock().unwrap();
+        assert_eq!(
+            confirmed.as_slice(),
+            [("inst-demo".to_string(), "9.9.9".to_string())]
+        );
+        // 安装目录与注册表
+        assert!(root.path().join("plugins/inst-demo/plugin.json").is_file());
+        assert!(
+            root.path()
+                .join("plugins/inst-demo/dist/index.html")
+                .is_file()
+        );
+        assert!(
+            crate::registry::plugin_manifest("inst-demo").is_some(),
+            "注册表应可见已装插件"
+        );
+    }
+
     #[test]
     fn install_缺构建产物时给出devkit指引() {
         let root = tempfile::tempdir().unwrap();
