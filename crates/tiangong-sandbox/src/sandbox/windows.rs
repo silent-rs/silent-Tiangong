@@ -1200,6 +1200,6 @@ mod tests {
         let text = OsString::from_wide(&line[..line.len() - 1])
             .to_string_lossy()
             .into_owned();
-        assert_eq!(text, r#""C:\Program Files\tool.exe" "a\"b" tail\"#);
+        assert_eq!(text, r#""C:\Program Files\tool.exe" "a\\\"b" tail\"#);
     }
 }
