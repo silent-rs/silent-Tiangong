@@ -190,7 +190,7 @@ async fn parse_error_response(response: reqwest::Response) -> DeepSeekError {
     classify_http_error(status, body_text)
 }
 
-async fn parse_json_response<T: DeserializeOwned>(
+pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, DeepSeekError> {
     let status = response.status();

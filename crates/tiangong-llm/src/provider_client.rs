@@ -2190,6 +2190,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_stream_accepts_server_ignoring_stream_flag() {
+        // 部分网关忽略 stream 参数，返回 application/json 的一次性完整响应；
+        // llm 层应按完整结果接住并合成流事件，而不是让 SSE 解析器静默丢弃。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-complete",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "一次性完整回复",
+                        "tool_calls": [{
+                            "id": "call_tool",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"TODO.md\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 5,
+                    "total_tokens": 8
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: serde_json::Value::Object(serde_json::Map::new()),
+        });
+        let request = ModelRequest {
+            user_input: "检查项目".to_string(),
+            context: vec![Message::new(MessageRole::System, "system")],
+            reasoning_effort: ReasoningEffort::None,
+            max_output_tokens: None,
+        };
+        let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls(request, functions, chunk_tx)
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "一次性完整回复");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_tool");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"path": "TODO.md"})
+        );
+        assert_eq!(response.usage.total_tokens, 8);
+        let mut streamed_text = String::new();
+        while let Ok(chunk) = chunk_rx.try_recv() {
+            streamed_text.push_str(&chunk.content);
+        }
+        assert_eq!(streamed_text, "一次性完整回复");
+    }
+
+    #[tokio::test]
     async fn openai_stream_filters_invalid_parallel_calls_without_hidden_retry() {
         let server = MockServer::start().await;
         mount_openai_stream(

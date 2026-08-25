@@ -8,6 +8,48 @@ use crate::types::{
     ChatCompletionRequest, ChatCompletionResponse, EventStream, StreamChunk, StreamEvent,
 };
 
+/// 把一次性完整响应合成为等价的流事件序列。
+///
+/// 网关忽略 stream 参数返回 application/json 时，SDK 在内部按完整响应
+/// 接住并合成事件流，调用方无需感知差异。
+fn complete_response_events(response: ChatCompletionResponse) -> Vec<StreamEvent> {
+    let Some(choice) = response.choices.into_iter().next() else {
+        return vec![StreamEvent::Done];
+    };
+    let mut events = Vec::new();
+    if let Some(reasoning) = choice
+        .message
+        .reasoning_content
+        .filter(|value| !value.is_empty())
+    {
+        events.push(StreamEvent::ReasoningDelta(reasoning));
+    }
+    if let Some(text) = choice.message.content.filter(|value| !value.is_empty()) {
+        events.push(StreamEvent::TextDelta(text));
+    }
+    for (index, tool_call) in choice
+        .message
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+    {
+        events.push(StreamEvent::ToolCallStart {
+            id: tool_call.id,
+            name: tool_call.function.name,
+        });
+        if !tool_call.function.arguments.is_empty() {
+            events.push(StreamEvent::ToolCallDelta {
+                index: index as u32,
+                arguments: tool_call.function.arguments,
+            });
+        }
+    }
+    events.push(StreamEvent::Usage(response.usage));
+    events.push(StreamEvent::Done);
+    events
+}
+
 pub struct Chat<'c> {
     client: &'c DeepSeekClient,
 }
@@ -41,30 +83,48 @@ impl<'c> Chat<'c> {
             .post_stream_raw("/chat/completions", &request)
             .await?;
 
-        let sse_stream = response.bytes_stream().eventsource();
-        // 第一层：SSE message → Vec<StreamEvent>（单个 chunk 可能产出多个事件）。
-        let chunk_stream = stream::unfold(sse_stream, |mut sse_stream| async move {
-            match sse_stream.next().await {
-                Some(Ok(message)) => {
-                    if message.data == "[DONE]" {
-                        Some((vec![Ok(StreamEvent::Done)], sse_stream))
-                    } else {
-                        Some((parse_stream_chunk(&message.data), sse_stream))
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let flat: EventStream = if content_type.contains("text/event-stream") {
+            let sse_stream = response.bytes_stream().eventsource();
+            // 第一层：SSE message → Vec<StreamEvent>（单个 chunk 可能产出多个事件）。
+            let chunk_stream = stream::unfold(sse_stream, |mut sse_stream| async move {
+                match sse_stream.next().await {
+                    Some(Ok(message)) => {
+                        if message.data == "[DONE]" {
+                            Some((vec![Ok(StreamEvent::Done)], sse_stream))
+                        } else {
+                            Some((parse_stream_chunk(&message.data), sse_stream))
+                        }
                     }
+                    Some(Err(err)) => Some((
+                        vec![Err(DeepSeekError::Stream(err.to_string()))],
+                        sse_stream,
+                    )),
+                    None => None,
                 }
-                Some(Err(err)) => Some((
-                    vec![Err(DeepSeekError::Stream(err.to_string()))],
-                    sse_stream,
-                )),
-                None => None,
-            }
-        });
-        let flat = chunk_stream.flat_map(stream::iter);
+            });
+            Box::pin(chunk_stream.flat_map(stream::iter))
+        } else {
+            // 网关忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些行全部当
+            // 未知字段丢弃且不报错，在 SDK 内按完整响应接住并合成事件流。
+            let complete: ChatCompletionResponse =
+                crate::client::parse_json_response(response).await?;
+            Box::pin(stream::iter(
+                complete_response_events(complete).into_iter().map(Ok),
+            ))
+        };
 
         // 第二层：文本协议兜底缓冲。普通文本正常透传；确认命中文本工具协议后，
         // 等完整响应结束再统一解析，避免按单个 invoke 尾缀提前拆散一组工具调用。
+        // 一次性 JSON 分支同样过缓冲，保持文本协议工具调用识别一致。
         if !enable_buffer {
-            return Ok(Box::pin(flat));
+            return Ok(flat);
         }
 
         let state = BufferState::default();

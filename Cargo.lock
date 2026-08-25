@@ -10629,6 +10629,7 @@ dependencies = [
  "async-trait",
  "backoff",
  "base64 0.23.1",
+ "eventsource-stream",
  "futures-util",
  "jsonschema",
  "reqwest 0.13.4",

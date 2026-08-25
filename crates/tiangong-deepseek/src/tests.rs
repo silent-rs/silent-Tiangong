@@ -1224,3 +1224,46 @@ async fn files_retrieve_and_delete_encode_file_id_in_path() {
         "删除路径应编码：{delete_line}"
     );
 }
+
+#[tokio::test]
+async fn chat_stream_accepts_server_ignoring_stream_flag() {
+    // 网关忽略 stream 参数返回一次性 JSON 时，SDK 应在内部按完整响应接住并
+    // 合成流事件，而不是让 SSE 解析器静默丢弃后报空流。
+    use futures_util::StreamExt;
+
+    let body = r#"{"id":"cmpl_1","object":"chat.completion","created":0,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"一次性完整回复"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":3}}"#
+        .as_bytes();
+    let server = MockServer::start(vec![http_response("200 OK", "application/json", body)]);
+    let client = mock_client(&server.addr);
+
+    let mut stream = client
+        .chat()
+        .create_stream(crate::types::ChatCompletionRequest {
+            model: crate::types::MODEL_V4_FLASH.into(),
+            messages: vec![crate::types::ChatMessage {
+                role: crate::types::MessageRole::User,
+                content: Some(json!("你好")),
+                reasoning_content: None,
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                prefix: false,
+            }],
+            stream: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(event) = stream.next().await {
+        match event.expect("流事件应无错误") {
+            crate::types::StreamEvent::TextDelta(delta) => text.push_str(&delta),
+            crate::types::StreamEvent::Done => done = true,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "一次性完整回复");
+    assert!(done, "应收到终止事件");
+}

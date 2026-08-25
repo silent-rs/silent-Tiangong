@@ -16,6 +16,41 @@ use super::mapping::normalize_api_base;
 type OpenAiByotStream =
     std::pin::Pin<Box<dyn Stream<Item = Result<Value, async_openai::error::OpenAIError>> + Send>>;
 
+/// 流式请求的响应形态：正常 SSE 流，或服务端忽略 stream 参数返回的一次性 JSON。
+pub enum OpenAiStreamResponse {
+    Sse(OpenAiByotStream),
+    Complete(Value),
+}
+
+/// 把 SSE 响应体解析为 JSON 值流，跳过 [DONE] 与 keepalive。
+/// Responses 协议与 Chat Completions 的 SSE 帧格式一致，共用此实现。
+pub(crate) fn sse_value_stream(
+    response: reqwest::Response,
+) -> impl Stream<Item = Result<Value, async_openai::error::OpenAIError>> {
+    use eventsource_stream::Eventsource;
+    use futures_util::StreamExt;
+    response
+        .bytes_stream()
+        .eventsource()
+        .filter_map(|event| async move {
+            match event {
+                Ok(message) => {
+                    if message.data == "[DONE]" || message.event == "keepalive" {
+                        return None;
+                    }
+                    Some(serde_json::from_str::<Value>(&message.data).map_err(|err| {
+                        async_openai::error::OpenAIError::JSONDeserialize(err, message.data)
+                    }))
+                }
+                Err(err) => Some(Err(async_openai::error::OpenAIError::StreamError(
+                    Box::new(async_openai::error::StreamError::EventStream(
+                        err.to_string(),
+                    )),
+                ))),
+            }
+        })
+}
+
 const MAX_RETRIES: u32 = 3;
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 
@@ -42,11 +77,71 @@ impl OpenAiClient {
         .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
     }
 
-    pub async fn stream(&self, model: &str, payload: Value) -> Result<OpenAiByotStream, LlmError> {
-        let client = self.build_client();
-        let chat = client.chat();
-        self.with_retry("openai_stream", model, true, || {
-            chat.create_stream_byot::<_, Value>(payload.clone())
+    pub async fn stream(
+        &self,
+        model: &str,
+        payload: Value,
+    ) -> Result<OpenAiStreamResponse, LlmError> {
+        let base = normalize_api_base(&self.config.base_url)
+            .map_err(|err| LlmError::Configuration(err.to_string()))?;
+        let url = format!("{base}/chat/completions");
+        let api_key = self.config.api_key.clone();
+        self.with_retry("openai_stream", model, true, move || {
+            let url = url.clone();
+            let api_key = api_key.clone();
+            let payload = payload.clone();
+            async move {
+                // 不设总超时：流式响应允许长时间增量生成，总时长上限交给上层；
+                // 连接阶段卡死由 connect_timeout 兜住。
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(30))
+                    .build()?;
+                let mut request = client
+                    .post(&url)
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .json(&payload);
+                if !api_key.trim().is_empty() {
+                    request = request.bearer_auth(&api_key);
+                }
+                let response = request.send().await?;
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(async_openai::error::OpenAIError::ApiError(
+                        async_openai::error::ApiErrorResponse {
+                            status_code: status,
+                            api_error: async_openai::error::ApiError {
+                                message: format!("{status}: {body}"),
+                                r#type: None,
+                                param: None,
+                                code: None,
+                            },
+                        },
+                    ));
+                }
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if content_type.contains("text/event-stream") {
+                    Ok(OpenAiStreamResponse::Sse(Box::pin(sse_value_stream(
+                        response,
+                    ))))
+                } else {
+                    // 服务端忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些
+                    // 行全部当未知字段丢弃且不报错，必须在 llm 层按完整响应接住。
+                    tracing::info!(
+                        operation = "openai_stream",
+                        provider = "openai",
+                        model,
+                        "服务端未按 SSE 流式返回，转按一次性完整响应处理"
+                    );
+                    let value = response.json::<Value>().await?;
+                    Ok(OpenAiStreamResponse::Complete(value))
+                }
+            }
         })
         .await
     }

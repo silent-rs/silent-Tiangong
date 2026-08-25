@@ -43,6 +43,22 @@ impl<'c> Responses<'c> {
         request.stream = Some(true);
         let response = self.client.post_stream_raw("/responses", &request).await?;
 
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if !content_type.contains("text/event-stream") {
+            // 网关忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些行全部当
+            // 未知字段丢弃且不报错，在 SDK 内按完整响应接住并合成事件流。
+            let complete: ResponseObject = crate::client::parse_json_response(response).await?;
+            return Ok(Box::pin(stream::iter(
+                complete_response_events(complete).into_iter().map(Ok),
+            )));
+        }
+
         let sse_stream = response.bytes_stream().eventsource();
         let event_stream = stream::unfold(
             (sse_stream, false),
@@ -72,6 +88,24 @@ impl<'c> Responses<'c> {
 
         Ok(Box::pin(event_stream))
     }
+}
+
+/// 把一次性完整响应合成为等价的流事件序列。
+///
+/// 网关忽略 stream 参数返回 application/json 时，SDK 在内部按完整响应
+/// 接住并合成事件流，调用方无需感知差异。ResponseCompleted 为终止事件，
+/// 流在其后自然结束。
+fn complete_response_events(response: ResponseObject) -> Vec<ResponsesStreamEvent> {
+    vec![
+        ResponsesStreamEvent::ResponseCreated {
+            sequence_number: 0,
+            response: response.clone(),
+        },
+        ResponsesStreamEvent::ResponseCompleted {
+            sequence_number: 1,
+            response,
+        },
+    ]
 }
 
 /// 解析单条 SSE data 为流事件。

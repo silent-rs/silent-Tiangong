@@ -73,7 +73,21 @@ impl LlmProvider for OpenAiResponsesProvider {
         let model = req.model.clone();
         let payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        let stream = self.client.stream(&model, payload).await?;
+        let stream = match self.client.stream(&model, payload).await? {
+            // 服务端忽略 stream 参数返回一次性 JSON：复用非流式解析，
+            // 合成等价的流事件序列，消费方无需感知差异。
+            super::client::ResponsesStreamResponse::Complete(value) => {
+                let response =
+                    parse_complete_response(&value).map_err(|err| LlmError::Provider {
+                        provider: "openai",
+                        message: err.to_string(),
+                    })?;
+                return Ok(Box::pin(stream::iter(
+                    crate::stream::complete_response_events(response),
+                )));
+            }
+            super::client::ResponsesStreamResponse::Sse(stream) => stream,
+        };
 
         // 维护流式状态：记录是否收到过 reasoning delta 增量。
         // 流式增量一律保留；仅在全程无 delta 时，从 completed 兜底补发 reasoning。
@@ -173,6 +187,67 @@ mod tests {
             Some(Ok(ProviderStreamEvent::MessageStart))
         ));
         drop(response_stream);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn stream_accepts_server_ignoring_stream_flag() {
+        // 部分网关忽略 stream 参数，返回 application/json 的一次性完整响应；
+        // llm 层应按完整结果接住并合成流事件，而不是让 SSE 解析器静默丢弃。
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_complete",
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-5.6-sol",
+                "output": [
+                    { "type": "message", "content": [{ "type": "output_text", "text": "一次性完整回复" }] },
+                    { "type": "function_call", "call_id": "call_tool", "name": "read_file", "arguments": "{\"path\":\"TODO.md\"}" }
+                ],
+                "usage": { "input_tokens": 3, "output_tokens": 5, "total_tokens": 8 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut config = OpenAiResponsesConfig::new("test-key", server.uri());
+        config.timeout = std::time::Duration::from_secs(2);
+        config.max_retries = 0;
+        let provider = OpenAiResponsesProvider::new(config);
+        let request = ProviderRequest {
+            model: "gpt-5.6-sol".to_string(),
+            system: None,
+            messages: vec![crate::message::ChatMessage::text(
+                crate::message::MessageRole::User,
+                "你好",
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            reasoning_effort: crate::request::ReasoningEffort::None,
+        };
+
+        let mut response_stream = provider.stream(request).await.unwrap();
+        let mut text = String::new();
+        let mut tool_calls = 0;
+        while let Some(event) = response_stream.next().await {
+            match event.expect("流事件应无错误") {
+                ProviderStreamEvent::TextDelta(delta) => text.push_str(&delta),
+                ProviderStreamEvent::ToolCallStart(_) => tool_calls += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "一次性完整回复");
+        assert_eq!(tool_calls, 1);
         server.verify().await;
     }
 

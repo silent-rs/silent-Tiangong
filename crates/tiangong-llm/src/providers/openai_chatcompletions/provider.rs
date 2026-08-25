@@ -82,15 +82,30 @@ impl LlmProvider for OpenAiChatCompletionsProvider {
         let model = req.model.clone();
         let payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
-        let stream = self.client.stream(&model, payload).await?;
-        let mut decoder = super::stream::OpenAiStreamDecoder::default();
-        let mapped = stream
-            .map(move |item| match item {
-                Ok(payload) => decoder.parse_payload(&payload),
-                Err(err) => vec![Err(map_openai_error(&err))],
-            })
-            .flat_map(stream::iter);
-        Ok(Box::pin(mapped))
+        match self.client.stream(&model, payload).await? {
+            super::client::OpenAiStreamResponse::Sse(stream) => {
+                let mut decoder = super::stream::OpenAiStreamDecoder::default();
+                let mapped = stream
+                    .map(move |item| match item {
+                        Ok(payload) => decoder.parse_payload(&payload),
+                        Err(err) => vec![Err(map_openai_error(&err))],
+                    })
+                    .flat_map(stream::iter);
+                Ok(Box::pin(mapped))
+            }
+            // 服务端忽略 stream 参数返回一次性 JSON：复用非流式解析，
+            // 合成等价的流事件序列，消费方无需感知差异。
+            super::client::OpenAiStreamResponse::Complete(value) => {
+                let response =
+                    parse_complete_response(&value).map_err(|err| LlmError::Provider {
+                        provider: "openai",
+                        message: err.to_string(),
+                    })?;
+                Ok(Box::pin(stream::iter(
+                    crate::stream::complete_response_events(response),
+                )))
+            }
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
