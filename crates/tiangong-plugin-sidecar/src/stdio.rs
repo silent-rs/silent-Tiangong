@@ -12,6 +12,8 @@ use tiangong_plugin_runtime::protocol::{
     ErrorCode as PluginErrorCode, IpcFrame, IpcRequest, IpcResponse, Request as PluginRequest,
     Response as PluginResponse,
 };
+#[cfg(target_os = "macos")]
+use tiangong_plugin_runtime::sidecar::stdio::HOST_PID_ENV;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::singleton::SidecarService;
@@ -32,6 +34,7 @@ where
 {
     let service_name =
         std::env::var("TIANGONG_PLUGIN_ID").unwrap_or_else(|_| "sidecar".to_string());
+    start_host_process_monitor()?;
     let service_obj = service_factory()?;
     tracing::info!(service = %service_name, "stdio sidecar 开始服务");
 
@@ -136,6 +139,88 @@ fn terminate_owned_process_group() {
 
 #[cfg(not(unix))]
 fn terminate_owned_process_group() {}
+
+/// macOS 没有 Linux 的 PDEATHSIG。独立线程通过 kqueue 监视创建本次 stdio
+/// 连接的实际宿主 PID，因此业务 dispatch 长时间占用主循环时也能立即清理。
+#[cfg(target_os = "macos")]
+fn start_host_process_monitor() -> Result<()> {
+    let host_pid = std::env::var(HOST_PID_ENV)
+        .with_context(|| format!("读取 {HOST_PID_ENV} 失败"))?
+        .parse::<libc::pid_t>()
+        .with_context(|| format!("解析 {HOST_PID_ENV} 失败"))?;
+    if host_pid <= 1 || host_pid == unsafe { libc::getpid() } {
+        bail!("stdio sidecar 宿主 PID 无效: {host_pid}");
+    }
+    if !process_alive(host_pid) {
+        bail!("stdio sidecar 宿主进程已退出: {host_pid}");
+    }
+
+    std::thread::Builder::new()
+        .name("sidecar-host-watch".to_string())
+        .spawn(move || {
+            if !wait_for_process_exit(host_pid) {
+                while process_alive(host_pid) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            terminate_owned_process_group();
+            unsafe { libc::_exit(1) };
+        })
+        .context("启动 macOS sidecar 宿主监视线程失败")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_host_process_monitor() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn process_alive(pid: libc::pid_t) -> bool {
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// 返回 true 表示 kqueue 已观察到进程退出；注册或等待不可用时返回 false，
+/// 调用方改用有界轮询，避免受限 Seatbelt 环境失去父进程保护。
+#[cfg(target_os = "macos")]
+fn wait_for_process_exit(pid: libc::pid_t) -> bool {
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return false;
+    }
+    let change = libc::kevent {
+        ident: pid as libc::uintptr_t,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let registered =
+        unsafe { libc::kevent(queue, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+    if registered < 0 {
+        unsafe { libc::close(queue) };
+        return false;
+    }
+
+    let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+    loop {
+        let received =
+            unsafe { libc::kevent(queue, std::ptr::null(), 0, &mut event, 1, std::ptr::null()) };
+        if received > 0 {
+            unsafe { libc::close(queue) };
+            return true;
+        }
+        if received < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe { libc::close(queue) };
+        return false;
+    }
+}
 
 async fn dispatch_and_respond(
     writer: &Arc<tokio::sync::Mutex<tokio::io::Stdout>>,

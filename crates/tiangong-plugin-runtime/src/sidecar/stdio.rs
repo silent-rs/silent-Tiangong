@@ -32,6 +32,8 @@ use serde_json::Value;
 pub const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
 /// 子进程环境：stdio 模式的认证 token。
 pub const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
+/// 子进程环境：创建并持有 stdio 连接的宿主进程 PID。
+pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
 pub const TRANSPORT_STDIO: &str = "stdio";
 /// command 子进程继承的 CPU 时间上限（秒）。
 pub const SANDBOX_CPU_LIMIT_ENV: &str = "TIANGONG_SANDBOX_CPU_LIMIT_SECONDS";
@@ -255,6 +257,7 @@ impl StdioSidecarConnection {
             .stderr(Stdio::from(stderr))
             .env(TRANSPORT_ENV, TRANSPORT_STDIO)
             .env(STDIO_TOKEN_ENV, &token)
+            .env(HOST_PID_ENV, std::process::id().to_string())
             .env(PLUGIN_ID_ENV, &self.config.plugin_id)
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             // stdio 模式无 endpoint 文件；保留路径占位以兼容读取方。

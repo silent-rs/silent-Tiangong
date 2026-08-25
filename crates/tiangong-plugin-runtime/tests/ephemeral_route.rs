@@ -552,6 +552,104 @@ fn real_launcher_timeout_kills_background_process_tree() {
     eprintln!("SAFE: timeout_process_tree");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn real_launcher_host_crash_kills_busy_process_tree() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !sandbox_binaries_ready() {
+        return;
+    }
+    let Some(host_binary) = debug_binary("test-stdio-host") else {
+        eprintln!("跳过真实宿主崩溃测试：target/debug/test-stdio-host 尚未构建");
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let host_log = root.path().join("host.log");
+    let stderr = std::fs::File::create(&host_log).unwrap();
+    let host = std::process::Command::new(host_binary)
+        .arg("--command-sandbox")
+        .arg(command_sidecar_binary().unwrap())
+        .arg(root.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    let mut guard = MacHostGuard {
+        host,
+        sidecar_pid: None,
+    };
+    let sidecar_pid = wait_for_host_pid_file(
+        &root.path().join("workspace/sidecar.pid"),
+        &mut guard.host,
+        &host_log,
+        Duration::from_secs(30),
+    );
+    let child_pid = wait_for_host_pid_file(
+        &root.path().join("workspace/child.pid"),
+        &mut guard.host,
+        &host_log,
+        Duration::from_secs(30),
+    );
+    guard.sidecar_pid = Some(sidecar_pid);
+    assert!(process_exists(sidecar_pid));
+    assert!(process_exists(child_pid));
+
+    unsafe { libc::kill(guard.host.id() as libc::pid_t, libc::SIGKILL) };
+    let _ = guard.host.wait();
+    wait_for_process_exit(sidecar_pid, Duration::from_secs(5));
+    wait_for_process_exit(child_pid, Duration::from_secs(5));
+    guard.sidecar_pid = None;
+    eprintln!("SAFE: macos_host_crash_process_tree");
+}
+
+#[cfg(target_os = "macos")]
+struct MacHostGuard {
+    host: std::process::Child,
+    sidecar_pid: Option<i32>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MacHostGuard {
+    fn drop(&mut self) {
+        unsafe { libc::kill(self.host.id() as libc::pid_t, libc::SIGKILL) };
+        let _ = self.host.wait();
+        if let Some(pid) = self.sidecar_pid {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_host_pid_file(
+    path: &Path,
+    host: &mut std::process::Child,
+    log: &Path,
+    timeout: Duration,
+) -> i32 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(pid) = raw.trim().parse::<i32>()
+        {
+            return pid;
+        }
+        if let Some(status) = host.try_wait().expect("读取测试宿主状态失败") {
+            panic!(
+                "PID 文件就绪前测试宿主已退出: {status}；日志:\n{}",
+                read_log(log)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "等待测试宿主 PID 文件超时；日志:\n{}",
+            read_log(log)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn real_launcher_applies_resource_limits() {
