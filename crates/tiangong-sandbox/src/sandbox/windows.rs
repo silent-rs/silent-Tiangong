@@ -40,9 +40,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileInformationByHandle,
-    OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
+    GetFileInformationByHandle, OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -80,6 +80,7 @@ const FILE_WRITE_ACCESS: u32 = FILE_WRITE_DATA
 const FILE_WORKSPACE_ACCESS: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 const FILE_PROGRAM_ACCESS: u32 = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+const FILE_ANCESTOR_PATH_ACCESS: u32 = FILE_GENERIC_EXECUTE | FILE_LIST_DIRECTORY;
 
 /// Windows Launcher 的原生启动参数。
 pub struct WindowsLaunchRequest<'a> {
@@ -552,8 +553,8 @@ impl AclGrants {
             active: true,
         };
         let result = (|| {
-            // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
-            // 子树传播继承项，因此祖先只增加不继承的最小穿越权限。
+            // Windows 规范化路径时会逐级查询目录名。祖先权限不继承，
+            // 因而只暴露当前层目录项，不会放行其中任何文件内容。
             grants.add(
                 appcontainer_sid,
                 program,
@@ -571,7 +572,7 @@ impl AclGrants {
 
             let writable = policy.writable_roots();
             for root in &writable {
-                grants.add_traversal_ancestors(appcontainer_sid, root)?;
+                grants.add_path_resolution_ancestors(appcontainer_sid, root)?;
                 grants.add(
                     appcontainer_sid,
                     root,
@@ -619,7 +620,7 @@ impl AclGrants {
         Ok(grants)
     }
 
-    fn add_traversal_ancestors(&mut self, sid: PSID, root: &Path) -> Result<()> {
+    fn add_path_resolution_ancestors(&mut self, sid: PSID, root: &Path) -> Result<()> {
         for ancestor in root.ancestors().skip(1) {
             if ancestor.parent().is_none() {
                 break;
@@ -634,7 +635,7 @@ impl AclGrants {
             match modify_acl(
                 ancestor,
                 sid,
-                FILE_GENERIC_EXECUTE,
+                FILE_ANCESTOR_PATH_ACCESS,
                 NO_INHERITANCE,
                 GRANT_ACCESS,
             ) {
