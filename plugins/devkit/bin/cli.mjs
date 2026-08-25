@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @silent-ai/plugin-creator（devkit CLI）——天工插件创作工具链。
 //
-// 经命令通道执行：npx -y @silent-ai/plugin-creator@1.0.1 <command> ...
+// 经命令通道执行：npx -y @silent-ai/plugin-creator@1.0.2 <command> ...
 // 约定：stdout 输出单个 JSON 结果（{ok, ...}）；人读信息写 stderr；
 // 非零退出码表示失败。开发目录固定 ~/.tiangong/plugins-dev/<id>/
 // （TIANGONG_PLUGINS_DEV 或 --root 覆盖）。

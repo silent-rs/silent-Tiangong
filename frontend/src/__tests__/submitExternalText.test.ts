@@ -73,6 +73,39 @@ describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () =>
     expect(queue.map((message) => message.text)).toEqual(['第一条', '第二条']);
   });
 
+  it('发送事务中第二条到达：第一条不重复，第二条直接入队', async () => {
+    // 模拟真实 sendMessage：进入即置 is_sending 并保持挂起。
+    let release!: () => void;
+    const gate = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    const send = vi.fn().mockImplementation(async () => {
+      useStore.setState((current) => ({
+        inputCaches: {
+          ...current.inputCaches,
+          [KEY]: { ...current.inputCaches[KEY], is_sending: true },
+        },
+      }));
+      await gate;
+      return true;
+    });
+    useStore.setState({ sendMessage: send as never });
+
+    // 第一条：空闲路径，写入草稿并开始发送（挂起中）。
+    useStore.getState().submitExternalText(KEY, '第一条', 'full_trust');
+    expect(send).toHaveBeenCalledTimes(1);
+    // 第二条：发送事务中到达——不得把第一条草稿再次入队。
+    useStore.getState().submitExternalText(KEY, '第二条', 'full_trust');
+    const queue = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queue.map((message) => message.text)).toEqual(['第二条']);
+
+    // 第一条发送完成：队列只剩第二条，等待自动放行。
+    release();
+    await Promise.resolve();
+    expect(useStore.getState().inputQueues[KEY] ?? []).toHaveLength(1);
+    expect(useStore.getState().inputQueues[KEY]?.[0].text).toBe('第二条');
+  });
+
   it('空文本：不做任何投递', () => {
     const { send } = spyActions();
     useStore.getState().submitExternalText(KEY, '   ', 'full_trust');

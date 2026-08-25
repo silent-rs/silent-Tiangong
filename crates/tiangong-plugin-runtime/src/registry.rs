@@ -708,27 +708,43 @@ pub fn invoke_sidecar(
 /// 新装插件的适配器不会进入已有 Core；经注册表聚合则安装/卸载/启停立即
 /// 反映（与 `get_mentions` 对各 Core 的遍历结果一致，因为 adapter 同源）。
 pub fn collect_mention_candidates() -> Vec<tiangong_core::MentionCandidate> {
+    use std::collections::HashSet;
     use tiangong_core::tool_override::MentionCandidateProvider;
 
-    let Ok(plugins) = loaded_plugins().lock() else {
-        return Vec::new();
+    // 锁内仅取快照（适配器 Arc 与清单克隆），锁外再调用插件——WASM 的
+    // 候选收集是跨调用（可能耗时），不得持注册表锁进行。
+    let (adapters, manifests) = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return Vec::new();
+        };
+        let adapters: Vec<Arc<WasmPluginAdapter>> = plugins
+            .values()
+            .filter(|loaded| loaded.enabled)
+            .flat_map(|loaded| loaded.instances.iter().filter_map(std::sync::Weak::upgrade))
+            .collect();
+        let manifests: Vec<PluginManifest> = plugins
+            .values()
+            .filter(|loaded| loaded.enabled)
+            .map(|loaded| loaded.manifest.clone())
+            .collect();
+        (adapters, manifests)
     };
     let mut out = Vec::new();
-    for loaded in plugins.values() {
-        if !loaded.enabled {
-            continue;
-        }
-        // WASM 插件：候选经适配器动态收集（wasm 导出，如 skill/mcp 列表）。
-        for adapter in loaded.instances.iter().filter_map(std::sync::Weak::upgrade) {
-            out.extend(adapter.mention_candidates());
-        }
-        // TS 插件：mention 是纯清单数据，静态生成——适配器弱引用由会话
-        // Core 构建时填充，安装后不可达；静态生成让安装即进候选。
-        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&loaded.manifest)
-        {
+    // WASM 插件：候选经适配器动态收集（wasm 导出，如 skill/mcp 列表）。
+    for adapter in adapters {
+        out.extend(adapter.mention_candidates());
+    }
+    // TS 插件：mention 是纯清单数据，静态生成——适配器弱引用由会话
+    // Core 构建时填充，安装后不可达；静态生成让安装即进候选。
+    for manifest in manifests {
+        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&manifest) {
             out.push(candidate);
         }
     }
+    // 多会话/多适配器合并去重：同一插件的适配器可能被多个会话的 Core
+    // 持有（instances 逐次追加），按 (kind, value) 保留首个。
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    out.retain(|candidate| seen.insert((candidate.kind.clone(), candidate.value.clone())));
     out
 }
 

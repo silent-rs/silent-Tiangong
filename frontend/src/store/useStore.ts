@@ -69,6 +69,17 @@ function newQueuedMessageId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 直接由文本构造一条队列消息（不触碰草稿——用于外部文本在发送事务
+ *  或执行中投递：草稿可能属于进行中的提交，不得被再次入队或覆盖）。 */
+function queuedTextMessage(text: string): QueuedInputMessage {
+  return {
+    id: newQueuedMessageId(),
+    text,
+    attachments: [],
+    queuedAt: Date.now(),
+  };
+}
+
 /** 把当前草稿快照为一条队列消息（不修改草稿）。 */
 function queuedMessageFromCache(cache: InputCache): QueuedInputMessage {
   return {
@@ -1665,20 +1676,34 @@ export const useStore = create<AppState>((set, get) => ({
     const state = get();
     const cache = state.inputCaches[cacheKey];
     if (!cache) return;
-    // 保护用户草稿：非空（文本或附件）先入队，避免被外部文本覆盖丢失。
-    if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
-      state.enqueueInputMessage(cacheKey);
+    const queueExternal = () => {
+      set((current) => ({
+        inputQueues: {
+          ...current.inputQueues,
+          [cacheKey]: [...(current.inputQueues[cacheKey] ?? []), queuedTextMessage(text)],
+        },
+      }));
+    };
+    // 发送事务中：当前草稿属于正在提交的输入，不得把它再次入队（重复
+    // 发送风险）——外部文本直接构造队列项，不触碰草稿。
+    if (cache.is_sending) {
+      queueExternal();
+      return;
     }
+    // 与既有队列逻辑一致的运行判断：状态表存在非空值即运行中。
+    const running = Boolean(state.sessionRunStatuses[cacheKey]);
+    if (running) {
+      // 保护用户草稿：非空（文本或附件）先入队，避免被外部文本覆盖丢失。
+      if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
+        state.enqueueInputMessage(cacheKey);
+      }
+      queueExternal();
+      return;
+    }
+    // 空闲：写入草稿并发送（sendMessage 自管 is_sending/revision/清缓存）。
     get().setInputCacheText(cacheKey, text);
     const fresh = get().inputCaches[cacheKey];
     if (!fresh) return;
-    // 与普通 Enter 一致的分流：执行中入队（等待自动放行或用户立即引导），
-    // 空闲立即开新轮发送。
-    const running = get().sessionRunStatuses[cacheKey] === 'executing';
-    if (running || fresh.is_sending) {
-      get().enqueueInputMessage(cacheKey);
-      return;
-    }
     void get().sendMessage(cacheKey, text, [], fresh.revision, trustMode);
   },
 
