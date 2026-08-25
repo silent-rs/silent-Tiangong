@@ -21,8 +21,10 @@
 //! 子命令：
 //! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项）。
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::Read;
+#[cfg(windows)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -73,7 +75,8 @@ fn main() {
     #[cfg(windows)]
     if args.first().map(String::as_str) == Some("--windows-self-check-child-probe") {
         let request = args.get(1).map(String::as_str).unwrap_or_default();
-        std::process::exit(run_windows_child_probe(request));
+        let expected_stdin = args.get(2).map(String::as_str);
+        std::process::exit(run_windows_child_probe(request, expected_stdin));
     }
     #[cfg(windows)]
     if args.first().map(String::as_str) == Some("--windows-self-check-process-limit-probe") {
@@ -86,6 +89,25 @@ fn main() {
     #[cfg(windows)]
     if args.first().map(String::as_str) == Some("--windows-self-check-cpu-limit-probe") {
         std::process::exit(run_windows_cpu_limit_probe());
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-tree-probe") {
+        let request = args.get(1).map(String::as_str).unwrap_or_default();
+        std::process::exit(run_windows_tree_probe(request));
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-idle-probe") {
+        std::process::exit(run_windows_idle_probe());
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-self-check-lifecycle-worker") {
+        let root = args.get(1).map(String::as_str).unwrap_or_default();
+        let label = args.get(2).map(String::as_str).unwrap_or_default();
+        std::process::exit(run_windows_lifecycle_worker(root, label));
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("--windows-lifecycle-self-check") {
+        std::process::exit(run_windows_lifecycle_self_check());
     }
     if args.iter().any(|arg| arg == "--self-check") {
         // 自检有自己的三态退出码语义，不走统一拒绝路径。
@@ -471,6 +493,16 @@ struct WindowsProbeRequest {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Serialize, Deserialize)]
+struct WindowsTreeProbeRequest {
+    workspace: PathBuf,
+    executable: PathBuf,
+    parent_pid_path: PathBuf,
+    child_pid_path: PathBuf,
+    ready_path: PathBuf,
+}
+
+#[cfg(windows)]
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WindowsProbeReport {
     workspace_write: bool,
@@ -487,6 +519,7 @@ struct WindowsProbeReport {
     path_traversal_blocked: bool,
     child_restrictions_inherited: bool,
     resource_limits_applied: bool,
+    null_device_accessible: bool,
 }
 
 #[cfg(windows)]
@@ -533,6 +566,7 @@ fn run_windows_enforcement_probes(report: &mut serde_json::Map<String, serde_jso
                     probe.child_restrictions_inherited,
                 ),
                 ("resource_limits_applied", probe.resource_limits_applied),
+                ("null_device_accessible", probe.null_device_accessible),
             ] {
                 report.insert(field.into(), serde_json::Value::from(value));
             }
@@ -862,6 +896,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         resource_limits_applied: tiangong_sandbox::sandbox::windows::current_process_limits_match(
             request.resource_limits,
         ),
+        null_device_accessible: false,
     };
     eprintln!("Windows 文件隔离探针: 启动受限子进程");
     eprintln!(
@@ -873,13 +908,8 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         Ok(value) => value,
         Err(_) => return 3,
     };
-    let current_exe_result = std::env::current_exe().and_then(|program| {
-        std::process::Command::new(program)
-            .args(["--self-check-network-probe", "invalid"])
-            .status()
-    });
-    eprintln!("Windows 文件隔离探针: 原程序派生结果={current_exe_result:?}");
-
+    // 普通用户 AppContainer 通常不能打开 NUL；这里只保留兼容性诊断，
+    // 子进程隔离继承由下方匿名管道和普通文件句柄验证。
     let null_read = std::fs::OpenOptions::new().read(true).open("NUL");
     let null_write = std::fs::OpenOptions::new().write(true).open("NUL");
     eprintln!(
@@ -887,36 +917,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         null_read.as_ref().map(|_| ()),
         null_write.as_ref().map(|_| ())
     );
-    let null_device_ok = null_read.is_ok() && null_write.is_ok();
-
-    let inherited_result = std::process::Command::new(&request.workspace_executable)
-        .arg("--windows-self-check-child-probe")
-        .arg(&child_request)
-        .current_dir(&request.workspace)
-        .status();
-    eprintln!("Windows 文件隔离探针: 继承输出派生结果={inherited_result:?}");
-    let inherited_ok = inherited_result.is_ok_and(|status| status.success());
-    let _ = std::fs::remove_file(&request.child_report_path);
-
-    let stdin_null_result = std::process::Command::new(&request.workspace_executable)
-        .arg("--windows-self-check-child-probe")
-        .arg(&child_request)
-        .current_dir(&request.workspace)
-        .stdin(std::process::Stdio::null())
-        .status();
-    eprintln!("Windows 文件隔离探针: 仅空输入派生结果={stdin_null_result:?}");
-    let stdin_null_ok = stdin_null_result.is_ok_and(|status| status.success());
-    let _ = std::fs::remove_file(&request.child_report_path);
-
-    let piped_stdout_result = std::process::Command::new(&request.workspace_executable)
-        .arg("--windows-self-check-child-probe")
-        .arg(&child_request)
-        .current_dir(&request.workspace)
-        .stdout(std::process::Stdio::piped())
-        .status();
-    eprintln!("Windows 文件隔离探针: 仅输出管道派生结果={piped_stdout_result:?}");
-    let piped_stdout_ok = piped_stdout_result.is_ok_and(|status| status.success());
-    let _ = std::fs::remove_file(&request.child_report_path);
+    probe.null_device_accessible = null_read.is_ok() && null_write.is_ok();
 
     let file_stdout_path = request.workspace.join("child-stdio.stdout");
     let file_stderr_path = request.workspace.join("child-stdio.stderr");
@@ -955,68 +956,75 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     let _ = std::fs::remove_file(file_stdout_path);
     let _ = std::fs::remove_file(file_stderr_path);
 
-    let null_result = std::process::Command::new(&request.workspace_executable)
+    const PIPE_TOKEN: &str = "tiangong-sandbox-pipe-input";
+    const STDOUT_TOKEN: &str = "tiangong-sandbox-pipe-stdout";
+    const STDERR_TOKEN: &str = "tiangong-sandbox-pipe-stderr";
+    let piped_child = std::process::Command::new(&request.workspace_executable)
         .arg("--windows-self-check-child-probe")
         .arg(&child_request)
+        .arg(PIPE_TOKEN)
         .current_dir(&request.workspace)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    eprintln!("Windows 文件隔离探针: 空设备输出派生结果={null_result:?}");
-    let null_ok = null_result.is_ok_and(|status| status.success());
-    let _ = std::fs::remove_file(&request.child_report_path);
-
-    let child_result = std::process::Command::new(&request.workspace_executable)
-        .arg("--windows-self-check-child-probe")
-        .arg(child_request)
-        .current_dir(&request.workspace)
-        .output();
-    let child_ok = match child_result {
-        Ok(output) => {
-            if !output.status.success() {
-                eprintln!(
-                    "Windows 文件隔离探针: 受限子进程退出失败 ({})，stderr={}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let pipe_stdio_ok = match piped_child {
+        Ok(mut child) => {
+            let input_written = child
+                .stdin
+                .take()
+                .is_some_and(|mut stdin| stdin.write_all(PIPE_TOKEN.as_bytes()).is_ok());
+            match child.wait_with_output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !output.status.success() {
+                        eprintln!(
+                            "Windows 文件隔离探针: 管道子进程退出失败 ({})，stderr={stderr}",
+                            output.status
+                        );
+                    }
+                    input_written
+                        && output.status.success()
+                        && stdout.contains(STDOUT_TOKEN)
+                        && stderr.contains(STDERR_TOKEN)
+                }
+                Err(error) => {
+                    eprintln!("Windows 文件隔离探针: 等待管道子进程失败: {error:?}");
+                    false
+                }
             }
-            output.status.success()
         }
         Err(error) => {
             eprintln!(
-                "Windows 文件隔离探针: 启动受限子进程失败: {error:?} (os={:?})",
+                "Windows 文件隔离探针: 启动管道子进程失败: {error:?} (os={:?})",
                 error.raw_os_error()
             );
             false
         }
     };
+    eprintln!("Windows 文件隔离探针: 完整匿名管道派生={pipe_stdio_ok}");
     eprintln!("Windows 文件隔离探针: 读取子进程报告");
-    probe.child_restrictions_inherited = inherited_ok
-        && null_device_ok
-        && stdin_null_ok
-        && piped_stdout_ok
-        && file_stdio_ok
-        && null_ok
-        && child_ok
-        && std::fs::read(&request.child_report_path)
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<WindowsProbeReport>(&raw).ok())
-            .is_some_and(|child| {
-                child.workspace_write
-                    && child.dedicated_temp_write
-                    && child.existing_workspace_read_write
-                    && child.outside_write_blocked
-                    && child.outside_read_blocked
-                    && child.outside_delete_blocked
-                    && child.outside_config_write_blocked
-                    && child.git_metadata_write_blocked
-                    && child.git_metadata_readable
-                    && child.network_blocked
-                    && child.sensitive_read_blocked
-                    && child.path_traversal_blocked
-                    && child.resource_limits_applied
-            });
+    let child_report = std::fs::read(&request.child_report_path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<WindowsProbeReport>(&raw).ok());
+    probe.child_restrictions_inherited = file_stdio_ok
+        && pipe_stdio_ok
+        && child_report.is_some_and(|child| {
+            child.workspace_write
+                && child.dedicated_temp_write
+                && child.existing_workspace_read_write
+                && child.outside_write_blocked
+                && child.outside_read_blocked
+                && child.outside_delete_blocked
+                && child.outside_config_write_blocked
+                && child.git_metadata_write_blocked
+                && child.git_metadata_readable
+                && child.network_blocked
+                && child.sensitive_read_blocked
+                && child.path_traversal_blocked
+                && child.resource_limits_applied
+        });
     eprintln!("Windows 文件隔离探针: 写入父进程报告");
     match serde_json::to_vec(&probe)
         .ok()
@@ -1028,10 +1036,18 @@ fn run_windows_file_probe(raw: &str) -> i32 {
 }
 
 #[cfg(windows)]
-fn run_windows_child_probe(raw: &str) -> i32 {
+fn run_windows_child_probe(raw: &str, expected_stdin: Option<&str>) -> i32 {
     let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
         return 2;
     };
+    if let Some(expected) = expected_stdin {
+        let mut input = String::new();
+        if std::io::stdin().read_to_string(&mut input).is_err() || input != expected {
+            return 4;
+        }
+        println!("tiangong-sandbox-pipe-stdout");
+        eprintln!("tiangong-sandbox-pipe-stderr");
+    }
     eprintln!("Windows 文件隔离探针: 验证子进程边界");
     let (git_metadata_write_blocked, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "子进程");
@@ -1063,6 +1079,7 @@ fn run_windows_child_probe(raw: &str) -> i32 {
         resource_limits_applied: tiangong_sandbox::sandbox::windows::current_process_limits_match(
             request.resource_limits,
         ),
+        null_device_accessible: false,
         ..Default::default()
     };
     eprintln!("Windows 文件隔离探针: 写入子进程报告");
@@ -1164,6 +1181,466 @@ fn run_windows_cpu_limit_probe() -> i32 {
         std::hint::black_box(value);
     }
     5
+}
+
+#[cfg(windows)]
+fn run_windows_idle_probe() -> i32 {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_tree_probe(raw: &str) -> i32 {
+    let Ok(request) = serde_json::from_str::<WindowsTreeProbeRequest>(raw) else {
+        return 2;
+    };
+    if std::fs::write(&request.parent_pid_path, std::process::id().to_string()).is_err() {
+        return 3;
+    }
+    let child = match std::process::Command::new(&request.executable)
+        .arg("--windows-self-check-idle-probe")
+        .current_dir(&request.workspace)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return 4,
+    };
+    if std::fs::write(&request.child_pid_path, child.id().to_string()).is_err()
+        || std::fs::write(&request.ready_path, "ready").is_err()
+    {
+        return 5;
+    }
+    let _child = child;
+    run_windows_idle_probe()
+}
+
+#[cfg(windows)]
+struct WindowsTreeFixture {
+    program_root: PathBuf,
+    request: WindowsTreeProbeRequest,
+    policy: tiangong_sandbox::SandboxPolicy,
+}
+
+#[cfg(windows)]
+impl WindowsTreeFixture {
+    fn new(root: &Path, current_exe: &Path, label: &str) -> Result<Self> {
+        let program_root = root.join(label).join("workspace");
+        std::fs::create_dir_all(&program_root)
+            .with_context(|| format!("创建 Windows {label} 生命周期工作区失败"))?;
+        let executable = program_root.join("tree-probe.exe");
+        std::fs::copy(current_exe, &executable)
+            .with_context(|| format!("复制 Windows {label} 生命周期探针失败"))?;
+        let request = WindowsTreeProbeRequest {
+            workspace: program_root.clone(),
+            executable,
+            parent_pid_path: program_root.join("parent.pid"),
+            child_pid_path: program_root.join("child.pid"),
+            ready_path: program_root.join("ready"),
+        };
+        let policy = tiangong_sandbox::SandboxPolicy::workspace_write(&program_root);
+        Ok(Self {
+            program_root,
+            request,
+            policy,
+        })
+    }
+
+    fn launch(
+        &self,
+        host_pid: Option<u32>,
+        stop_event_name: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Result<i32> {
+        let args = vec![
+            "--windows-self-check-tree-probe".to_string(),
+            serde_json::to_string(&self.request)?,
+        ];
+        tiangong_sandbox::sandbox::windows::launch(
+            tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
+                program: &self.request.executable,
+                program_root: &self.program_root,
+                args: &args,
+                policy: &self.policy,
+                host_pid,
+                stop_event_name,
+                timeout: Some(timeout),
+            },
+        )
+    }
+
+    fn process_tree_cleaned(&self) -> bool {
+        if !self.request.ready_path.is_file() {
+            eprintln!(
+                "Windows 生命周期探针未就绪: {}",
+                self.request.ready_path.display()
+            );
+            return false;
+        }
+        let Some(parent_pid) = read_windows_probe_pid(&self.request.parent_pid_path) else {
+            return false;
+        };
+        let Some(child_pid) = read_windows_probe_pid(&self.request.child_pid_path) else {
+            return false;
+        };
+        let parent_stopped =
+            wait_for_windows_process_exit(parent_pid, std::time::Duration::from_secs(5));
+        let child_stopped =
+            wait_for_windows_process_exit(child_pid, std::time::Duration::from_secs(5));
+        if !parent_stopped || !child_stopped {
+            eprintln!(
+                "Windows 生命周期探针残留进程: parent={parent_pid} ({parent_stopped}), child={child_pid} ({child_stopped})"
+            );
+        }
+        parent_stopped && child_stopped
+    }
+}
+
+#[cfg(windows)]
+fn read_windows_probe_pid(path: &Path) -> Option<u32> {
+    match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    {
+        Some(pid) => Some(pid),
+        None => {
+            eprintln!("Windows 生命周期 PID 文件无效: {}", path.display());
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut exit_code = 0;
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(handle);
+    }
+    queried && exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(windows)]
+fn wait_for_windows_process_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while windows_process_exists(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    !windows_process_exists(pid)
+}
+
+#[cfg(windows)]
+fn wait_for_windows_marker(path: &Path, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !path.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    path.is_file()
+}
+
+#[cfg(windows)]
+fn windows_timeout_cleanup_probe(root: &Path, current_exe: &Path, label: &str) -> Result<bool> {
+    let fixture = WindowsTreeFixture::new(root, current_exe, label)?;
+    let timed_out = match fixture.launch(None, None, std::time::Duration::from_secs(2)) {
+        Err(error) if format!("{error:#}").contains("等待 AppContainer 进程超过") => true,
+        Err(error) => {
+            eprintln!("Windows 超时清理探针失败: {error:#}");
+            false
+        }
+        Ok(exit_code) => {
+            eprintln!("Windows 超时清理探针意外退出: {exit_code}");
+            false
+        }
+    };
+    Ok(timed_out && fixture.process_tree_cleaned())
+}
+
+#[cfg(windows)]
+struct WindowsSelfCheckEvent {
+    handle: std::os::windows::io::OwnedHandle,
+    name: String,
+}
+
+#[cfg(windows)]
+impl WindowsSelfCheckEvent {
+    fn new() -> Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let name = format!("Local\\TiangongSandboxSelfCheckStop-{}", scru128::new());
+        let wide = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error()).context("创建 Windows 自检停止事件失败");
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                CloseHandle(handle);
+            }
+            bail!("Windows 自检停止事件名称冲突");
+        }
+        Ok(Self {
+            handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
+            name,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn windows_stop_event_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Threading::SetEvent;
+
+    let fixture = WindowsTreeFixture::new(root, current_exe, "stop-event")?;
+    let event = WindowsSelfCheckEvent::new()?;
+    let event_handle = event.handle.as_raw_handle() as usize;
+    let ready_path = fixture.request.ready_path.clone();
+    let signaler = std::thread::spawn(move || {
+        let ready = wait_for_windows_marker(&ready_path, std::time::Duration::from_secs(5));
+        let signaled = unsafe { SetEvent(event_handle as *mut std::ffi::c_void) } != 0;
+        ready && signaled
+    });
+    let stopped = match fixture.launch(None, Some(&event.name), std::time::Duration::from_secs(15))
+    {
+        Ok(1) => true,
+        Ok(exit_code) => {
+            eprintln!("Windows 停止事件探针退出码异常: {exit_code}");
+            false
+        }
+        Err(error) => {
+            eprintln!("Windows 停止事件探针失败: {error:#}");
+            false
+        }
+    };
+    let signaled = signaler.join().unwrap_or(false);
+    Ok(signaled && stopped && fixture.process_tree_cleaned())
+}
+
+#[cfg(windows)]
+fn windows_host_exit_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bool> {
+    let fixture = WindowsTreeFixture::new(root, current_exe, "host-exit")?;
+    let mut host = std::process::Command::new(current_exe)
+        .arg("--windows-self-check-idle-probe")
+        .spawn()
+        .context("启动 Windows 生命周期宿主探针失败")?;
+    let host_pid = host.id();
+    let ready_path = fixture.request.ready_path.clone();
+    let killer = std::thread::spawn(move || {
+        let ready = wait_for_windows_marker(&ready_path, std::time::Duration::from_secs(5));
+        let killed = host.kill().is_ok();
+        let _ = host.wait();
+        ready && killed
+    });
+    let stopped = match fixture.launch(Some(host_pid), None, std::time::Duration::from_secs(15)) {
+        Ok(1) => true,
+        Ok(exit_code) => {
+            eprintln!("Windows 宿主退出探针退出码异常: {exit_code}");
+            false
+        }
+        Err(error) => {
+            eprintln!("Windows 宿主退出探针失败: {error:#}");
+            false
+        }
+    };
+    let killed = killer.join().unwrap_or(false);
+    Ok(killed && stopped && fixture.process_tree_cleaned())
+}
+
+#[cfg(windows)]
+fn run_windows_lifecycle_worker(root: &str, label: &str) -> i32 {
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Windows 并发探针无法读取当前程序: {error}");
+            return EXIT_SANDBOX_UNAVAILABLE;
+        }
+    };
+    match windows_timeout_cleanup_probe(Path::new(root), &current_exe, label) {
+        Ok(true) => 0,
+        Ok(false) => EXIT_SANDBOX_UNAVAILABLE,
+        Err(error) => {
+            eprintln!("Windows 并发生命周期探针失败: {error:#}");
+            EXIT_SANDBOX_UNAVAILABLE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn cleanup_windows_workers(workers: &mut [(std::process::Child, PathBuf, PathBuf)]) {
+    for (child, _, _) in workers {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(windows)]
+fn windows_concurrent_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bool> {
+    let worker_root = root.join("concurrent");
+    std::fs::create_dir_all(&worker_root).context("创建 Windows 并发探针目录失败")?;
+    let input_path = worker_root.join("stdin.txt");
+    std::fs::write(&input_path, []).context("创建 Windows 并发探针输入失败")?;
+    let mut workers = Vec::new();
+    for index in 0..10 {
+        let stdout_path = worker_root.join(format!("worker-{index}.stdout"));
+        let stderr_path = worker_root.join(format!("worker-{index}.stderr"));
+        let child = (|| -> Result<std::process::Child> {
+            let stdin = std::fs::File::open(&input_path)?;
+            let stdout = std::fs::File::create(&stdout_path)?;
+            let stderr = std::fs::File::create(&stderr_path)?;
+            Ok(std::process::Command::new(current_exe)
+                .arg("--windows-self-check-lifecycle-worker")
+                .arg(&worker_root)
+                .arg(format!("worker-{index}"))
+                .stdin(std::process::Stdio::from(stdin))
+                .stdout(std::process::Stdio::from(stdout))
+                .stderr(std::process::Stdio::from(stderr))
+                .spawn()?)
+        })();
+        match child {
+            Ok(child) => workers.push((child, stdout_path, stderr_path)),
+            Err(error) => {
+                cleanup_windows_workers(&mut workers);
+                return Err(error).context("启动 Windows 并发生命周期探针失败");
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    let mut statuses = vec![None; workers.len()];
+    loop {
+        let mut pending = false;
+        for index in 0..workers.len() {
+            if statuses[index].is_none() {
+                let observed = workers[index].0.try_wait();
+                match observed {
+                    Ok(status) => statuses[index] = status,
+                    Err(error) => {
+                        cleanup_windows_workers(&mut workers);
+                        return Err(error).context("读取 Windows 并发探针状态失败");
+                    }
+                }
+            }
+            pending |= statuses[index].is_none();
+        }
+        if !pending {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            cleanup_windows_workers(&mut workers);
+            eprintln!("Windows 并发生命周期探针超时");
+            return Ok(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let mut all_ok = true;
+    for ((_, stdout_path, stderr_path), status) in workers.iter().zip(statuses) {
+        if !status.is_some_and(|status| status.success()) {
+            all_ok = false;
+            eprintln!(
+                "Windows 并发生命周期探针失败: stdout={} stderr={}",
+                std::fs::read_to_string(stdout_path).unwrap_or_default(),
+                std::fs::read_to_string(stderr_path).unwrap_or_default()
+            );
+        }
+    }
+    Ok(all_ok)
+}
+
+#[cfg(windows)]
+#[derive(Serialize)]
+struct WindowsLifecycleReport {
+    platform: &'static str,
+    timeout_cleanup: bool,
+    stop_event_cleanup: bool,
+    host_exit_cleanup: bool,
+    process_tree_cleanup: bool,
+    concurrent_cleanup: bool,
+}
+
+#[cfg(windows)]
+fn lifecycle_probe_result(label: &str, result: Result<bool>) -> bool {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Windows {label} 生命周期验证失败: {error:#}");
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_windows_lifecycle_self_check() -> i32 {
+    let result = (|| -> Result<WindowsLifecycleReport> {
+        let root = tempfile::Builder::new()
+            .prefix("tiangong-sandbox-lifecycle-")
+            .tempdir()
+            .context("创建 Windows 生命周期自检目录失败")?;
+        let current_exe = std::env::current_exe().context("读取 Windows 生命周期自检程序失败")?;
+        let timeout_cleanup = lifecycle_probe_result(
+            "超时",
+            windows_timeout_cleanup_probe(root.path(), &current_exe, "timeout"),
+        );
+        let stop_event_cleanup = lifecycle_probe_result(
+            "停止事件",
+            windows_stop_event_cleanup_probe(root.path(), &current_exe),
+        );
+        let host_exit_cleanup = lifecycle_probe_result(
+            "宿主退出",
+            windows_host_exit_cleanup_probe(root.path(), &current_exe),
+        );
+        let concurrent_cleanup = lifecycle_probe_result(
+            "并发",
+            windows_concurrent_cleanup_probe(root.path(), &current_exe),
+        );
+        Ok(WindowsLifecycleReport {
+            platform: "windows",
+            timeout_cleanup,
+            stop_event_cleanup,
+            host_exit_cleanup,
+            process_tree_cleanup: timeout_cleanup && stop_event_cleanup && host_exit_cleanup,
+            concurrent_cleanup,
+        })
+    })();
+
+    match result {
+        Ok(report) => {
+            let passed = report.timeout_cleanup
+                && report.stop_event_cleanup
+                && report.host_exit_cleanup
+                && report.process_tree_cleanup
+                && report.concurrent_cleanup;
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("序列化 Windows 生命周期报告失败")
+            );
+            if passed { 0 } else { EXIT_SANDBOX_UNAVAILABLE }
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "platform": "windows",
+                    "error": format!("{error:#}"),
+                })
+            );
+            EXIT_SANDBOX_UNAVAILABLE
+        }
+    }
 }
 
 #[cfg(unix)]

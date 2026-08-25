@@ -327,6 +327,8 @@ jobs:
       - name: Prepare diagnostics directory
         run: mkdir -p "$RUNNER_TEMP/sandbox-diagnostics"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: sandbox-windows-x86_64
@@ -350,9 +352,15 @@ jobs:
           -p xtask
           --all-targets
 
-      - name: Build Launcher and command sidecar
+      - name: Lint Windows Sandbox crate
+        run: >-
+          cargo clippy --locked
+          -p tiangong-sandbox
+          --all-targets -- -D warnings
+
+      - name: Build Launcher and stdio test host
         run: |
-          cargo build --locked -p tiangong-sandbox -p tiangong-plugin-command-sidecar
+          cargo build --locked -p tiangong-sandbox
           cargo build --locked -p tiangong-plugin-sidecar --bin test-stdio-host
 
       - name: Verify native Windows sandbox enforcement
@@ -427,21 +435,43 @@ jobs:
             -- --exact --nocapture \
             2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/resource-limits.log"
 
-      - name: Verify real Windows command isolation and lifecycle
-        env:
-          TIANGONG_SANDBOX_DIAGNOSTICS: "1"
+      - name: Verify native Windows Launcher lifecycle
+        shell: pwsh
         run: |
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --test ephemeral_route \
-            -- --nocapture --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/ephemeral-route.log"
-          cargo test --locked \
-            -p tiangong-plugin-runtime \
-            --test ephemeral_route \
-            ten_concurrent_commands_can_be_cancelled_and_stopped \
-            -- --exact --ignored --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/sandbox-diagnostics/concurrency.log"
+          $stdoutPath = "$env:RUNNER_TEMP\sandbox-diagnostics\lifecycle-self-check.json"
+          $stderrPath = "$env:RUNNER_TEMP\sandbox-diagnostics\lifecycle-self-check.stderr"
+          $process = Start-Process -FilePath '.\target\debug\tiangong-sandbox.exe' `
+            -ArgumentList '--windows-lifecycle-self-check' -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          if (-not $process.WaitForExit(240000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+            throw 'Windows Launcher lifecycle self-check timed out after 240 seconds'
+          }
+          $process.WaitForExit()
+          $output = Get-Content -Raw -LiteralPath $stdoutPath
+          $stderrOutput = Get-Content -Raw -LiteralPath $stderrPath
+          if ($stderrOutput) {
+            Write-Host $stderrOutput
+          }
+          Write-Host $output
+          if ($process.ExitCode -ne 0) {
+            throw "Expected lifecycle self-check exit code 0, got $($process.ExitCode)"
+          }
+          $report = $output | ConvertFrom-Json
+          $required = @(
+            'timeout_cleanup',
+            'stop_event_cleanup',
+            'host_exit_cleanup',
+            'process_tree_cleanup',
+            'concurrent_cleanup'
+          )
+          foreach ($field in $required) {
+            if ($report.$field -ne $true) {
+              throw "Windows Launcher lifecycle check failed: $field; report=$output"
+            }
+          }
+          exit 0
 
       - name: Verify packaged Launcher
         shell: pwsh
