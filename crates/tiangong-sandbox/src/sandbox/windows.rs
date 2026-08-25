@@ -912,6 +912,16 @@ fn run_restricted_process(
     }
     let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess) };
     let thread = unsafe { OwnedHandle::from_raw_handle(process_info.hThread) };
+    trace_self_check(request, "配置目标进程令牌默认访问表");
+    if let Err(error) =
+        grant_process_token_default_access(raw_handle(&process), &[profile.sid, restriction.sid])
+    {
+        unsafe {
+            TerminateProcess(raw_handle(&process), 1);
+            WaitForSingleObject(raw_handle(&process), INFINITE);
+        }
+        return Err(error).context("配置 AppContainer 目标进程令牌失败");
+    }
     trace_self_check(request, "将目标进程加入受限 Job");
     if unsafe { AssignProcessToJobObject(job.raw(), raw_handle(&process)) } == 0 {
         let error = std::io::Error::last_os_error();
@@ -971,6 +981,15 @@ fn run_restricted_process(
         return Err(std::io::Error::last_os_error()).context("等待 AppContainer 清理失败");
     }
     Ok(exit_code as i32)
+}
+
+fn grant_process_token_default_access(process: HANDLE, sids: &[PSID]) -> Result<()> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("打开 AppContainer 目标进程令牌失败");
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    grant_token_default_access(raw_handle(&token), sids)
 }
 
 struct WindowsJob(OwnedHandle);
