@@ -1,7 +1,7 @@
 // validate：清单与结构校验（plugin.json 解析、必要字段、UI 入口存在性）。
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fail, requireProject } from './common.mjs';
+import { fail, requireProject, resolveInside } from './common.mjs';
 
 export async function validate(argv, ctx) {
   const [id] = argv;
@@ -37,8 +37,22 @@ export async function validate(argv, ctx) {
       errors.push('ui.contributions 缺少 entry');
       continue;
     }
-    if (!existsSync(join(projectDir, entry))) {
+    let resolved;
+    try {
+      resolved = resolveInside(projectDir, entry, `UI 入口 ${entry}`);
+    } catch (error) {
+      errors.push(error.message);
+      continue;
+    }
+    if (!existsSync(resolved)) {
       warnings.push(`UI 入口 ${entry} 尚不存在（通常表示还未构建）`);
+    }
+  }
+  for (const directory of manifest.resources ?? []) {
+    try {
+      resolveInside(projectDir, directory, `资源目录 ${directory}`);
+    } catch (error) {
+      errors.push(error.message);
     }
   }
   if (contributions.length === 0 && !manifest.tools?.length && !manifest.wasm) {

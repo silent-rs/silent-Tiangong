@@ -3,7 +3,7 @@ name: Publish devkit to npm
 # @silent-ai/plugin-creator（devkit CLI）自动发布到 npm。
 # 触发：推 tag `devkit/v<版本>`（与 package.json 版本一致，不一致即拒绝），
 # 或手动 workflow_dispatch（按 package.json 当前版本发布）。
-# 前置（一次性）：npm 创建 tiangong org → 生成 Automation 类型 token →
+# 前置（一次性）：npm 创建 silent-ai org → 生成 Automation 类型 token →
 # 仓库 Secrets 配置 NPM_TOKEN。
 
 on:

@@ -2,7 +2,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { fail, requireProject } from './common.mjs';
+import { fail, killTree, requireProject, spawnOptions } from './common.mjs';
 
 const RUN_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL = 16 * 1024;
@@ -52,33 +52,52 @@ export async function run(argv, ctx) {
   );
 
   const started = Date.now();
-  const { code, stdout, stderr, timedOut } = await new Promise((resolve) => {
-    const child = spawn('npx', argvList, {
-      cwd: projectDir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, npm_config_cache: join(projectDir, 'runtime', 'npm-cache') },
-    });
+  const { code, stdout, stderr, timedOut, spawnError } = await new Promise((resolvePromise) => {
+    let settled = false;
+    const settle = (value) => {
+      if (!settled) {
+        settled = true;
+        resolvePromise(value);
+      }
+    };
+    let child;
+    try {
+      child = spawn('npx', argvList, spawnOptions({
+        cwd: projectDir,
+        env: { ...process.env, npm_config_cache: join(projectDir, 'runtime', 'npm-cache') },
+      }));
+    } catch (error) {
+      settle({ code: -1, stdout: '', stderr: '', timedOut: false, spawnError: error.message });
+      return;
+    }
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => {
+    child.stdout?.on('data', (chunk) => {
       stdout += chunk;
     });
-    child.stderr.on('data', (chunk) => {
+    child.stderr?.on('data', (chunk) => {
       stderr += chunk;
     });
+    const timedOutRef = { value: false };
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve({ code: null, stdout, stderr, timedOut: true });
+      timedOutRef.value = true;
+      killTree(child);
+      // 终止进程树后等 close 事件完成 Promise（等待真正退出）。
     }, RUN_TIMEOUT_MS);
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout, stderr, timedOut: false });
+      settle({ code: code ?? -1, stdout, stderr, timedOut: timedOutRef.value, spawnError: null });
     });
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: `${stderr}\n${error.message}`, timedOut: false });
+      settle({ code: -1, stdout, stderr: `${stderr}\n${error.message}`, timedOut: false, spawnError: error.message });
     });
   });
+  if (spawnError && code === -1 && !stdout && !stderr.includes('退出')) {
+    return { ok: false, exit_code: -1, timed_out: false, duration_ms: Date.now() - started,
+      command: commandDisplay, stdout_tail: '', stderr_tail: `启动 npx 失败：${spawnError}`,
+      error: '未找到 npx。试运行需要 Node ≥ 20（自带 npx），请安装后重试：https://nodejs.org' };
+  }
   const durationMs = Date.now() - started;
   appendFileSync(join(projectDir, 'logs', 'run.log'), `# 退出码 ${code}（${durationMs} ms）\n`);
   return {

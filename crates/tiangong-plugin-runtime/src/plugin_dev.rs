@@ -208,8 +208,14 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
             release_manifest.display()
         );
     }
-    let manifest = PluginManifest::load(&release_manifest)
-        .with_context(|| format!("构建产物清单无效: {}", release_manifest.display()))?;
+    // 先暂存（不可变事务副本），确认与导入都作用于这份副本——外置化后
+    // devkit 是独立进程，宿主无法锁住 release/ 的变化；若先确认后暂存，
+    // 用户确认窗口期内 release/ 可被替换，形成"确认内容 ≠ 安装内容"。
+    // StagedPlugin 的 Drop 保证用户拒绝/任意失败路径自动清理暂存目录。
+    let staged = crate::artifacts::stage_local_plugin(storage_root, &release_dir)?;
+    let staged_manifest = staged.path().join("plugin.json");
+    let manifest = PluginManifest::load(&staged_manifest)
+        .with_context(|| format!("构建产物清单无效: {}", staged_manifest.display()))?;
     if manifest.id != project_id {
         bail!(
             "构建产物清单 ID {} 与项目 ID {project_id} 不一致，请检查 plugin.json",
@@ -243,7 +249,6 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     }
     // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化；
     // 确认等待不持锁（避免阻塞其它插件的加载操作）。
-    let staged = crate::artifacts::stage_local_plugin(storage_root, &release_dir)?;
     let status = crate::registry::import_staged_plugin(storage_root, staged.path())?;
     tracing::info!(plugin = %status.id, version = %status.manifest_version, "plugin-dev 安装完成");
     Ok(InstallResult {
