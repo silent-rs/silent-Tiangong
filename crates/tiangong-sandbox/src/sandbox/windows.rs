@@ -34,8 +34,8 @@ use windows_sys::Win32::Security::{
     SECURITY_RESOURCE_MANAGER_AUTHORITY, SID_AND_ATTRIBUTES, SetTokenInformation,
     TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS,
     TOKEN_QUERY, TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenUser, WinAuthenticatedUserSid,
-    WinBuiltinUsersSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
-    WinRestrictedCodeSid, WinWorldSid,
+    WinBuiltinAnyPackageSid, WinBuiltinUsersSid, WinCapabilityInternetClientSid,
+    WinCapabilityPrivateNetworkClientServerSid, WinRestrictedCodeSid, WinWorldSid,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
@@ -389,6 +389,7 @@ impl RestrictedToken {
         for kind in [
             WinWorldSid,
             WinBuiltinUsersSid,
+            WinBuiltinAnyPackageSid,
             WinAuthenticatedUserSid,
             WinRestrictedCodeSid,
         ] {
