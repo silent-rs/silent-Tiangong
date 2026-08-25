@@ -334,6 +334,20 @@ const INTERACTION: PluginConfig = PluginConfig {
     protocol_manifest: None,
 };
 
+const PLUGIN_CREATOR: PluginConfig = PluginConfig {
+    id: "plugin-creator",
+    name: "Plugin Creator",
+    description: "插件创作：经 Agent 与 devkit 生成、构建与安装自建插件",
+    protocol_crate: None,
+    wasm_crate: None,
+    wasm_artifact: None,
+    sidecar_crate: None,
+    sidecar_artifact: None,
+    plugin_root: "plugins/tiangong-plugin-creator",
+    plugin_manifest: "plugins/tiangong-plugin-creator/plugin.json",
+    protocol_manifest: None,
+};
+
 const BROWSER: PluginConfig = PluginConfig {
     id: "browser",
     name: "Browser",
@@ -364,7 +378,9 @@ const TERMINAL: PluginConfig = PluginConfig {
 
 fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "screenshot-input" | "interaction" | "browser" | "terminal" => &["dist/index.html"],
+        "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
+            &["dist/index.html"]
+        }
         _ => &[],
     }
 }
@@ -390,6 +406,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "computer-use" => Ok(&COMPUTER_USE),
         "screenshot-input" => Ok(&SCREENSHOT_INPUT),
         "interaction" => Ok(&INTERACTION),
+        "plugin-creator" => Ok(&PLUGIN_CREATOR),
         "browser" => Ok(&BROWSER),
         "terminal" => Ok(&TERMINAL),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
