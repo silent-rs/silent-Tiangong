@@ -415,10 +415,6 @@ impl RestrictedToken {
                 Attributes: 0,
             },
             SID_AND_ATTRIBUTES {
-                Sid: appcontainer_sid,
-                Attributes: 0,
-            },
-            SID_AND_ATTRIBUTES {
                 Sid: user.User.Sid,
                 Attributes: 0,
             },
