@@ -829,6 +829,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
         return 2;
     };
+    eprintln!("Windows 文件隔离探针: 验证父进程边界");
     let mut probe = WindowsProbeReport {
         workspace_write: std::fs::write(request.workspace.join("inside.txt"), "ok").is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp.txt"), "ok").is_ok(),
@@ -860,6 +861,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
             request.resource_limits,
         ),
     };
+    eprintln!("Windows 文件隔离探针: 启动受限子进程");
     let child_request = match serde_json::to_string(&request) {
         Ok(value) => value,
         Err(_) => return 3,
@@ -872,6 +874,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
                 .status()
         })
         .is_ok_and(|status| status.success());
+    eprintln!("Windows 文件隔离探针: 读取子进程报告");
     probe.child_restrictions_inherited = child_ok
         && std::fs::read(&request.child_report_path)
             .ok()
@@ -891,6 +894,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
                     && child.path_traversal_blocked
                     && child.resource_limits_applied
             });
+    eprintln!("Windows 文件隔离探针: 写入父进程报告");
     match serde_json::to_vec(&probe)
         .ok()
         .and_then(|raw| std::fs::write(&request.report_path, raw).ok())
@@ -905,6 +909,7 @@ fn run_windows_child_probe(raw: &str) -> i32 {
     let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
         return 2;
     };
+    eprintln!("Windows 文件隔离探针: 验证子进程边界");
     let report = WindowsProbeReport {
         workspace_write: std::fs::write(request.workspace.join("inside-child.txt"), "ok").is_ok(),
         dedicated_temp_write: std::fs::write(request.temp_dir.join("temp-child.txt"), "ok").is_ok(),
@@ -936,6 +941,7 @@ fn run_windows_child_probe(raw: &str) -> i32 {
         ),
         ..Default::default()
     };
+    eprintln!("Windows 文件隔离探针: 写入子进程报告");
     match serde_json::to_vec(&report)
         .ok()
         .and_then(|raw| std::fs::write(&request.child_report_path, raw).ok())

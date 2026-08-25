@@ -104,9 +104,13 @@ pub fn availability() -> SandboxAvailability {
 
 /// 创建、运行并清理一次 Windows AppContainer 调用。
 pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
+    trace_self_check(&request, "校验启动请求");
     validate_launch_request(&request)?;
+    trace_self_check(&request, "创建网络能力集合");
     let capabilities = CapabilitySet::new(request.policy.allow_network)?;
+    trace_self_check(&request, "创建临时 AppContainer 身份");
     let mut profile = AppContainerProfile::create(&capabilities)?;
+    trace_self_check(&request, "应用临时目录授权");
     let mut grants = AclGrants::apply(
         profile.sid,
         request.program,
@@ -114,9 +118,13 @@ pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
         request.policy,
     )?;
 
+    trace_self_check(&request, "启动受限目标进程");
     let execution = run_restricted_process(&request, &profile, &capabilities);
+    trace_self_check(&request, "受限目标进程已结束");
     let acl_cleanup = grants.revoke();
+    trace_self_check(&request, "临时目录授权已撤销");
     let profile_cleanup = profile.delete();
+    trace_self_check(&request, "临时 AppContainer 身份已删除");
 
     match (execution, acl_cleanup, profile_cleanup) {
         (Ok(code), Ok(()), Ok(())) => Ok(code),
@@ -134,6 +142,12 @@ pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
             }
             bail!(messages.join("; "))
         }
+    }
+}
+
+fn trace_self_check(request: &WindowsLaunchRequest<'_>, stage: &str) {
+    if request.timeout.is_some() {
+        eprintln!("Windows AppContainer 自检阶段: {stage}");
     }
 }
 
@@ -628,6 +642,7 @@ fn run_restricted_process(
     profile: &AppContainerProfile,
     capabilities: &CapabilitySet,
 ) -> Result<i32> {
+    trace_self_check(request, "创建受限 Job");
     let job = WindowsJob::new(request.policy.resource_limits)?;
     let host = request.host_pid.map(open_host_process).transpose()?;
     let stop_event = request.stop_event_name.map(open_stop_event).transpose()?;
@@ -638,6 +653,7 @@ fn run_restricted_process(
         CapabilityCount: capabilities.entries.len() as u32,
         Reserved: 0,
     };
+    trace_self_check(request, "准备标准输入输出句柄");
     let stdio = InheritableStdio::prepare()?;
     let mut attributes = ProcessAttributes::new(&security_capabilities, &stdio.handles)?;
 
@@ -658,6 +674,7 @@ fn run_restricted_process(
     startup.lpAttributeList = attributes.as_mut_ptr();
     let mut process_info = PROCESS_INFORMATION::default();
 
+    trace_self_check(request, "以挂起状态创建目标进程");
     let created = unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -678,6 +695,7 @@ fn run_restricted_process(
     }
     let process = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess) };
     let thread = unsafe { OwnedHandle::from_raw_handle(process_info.hThread) };
+    trace_self_check(request, "将目标进程加入受限 Job");
     if unsafe { AssignProcessToJobObject(job.raw(), raw_handle(&process)) } == 0 {
         let error = std::io::Error::last_os_error();
         unsafe {
@@ -686,6 +704,7 @@ fn run_restricted_process(
         }
         return Err(error).context("将 AppContainer 进程加入 Job 失败");
     }
+    trace_self_check(request, "恢复目标主线程");
     if unsafe { ResumeThread(raw_handle(&thread)) } == u32::MAX {
         let error = std::io::Error::last_os_error();
         job.terminate_and_wait()
@@ -705,6 +724,7 @@ fn run_restricted_process(
         .timeout
         .map(|timeout| timeout.as_millis().min((INFINITE - 1) as u128) as u32)
         .unwrap_or(INFINITE);
+    trace_self_check(request, "等待目标进程退出");
     let wait =
         unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_timeout) };
     if wait == WAIT_FAILED {
@@ -714,6 +734,7 @@ fn run_restricted_process(
         return Err(error).context("等待 AppContainer 进程失败");
     }
     if wait == WAIT_TIMEOUT {
+        trace_self_check(request, "目标进程等待超时，终止受限 Job");
         job.terminate_and_wait()
             .context("超时后清理 AppContainer Job 失败")?;
         bail!("等待 AppContainer 进程超过 {:?}", request.timeout.unwrap());
@@ -726,7 +747,9 @@ fn run_restricted_process(
             .context("读取退出码失败后清理 AppContainer Job 失败")?;
         return Err(error).context("读取 AppContainer 退出码失败");
     }
+    trace_self_check(request, "终止目标残留进程");
     job.terminate_and_wait()?;
+    trace_self_check(request, "目标进程树已清理");
     if unsafe { WaitForSingleObject(raw_handle(&process), INFINITE) } == WAIT_FAILED {
         return Err(std::io::Error::last_os_error()).context("等待 AppContainer 清理失败");
     }
