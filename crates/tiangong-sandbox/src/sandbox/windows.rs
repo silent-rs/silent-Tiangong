@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation, GetLastError, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, WAIT_ABANDONED,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_ALL, GetHandleInformation, GetLastError,
+    HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
+    WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -31,8 +31,9 @@ use windows_sys::Win32::Security::{
     AllocateAndInitializeSid, CONTAINER_INHERIT_ACE, CreateRestrictedToken, CreateWellKnownSid,
     DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, FreeSid, GetTokenInformation, NO_INHERITANCE,
     OBJECT_INHERIT_ACE, PSID, SECURITY_CAPABILITIES, SECURITY_MAX_SID_SIZE,
-    SECURITY_RESOURCE_MANAGER_AUTHORITY, SID_AND_ATTRIBUTES, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-    TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser, WinAuthenticatedUserSid,
+    SECURITY_RESOURCE_MANAGER_AUTHORITY, SID_AND_ATTRIBUTES, SetTokenInformation,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY,
+    TOKEN_USER, TokenDefaultDacl, TokenGroups, TokenUser, WinAuthenticatedUserSid,
     WinBuiltinUsersSid, WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
     WinRestrictedCodeSid, WinWorldSid,
 };
@@ -342,7 +343,7 @@ impl Drop for RestrictionSid {
 struct RestrictedToken(OwnedHandle);
 
 impl RestrictedToken {
-    fn new(restriction_sid: PSID) -> Result<Self> {
+    fn new(restriction_sid: PSID, appcontainer_sid: PSID) -> Result<Self> {
         let mut source = std::ptr::null_mut();
         if unsafe {
             OpenProcessToken(
@@ -430,12 +431,66 @@ impl RestrictedToken {
         {
             return Err(std::io::Error::last_os_error()).context("创建 Windows 受限主令牌失败");
         }
-        Ok(Self(unsafe { OwnedHandle::from_raw_handle(token) }))
+        let token = unsafe { OwnedHandle::from_raw_handle(token) };
+        // 子进程对象沿用令牌默认 DACL；缺少这两个身份时 AppContainer 内的
+        // CreateProcess 会在文件权限已放行的情况下仍返回拒绝访问。
+        grant_token_default_access(raw_handle(&token), &[appcontainer_sid, restriction_sid])?;
+        Ok(Self(token))
     }
 
     fn raw(&self) -> HANDLE {
         raw_handle(&self.0)
     }
+}
+
+fn grant_token_default_access(token: HANDLE, sids: &[PSID]) -> Result<()> {
+    let storage = token_information(token, TokenDefaultDacl, "默认 DACL")?;
+    let current = unsafe { &*storage.as_ptr().cast::<TOKEN_DEFAULT_DACL>() };
+    let mut entries = Vec::with_capacity(sids.len());
+    for sid in sids {
+        let mut trustee = Default::default();
+        unsafe {
+            BuildTrusteeWithSidW(&mut trustee, *sid);
+        }
+        entries.push(EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: trustee,
+        });
+    }
+
+    let mut updated_acl = std::ptr::null_mut();
+    let acl_status = unsafe {
+        SetEntriesInAclW(
+            entries.len() as u32,
+            entries.as_ptr(),
+            current.DefaultDacl,
+            &mut updated_acl,
+        )
+    };
+    if acl_status != ERROR_SUCCESS {
+        return Err(win32_error(acl_status)).context("构造 Windows 受限令牌默认 ACL 失败");
+    }
+
+    let default_dacl = TOKEN_DEFAULT_DACL {
+        DefaultDacl: updated_acl,
+    };
+    let configured = unsafe {
+        SetTokenInformation(
+            token,
+            TokenDefaultDacl,
+            (&raw const default_dacl).cast(),
+            size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        )
+    };
+    unsafe {
+        LocalFree(updated_acl.cast());
+    }
+    if configured == 0 {
+        return Err(std::io::Error::last_os_error()).context("配置 Windows 受限令牌默认 ACL 失败");
+    }
+    Ok(())
 }
 
 fn token_information(token: HANDLE, class: i32, label: &str) -> Result<Vec<usize>> {
@@ -816,7 +871,7 @@ fn run_restricted_process(
     let stdio = InheritableStdio::prepare()?;
     let mut attributes = ProcessAttributes::new(&security_capabilities, &stdio.handles)?;
     trace_self_check(request, "创建受限进程令牌");
-    let token = RestrictedToken::new(restriction.sid)?;
+    let token = RestrictedToken::new(restriction.sid, profile.sid)?;
 
     let application = wide_os(request.program.as_os_str());
     let mut command_line = windows_command_line(request.program.as_os_str(), request.args);
