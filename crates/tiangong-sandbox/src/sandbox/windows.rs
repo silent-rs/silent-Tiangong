@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation, GetLastError, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation, WAIT_ABANDONED,
-    WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GetHandleInformation,
+    GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+    SetHandleInformation, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -553,7 +553,7 @@ impl AclGrants {
         };
         let result = (|| {
             // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
-            // 子树传播继承项，因此只授权最终程序和策略根。
+            // 子树传播继承项，因此祖先只增加不继承的最小穿越权限。
             grants.add(
                 appcontainer_sid,
                 program,
@@ -571,6 +571,7 @@ impl AclGrants {
 
             let writable = policy.writable_roots();
             for root in &writable {
+                grants.add_traversal_ancestors(appcontainer_sid, root)?;
                 grants.add(
                     appcontainer_sid,
                     root,
@@ -616,6 +617,41 @@ impl AclGrants {
             };
         }
         Ok(grants)
+    }
+
+    fn add_traversal_ancestors(&mut self, sid: PSID, root: &Path) -> Result<()> {
+        for ancestor in root.ancestors().skip(1) {
+            if ancestor.parent().is_none() {
+                break;
+            }
+            if self
+                .roots
+                .iter()
+                .any(|entry| entry.sid == sid && entry.path == ancestor)
+            {
+                continue;
+            }
+            match modify_acl(
+                ancestor,
+                sid,
+                FILE_GENERIC_EXECUTE,
+                NO_INHERITANCE,
+                GRANT_ACCESS,
+            ) {
+                Ok(()) => self.roots.push(AclRoot {
+                    sid,
+                    path: ancestor.to_path_buf(),
+                    recursive: false,
+                }),
+                Err(error) if is_access_denied(&error) => break,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("授予 Windows 目录穿越权限失败: {}", ancestor.display())
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn add(
@@ -677,6 +713,15 @@ impl AclGrants {
             bail!(failures.join("; "))
         }
     }
+}
+
+fn is_access_denied(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            == Some(ERROR_ACCESS_DENIED as i32)
+    })
 }
 
 impl Drop for AclGrants {
