@@ -106,6 +106,18 @@ describe('submitExternalText（插件 sendText 的普通 Enter 语义）', () =>
     expect(useStore.getState().inputQueues[KEY]?.[0].text).toBe('第二条');
   });
 
+  it('Agent 空闲但已有草稿：草稿先入队保留，外部文本立即发送', () => {
+    const { send } = spyActions();
+    prepareSession({ draft: '用户未发送的草稿' });
+    useStore.getState().submitExternalText(KEY, '插件消息', 'full_trust');
+    // 外部文本立即发送（不是入队等待）。
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][1]).toBe('插件消息');
+    // 用户草稿保留在队列中，未被覆盖丢失。
+    const queue = useStore.getState().inputQueues[KEY] ?? [];
+    expect(queue.map((message) => message.text)).toEqual(['用户未发送的草稿']);
+  });
+
   it('空文本：不做任何投递', () => {
     const { send } = spyActions();
     useStore.getState().submitExternalText(KEY, '   ', 'full_trust');

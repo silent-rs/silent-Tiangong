@@ -1690,13 +1690,14 @@ export const useStore = create<AppState>((set, get) => ({
       queueExternal();
       return;
     }
+    // 保护用户草稿（非发送事务的草稿才入队）：先入队再投递外部文本，
+    // 任何状态都不覆盖用户未发送内容。
+    if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
+      state.enqueueInputMessage(cacheKey);
+    }
     // 与既有队列逻辑一致的运行判断：状态表存在非空值即运行中。
     const running = Boolean(state.sessionRunStatuses[cacheKey]);
     if (running) {
-      // 保护用户草稿：非空（文本或附件）先入队，避免被外部文本覆盖丢失。
-      if (cache.text.trim().length > 0 || cache.attachments.length > 0) {
-        state.enqueueInputMessage(cacheKey);
-      }
       queueExternal();
       return;
     }
