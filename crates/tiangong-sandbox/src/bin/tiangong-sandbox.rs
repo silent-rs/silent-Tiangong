@@ -455,6 +455,7 @@ fn run_network_probe(address: &str) -> i32 {
 #[derive(Debug, Serialize, Deserialize)]
 struct WindowsProbeRequest {
     workspace: PathBuf,
+    workspace_executable: PathBuf,
     temp_dir: PathBuf,
     existing_workspace_file: PathBuf,
     outside_write: PathBuf,
@@ -613,8 +614,13 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
     };
     let report_path = workspace.join("probe-report.json");
     let child_report_path = workspace.join("child-report.json");
+    let current_exe = std::env::current_exe().context("读取 Windows 自检程序路径失败")?;
+    let workspace_executable = workspace.join("workspace-child-probe.exe");
+    std::fs::copy(&current_exe, &workspace_executable)
+        .context("复制 Windows 工作区子进程探针失败")?;
     let request = WindowsProbeRequest {
         workspace: workspace.clone(),
+        workspace_executable,
         temp_dir: temp_dir.clone(),
         existing_workspace_file: existing_workspace_file.clone(),
         outside_write: outside.join("blocked.txt"),
@@ -629,7 +635,6 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
         resource_limits,
     };
     let request_json = serde_json::to_string(&request)?;
-    let current_exe = std::env::current_exe().context("读取 Windows 自检程序路径失败")?;
     let program_root = current_exe.parent().context("Windows 自检程序缺少父目录")?;
     let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(&workspace);
     policy.extra_writable = vec![temp_dir];
@@ -863,13 +868,11 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         Ok(value) => value,
         Err(_) => return 3,
     };
-    let child_result = std::env::current_exe().and_then(|program| {
-        std::process::Command::new(program)
-            .arg("--windows-self-check-child-probe")
-            .arg(child_request)
-            .current_dir(&request.workspace)
-            .output()
-    });
+    let child_result = std::process::Command::new(&request.workspace_executable)
+        .arg("--windows-self-check-child-probe")
+        .arg(child_request)
+        .current_dir(&request.workspace)
+        .output();
     let child_ok = match child_result {
         Ok(output) => {
             if !output.status.success() {
