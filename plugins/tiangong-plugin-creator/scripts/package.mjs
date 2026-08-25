@@ -1,6 +1,6 @@
 // 开发期打包：构建 UI 并组装可直接「导入本地插件」的插件包目录（release/）。
-// 产物 = plugin.json + dist/ + templates/（随包资源，plugin-dev.init 的模板源）
-// + 内容树清单（路径 + sha256 逐条，供信任哈希锁定直接消费）。
+// 产物 = plugin.json + dist/（开发工具链外置于 @tiangong/plugin-creator npm 包，
+//   模板与 CLI 随 devkit 分发）+ 内容树清单（路径 + sha256 逐条）。
 import { cpSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
@@ -19,7 +19,6 @@ rmSync(release, { recursive: true, force: true });
 mkdirSync(release, { recursive: true });
 cpSync(join(pluginRoot, 'plugin.json'), join(release, 'plugin.json'));
 cpSync(join(pluginRoot, 'dist'), join(release, 'dist'), { recursive: true });
-cpSync(join(pluginRoot, 'templates'), join(release, 'templates'), { recursive: true });
 
 // 打包即校验：清单、entry 与 resources 就位，避免导入时才发现问题
 const manifest = JSON.parse(readFileSync(join(release, 'plugin.json'), 'utf8'));

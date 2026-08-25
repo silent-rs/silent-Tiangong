@@ -1,0 +1,19 @@
+{
+  "name": "@tiangong/plugin-creator",
+  "version": "1.0.0",
+  "description": "天工插件创作工具链（devkit）：init/validate/build/run/logs，经命令通道执行",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "plugin-creator": "bin/cli.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
