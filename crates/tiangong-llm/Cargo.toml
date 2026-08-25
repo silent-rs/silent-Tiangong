@@ -14,6 +14,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model", "responses"] }
+eventsource-stream = { workspace = true }
+bytes = "1"
 backoff = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync"] }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }

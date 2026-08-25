@@ -23,6 +23,9 @@ pub enum AnthropicError {
     #[error("流式处理失败：{0}")]
     Stream(String),
 
+    #[error("请求超时：{0}")]
+    Timeout(String),
+
     #[error("Anthropic API 错误：{0}")]
     Api(String),
 }

@@ -17,6 +17,9 @@ pub enum DeepSeekError {
     #[error("rate limited: {0}")]
     RateLimited(String),
 
+    #[error("request timeout: {0}")]
+    Timeout(String),
+
     #[error("serialization error: {0}")]
     Serialization(String),
 

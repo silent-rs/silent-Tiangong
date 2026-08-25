@@ -1,4 +1,3 @@
-use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use futures_util::stream;
 use serde_json::Value;
@@ -6,9 +5,112 @@ use serde_json::Value;
 use crate::config::AnthropicConfig;
 use crate::error::AnthropicError;
 use crate::types::{
-    ContentBlockDeltaData, ContentBlockStartData, EventStream, MessageDeltaData, MessageStartData,
-    MessagesCreateRequest, MessagesCreateResponse, ModelsListResponse, StreamEvent, ThinkingConfig,
+    ContentBlock, ContentBlockDeltaData, ContentBlockStartData, EventStream, MessageDeltaData,
+    MessageStartData, MessagesCreateRequest, MessagesCreateResponse, ModelsListResponse,
+    StreamEvent, ThinkingConfig,
 };
+
+/// 把一次性完整响应合成为等价的流事件序列。
+///
+/// 网关忽略 stream 参数返回 application/json 时，SDK 在内部按完整响应
+/// 接住并合成事件流，调用方无需感知差异。
+fn complete_response_events(response: MessagesCreateResponse) -> Vec<StreamEvent> {
+    let mut events = vec![StreamEvent::MessageStart {
+        message: MessageStartData {
+            id: response.id,
+            model: response.model,
+            role: response.role,
+            content: Vec::new(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: None,
+        },
+    }];
+    for (index, block) in response.content.into_iter().enumerate() {
+        let content_block = match block {
+            ContentBlock::Text { text } => ContentBlockStartData::Text { text },
+            ContentBlock::ToolUse { id, name, input } => {
+                ContentBlockStartData::ToolUse { id, name, input }
+            }
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => ContentBlockStartData::Thinking {
+                thinking,
+                signature: signature.unwrap_or_default(),
+            },
+            ContentBlock::RedactedThinking { data } => {
+                ContentBlockStartData::RedactedThinking { data }
+            }
+            ContentBlock::ToolResult { .. } | ContentBlock::Unknown => continue,
+        };
+        events.push(StreamEvent::ContentBlockStart {
+            index,
+            content_block,
+        });
+        events.push(StreamEvent::ContentBlockStop { index });
+    }
+    events.push(StreamEvent::MessageDelta {
+        delta: MessageDeltaData {
+            stop_reason: response.stop_reason,
+            stop_sequence: response.stop_sequence,
+        },
+        usage: response.usage,
+    });
+    events.push(StreamEvent::MessageStop);
+    events
+}
+
+/// SSE 字节流转 Anthropic 事件流。
+fn anthropic_sse_stream<S>(byte_stream: S) -> EventStream
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    use eventsource_stream::Eventsource;
+    use futures_util::StreamExt;
+    let sse_stream = Box::pin(byte_stream.eventsource());
+    Box::pin(stream::unfold(sse_stream, |mut sse_stream| async move {
+        match sse_stream.next().await {
+            Some(Ok(message)) => {
+                let item = parse_sse_event(&message.event, &message.data);
+                Some((item, sse_stream))
+            }
+            Some(Err(err)) => Some((Err(AnthropicError::Stream(err.to_string())), sse_stream)),
+            None => None,
+        }
+    }))
+}
+
+/// 判断响应首块是否是 JSON（跳过空白后以 `{` 或 `[` 开头）。
+fn looks_like_json(first: &[u8]) -> bool {
+    first
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| *byte == b'{' || *byte == b'[')
+}
+
+/// 聚合首块与剩余响应体并解析为完整响应，整体受 timeout 约束。
+async fn read_complete_response(
+    mut response: reqwest::Response,
+    first: bytes::Bytes,
+    timeout: std::time::Duration,
+) -> Result<MessagesCreateResponse, AnthropicError> {
+    let read = async {
+        let mut buf = first.to_vec();
+        while let Some(chunk) = response.chunk().await.map_err(map_reqwest_error)? {
+            buf.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<MessagesCreateResponse>(&buf).map_err(|err| {
+            AnthropicError::Serialization(format!(
+                "{err}: {}",
+                String::from_utf8_lossy(&buf[..buf.len().min(256)])
+            ))
+        })
+    };
+    tokio::time::timeout(timeout, read)
+        .await
+        .map_err(|_| AnthropicError::Timeout(format!("{} ms", timeout.as_millis())))?
+}
 
 /// 官方 Anthropic API 域名。
 const OFFICIAL_API_HOST: &str = "api.anthropic.com";
@@ -60,30 +162,54 @@ impl AnthropicClient {
     ) -> Result<EventStream, AnthropicError> {
         self.apply_official_thinking_budget(&mut request);
         request.stream = Some(true);
-        let response = self
-            .stream_request_builder("/v1/messages")
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&request)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+        // 建连与等待响应头受用户配置的请求超时约束，避免网关建连后
+        // 不返回响应头导致永久等待；SSE 建流成功后不受总时限限制。
+        let response = tokio::time::timeout(
+            self.config.timeout,
+            self.stream_request_builder("/v1/messages")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&request)
+                .send(),
+        )
+        .await
+        .map_err(|_| AnthropicError::Timeout(format!("{} ms", self.config.timeout.as_millis())))?
+        .map_err(map_reqwest_error)?;
 
         if !response.status().is_success() {
             return Err(parse_error_response(response).await);
         }
 
-        let sse_stream = response.bytes_stream().eventsource();
-        let stream = stream::unfold(sse_stream, |mut sse_stream| async move {
-            match sse_stream.next().await {
-                Some(Ok(message)) => {
-                    let item = parse_sse_event(&message.event, &message.data);
-                    Some((item, sse_stream))
-                }
-                Some(Err(err)) => Some((Err(AnthropicError::Stream(err.to_string())), sse_stream)),
-                None => None,
-            }
-        });
-        Ok(Box::pin(stream))
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if content_type.contains("text/event-stream") {
+            return Ok(anthropic_sse_stream(response.bytes_stream()));
+        }
+
+        // 类型不明确（部分网关漏标或错标）时按首块内容探测：JSON 以 `{`/`[`
+        // 开头，SSE 事件以 `data:` 等开头。
+        let mut response = response;
+        let first = response
+            .chunk()
+            .await
+            .map_err(map_reqwest_error)?
+            .unwrap_or_default();
+        if content_type.contains("json") || looks_like_json(&first) {
+            // 网关忽略 stream 参数返回一次性 JSON：SSE 解析器会把这些行
+            // 全部当未知字段丢弃且不报错，在 SDK 内按完整响应接住并合成
+            // 事件流。完整读取受超时约束，避免迟迟不结束的响应永久等待。
+            let complete = read_complete_response(response, first, self.config.timeout).await?;
+            return Ok(Box::pin(stream::iter(
+                complete_response_events(complete).into_iter().map(Ok),
+            )));
+        }
+        // 首块不是 JSON：按 SSE 流解析，把首块拼回流头。
+        let byte_stream = stream::once(async move { Ok::<_, reqwest::Error>(first) })
+            .chain(response.bytes_stream());
+        Ok(anthropic_sse_stream(byte_stream))
     }
 
     pub async fn list_models(&self) -> Result<ModelsListResponse, AnthropicError> {
@@ -396,5 +522,48 @@ mod tests {
         let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
         client.apply_official_thinking_budget(&mut request);
         assert_eq!(request.thinking, Some(ThinkingConfig::Disabled));
+    }
+
+    #[test]
+    fn complete_response_events_synthesizes_stream_sequence() {
+        // 网关忽略 stream 参数返回一次性 JSON 时，完整响应应合成为等价事件流：
+        // MessageStart → 每个内容块 Start/Stop（完整内容在 Start）→ MessageDelta → MessageStop。
+        let response: MessagesCreateResponse = serde_json::from_value(serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+                { "type": "text", "text": "一次性完整回复" },
+                { "type": "tool_use", "id": "call_tool", "name": "read_file", "input": {"path": "TODO.md"} }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 3, "output_tokens": 5 }
+        }))
+        .unwrap();
+
+        let events = complete_response_events(response);
+
+        assert!(
+            matches!(&events[0], StreamEvent::MessageStart { message } if message.id == "msg_1")
+        );
+        assert!(matches!(&events[1],
+            StreamEvent::ContentBlockStart { index: 0, content_block: ContentBlockStartData::Text { text } }
+            if text == "一次性完整回复"));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(&events[3],
+            StreamEvent::ContentBlockStart { index: 1, content_block: ContentBlockStartData::ToolUse { id, name, input } }
+            if id == "call_tool" && name == "read_file" && input["path"] == "TODO.md"));
+        assert!(matches!(
+            &events[4],
+            StreamEvent::ContentBlockStop { index: 1 }
+        ));
+        assert!(matches!(&events[5],
+            StreamEvent::MessageDelta { delta, usage: Some(_) } if delta.stop_reason.as_deref() == Some("tool_use")));
+        assert!(matches!(&events[6], StreamEvent::MessageStop));
+        assert_eq!(events.len(), 7);
     }
 }
