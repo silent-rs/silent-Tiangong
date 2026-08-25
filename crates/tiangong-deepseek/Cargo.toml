@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-deepseek"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "An asynchronous Rust client for the DeepSeek API, supporting chat completions (with SSE streaming), responses, files, model listing, and balance queries."
@@ -16,3 +16,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 eventsource-stream = "0.2"
 futures-util = "0.3"
 tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

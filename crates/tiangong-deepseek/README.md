@@ -19,7 +19,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1.1"
+tiangong-deepseek = "0.1.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -300,11 +300,13 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 
 ## Changelog
 
-### Unreleased
+### 0.1.2
 
 - **Responses API**：`client.responses()` 非流式与流式调用（`create` / `create_stream`）；输入项覆盖 message / function_call / function_call_output / custom_tool_call / custom_tool_call_output / reasoning / web_search_call（保留未知字段支持原样回传）；图片 `image_url` / `file_id` 互斥二选一；reasoning effort 七档；流式事件全量解析，终止事件（completed / incomplete / failed）后结束流，未知事件降级为 `Unknown` 透传不中断；`ResponseObject::output_text()` 便捷拼接
 - **Files API**：`client.files()` 上传（multipart 手工构造，零新增依赖，`expires_after` 支持 1 小时–30 天有效期）、列出（游标分页）、查询、删除；上传 Content-Type 按文件实际内容嗅探（JPEG / PNG / GIF / WebP）
+- **健壮性**：`create()` 强制关闭 `stream`，方法语义与返回类型一致；查询参数与 `file_id` 路径段按 RFC 3986 百分号编码
 - **HTTP 层**：client 新增 `get_with_query` / `delete` / `post_multipart` 通用方法
+- **测试**：新增 19 项回归测试（请求/响应序列化、SSE 事件解析与未知事件降级、终止事件后停止流、multipart 编码与文件名转义、图片格式嗅探、URL 编码端到端）
 
 ### 0.1.1
 

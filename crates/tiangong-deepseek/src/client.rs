@@ -73,13 +73,12 @@ impl DeepSeekClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T, DeepSeekError> {
-        // 查询值域为 file_id、数字、固定枚举，均为 URL 安全字符，直接拼接。
         let url = if query.is_empty() {
             self.build_url(path)
         } else {
             let query_string = query
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
+                .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
                 .collect::<Vec<_>>()
                 .join("&");
             format!("{}?{}", self.build_url(path), query_string)
@@ -275,7 +274,7 @@ impl MultipartForm {
         self
     }
 
-    fn encode(&self) -> (String, Vec<u8>) {
+    pub(crate) fn encode(&self) -> (String, Vec<u8>) {
         let boundary = generate_boundary();
         let mut body = Vec::new();
         for part in &self.parts {
@@ -318,6 +317,22 @@ impl MultipartForm {
     }
 }
 
+/// 百分号编码（RFC 3986）：仅保留非保留字符 `A-Z a-z 0-9 - _ . ~`，
+/// 其余字符（含 `&`、`=`、`#`、空格、`/`、非 ASCII）按 UTF-8 字节转义，
+/// 适用于查询参数值与 URL 路径段。
+pub(crate) fn percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// 生成足够独特的边界串：时间戳纳秒 + 进程内递增序号。
 fn generate_boundary() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -339,7 +354,7 @@ fn escape_form_value(value: &str) -> String {
 }
 
 /// 按文件实际内容判断图片格式（Files API 以内容而非扩展名判断格式）。
-fn sniff_image_content_type(data: &[u8]) -> &'static str {
+pub(crate) fn sniff_image_content_type(data: &[u8]) -> &'static str {
     if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         "image/jpeg"
     } else if data.starts_with(b"\x89PNG\r\n\x1a\n") {

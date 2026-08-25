@@ -1,4 +1,4 @@
-use crate::client::{DeepSeekClient, MultipartForm};
+use crate::client::{DeepSeekClient, MultipartForm, percent_encode};
 use crate::error::DeepSeekError;
 use crate::types::{DeleteFileResponse, FileObject, ListFilesParams, ListFilesResponse};
 
@@ -56,11 +56,15 @@ impl<'c> Files<'c> {
 
     /// 查询单个文件信息。
     pub async fn retrieve(&self, file_id: &str) -> Result<FileObject, DeepSeekError> {
-        self.client.get(&format!("/files/{file_id}")).await
+        self.client
+            .get(&format!("/files/{}", percent_encode(file_id)))
+            .await
     }
 
     /// 删除指定文件。
     pub async fn delete(&self, file_id: &str) -> Result<DeleteFileResponse, DeepSeekError> {
-        self.client.delete(&format!("/files/{file_id}")).await
+        self.client
+            .delete(&format!("/files/{}", percent_encode(file_id)))
+            .await
     }
 }

@@ -20,10 +20,14 @@ impl<'c> Responses<'c> {
     ///
     /// Responses API 为无状态设计：服务端不存储会话，多轮对话需在
     /// `input` 中回传完整历史。输入超出上下文窗口时服务端直接返回 400。
+    ///
+    /// 无论调用方传入什么 `stream` 值，此方法始终强制关闭流式，
+    /// 保证返回值按普通 JSON 解析。
     pub async fn create(
         &self,
-        request: CreateResponseRequest,
+        mut request: CreateResponseRequest,
     ) -> Result<ResponseObject, DeepSeekError> {
+        request.stream = Some(false);
         self.client.post("/responses", &request).await
     }
 
