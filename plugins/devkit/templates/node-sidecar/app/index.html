@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{{PLUGIN_NAME}}</title>
+  <style>
+    * { box-sizing: border-box; }
+    .app {
+      min-height: 100%;
+      padding: 14px;
+      font-family: inherit;
+      font-size: 13px;
+      background: hsl(var(--background, 0 0% 100%));
+      color: hsl(var(--foreground, 222.2 47.4% 11.2%));
+    }
+    h2 { margin: 0 0 8px; font-size: 15px; }
+    .hint { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); font-size: 11px; margin: 8px 0; }
+    ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+    li { display: grid; gap: 2px; padding: 6px 8px; border-radius: var(--radius, 0.5rem); background: hsl(var(--muted, 210 40% 96.1%)); }
+    code { font-size: 10px; opacity: 0.8; }
+    .name { font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h2>{{PLUGIN_NAME}}</h2>
+    <p class="hint" id="status">连接宿主桥接中…</p>
+    <p class="hint">
+      本插件带一个常驻 node sidecar（sidecar/main.mjs）：Agent 调用 query 工具时，
+      本页面把请求经宿主桥接转发给 sidecar 处理并应答。改造入口：sidecar/main.mjs
+      的 dispatch、下方的 bridge.call 操作名、plugin.json 的工具声明。
+    </p>
+    <ul id="calls"></ul>
+    <p class="hint" id="empty">暂无工具调用记录。</p>
+  </div>
+  <script>
+    // shadow 容器注入的宿主桥接（宿主渲染本页时生效）。
+    const bridge = globalThis.bridge;
+    const calls = document.getElementById('calls');
+    const empty = document.getElementById('empty');
+    const status = document.getElementById('status');
+
+    function record(name, summary, ok) {
+      empty.style.display = 'none';
+      const item = document.createElement('li');
+      const time = document.createElement('code');
+      time.textContent = new Date().toLocaleTimeString();
+      const nameEl = document.createElement('span');
+      nameEl.className = 'name';
+      nameEl.textContent = name;
+      const summaryEl = document.createElement('span');
+      summaryEl.textContent = summary;
+      if (!ok) summaryEl.style.color = 'hsl(0 72% 45%)';
+      item.append(time, nameEl, summaryEl);
+      calls.prepend(item);
+    }
+
+    function outcome(ok, summary) {
+      return { ok, summary, stdout: '', stderr: '', exit_code: ok ? 0 : 1 };
+    }
+
+    async function resolveTool(invocationId, result) {
+      try {
+        await bridge.call('tool.resolve', JSON.stringify({
+          invocation_id: invocationId,
+          status: 'answered',
+          result,
+        }));
+      } catch (error) {
+        console.warn('tool.resolve 失败', error);
+      }
+    }
+
+    if (!bridge) {
+      status.textContent = '未检测到宿主桥接（独立打开时仅作预览）。';
+    } else {
+      status.textContent = '已连接';
+      bridge.on('tool.requested', async (payload) => {
+        const invocation = JSON.parse(payload);
+        try {
+          const raw = await bridge.call(
+            'sidecar.demo.echo',
+            JSON.stringify({ text: invocation.arguments?.text ?? '' }),
+          );
+          const result = JSON.parse(raw);
+          record(invocation.name, `sidecar 回显：${result.text ?? ''}（${result.received_at ?? ''}）`, true);
+          await resolveTool(invocation.invocation_id, outcome(true, `sidecar 回显：${result.text ?? ''}`));
+        } catch (error) {
+          record(invocation.name, `sidecar 调用失败：${error?.message ?? error}`, false);
+          await resolveTool(invocation.invocation_id, outcome(false, `sidecar 调用失败：${error?.message ?? error}`));
+        }
+      });
+      bridge.on('tool.closed', () => undefined);
+    }
+  </script>
+</body>
+</html>

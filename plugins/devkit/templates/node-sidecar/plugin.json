@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "id": "{{PLUGIN_ID}}",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "sidecar.invoke"
+  ],
+  "capabilities": {
+    "tools": true,
+    "events": [
+      "tool.*"
+    ]
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "app",
+        "title": "{{PLUGIN_NAME}}",
+        "entry": "app/index.html",
+        "open_mode": "singleton"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "name": "query",
+      "description": "调用 {{PLUGIN_NAME}} 的常驻 sidecar 处理文本并返回回显与时间戳（示例能力，改造 sidecar/main.mjs 与此处声明）",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要处理的文本"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "timeout_ms": 30000
+    }
+  ],
+  "resources": [
+    "sidecar/"
+  ],
+  "sidecar": {
+    "runtime": "node",
+    "entry": "sidecar/main.mjs",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 0,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 30000
+  },
+  "mention": {
+    "hint": "{{PLUGIN_NAME}}（常驻 sidecar 插件，提供 query 工具）"
+  }
+}

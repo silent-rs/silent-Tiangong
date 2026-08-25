@@ -64,8 +64,19 @@ export async function validate(argv, ctx) {
   if (sidecar && !(manifest.permissions ?? []).includes('sidecar.invoke')) {
     errors.push('声明 sidecar 时必须声明 sidecar.invoke 权限');
   }
-  if (sidecar?.runtime && sidecar.runtime !== 'npx') {
-    errors.push(`sidecar.runtime 非法值 ${sidecar.runtime}（仅支持 npx）`);
+  const SIDEAR_RUNTIMES = ['node', 'python'];
+  if (sidecar?.runtime && !SIDEAR_RUNTIMES.includes(sidecar.runtime)) {
+    errors.push(`sidecar.runtime 非法值 ${sidecar.runtime}（支持 ${SIDEAR_RUNTIMES.join(' / ')}；原生二进制省略该字段）`);
+  }
+  if (sidecar?.runtime && SIDEAR_RUNTIMES.includes(sidecar.runtime)) {
+    if (!sidecar.entry) {
+      errors.push(`解释器 sidecar（${sidecar.runtime}）必须声明 entry 入口脚本`);
+    } else if (!/^[\w.-]+(\/[\w.-]+)+$/.test(sidecar.entry)) {
+      errors.push(`sidecar.entry 必须是子目录内的相对路径: ${sidecar.entry}`);
+    }
+    if (sidecar.binary) {
+      errors.push('解释器 sidecar 不允许声明 binary（解释器由宿主选择）');
+    }
   }
   return {
     ok: errors.length === 0,

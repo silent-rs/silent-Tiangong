@@ -182,7 +182,36 @@ impl StdioSidecarConnection {
         let token = scru128::new().to_string();
         // OS 沙箱路径（经 tiangong-sandbox Launcher 启动）由沙箱覆盖分支
         // 在本传输层之上叠加；此处仅负责直接 spawn 与 stdio 管道接续。
-        let mut command = Command::new(&self.config.binary);
+        // 解释器形态：以宿主解析的解释器程序运行 entry（本地信任时先复核内容清单）。
+        let mut command = match self.config.interpreter.as_ref() {
+            Some(launch) => {
+                if let Some(manifest_path) = &self.config.integrity_manifest {
+                    let root = manifest_path
+                        .parent()
+                        .ok_or_else(|| anyhow!("内容清单缺少父目录"))?;
+                    SidecarConfig::verify_integrity_manifest(manifest_path, root)?;
+                }
+                if !launch.program.is_file() {
+                    bail!(
+                        "解释器程序不存在: {}（可用 TIANGONG_NODE_PATH/TIANGONG_PYTHON_PATH 指定）",
+                        launch.program.display()
+                    );
+                }
+                if !launch.entry.is_file() {
+                    bail!("sidecar 入口脚本不存在: {}", launch.entry.display());
+                }
+                let mut command = Command::new(&launch.program);
+                command.arg(&launch.entry);
+                command.args(&launch.args);
+                command
+            }
+            None => {
+                if !self.config.binary.is_file() {
+                    bail!("sidecar 二进制不存在: {}", self.config.binary.display());
+                }
+                Command::new(&self.config.binary)
+            }
+        };
         sanitize_spawn_environment(&mut command);
         command
             .stdin(Stdio::piped())

@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::manifest::PluginManifest;
 
@@ -247,6 +248,10 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     if !confirm(&request) {
         bail!("用户取消了插件 {} 的安装", request.plugin_id);
     }
+    // 原生确认通过：为解释器 sidecar 落本地信任锚（内容清单整体哈希）。
+    if manifest.sidecar.is_some() {
+        write_local_trust(staged.path())?;
+    }
     // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化；
     // 确认等待不持锁（避免阻塞其它插件的加载操作）。
     let status = crate::registry::import_staged_plugin(storage_root, staged.path())?;
@@ -260,6 +265,30 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
 }
 
 // ── status ──
+
+/// 在暂存目录写入本地信任标记：锚定当前内容清单的整体哈希。
+///
+/// 信任语义：用户经原生确认对话框亲手安装的本地插件，其解释器 sidecar
+/// 允许以 stdio 常驻运行；安装后任何文件与清单不一致即拒绝启动。
+/// 仅当构建产物带 content-manifest.json（devkit build 必然生成）时可落锚。
+fn write_local_trust(staged_path: &Path) -> Result<()> {
+    let manifest_path = staged_path.join("content-manifest.json");
+    let raw = std::fs::read(&manifest_path).with_context(|| {
+        "本地安装缺少内容清单（content-manifest.json），无法建立本地信任；请用 plugin-creator 重新构建".to_string()
+    })?;
+    let anchor = hex::encode(sha2::Sha256::digest(&raw));
+    let trust = serde_json::json!({
+        "kind": "local-confirm",
+        "content_sha256": anchor,
+        "created_at": chrono::Local::now().naive_local().to_string(),
+    });
+    std::fs::write(
+        staged_path.join("local-trust.json"),
+        serde_json::to_vec_pretty(&trust)?,
+    )
+    .with_context(|| "写入本地信任标记失败".to_string())?;
+    Ok(())
+}
 
 fn status(storage_root: &Path, project_id: &str) -> Result<StatusResult> {
     let project_dir = dev_project_dir(storage_root, project_id)?;
@@ -454,6 +483,160 @@ mod tests {
         assert!(
             error.to_string().contains("@silent-ai/plugin-creator"),
             "应指引 devkit 命令：{error}"
+        );
+    }
+
+    fn find_node_for_test() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("TIANGONG_NODE_PATH") {
+            let path = PathBuf::from(path);
+            return path.is_file().then_some(path);
+        }
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|path| path.is_file())
+    }
+
+    /// 构造 devkit 风格的 node sidecar 构建产物（含内容哈希清单）。
+    fn make_node_sidecar_release(root: &Path, id: &str) -> PathBuf {
+        let release = root.join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("app")).unwrap();
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            format!(
+                r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","permissions":["sidecar.invoke"],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}},"sidecar":{{"runtime":"node","entry":"sidecar/main.mjs"}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'ID_PLACEHOLDER',
+  pluginVersion: '0.1.0',
+  dispatch(operation, payload) {
+    if (operation === 'demo.echo') {
+      return { payload: { text: payload?.text ?? '' } };
+    }
+    return { payload: {} };
+  },
+});
+"#
+            .replace("ID_PLACEHOLDER", id),
+        )
+        .unwrap();
+        write_content_manifest(&release);
+        release
+    }
+
+    /// devkit build 同款内容清单：release 全树（排除清单自身）路径 + sha256。
+    fn write_content_manifest(release: &Path) {
+        use sha2::Digest;
+        let mut files = Vec::new();
+        let mut stack = vec![release.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    let path = entry.path();
+                    let relative = path.strip_prefix(release).unwrap().display().to_string();
+                    if relative == "content-manifest.json" {
+                        continue;
+                    }
+                    let raw = std::fs::read(&path).unwrap();
+                    files.push(json!({
+                        "path": relative.replace('\\', "/"),
+                        "sha256": hex::encode(sha2::Sha256::digest(&raw)),
+                    }));
+                }
+            }
+        }
+        std::fs::write(
+            release.join("content-manifest.json"),
+            json!({"algorithm": "sha256", "files": files}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn copy_tree_for_test(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = target.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree_for_test(&entry.path(), &destination);
+            } else {
+                std::fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn 解释器sidecar_本地信任安装_真实调用与篡改拒绝() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let id = "node-sc-demo";
+        make_project(root.path(), id);
+        make_node_sidecar_release(root.path(), id);
+
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        let result = install(root.path(), id).expect("解释器 sidecar 安装");
+        assert_eq!(result.plugin_id, id);
+
+        // 真实调用：宿主 stdio 连接 ↔ node 解释器 sidecar。
+        let response = crate::registry::invoke_sidecar(
+            root.path(),
+            id,
+            "demo.echo",
+            json!({"text": "本地信任"}),
+        )
+        .expect("sidecar 调用");
+        assert_eq!(response["text"], "本地信任");
+
+        // 篡改安装目录内的入口脚本：内容清单复核必须拒绝。
+        let installed_entry = root
+            .path()
+            .join("plugins")
+            .join(id)
+            .join("sidecar/main.mjs");
+        std::fs::write(&installed_entry, "// tampered\n").unwrap();
+        let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
+            .expect_err("篡改后应拒绝启动");
+        assert!(
+            format!("{error:#}").contains("篡改"),
+            "应报篡改错误：{error:#}"
+        );
+    }
+
+    #[test]
+    fn 解释器sidecar_无本地信任时拒绝启动() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "node-sc-notrusted";
+        make_project(root.path(), id);
+        let release = make_node_sidecar_release(root.path(), id);
+        // 手动把产物放进安装目录，不经 plugin-dev 确认链（无 local-trust.json）。
+        let installed = root.path().join("plugins").join(id);
+        copy_tree_for_test(&release, &installed);
+        let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
+            .expect_err("未建立本地信任应拒绝");
+        assert!(
+            format!("{error:#}").contains("本地信任"),
+            "应提示本地信任安装：{error:#}"
         );
     }
 }

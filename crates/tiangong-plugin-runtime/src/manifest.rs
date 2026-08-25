@@ -178,10 +178,32 @@ pub enum WasmManifest {
     Legacy(PathBuf),
 }
 
+/// sidecar 的运行时形态：原生二进制或解释器（宿主白名单分派）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarRuntime {
+    /// 插件目录内的原生可执行文件（存量默认，要求官方签名）。
+    #[default]
+    Native,
+    /// 系统解释器运行 `entry` 脚本（本地信任放行）。
+    Node,
+    Python,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarManifest {
-    /// 相对插件目录的可执行文件名，不包含平台可执行后缀。
-    pub binary: PathBuf,
+    /// 相对插件目录的可执行文件名，不包含平台可执行后缀（native 形态必填）。
+    #[serde(default)]
+    pub binary: Option<PathBuf>,
+    /// 运行时形态；非 native 时由宿主以解释器启动 entry，不接受任意命令。
+    #[serde(default)]
+    pub runtime: SidecarRuntime,
+    /// 解释器入口脚本（相对插件目录的安全相对路径；非 native 形态必填）。
+    #[serde(default)]
+    pub entry: Option<PathBuf>,
+    /// 传给入口的固定参数（受数量与长度约束）。
+    #[serde(default)]
+    pub args: Vec<String>,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
     #[serde(default)]
@@ -245,12 +267,55 @@ impl PluginManifest {
             }
         }
         if let Some(sidecar) = &self.sidecar {
-            validate_relative_path(&sidecar.binary, "sidecar.binary")?;
             if sidecar.transport_protocol.trim().is_empty() {
                 bail!("插件 {} sidecar transport 版本为空", self.id);
             }
             if sidecar.startup_timeout_ms == 0 || sidecar.request_timeout_ms == 0 {
                 bail!("插件 {} sidecar 超时时间必须大于 0", self.id);
+            }
+            match sidecar.runtime {
+                SidecarRuntime::Native => {
+                    let binary = sidecar.binary.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("插件 {} native sidecar 必须声明 binary", self.id)
+                    })?;
+                    validate_relative_path(binary, "sidecar.binary")?;
+                    if sidecar.entry.is_some() {
+                        bail!("插件 {} native sidecar 不应声明 entry", self.id);
+                    }
+                }
+                SidecarRuntime::Node | SidecarRuntime::Python => {
+                    let entry = sidecar.entry.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "插件 {} 解释器 sidecar（{:?}）必须声明 entry",
+                            self.id,
+                            sidecar.runtime
+                        )
+                    })?;
+                    validate_relative_path(entry, "sidecar.entry")?;
+                    // 入口所在目录整树进入安装目录（协议库等随行文件），入口必须位于子目录。
+                    if entry
+                        .parent()
+                        .is_none_or(|parent| parent.as_os_str().is_empty())
+                    {
+                        bail!("插件 {} 解释器 sidecar entry 必须位于子目录内", self.id);
+                    }
+                    if sidecar.binary.is_some() {
+                        bail!(
+                            "插件 {} 解释器 sidecar 不允许声明 binary（解释器由宿主选择）",
+                            self.id
+                        );
+                    }
+                }
+            }
+            if sidecar.args.len() > 16 {
+                bail!("插件 {} sidecar.args 数量超过上限 16", self.id);
+            }
+            if sidecar
+                .args
+                .iter()
+                .any(|arg| arg.is_empty() || arg.len() > 512)
+            {
+                bail!("插件 {} sidecar.args 包含空值或超过 512 字符的项", self.id);
             }
         }
         if self.permissions.iter().any(|item| item.trim().is_empty()) {
@@ -906,5 +971,87 @@ mod tests {
         let json = v1_json().replace("\"schema_version\": 1", "\"schema_version\": 2");
         let manifest = parse(&json).unwrap();
         assert!(manifest.ui_contributions().is_empty());
+    }
+
+    fn sidecar_json(sidecar: &str) -> String {
+        format!(
+            r#"{{"schema_version":2,"id":"com.example.sc","version":"1.0.0","permissions":["sidecar.invoke"],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}},"sidecar":{sidecar}}}"#
+        )
+    }
+
+    #[test]
+    fn 解释器_sidecar_声明解析与校验() {
+        let manifest: PluginManifest = serde_json::from_str(&sidecar_json(
+            r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#,
+        ))
+        .unwrap();
+        manifest.validate().expect("解释器 sidecar 声明应通过校验");
+        let sidecar = manifest.sidecar.as_ref().unwrap();
+        assert_eq!(sidecar.runtime, SidecarRuntime::Node);
+        assert_eq!(
+            sidecar.entry.as_deref(),
+            Some(std::path::Path::new("sidecar/main.mjs"))
+        );
+        assert!(sidecar.binary.is_none());
+    }
+
+    #[test]
+    fn 解释器_sidecar_缺少_entry_被拒绝() {
+        let manifest: PluginManifest =
+            serde_json::from_str(&sidecar_json(r#"{"runtime":"python"}"#)).unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("必须声明 entry"));
+    }
+
+    #[test]
+    fn 解释器_sidecar_不允许声明_binary() {
+        let manifest: PluginManifest = serde_json::from_str(&sidecar_json(
+            r#"{"runtime":"node","entry":"sidecar/main.mjs","binary":"x"}"#,
+        ))
+        .unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("不允许声明 binary"));
+    }
+
+    #[test]
+    fn 解释器_sidecar_entry_必须在子目录() {
+        let manifest: PluginManifest =
+            serde_json::from_str(&sidecar_json(r#"{"runtime":"node","entry":"main.mjs"}"#))
+                .unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("必须位于子目录"));
+    }
+
+    #[test]
+    fn 解释器_sidecar_entry_路径逃逸被拒绝() {
+        let manifest: PluginManifest =
+            serde_json::from_str(&sidecar_json(r#"{"runtime":"node","entry":"../main.mjs"}"#))
+                .unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("安全的相对路径"));
+    }
+
+    #[test]
+    fn native_sidecar_缺_binary_被拒绝() {
+        let manifest: PluginManifest = serde_json::from_str(&sidecar_json(r#"{}"#)).unwrap();
+        let error = manifest.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("必须声明 binary"));
+
+        // 缺省 runtime 等价 native（存量清单行为不变）
+        let manifest: PluginManifest =
+            serde_json::from_str(&sidecar_json(r#"{"binary":"sidecar-bin"}"#)).unwrap();
+        manifest.validate().expect("缺省 runtime 解析为 native");
+        assert_eq!(
+            manifest.sidecar.as_ref().unwrap().runtime,
+            SidecarRuntime::Native
+        );
+    }
+
+    #[test]
+    fn 未知_runtime_值解析失败() {
+        let result: Result<PluginManifest, _> = serde_json::from_str(&sidecar_json(
+            r#"{"runtime":"npx","entry":"tools/main.ts"}"#,
+        ));
+        assert!(result.is_err());
     }
 }

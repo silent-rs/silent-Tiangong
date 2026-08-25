@@ -132,7 +132,16 @@ impl SignedPluginRelease {
                 if !self.has_permission("sidecar.invoke") {
                     bail!("插件签名清单未授权 sidecar.invoke");
                 }
-                signed.verify(directory, &sidecar_binary_path(&sidecar.binary)?)?;
+                if sidecar.runtime != crate::manifest::SidecarRuntime::Native {
+                    bail!("插件 {} 官方签名暂不支持解释器 sidecar", plugin_manifest.id);
+                }
+                let binary = sidecar.binary.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "插件 {} native sidecar 缺少 binary 声明",
+                        plugin_manifest.id
+                    )
+                })?;
+                signed.verify(directory, &sidecar_binary_path(binary)?)?;
             }
             (None, None) => {}
             _ => bail!("插件签名清单与 plugin.json 的 sidecar 声明不一致"),

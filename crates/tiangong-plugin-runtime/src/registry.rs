@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use semver::Version;
 use serde::Serialize;
+use sha2::Digest;
 use tiangong_core::core::Plugin;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
@@ -16,10 +17,18 @@ use crate::loader::{
     Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
     instantiate_component,
 };
-use crate::manifest::{MANIFEST_FILE, PluginManifest};
-use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
+use crate::sidecar::{
+    InterpreterLaunch, ProcessSidecarConnection, SidecarConfig, SidecarConnection,
+    StdioSidecarConnection,
+};
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
+
+/// 本地信任标记（安装时原生确认后由宿主写入插件目录）。
+const LOCAL_TRUST_FILE: &str = "local-trust.json";
+/// devkit 构建生成的内容哈希清单（本地信任的篡改检测锚）。
+const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
@@ -1749,9 +1758,31 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
         };
         let sidecar = resolve_sidecar(storage_root, &installed, true)?;
         if let Some(sidecar_manifest) = &installed.manifest.sidecar {
-            let binary = sidecar_binary_path(staged_path, &sidecar_manifest.binary)?;
-            if !binary.is_file() {
-                bail!("插件 sidecar 制品不存在: {}", binary.display());
+            match sidecar_manifest.runtime {
+                crate::manifest::SidecarRuntime::Native => {
+                    let binary = sidecar_manifest.binary.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "插件 {} native sidecar 缺少 binary 声明",
+                            installed.manifest.id
+                        )
+                    })?;
+                    let binary = sidecar_binary_path(staged_path, binary)?;
+                    if !binary.is_file() {
+                        bail!("插件 sidecar 制品不存在: {}", binary.display());
+                    }
+                }
+                crate::manifest::SidecarRuntime::Node | crate::manifest::SidecarRuntime::Python => {
+                    let entry = sidecar_manifest.entry.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "插件 {} 解释器 sidecar 缺少 entry 声明",
+                            installed.manifest.id
+                        )
+                    })?;
+                    let entry_path = staged_path.join(entry);
+                    if !entry_path.is_file() {
+                        bail!("插件 sidecar 入口脚本不存在: {}", entry_path.display());
+                    }
+                }
             }
         }
         compile_plugin(
@@ -2235,8 +2266,19 @@ fn kill_sidecar_orphans(installed: &InstalledPlugin) {
     let Some(sidecar) = installed.manifest.sidecar.as_ref() else {
         return;
     };
-    let binary = sidecar_binary_path(&installed.directory, &sidecar.binary)
-        .unwrap_or_else(|_| installed.directory.join(&sidecar.binary));
+    // 解释器 sidecar 的进程 image 是系统 node/python，按 image 清理会误杀无关
+    // 进程；其孤儿治理完全依赖 stdio 连接的宿主绑定生命周期（EOF/进程组）。
+    if sidecar.runtime != crate::manifest::SidecarRuntime::Native {
+        return;
+    }
+    let binary = sidecar
+        .binary
+        .as_deref()
+        .map(|binary| {
+            sidecar_binary_path(&installed.directory, binary)
+                .unwrap_or_else(|_| installed.directory.join(binary))
+        })
+        .unwrap_or_else(|| installed.directory.clone());
     crate::sidecar::kill_sidecar_processes_by_image(&binary);
 }
 
@@ -2414,41 +2456,67 @@ fn sidecar_connection(
         .sidecar
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
-    let signed_release = installed.signed_release.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "未签名插件 {} 不允许启动原生 sidecar",
-            installed.manifest.id
-        )
-    })?;
-    if !signed_release.has_permission("sidecar.invoke") {
-        bail!(
-            "插件 {} 的官方签名未授权 sidecar.invoke",
-            installed.manifest.id
-        );
-    }
+    // 启动门槛（三分支）：官方签名照旧；未签名插件仅当"解释器形态 + 本地信任
+    // （安装时原生确认落锚 + 内容哈希清单复核通过）"时放行；其余拒绝。
+    let interpreter = match sidecar.runtime {
+        SidecarRuntime::Native => None,
+        SidecarRuntime::Node | SidecarRuntime::Python => {
+            Some(resolve_interpreter_launch(installed, sidecar)?)
+        }
+    };
+    let signed_release = match installed.signed_release.as_ref() {
+        Some(signed_release) => {
+            if !signed_release.has_permission("sidecar.invoke") {
+                bail!(
+                    "插件 {} 的官方签名未授权 sidecar.invoke",
+                    installed.manifest.id
+                );
+            }
+            if interpreter.is_some() {
+                bail!(
+                    "插件 {} 官方签名暂不支持解释器 sidecar",
+                    installed.manifest.id
+                );
+            }
+            Some(signed_release)
+        }
+        None => {
+            let trusted = interpreter.is_some() && verify_local_trust(&installed.directory)?;
+            if !trusted {
+                bail!(
+                    "未签名插件 {} 不允许启动原生 sidecar（解释器 sidecar 需经插件创作链本地信任安装）",
+                    installed.manifest.id
+                );
+            }
+            None
+        }
+    };
     if !installed.manifest.permissions.is_empty()
         && !installed.manifest.has_permission("sidecar.invoke")
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
     }
 
-    let mut binary = installed.directory.join(&sidecar.binary);
-    if !std::env::consts::EXE_SUFFIX.is_empty() {
-        let file_name = binary
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| anyhow::anyhow!("sidecar 文件名无效"))?;
-        if !file_name.ends_with(std::env::consts::EXE_SUFFIX) {
-            binary.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
+    // native：插件目录内可执行文件（补平台后缀）；解释器：宿主白名单程序 + 入口。
+    let binary = match interpreter.as_ref() {
+        None => {
+            let raw = sidecar.binary.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "插件 {} native sidecar 缺少 binary 声明",
+                    installed.manifest.id
+                )
+            })?;
+            sidecar_binary_path(&installed.directory, raw)?
         }
-    }
+        Some(launch) => launch.entry.clone(),
+    };
     let endpoint = installed.directory.join("runtime").join("endpoint.json");
     let log = installed.directory.join("logs").join("sidecar.log");
     let data_dir = installed.directory.join("data");
     let (server_url, server_token) = current_server_endpoint()
         .map(|(url, token)| (Some(url), token))
         .unwrap_or((None, None));
-    let config = SidecarConfig::new(
+    let mut config = SidecarConfig::new(
         &installed.manifest.id,
         &installed.manifest.version,
         binary,
@@ -2457,30 +2525,142 @@ fn sidecar_connection(
         data_dir,
         storage_root,
     )
-    .with_sensitive_storage(
-        signed_release.has_permission("model-config.read")
-            || signed_release.has_permission("app-storage.read"),
-    )
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
     .with_server_endpoint(server_url, server_token);
+    if let Some(signed_release) = signed_release {
+        config = config.with_sensitive_storage(
+            signed_release.has_permission("model-config.read")
+                || signed_release.has_permission("app-storage.read"),
+        );
+    }
+    if let Some(launch) = interpreter {
+        // 本地信任解释器 sidecar：spawn 前按内容清单复核文件树，防安装后篡改。
+        config = config
+            .with_interpreter(launch)
+            .with_integrity_manifest(installed.directory.join(CONTENT_MANIFEST_FILE));
+    }
 
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
     if refresh || !connections.contains_key(&installed.directory) {
-        connections.insert(
-            installed.directory.clone(),
-            Arc::new(ProcessSidecarConnection::new(config)),
-        );
+        // 通道由宿主决定：解释器 sidecar 只开放 stdio（无监听端口、生命周期与宿主
+        // 绑定）；native 保持存量 TCP。
+        let connection: Arc<dyn SidecarConnection> = if config.interpreter.is_some() {
+            Arc::new(StdioSidecarConnection::new(config))
+        } else {
+            Arc::new(ProcessSidecarConnection::new(config))
+        };
+        connections.insert(installed.directory.clone(), connection);
     }
     connections
         .get(&installed.directory)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("创建插件 sidecar 连接失败"))
+}
+
+/// 解析解释器 sidecar 的启动规格：宿主白名单程序 + 入口绝对路径 + 清单参数。
+fn resolve_interpreter_launch(
+    installed: &InstalledPlugin,
+    sidecar: &crate::manifest::SidecarManifest,
+) -> Result<InterpreterLaunch> {
+    let entry = sidecar.entry.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "插件 {} 解释器 sidecar 缺少 entry 声明",
+            installed.manifest.id
+        )
+    })?;
+    let entry_path = installed.directory.join(entry);
+    if !entry_path.is_file() {
+        bail!("插件 sidecar 入口脚本不存在: {}", entry_path.display());
+    }
+    let program = resolve_interpreter_program(sidecar.runtime)?;
+    Ok(InterpreterLaunch {
+        program,
+        entry: entry_path,
+        args: sidecar.args.clone(),
+    })
+}
+
+/// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
+fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
+    let (override_env, candidates): (&str, &[&str]) = match runtime {
+        SidecarRuntime::Native => bail!("native sidecar 无解释器"),
+        SidecarRuntime::Node => (
+            "TIANGONG_NODE_PATH",
+            if cfg!(windows) {
+                &["node.exe"]
+            } else {
+                &["node"]
+            },
+        ),
+        SidecarRuntime::Python => (
+            "TIANGONG_PYTHON_PATH",
+            if cfg!(windows) {
+                &["python.exe", "py.exe"]
+            } else {
+                &["python3", "python"]
+            },
+        ),
+    };
+    if let Some(path) = std::env::var_os(override_env)
+        && !path.is_empty()
+    {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        bail!("{override_env} 指向的程序不存在: {}", path.display());
+    }
+    let search_paths = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for directory in search_paths {
+        for candidate in candidates {
+            let path = directory.join(candidate);
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+    bail!(
+        "未找到 {:?} sidecar 所需的解释器程序（{}）；请安装后重试，或以 {override_env} 指定路径",
+        runtime,
+        candidates.join(" / ")
+    );
+}
+
+/// 本地信任校验：安装时落锚的标记与内容清单哈希一致，且清单内全部文件未被篡改。
+fn verify_local_trust(directory: &Path) -> Result<bool> {
+    #[derive(serde::Deserialize)]
+    struct LocalTrust {
+        content_sha256: String,
+    }
+    let Ok(raw) = std::fs::read_to_string(directory.join(LOCAL_TRUST_FILE)) else {
+        return Ok(false);
+    };
+    let trust: LocalTrust = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "插件本地信任标记损坏: {}",
+            directory.join(LOCAL_TRUST_FILE).display()
+        )
+    })?;
+    let manifest_path = directory.join(CONTENT_MANIFEST_FILE);
+    let manifest_raw = std::fs::read(&manifest_path)
+        .with_context(|| format!("本地信任插件缺少内容清单: {}", manifest_path.display()))?;
+    let anchored = hex::encode(sha2::Sha256::digest(&manifest_raw));
+    if !anchored.eq_ignore_ascii_case(&trust.content_sha256) {
+        bail!(
+            "插件内容清单与本地信任标记不一致（可能被篡改），拒绝启动: {}",
+            directory.display()
+        );
+    }
+    crate::sidecar::SidecarConfig::verify_integrity_manifest(&manifest_path, directory)?;
+    Ok(true)
 }
 
 fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {

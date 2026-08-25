@@ -180,9 +180,27 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
     }
 
     if let Some(sidecar) = &manifest.sidecar {
-        let binary = with_executable_suffix(&sidecar.binary)?;
-        let destination = copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
-        set_executable(&destination)?;
+        match sidecar.runtime {
+            crate::manifest::SidecarRuntime::Native => {
+                let binary = sidecar.binary.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("插件 {} native sidecar 缺少 binary 声明", manifest.id)
+                })?;
+                let binary = with_executable_suffix(binary)?;
+                let destination =
+                    copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
+                set_executable(&destination)?;
+            }
+            crate::manifest::SidecarRuntime::Node | crate::manifest::SidecarRuntime::Python => {
+                // 解释器入口及其同目录树（协议库等）整目录复制，保持只读语义。
+                let entry = sidecar.entry.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("插件 {} 解释器 sidecar 缺少 entry 声明", manifest.id)
+                })?;
+                let entry_dir = entry.parent().ok_or_else(|| {
+                    anyhow::anyhow!("插件 {} 解释器 sidecar entry 缺少父目录", manifest.id)
+                })?;
+                copy_resource_tree(source, entry_dir, &staged.path)?;
+            }
+        }
     }
 
     for contribution in manifest.ui_contributions() {
@@ -200,6 +218,18 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
             ensure_regular_file(&source_file, "插件签名制品")?;
             copy_regular_file(&source_file, &staged.path.join(file), "插件签名制品")?;
         }
+    }
+
+    // 内容清单（devkit 构建生成的路径 + sha256 树）：随插件进入安装目录，
+    // 作为解释器 sidecar 本地信任的篡改检测锚。
+    let content_manifest = source.join("content-manifest.json");
+    if content_manifest.exists() {
+        ensure_regular_file(&content_manifest, "插件内容清单")?;
+        copy_regular_file(
+            &content_manifest,
+            &staged.path.join("content-manifest.json"),
+            "插件内容清单",
+        )?;
     }
 
     for directory in manifest.resources.iter().flatten() {
@@ -444,9 +474,14 @@ impl PluginRepository {
                 .get(&platform)
                 .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的 sidecar", release.id))?;
             let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
-            let sidecar_path = staged
-                .path
-                .join(with_executable_suffix(&sidecar_binary.binary)?);
+            if sidecar_binary.runtime != crate::manifest::SidecarRuntime::Native {
+                bail!("插件 {} 解释器 sidecar 暂不经官方市场分发", release.id);
+            }
+            let binary = sidecar_binary
+                .binary
+                .as_ref()
+                .expect("validate 保证 native 有 binary");
+            let sidecar_path = staged.path.join(with_executable_suffix(binary)?);
             let sidecar_name = sidecar_path
                 .file_name()
                 .and_then(|value| value.to_str())
