@@ -1,6 +1,6 @@
-// 打包步骤：组装 release/ —— plugin.json + 零构建页面 + 打包后的 sidecar
-// 单文件，并生成内容哈希清单（本地信任锚）。产物不包含源码、vendor 与
-// node_modules；安装后的运行时零依赖。
+// 打包步骤：组装 release/ —— plugin.json + 单文件页面（dist/）+ 打包后的
+// sidecar 单文件，并生成内容哈希清单（本地信任锚）。产物不包含源码、vendor
+// 与 node_modules；安装后的运行时零依赖。
 
 import { createHash } from 'node:crypto';
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -40,7 +40,7 @@ if (!(await exists(bundled))) {
 const uiEntries = (manifest.ui?.contributions ?? []).map((item) => item.entry);
 for (const entry of uiEntries) {
   if (!(await exists(entry))) {
-    throw new Error(`UI 入口不存在: ${entry}`);
+    throw new Error(`UI 入口不存在: ${entry}（页面经 vite 构建产出 dist/index.html）`);
   }
 }
 

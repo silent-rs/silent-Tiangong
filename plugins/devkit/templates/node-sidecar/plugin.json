@@ -22,7 +22,7 @@
         "slot": "extension.tab",
         "id": "app",
         "title": "{{PLUGIN_NAME}}",
-        "entry": "app/index.html",
+        "entry": "dist/index.html",
         "open_mode": "singleton"
       }
     ]
