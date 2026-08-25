@@ -73,6 +73,26 @@ impl EphemeralCommandConnection {
         let request_object = request
             .as_object_mut()
             .ok_or_else(|| anyhow!("command 请求必须是 JSON 对象"))?;
+        // Windows AppContainer 无法展开宿主短路径别名，启动前由宿主统一 cwd。
+        let requested_cwd = request_object
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .map(PathBuf::from);
+        if let Some(requested_cwd) = requested_cwd {
+            let candidate = if requested_cwd.is_absolute() {
+                requested_cwd
+            } else {
+                workspace.join(requested_cwd)
+            };
+            if let Ok(canonical_cwd) = std::fs::canonicalize(candidate) {
+                request_object.insert(
+                    "cwd".to_string(),
+                    serde_json::Value::String(canonical_cwd.display().to_string()),
+                );
+            }
+        }
         // CommandAccessContext 使用 serde(flatten)，现行字段位于请求顶层；同时
         // 兼容早期嵌套 access 形态。两种形态中的 workspace 都只作输入兼容，
         // 最终统一覆盖为本次宿主调用的权威工作区。
