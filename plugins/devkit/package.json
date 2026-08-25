@@ -1,6 +1,6 @@
 {
   "name": "@silent-ai/plugin-creator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "天工插件创作工具链（devkit）：init/validate/build/run/logs，经命令通道执行",
   "type": "module",
   "license": "Apache-2.0",

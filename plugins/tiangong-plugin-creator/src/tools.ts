@@ -47,7 +47,7 @@ export const pluginDev = {
 };
 
 /** devkit 命令模板（页面展示引导，实际由 Agent 经命令通道执行）。 */
-export const DEVKIT_VERSION = '1.0.0';
+export const DEVKIT_VERSION = '1.0.1';
 export const DEVKIT_COMMANDS: Record<string, (id: string) => string> = {
   init: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} init <模板> ${id} --name <显示名>`,
   validate: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} validate ${id}`,

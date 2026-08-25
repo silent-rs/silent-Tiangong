@@ -3,11 +3,11 @@
 天工插件创作工具链 CLI。经命令通道执行（Agent 的 run_command）：
 
 ```bash
-npx -y @silent-ai/plugin-creator@1.0.0 init ui-app my-dashboard --name 我的看板
-npx -y @silent-ai/plugin-creator@1.0.0 validate my-dashboard
-npx -y @silent-ai/plugin-creator@1.0.0 build my-dashboard
-npx -y @silent-ai/plugin-creator@1.0.0 run my-dashboard -- --name 测试
-npx -y @silent-ai/plugin-creator@1.0.0 logs dev:my-dashboard
+npx -y @silent-ai/plugin-creator@1.0.1 init ui-app my-dashboard --name 我的看板
+npx -y @silent-ai/plugin-creator@1.0.1 validate my-dashboard
+npx -y @silent-ai/plugin-creator@1.0.1 build my-dashboard
+npx -y @silent-ai/plugin-creator@1.0.1 run my-dashboard -- --name 测试
+npx -y @silent-ai/plugin-creator@1.0.1 logs dev:my-dashboard
 ```
 
 约定：stdout 输出单个 JSON 结果（`{ok, ...}`）；人读信息写 stderr；非零退出码表示失败。

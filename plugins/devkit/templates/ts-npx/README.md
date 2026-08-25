@@ -11,7 +11,7 @@
 1. 修改 `tools/main.ts`（CLI 式：参数输入、stdout 输出 JSON 结果）与
    `plugin.json` 的能力说明段（教 Agent 怎么用）；
 2. 开发期自测：经命令通道执行 devkit 试运行
-   （npx -y @silent-ai/plugin-creator@1.0.0 run <id> -- <参数>，
+   （npx -y @silent-ai/plugin-creator@1.0.1 run <id> -- <参数>，
    按 run.json 声明执行，日志在 `logs/run.log`）；
 3. 分发：plugin_validate → plugin_build（零构建直接打包）→ plugin_install
    （原生确认，内容哈希锁定）；
