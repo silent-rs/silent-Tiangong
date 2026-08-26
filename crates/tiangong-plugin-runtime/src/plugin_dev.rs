@@ -693,4 +693,88 @@ await runSidecar({
             "模板项目应真实创建（templates 随行资源可用）"
         );
     }
+    /// 完整用户旅程（显式运行：`cargo test -p tiangong-plugin-runtime --lib
+    /// -- --ignored`）：经 creator 的按需 sidecar 从零创建 node-sidecar 插件
+    /// → 注入自定义操作 → devkit 真实构建（yarn 工程链）→ 原生确认安装 →
+    /// 宿主连接新插件的 sidecar 真实调用。全程不经 GUI，等价于 Agent 操作序列。
+    #[test]
+    #[ignore = "真实 yarn 构建需数分钟与网络，按需显式运行"]
+    fn 从零创建node_sidecar插件_完整旅程() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/tiangong-plugin-creator/release");
+        if !release_source.join("plugin.json").is_file() {
+            eprintln!("跳过：缺少真实构建产物（先在 creator 目录 yarn package）");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let creator = "plugin-creator";
+        let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
+        copy_tree_for_test(&release_source, &dev_root.join("release"));
+        make_project(root.path(), creator);
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        install(root.path(), creator).expect("creator 安装");
+
+        let devkit = |command: &str, args: serde_json::Value| {
+            crate::registry::invoke_sidecar(
+                root.path(),
+                creator,
+                &format!("devkit.{command}"),
+                args,
+            )
+        };
+
+        // 1) 初始化 node-sidecar 模板项目（真实模板，写入受控开发根）。
+        let project_id = "journey-demo";
+        let response = devkit(
+            "init",
+            json!({"args": ["node-sidecar", project_id, "--name", "旅程验证"], "root": root.path().join(PLUGIN_DEV_DIR)}),
+        )
+        .expect("devkit.init");
+        assert_eq!(response["ok"], json!(true), "init 失败: {response}");
+
+        // 2) 修改 sidecar 源码：注入自定义操作（模拟用户/Agent 编码）。
+        let entry = root
+            .path()
+            .join(PLUGIN_DEV_DIR)
+            .join(project_id)
+            .join("sidecar/main.mjs");
+        let source = std::fs::read_to_string(&entry).unwrap();
+        let patched = source.replace(
+            "    if (operation === 'demo.echo') {",
+            "    if (operation === 'journey.greet') {\n      return { payload: { message: `你好，${payload?.who ?? '天工'}！` } };\n    }\n    if (operation === 'demo.echo') {",
+        );
+        assert!(patched != source, "应成功注入自定义操作");
+        std::fs::write(&entry, patched).unwrap();
+
+        // 3) 真实构建（yarn install + 类型检查 + vite/esbuild 双端打包）。
+        let response = devkit(
+            "build",
+            json!({"args": [project_id], "root": root.path().join(PLUGIN_DEV_DIR)}),
+        )
+        .expect("devkit.build");
+        assert_eq!(response["ok"], json!(true), "build 失败: {response}");
+
+        // 4) 安装新插件（原生确认通道 + 完整性 + 本地信任）。
+        let result = install(root.path(), project_id).expect("新插件安装");
+        assert_eq!(result.plugin_id, project_id);
+
+        // 5) 宿主连接新插件 sidecar，真实调用自定义操作。
+        let response = crate::registry::invoke_sidecar(
+            root.path(),
+            project_id,
+            "journey.greet",
+            json!({"who": "完整旅程"}),
+        )
+        .expect("自定义操作调用");
+        assert_eq!(
+            response["message"],
+            json!("你好，完整旅程！"),
+            "响应: {response}"
+        );
+    }
 }
