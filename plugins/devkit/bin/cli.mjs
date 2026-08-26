@@ -28,7 +28,7 @@ function usage() {
     '',
     '全局：--root <path> 覆盖开发根（默认 ~/.tiangong/plugins-dev）。',
     '模板：ui-app（纯 UI，零构建）、ts-tool（TS 工具插件）、ts-npx（npx 脚本插件）、',
-    '      node-sidecar（常驻 node sidecar 插件）。',
+    '      node-sidecar（常驻 node sidecar 插件）、node-tool（无界面纯工具插件）。',
   ].join('\n');
 }
 

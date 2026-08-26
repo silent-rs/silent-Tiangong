@@ -266,16 +266,24 @@ impl PluginManifest {
         match self.wasm_binary() {
             Some(binary) => validate_relative_path(binary, "wasm.binary")?,
             None => {
-                // 纯 UI 插件：无逻辑层时必须有界面贡献，且仅 v2 支持
+                // 无逻辑层（纯清单插件）：界面只是一种可选贡献——ui / tools /
+                // prompt / mention 任一非空即可，全空视为空壳拒绝。仅 v2 支持。
                 if self.schema_version != MANIFEST_SCHEMA_VERSION_V2 {
                     bail!(
-                        "插件 {} 未声明 wasm（仅 schema_version 2 支持纯 UI 插件）",
+                        "插件 {} 未声明 wasm（仅 schema_version 2 支持纯清单插件）",
                         self.id
                     );
                 }
-                if self.ui_contributions().is_empty() {
+                let has_contribution = !self.ui_contributions().is_empty()
+                    || self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                    || self
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|capabilities| capabilities.prompt)
+                    || self.mention.is_some();
+                if !has_contribution {
                     bail!(
-                        "插件 {} 未声明 wasm 时必须至少声明一条 ui.contributions",
+                        "插件 {} 未声明任何贡献（ui.contributions / tools / capabilities.prompt / mention 至少其一）",
                         self.id
                     );
                 }
@@ -331,6 +339,28 @@ impl PluginManifest {
                 .any(|arg| arg.is_empty() || arg.len() > 512)
             {
                 bail!("插件 {} sidecar.args 包含空值或超过 512 字符的项", self.id);
+            }
+        }
+
+        // UI 贡献图标：资源路径形态（含 / 或 .）须为安全相对路径 + 白名单扩展；
+        // 其余按图标名处理（宿主内置映射）。
+        for contribution in self.ui_contributions() {
+            let icon = contribution.icon.trim();
+            if icon.contains('/') || icon.contains('.') {
+                let path = Path::new(icon);
+                validate_relative_path(path, "ui.contributions.icon")?;
+                let extension = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !matches!(extension.as_str(), "png" | "svg" | "jpg" | "jpeg") {
+                    bail!(
+                        "插件 {} 贡献 {} 的图标 {icon} 扩展名不在白名单（png/svg/jpeg）",
+                        self.id,
+                        contribution.id
+                    );
+                }
             }
         }
         if self.permissions.iter().any(|item| item.trim().is_empty()) {
@@ -953,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn 纯_ui_插件_wasm_可省略但须有贡献() {
+    fn 纯清单插件_须有任一贡献() {
         // v2 + ui 贡献：wasm 可省略
         let manifest: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"com.example.board","version":"1.0.0","permissions":["bridge.call"],"ui":{"contributions":[{"slot":"extension.tab","id":"board","entry":"index.html"}]}}"#,
@@ -963,13 +993,27 @@ mod tests {
         assert!(manifest.wasm_binary().is_none());
         assert_eq!(manifest.ui_contributions().len(), 1);
 
-        // v2 + 无 wasm + 无 ui 贡献：拒绝
+        // v2 + 无 UI 纯工具（有 sidecar 承载执行）：界面不是必要贡献
+        let tool_only: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.counter","version":"1.0.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"count","description":"字数统计","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+        )
+        .unwrap();
+        tool_only.validate().expect("无 UI 纯工具插件应通过校验");
+
+        // v2 + 无 UI 纯 prompt + mention：同样合法
+        let prompt_only: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"com.example.hint","version":"1.0.0","entrypoints":["desktop"],"capabilities":{"prompt":true},"prompt":["能力说明"],"mention":{"hint":"提示插件"}}"#,
+        )
+        .unwrap();
+        prompt_only.validate().expect("无 UI prompt 插件应通过校验");
+
+        // v2 + 无 wasm + 无任何贡献：空壳拒绝
         let bare: PluginManifest = serde_json::from_str(
             r#"{"schema_version":2,"id":"com.example.bare","version":"1.0.0"}"#,
         )
         .unwrap();
         let error = bare.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("ui.contributions"));
+        assert!(format!("{error:#}").contains("未声明任何贡献"));
 
         // v1 + 无 wasm：拒绝（纯 UI 仅 v2 支持）
         let v1_bare: PluginManifest = serde_json::from_str(

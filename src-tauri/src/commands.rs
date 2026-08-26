@@ -4375,6 +4375,19 @@ pub async fn plugin_read_entry_resource(
 }
 
 /// 插件入口资源响应（字节数组 + MIME）。
+/// 读取插件 App 的自定义图标（拓展区矩阵渲染；插件根为根、扩展名白名单、
+/// 256KB 上限、防逃逸，见 registry::read_plugin_icon）。
+#[tauri::command]
+pub async fn plugin_read_icon(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<PluginEntryResource, String> {
+    let (data, mime) =
+        tiangong_plugin_runtime::registry::read_plugin_icon(&plugin_id, &contribution_id)
+            .map_err(|error| error.to_string())?;
+    Ok(PluginEntryResource { data, mime })
+}
+
 #[derive(serde::Serialize)]
 pub struct PluginEntryResource {
     pub data: Vec<u8>,

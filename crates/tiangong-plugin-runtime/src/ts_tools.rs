@@ -176,6 +176,26 @@ pub async fn execute(
         "TS 工具等待接应（无订阅者时请求后台挂载插件实例）"
     );
     if !subscribed {
+        // 既无界面可接应、又无 sidecar 可直连（直连在适配器层已分派，走到
+        // 这里说明插件有页面路径）：立即明确失败，不傻等超时。
+        let has_ui = crate::registry::plugin_manifest(&plugin_id).is_some_and(|manifest| {
+            manifest
+                .ui_contributions()
+                .iter()
+                .any(|contribution| contribution.slot == "extension.tab")
+        });
+        if !has_ui {
+            let _ = pending_calls()
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&invocation_id));
+            emit_closed(&plugin_id, &invocation_id, TsToolCloseStatus::Cancelled);
+            return failure_result(format!(
+                "插件 {plugin_id} 的工具 {} 无接应：插件未声明 extension.tab 界面，\
+                 也没有可供直连的 sidecar；请补齐界面贡献或 sidecar 声明",
+                invocation.name
+            ));
+        }
         request_plugin_ui(&plugin_id, &session_id);
     }
 

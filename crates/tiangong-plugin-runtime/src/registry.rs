@@ -937,6 +937,67 @@ pub fn read_manifest_resource(
     Ok((bytes, mime_of(&resolved)))
 }
 
+/// 读取插件 App 的自定义图标（拓展区矩阵渲染用）。
+///
+/// 以插件安装目录为根；扩展名白名单（png/svg/jpeg/jpg）；大小上限 256KB；
+/// 规范化后必须仍在插件目录内，拒绝 `../` 逃逸。图标是 UI 展示资源——
+/// 经 `<img>` 渲染（img 中的 SVG 不执行脚本），不进入任何执行路径。
+pub fn read_plugin_icon(plugin_id: &str, contribution_id: &str) -> Result<(Vec<u8>, String)> {
+    const MAX_ICON_BYTES: u64 = 256 * 1024;
+    let (directory, icon) = {
+        let plugins = loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+        let loaded = plugins
+            .get(plugin_id)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 未加载"))?;
+        let contribution = loaded
+            .manifest
+            .ui_contributions()
+            .into_iter()
+            .find(|item| item.id == contribution_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("插件 {plugin_id} 无 manifest 贡献 {contribution_id}")
+            })?;
+        (loaded.directory.clone(), contribution.icon.clone())
+    };
+    let extension = std::path::Path::new(&icon)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => bail!("插件 {plugin_id} 图标 {icon} 扩展名不在白名单（png/svg/jpeg）"),
+    };
+    let resource = directory.join(&icon);
+    let resolved = resource
+        .canonicalize()
+        .with_context(|| format!("图标路径无效: {icon}"))?;
+    let plugin_root = directory
+        .canonicalize()
+        .with_context(|| format!("插件目录无效: {}", directory.display()))?;
+    if !resolved.starts_with(&plugin_root) {
+        bail!("插件 {plugin_id} 图标路径 {icon} 逃出插件目录，已拒绝");
+    }
+    let metadata = std::fs::metadata(&resolved)
+        .with_context(|| format!("读取图标元数据失败: {}", resolved.display()))?;
+    if !metadata.is_file() {
+        bail!("插件 {plugin_id} 图标 {icon} 不是普通文件");
+    }
+    if metadata.len() > MAX_ICON_BYTES {
+        bail!(
+            "插件 {plugin_id} 图标超过 256KB 上限（{} 字节）",
+            metadata.len()
+        );
+    }
+    let bytes = std::fs::read(&resolved)
+        .with_context(|| format!("读取图标失败: {}", resolved.display()))?;
+    Ok((bytes, mime.to_string()))
+}
+
 /// 按扩展名推断资源 MIME（容器加载脚本/样式用，未知类型按二进制流返回）。
 fn mime_of(path: &Path) -> String {
     match path

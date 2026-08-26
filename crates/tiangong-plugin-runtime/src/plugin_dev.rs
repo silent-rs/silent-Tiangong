@@ -777,4 +777,101 @@ await runSidecar({
             "响应: {response}"
         );
     }
+    /// 无界面纯工具插件（node-tool 形态）：无 ui 贡献即可安装（校验解耦），
+    /// 工具契约（操作名=工具名、ToolOutcome 形状）经 sidecar 真实往返。
+    #[test]
+    fn 无界面纯工具插件_安装与工具契约() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "pure-tool-demo";
+        make_project(root.path(), id);
+        // 构造 node-tool 形态产物：tools + sidecar，无 ui/wasm。
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"pure-tool-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"text_analyze","description":"文本分析","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"},"mention":{"hint":"纯工具"}}"#,
+        )
+        .unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'pure-tool-demo',
+  dispatch(operation, payload) {
+    if (operation === 'text_analyze') {
+      const text = typeof payload?.text === 'string' ? payload.text : '';
+      return { payload: { ok: true, summary: `文本 ${[...text].length} 字`, stdout: [...text].reverse().join(''), stderr: '', exit_code: 0 } };
+    }
+    return { payload: {} };
+  },
+});
+"#,
+        )
+        .unwrap();
+        write_content_manifest(&release);
+
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        let result = install(root.path(), id).expect("无界面纯工具插件应可安装");
+        assert_eq!(result.plugin_id, id);
+
+        // 工具契约：操作名 = 工具名，参数 = 工具参数对象，返回 ToolOutcome。
+        let response = crate::registry::invoke_sidecar(
+            root.path(),
+            id,
+            "text_analyze",
+            json!({"text": "天工abc"}),
+        )
+        .expect("工具直连调用");
+        assert_eq!(response["ok"], json!(true), "响应: {response}");
+        assert_eq!(response["summary"], json!("文本 5 字"));
+        assert_eq!(response["stdout"], json!("cba工天"));
+    }
+    /// 自定义图标往返：带 png 图标的插件安装后，read_plugin_icon 返回正确
+    /// 字节与 MIME（read 走 loaded_plugins 内存表，install 后可用）。
+    #[test]
+    fn 插件图标_安装与读取往返() {
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "icon-demo";
+        make_project(root.path(), id);
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("app")).unwrap();
+        std::fs::create_dir_all(release.join("icons")).unwrap();
+        // 最小 PNG（1x1 透明像素）。
+        const MINIMAL_PNG: [u8; 67] = [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(release.join("icons/app.png"), MINIMAL_PNG).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"icon-demo","version":"0.1.0","permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"app","title":"图标验证","entry":"app/index.html","icon":"icons/app.png"}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
+        write_content_manifest(&release);
+
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        install(root.path(), id).expect("带图标插件安装");
+
+        let (data, mime) = crate::registry::read_plugin_icon(id, "app").expect("读取插件图标");
+        assert_eq!(mime, "image/png");
+        assert_eq!(data.as_slice(), MINIMAL_PNG);
+    }
 }

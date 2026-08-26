@@ -1131,6 +1131,10 @@ export const api = {
   pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>
     invoke('plugin_open_entry', { pluginId, contributionId }),
 
+  /// 读取插件 App 的自定义图标（拓展区矩阵渲染；插件根为根、白名单与上限见宿主）。
+  pluginReadIcon: (pluginId: string, contributionId: string): Promise<PluginEntryResource> =>
+    invoke('plugin_read_icon', { pluginId, contributionId }),
+
   /// 读取 v2 manifest UI 贡献的相对资源（沙箱容器加载外链脚本/样式）。
   pluginReadEntryResource: (
     pluginId: string,

@@ -784,6 +784,7 @@ fn run_gui() {
             tiangong_app::commands::list_extension_apps,
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
+            tiangong_app::commands::plugin_read_icon,
             tiangong_app::commands::bridge_call,
             tiangong_app::commands::bridge_subscribe,
             tiangong_app::commands::bridge_unsubscribe,

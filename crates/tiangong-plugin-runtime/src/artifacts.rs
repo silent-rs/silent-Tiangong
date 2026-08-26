@@ -210,6 +210,11 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
             &staged.path,
             "UI 入口",
         )?;
+        // 自定义图标（资源路径形态）随安装复制，无需额外声明 resources。
+        let icon = contribution.icon.trim();
+        if icon.contains('/') || icon.contains('.') {
+            copy_local_artifact(source, Path::new(icon), &staged.path, "UI 图标")?;
+        }
     }
 
     for file in ["release.json", "release.json.sig"] {

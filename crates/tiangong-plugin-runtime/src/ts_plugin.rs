@@ -30,6 +30,9 @@ pub struct TsPluginAdapter {
     id: String,
     state: RwLock<TsPluginState>,
     enabled: AtomicBool,
+    /// 无界面且声明 sidecar：工具由宿主直连 sidecar 执行（不进页面接应
+    /// 协议）。有界面的插件照旧走页面路径（页面可深度参与执行）。
+    sidecar_direct: AtomicBool,
 }
 
 impl TsPluginAdapter {
@@ -42,6 +45,7 @@ impl TsPluginAdapter {
                 mention: mention_candidate_parts(manifest),
             }),
             enabled: AtomicBool::new(enabled),
+            sidecar_direct: AtomicBool::new(sidecar_direct_of(manifest)),
         }
     }
 
@@ -56,6 +60,8 @@ impl TsPluginAdapter {
             Err(poisoned) => *poisoned.into_inner() = next,
         }
         self.set_enabled(enabled);
+        self.sidecar_direct
+            .store(sidecar_direct_of(manifest), Ordering::Release);
     }
 
     pub(crate) fn set_enabled(&self, enabled: bool) {
@@ -116,11 +122,90 @@ impl ToolOverrideHandler for TsPluginAdapter {
             return Box::pin(async { None });
         };
         let plugin_id = self.id.clone();
-        let session_id = session.id.clone();
         let call = call.clone();
-        Box::pin(async move {
-            Some(crate::ts_tools::execute(plugin_id, session_id, call, tool.timeout_ms).await)
-        })
+        if self.sidecar_direct.load(Ordering::Acquire) {
+            Box::pin(async move { Some(invoke_sidecar_tool(&plugin_id, call).await) })
+        } else {
+            let session_id = session.id.clone();
+            Box::pin(async move {
+                Some(crate::ts_tools::execute(plugin_id, session_id, call, tool.timeout_ms).await)
+            })
+        }
+    }
+}
+
+fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
+    manifest.ui_contributions().is_empty() && manifest.sidecar.is_some()
+}
+
+/// 无界面 sidecar 型插件的工具直达：宿主内置桥接，语义与 memory 等官方
+/// 插件的 WASM 桥接层一致（透传）——operation 为工具名、参数为调用参数
+/// 对象，sidecar 返回 ToolOutcome 形状（ok/summary/stdout/stderr/exit_code，
+/// 后四项可缺省）。
+async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall) -> ToolResult {
+    let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
+        return sidecar_tool_failure(plugin_id, "插件未加载");
+    };
+    let Some(storage_root) = directory
+        .parent()
+        .and_then(|parent| parent.parent())
+        .map(std::path::Path::to_path_buf)
+    else {
+        return sidecar_tool_failure(plugin_id, "无法定位插件存储根");
+    };
+    let plugin_id_owned = plugin_id.to_string();
+    let operation = call.name.clone();
+    let arguments = call.arguments.clone();
+    let invoked = tokio::task::spawn_blocking(move || {
+        crate::registry::invoke_sidecar(&storage_root, &plugin_id_owned, &operation, arguments)
+    })
+    .await;
+    match invoked {
+        Ok(Ok(value)) => ToolResult {
+            ok: value
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            summary: value
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            stdout: value
+                .get("stdout")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            stderr: value
+                .get("stderr")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            exit_code: value
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(
+                    if value.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+                        1
+                    } else {
+                        0
+                    },
+                ) as i32,
+            execution: None,
+        },
+        Ok(Err(error)) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
+        Err(error) => sidecar_tool_failure(plugin_id, format!("sidecar 调用任务失败：{error}")),
+    }
+}
+
+fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: format!("插件 {plugin_id} sidecar 工具执行失败：{message}"),
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 1,
+        execution: None,
     }
 }
 
@@ -250,5 +335,40 @@ mod tests {
         let adapter = TsPluginAdapter::from_manifest(&manifest, true);
         let candidates = MentionCandidateProvider::mention_candidates(&adapter);
         assert_eq!(candidates[0].label, "demo");
+    }
+    #[test]
+    fn 无界面sidecar插件_工具走直连_有界面走页面() {
+        // 无 UI + sidecar：直连
+        let mut manifest = manifest_with_mention(None);
+        manifest.ui = None;
+        manifest.sidecar =
+            Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        assert!(
+            adapter
+                .sidecar_direct
+                .load(std::sync::atomic::Ordering::Acquire),
+            "无界面 sidecar 插件应直连"
+        );
+        // 有 UI：照旧页面路径
+        let mut manifest = manifest_with_mention(None);
+        manifest.sidecar =
+            Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        assert!(
+            !adapter
+                .sidecar_direct
+                .load(std::sync::atomic::Ordering::Acquire),
+            "有界面插件应保持页面接应路径"
+        );
+        // 无 UI 无 sidecar：也不直连（无接应由 ts_tools 明确报错）
+        let mut manifest = manifest_with_mention(None);
+        manifest.ui = None;
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        assert!(
+            !adapter
+                .sidecar_direct
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 }
