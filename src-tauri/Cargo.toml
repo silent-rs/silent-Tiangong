@@ -10,6 +10,7 @@ tiangong-core = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 semver = { workspace = true }
+serial_test = { workspace = true }
 tiangong-core-manager = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-app-state = { workspace = true }

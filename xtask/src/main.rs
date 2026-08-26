@@ -1635,8 +1635,13 @@ fn new_plugin(plugin_id: &str, output_dir: Option<&str>) -> io::Result<()> {
 pub fn prepare_builtin_plugins() -> io::Result<()> {
     let root = workspace_root();
     let config = plugin_config("plugin-creator")?;
-    build_plugin(config)?;
-    let release = root.join(config.plugin_root).join("release");
+    // 完整打包（package 脚本内部含 yarn build：类型检查 + 页面 + sidecar 双端
+    // 打包并组装 release/ 与内容清单）。build_plugin 只部署本机安装目录、不
+    // 组装 release，不能用作内置产物来源。
+    let plugin_root = root.join(config.plugin_root);
+    run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
+    run_yarn(&plugin_root, &["run", "package"])?;
+    let release = plugin_root.join("release");
     require_file(&release.join("plugin.json"))?;
     let destination = root.join("src-tauri/resources/plugins").join(config.id);
     remove_dir_if_exists(&destination)?;

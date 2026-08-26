@@ -275,7 +275,7 @@ fn archive_legacy_directory(storage_root: &Path, legacy_id: &str) {
 #[derive(Clone)]
 pub(crate) struct InstalledPlugin {
     directory: PathBuf,
-    manifest: PluginManifest,
+    pub(crate) manifest: PluginManifest,
     enabled: bool,
     signed_release: Option<SignedPluginRelease>,
 }
@@ -2515,6 +2515,25 @@ pub(crate) fn sidecar_connection(
     installed: &InstalledPlugin,
     refresh: bool,
 ) -> Result<Arc<dyn SidecarConnection>> {
+    sidecar_connection_inner(storage_root, installed, refresh, false)
+}
+
+/// 临时连接（按需直连的并发隔离用）：走同样的启动门槛与配置构造，但不
+/// 进入共享连接表——连接及其进程完全归属发起本次调用的执行方，超时/取消
+/// 只影响自己，并发调用互不可见。
+pub(crate) fn ephemeral_sidecar_connection(
+    storage_root: &Path,
+    installed: &InstalledPlugin,
+) -> Result<Arc<dyn SidecarConnection>> {
+    sidecar_connection_inner(storage_root, installed, false, true)
+}
+
+fn sidecar_connection_inner(
+    storage_root: &Path,
+    installed: &InstalledPlugin,
+    refresh: bool,
+    ephemeral: bool,
+) -> Result<Arc<dyn SidecarConnection>> {
     let sidecar = installed
         .manifest
         .sidecar
@@ -2609,6 +2628,12 @@ pub(crate) fn sidecar_connection(
     }
     config = config.with_lifecycle(sidecar.lifecycle);
 
+    if ephemeral {
+        return Ok(match config.interpreter.as_ref() {
+            Some(_) => Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>,
+            None => Arc::new(ProcessSidecarConnection::new(config)),
+        });
+    }
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;

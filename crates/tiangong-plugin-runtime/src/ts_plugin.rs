@@ -163,15 +163,28 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
         Ok(installed) => installed,
         Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
     };
-    let connection = match crate::registry::sidecar_connection(&storage_root, &installed, false) {
+    // 按需形态：每次调用独立临时连接——进程完全归属本次调用，超时/取消
+    // 只终止自己，并发调用互不可见；常驻形态：共享缓存连接（进程内多路
+    // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
+    let on_demand =
+        installed.manifest.sidecar.as_ref().is_some_and(|sidecar| {
+            sidecar.lifecycle == crate::manifest::SidecarLifecycle::OnDemand
+        });
+    let connection = if on_demand {
+        crate::registry::ephemeral_sidecar_connection(&storage_root, &installed)
+    } else {
+        crate::registry::sidecar_connection(&storage_root, &installed, false)
+    };
+    let connection = match connection {
         Ok(connection) => connection,
         Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
     };
     // 进程守卫：调用完成（disarm）前，超时返回、panic 或会话取消（drop）
-    // 都终止本次按需进程——后台 spawn_blocking 里的调用随进程断开而失败，
+    // 都终止本次调用的进程——后台 spawn_blocking 里的调用随进程断开而失败，
     // 不再运行到 sidecar 总超时。
     let mut guard = SidecarProcessGuard {
         connection: Some(connection.clone()),
+        stop_on_drop: on_demand,
     };
     let operation = call.name.clone();
     let timeout_operation = operation.clone();
@@ -197,6 +210,8 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
         Ok(Ok(Err(error))) => Err(error),
         Ok(Err(error)) => Err(anyhow::anyhow!("sidecar 调用任务失败：{error}")),
     };
+    // 完成判定在业务映射前：传输层 Ok 即完成。
+    let outcome_is_complete = outcome.is_ok();
     let result = match outcome {
         Ok(value) => ToolResult {
             ok: value
@@ -232,9 +247,9 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
         },
         Err(error) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
     };
-    if result.ok {
-        // 正常路径解除守卫：按需进程已由调用自身清理；常驻进程不受影响。
-        // 超时/取消/panic 路径经 Drop 终止进程（后台阻塞调用随进程断开结束）。
+    if outcome_is_complete {
+        // 调用正常完成（含业务失败 ok:false——那是完整响应，不是传输故障））：
+        // 解除守卫。仅超时/取消/panic 路径经 Drop 终止进程。
         guard.connection.take();
     }
     result
@@ -242,12 +257,20 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
 
 struct SidecarProcessGuard {
     connection: Option<std::sync::Arc<dyn crate::sidecar::SidecarConnection>>,
+    /// 临时连接（按需直连）用 stop 终止；共享连接用 cancel_current。
+    stop_on_drop: bool,
 }
 
 impl Drop for SidecarProcessGuard {
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
-            connection.cancel_current();
+            if self.stop_on_drop {
+                // 独立连接：终止即安全（连接与进程都只属于本次调用）。
+                let _ = connection.stop();
+            } else {
+                // 共享连接：只取消当前进程，连接继续服务后续调用。
+                connection.cancel_current();
+            }
         }
     }
 }

@@ -989,4 +989,121 @@ await runSidecar({
             .unwrap_or(false);
         assert!(!alive, "超时后按需 sidecar 进程（pid {pid}）应被终止");
     }
+    /// 并发隔离：同一插件并发直连调用互不影响——两个并发快调用都成功；
+    /// 一个慢调用超时被终止的同时，并发进行的快调用正常完成；结束后无
+    /// 遗留进程。
+    #[test]
+    #[serial_test::serial]
+    fn 直连工具_并发隔离与取消归属() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "concurrent-tool";
+        make_project(root.path(), id);
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"concurrent-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"quick_job","description":"快","input_schema":{"type":"object"},"timeout_ms":20000},{"name":"slow_job","description":"慢","input_schema":{"type":"object"},"timeout_ms":1500}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
+        )
+        .unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { writeFileSync } from 'node:fs';
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'concurrent-tool',
+  dispatch(operation, payload) {
+    if (operation === 'quick_job') {
+      return { payload: { ok: true, summary: `完成 ${payload?.tag ?? ''}`, stdout: '', stderr: '', exit_code: 0 } };
+    }
+    if (operation === 'slow_job') {
+      writeFileSync(payload.pid_file, String(process.pid));
+      return new Promise(() => {});
+    }
+    return { payload: {} };
+  },
+});
+"#,
+        )
+        .unwrap();
+        write_content_manifest(&release);
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        install(root.path(), id).expect("安装并发工具插件");
+
+        let pid_file = root.path().join("slow.pid");
+        let call = |name: &str, args: serde_json::Value| tiangong_llm::tool::ToolCall {
+            id: format!("call-{name}"),
+            name: name.to_string(),
+            arguments: args,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::join!(
+                    async {
+                        let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                            id,
+                            call("quick_job", json!({"tag": "并发一"})),
+                            20000,
+                        )
+                        .await;
+                        assert!(result.ok, "并发快调用一应成功: {}", result.summary);
+                        assert_eq!(result.summary, "完成 并发一");
+                    },
+                    async {
+                        let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                            id,
+                            call("quick_job", json!({"tag": "并发二"})),
+                            20000,
+                        )
+                        .await;
+                        assert!(result.ok, "并发快调用二应成功: {}", result.summary);
+                        assert_eq!(result.summary, "完成 并发二");
+                    },
+                    async {
+                        let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
+                            id,
+                            call("slow_job", json!({"pid_file": &pid_file})),
+                            1500,
+                        )
+                        .await;
+                        assert!(!result.ok, "慢调用应超时失败");
+                    },
+                );
+            });
+
+        // 慢调用的按需进程被终止；无遗留。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let process_alive = |pid: i32| {
+            std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        };
+        while process_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!process_alive(pid), "超时调用的进程（pid {pid}）应被终止");
+    }
 }
