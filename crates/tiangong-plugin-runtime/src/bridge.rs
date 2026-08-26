@@ -92,6 +92,9 @@ pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
     "lifecycle.",
     "config.",
     "sidecar.",
+    // plugins.*：宿主插件集变更通知（安装/启停/卸载），插件页面据此刷新
+    // 自身状态（如插件创作页的项目列表）。
+    "plugins.",
     // webview.*：宿主 webview 容器原语的页面事件通道（如浏览器插件的
     // webview.event），插件在 capabilities.events 声明后可订阅。
     "webview.",
@@ -350,6 +353,22 @@ fn event_subscriptions() -> &'static Mutex<BTreeMap<String, BTreeMap<String, usi
 /// 注入事件推送回调（宿主入口启动时调用，把订阅事件送达前端/插件 UI）。
 pub fn set_event_emitter(emitter: BridgeEventEmitter) {
     let _ = EVENT_EMITTER.set(emitter);
+}
+
+/// 把插件集变更通知（安装/启停/卸载）下发给订阅了 `plugins.changed` 的
+/// 插件页面——主前端的 Tauri 事件到达不了插件沙箱，插件页面经桥接订阅获知。
+pub fn emit_plugins_changed() {
+    let Some(emitter) = EVENT_EMITTER.get() else {
+        return;
+    };
+    let Ok(subscriptions) = event_subscriptions().lock() else {
+        return;
+    };
+    for (plugin_id, channels) in subscriptions.iter() {
+        if channels.contains_key("plugins.changed") {
+            emitter(plugin_id, "plugins.changed", "{}");
+        }
+    }
 }
 
 /// 订阅宿主事件通道。

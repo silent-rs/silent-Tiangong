@@ -4489,6 +4489,9 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
 /// 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播，拓展区等消费方刷新。
 fn notify_plugins_changed(app: &AppHandle) {
     let _ = app.emit("plugins_changed", &());
+    // 主前端事件到达不了插件沙箱；插件页面（如插件创作的项目列表）经
+    // 桥接订阅 plugins.changed 获知插件集变化后自行刷新。
+    tiangong_plugin_runtime::emit_plugins_changed();
 }
 
 pub(crate) async fn download_and_install_plugin(

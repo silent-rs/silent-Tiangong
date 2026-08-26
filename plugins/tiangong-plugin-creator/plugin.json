@@ -17,7 +17,8 @@
     "tools": true,
     "prompt": true,
     "events": [
-      "tool.*"
+      "tool.*",
+      "plugins.*"
     ]
   },
   "ui": {

@@ -6,6 +6,7 @@ import { onMounted, onBeforeUnmount, ref } from 'vue';
 import {
   createTiangongBridge,
   createToolProvider,
+  getShadowHostRuntime,
   pluginStorage,
   type HostBridge,
   type ToolInvocation,
@@ -36,6 +37,8 @@ const sending = ref(false);
 
 let providerStop: (() => void) | null = null;
 let closedStop: (() => void) | null = null;
+let pluginsChangedStop: (() => void) | null = null;
+let contextChangeStop: (() => void) | null = null;
 
 function show(kind: OutputKind, title: string, body: string) {
   output.value = { kind, title, body };
@@ -140,6 +143,11 @@ onMounted(async () => {
         invocation.name,
         invocation.arguments as Record<string, unknown>,
       );
+      // 本页执行的开发操作（init/build/add 等）改变了项目集，立即刷新——
+      // 这是 Agent 创建插件时项目列表的主刷新路径。
+      if (invocation.name === 'plugin_init' || invocation.name === 'plugin_devkit') {
+        void refreshProjects();
+      }
       try {
         await provider.resolve({
           invocation_id: invocation.invocation_id,
@@ -151,6 +159,16 @@ onMounted(async () => {
       }
     });
     closedStop = provider.onClosed(() => undefined);
+    // 插件集变更（Agent 在对话里完成 init/build/install 等）经桥接订阅实时
+    // 刷新项目列表——页面无需手动刷新 tab。
+    pluginsChangedStop = bridge.value.on('plugins.changed', () => {
+      void refreshProjects();
+    });
+    // 兜底：页面切回可见（上下文变化）时刷新，覆盖尚未触发插件变更事件的
+    // 中间状态（如 Agent 刚 init 完还没 install）。
+    contextChangeStop = getShadowHostRuntime()?.onContextChange(() => {
+      void refreshProjects();
+    }) ?? null;
     await refreshProjects();
   } catch (error) {
     connected.value = `桥接连接失败：${error instanceof Error ? error.message : String(error)}`;
@@ -160,6 +178,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   providerStop?.();
   closedStop?.();
+  pluginsChangedStop?.();
+  contextChangeStop?.();
 });
 
 // 安装历史落插件私有存储（storage.private 权限的实际消费），供追溯。
