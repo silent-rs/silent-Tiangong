@@ -67,8 +67,13 @@ jobs:
                   runtime = (manifest.get("sidecar") or {}).get("runtime", "native")
                   publishable = "false" if runtime != "native" else "true"
                   if publishable == "false":
-                      print(f"::warning::插件 {plugin_id} 声明解释器 sidecar（runtime={runtime}），"
-                            "官方 OSS 分发暂不支持，本次发布链整体跳过（本地部署可用）")
+                      # 警告必须写 stderr：本脚本 stdout 整体重定向到 GITHUB_OUTPUT，
+                      # 该文件只接受 key=value 记录，混入注解行会导致输出解析失败。
+                      print(
+                          f"::warning::插件 {plugin_id} 声明解释器 sidecar（runtime={runtime}），"
+                          "官方 OSS 分发暂不支持，本次发布链整体跳过（本地部署可用）",
+                          file=sys.stderr,
+                      )
                   print(f"plugin_root={root}")
                   print(f"has_wasm={has_wasm}")
                   print(f"has_ui={has_ui}")
