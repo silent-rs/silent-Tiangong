@@ -823,7 +823,6 @@ async fn release_input_send_claim_and_cleanup(
 /// 未安装时落盘到插件目录（保留 data/logs/runtime 运行时目录），并按内容
 /// 清单生成 App 内置信任锚。dev 模式无打包资源时跳过。
 pub fn deploy_builtin_plugins(resource_dir: &std::path::Path, storage_root: &std::path::Path) {
-    use sha2::Digest;
     let builtin_root = resource_dir.join("plugins");
     let Ok(entries) = std::fs::read_dir(&builtin_root) else {
         return; // dev 模式或打包未包含资源：无内置插件
@@ -875,24 +874,13 @@ pub fn deploy_builtin_plugins(resource_dir: &std::path::Path, storage_root: &std
         }
         // 部署：原子替换——旧版残留（如官方签名文件、已删除文件）一并清除，
         // 只迁移运行时自管目录；失败回滚，避免半更新状态。
-        if let Err(error) = deploy_builtin_tree_atomic(&builtin, &installed_dir) {
-            tracing::error!("部署内置插件 {id} 失败（已回滚）：{error}");
+        // 部署：完整事务——暂存组装与全部验证（清单/入口/内容清单/信任锚）
+        // 都在切换前完成；旧目录在备份建立前零改动，任一步失败无损恢复。
+        if let Err(error) =
+            deploy_builtin_atomic_verified(&builtin, &installed_dir, &id, builtin_version)
+        {
+            tracing::error!("部署内置插件 {id} 失败（已无损回滚）：{error}");
             continue;
-        }
-        let manifest_path = installed_dir.join("content-manifest.json");
-        match std::fs::read(&manifest_path).map(|raw| hex::encode(sha2::Sha256::digest(raw))) {
-            Ok(anchor) => {
-                let trust = serde_json::json!({
-                    "kind": "app-builtin",
-                    "content_sha256": anchor,
-                    "plugin_version": builtin_version,
-                });
-                let _ = std::fs::write(
-                    installed_dir.join("local-trust.json"),
-                    serde_json::to_vec_pretty(&trust).unwrap_or_default(),
-                );
-            }
-            Err(error) => tracing::warn!("内置插件 {id} 缺少内容清单：{error}"),
         }
         tracing::info!(
             plugin = %id,
@@ -903,17 +891,24 @@ pub fn deploy_builtin_plugins(resource_dir: &std::path::Path, storage_root: &std
     }
 }
 
-/// 原子替换部署内置插件：
-/// 1. 完整内置树复制到同级暂存目录；2. 迁移运行时自管目录（data/logs/
-///    runtime，保留用户数据）；3. 旧目录改名备份、暂存改名就位（两步
-///    rename 原子切换）；4. 成功删除备份，任一步失败回滚。旧版本残留的
-///    受管文件（官方签名 release.json/.sig、新版已删除的文件）随旧目录
-///    一并移除——残留签名会与新清单版本不符导致插件被判无效，残留文件
-///    也会被内容清单全树校验判为篡改。
-fn deploy_builtin_tree_atomic(
+/// 内置插件的完整部署事务（验证前置、用户数据零风险）：
+///
+/// 1. 内置树复制到同级暂存目录；
+/// 2. 暂存目录内完成全部验证：正式清单校验（含全部结构规则）、ID 匹配、
+///    sidecar 入口存在、内容清单双向校验（覆盖完整、哈希一致）；
+/// 3. 信任锚在暂存目录内生成并复核（锚与内容清单一致）；
+/// 4. 旧目录原子改名备份——此前旧目录零改动，用户数据始终原位；
+/// 5. 从备份**复制**（非移动）data/logs/runtime 到暂存目录，原件留在备份；
+/// 6. 暂存目录原子切换为正式目录；此时新版已通过与运行时一致的信任校验，
+///    删除备份；
+/// 7. 任一步失败：正式目录不存在时备份原名恢复，暂存清理（其中只有内置
+///    副本与用户数据副本，原件完好于备份）。
+fn deploy_builtin_atomic_verified(
     builtin: &std::path::Path,
     installed: &std::path::Path,
-) -> std::io::Result<()> {
+    expected_id: &str,
+    builtin_version: &str,
+) -> Result<(), String> {
     fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(target)?;
         for entry in std::fs::read_dir(source)? {
@@ -929,7 +924,7 @@ fn deploy_builtin_tree_atomic(
     }
     let parent = installed
         .parent()
-        .ok_or_else(|| std::io::Error::other("安装目录缺少父目录"))?;
+        .ok_or_else(|| "安装目录缺少父目录".to_string())?;
     let plugin_name = installed
         .file_name()
         .and_then(|name| name.to_str())
@@ -943,36 +938,77 @@ fn deploy_builtin_tree_atomic(
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&staging);
-    let result = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(&staging)?;
-        copy_tree(builtin, &staging)?;
-        // 迁移运行时自管目录（仅存在的）。
+    let result = (|| -> Result<(), String> {
+        copy_tree(builtin, &staging).map_err(|error| format!("复制内置产物失败：{error}"))?;
+        verify_builtin_staging(&staging, expected_id)?;
+        let manifest_raw = std::fs::read(staging.join("content-manifest.json"))
+            .map_err(|error| format!("内容清单缺失：{error}"))?;
+        let anchor = {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(&manifest_raw))
+        };
+        let trust = serde_json::json!({
+            "kind": "app-builtin",
+            "content_sha256": anchor,
+            "plugin_version": builtin_version,
+        });
+        std::fs::write(
+            staging.join("local-trust.json"),
+            serde_json::to_vec_pretty(&trust).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("写入信任锚失败：{error}"))?;
+        if installed.exists() {
+            std::fs::rename(installed, &backup)
+                .map_err(|error| format!("备份旧版本失败：{error}"))?;
+        }
         for directory in ["data", "logs", "runtime"] {
-            let source = installed.join(directory);
+            let source = backup.join(directory);
             if source.is_dir() {
-                std::fs::rename(&source, staging.join(directory))?;
+                copy_tree(&source, &staging.join(directory))
+                    .map_err(|error| format!("迁移用户目录 {directory} 失败：{error}"))?;
             }
         }
-        if installed.exists() {
-            std::fs::rename(installed, &backup)?;
-        }
-        std::fs::rename(&staging, installed)?;
+        std::fs::rename(&staging, installed)
+            .map_err(|error| format!("切换安装目录失败：{error}"))?;
+        let _ = std::fs::remove_dir_all(&backup);
         Ok(())
     })();
-    match result {
-        Ok(()) => {
-            let _ = std::fs::remove_dir_all(&backup);
-            Ok(())
+    if result.is_err() {
+        if backup.exists() && !installed.exists() {
+            let _ = std::fs::rename(&backup, installed);
         }
-        Err(error) => {
-            // 回滚：备份移回、清理暂存。
-            if backup.exists() && !installed.exists() {
-                let _ = std::fs::rename(&backup, installed);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// 暂存目录的切换前验证：正式清单校验、ID 匹配、sidecar 入口存在、
+/// 内容清单双向校验——与运行时加载/信任校验同源，确保切换后的新版
+/// 能被正式发现与启动。
+fn verify_builtin_staging(staging: &std::path::Path, expected_id: &str) -> Result<(), String> {
+    let manifest =
+        tiangong_plugin_runtime::manifest::PluginManifest::load(&staging.join("plugin.json"))
+            .map_err(|error| format!("清单校验失败：{error:#}"))?;
+    if manifest.id != expected_id {
+        return Err(format!(
+            "清单 ID 不匹配：expected={expected_id}, actual={}",
+            manifest.id
+        ));
+    }
+    if let Some(sidecar) = &manifest.sidecar {
+        if sidecar.runtime != tiangong_plugin_runtime::manifest::SidecarRuntime::Native {
+            if let Some(entry) = &sidecar.entry {
+                if !staging.join(entry).is_file() {
+                    return Err(format!("sidecar 入口缺失：{}", entry.display()));
+                }
             }
-            let _ = std::fs::remove_dir_all(&staging);
-            Err(error)
         }
     }
+    tiangong_plugin_runtime::sidecar::SidecarConfig::verify_integrity_manifest(
+        &staging.join("content-manifest.json"),
+        staging,
+    )
+    .map_err(|error| format!("内容清单校验失败：{error:#}"))
 }
 
 pub(crate) async fn restore_failed_user_message_state(
@@ -4483,7 +4519,7 @@ mod tests {
         std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
         std::fs::write(
             builtin.join("plugin.json"),
-            r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0"}"#,
+            r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"demo","description":"演示","input_schema":{"type":"object"},"timeout_ms":5000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
         )
         .unwrap();
         std::fs::write(builtin.join("sidecar/main.mjs"), "// new bundle").unwrap();
@@ -4588,6 +4624,74 @@ mod tests {
         let manifest = tiangong_plugin_runtime::registry::plugin_manifest("plugin-creator")
             .expect("升级后应可被正式发现加载");
         assert_eq!(manifest.version, "0.2.0");
+    }
+    /// 故障注入：暂存验证失败（清单损坏、内容清单不完整、sidecar 入口
+    /// 缺失）时，部署无损中止——旧版本目录（含用户数据与旧签名）零改动，
+    /// 无暂存/备份残留。备份建立前的任何失败都具备此性质（事务结构保证：
+    /// 备份前旧目录零写操作）。
+    #[test]
+    fn 内置插件_验证失败时无损中止() {
+        let run_case = |break_builtin: &dyn Fn(&std::path::Path)| {
+            let root = tempfile::tempdir().unwrap();
+            let resource_dir = root.path().join("resources");
+            let builtin = resource_dir.join("plugins/plugin-creator");
+            std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
+            std::fs::write(
+                builtin.join("plugin.json"),
+                r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"demo","description":"演示","input_schema":{"type":"object"},"timeout_ms":5000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+            )
+            .unwrap();
+            std::fs::write(builtin.join("sidecar/main.mjs"), "// new").unwrap();
+            builtin_content_manifest(&builtin);
+            break_builtin(&builtin);
+
+            let storage_root = root.path().join("storage");
+            let plugins_dir = storage_root.join("plugins");
+            let installed = plugins_dir.join("plugin-creator");
+            std::fs::create_dir_all(installed.join("data")).unwrap();
+            std::fs::write(
+                installed.join("plugin.json"),
+                r#"{"schema_version":2,"id":"plugin-creator","version":"0.1.0"}"#,
+            )
+            .unwrap();
+            std::fs::write(installed.join("data/keep.txt"), "用户数据").unwrap();
+
+            deploy_builtin_plugins(&resource_dir, &storage_root);
+
+            // 旧版本与用户数据零改动。
+            let manifest: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(installed.join("plugin.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(manifest["version"], "0.1.0", "旧版本应原位保留");
+            assert!(
+                installed.join("data/keep.txt").is_file(),
+                "用户数据必须保留"
+            );
+            // 无暂存/备份残留。
+            for entry in std::fs::read_dir(&plugins_dir).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(!name.starts_with('.'), "不应残留事务目录：{name}");
+            }
+        };
+
+        // 清单损坏。
+        run_case(&|builtin| {
+            std::fs::write(builtin.join("plugin.json"), "not-json").unwrap();
+        });
+        // 内容清单不完整（漏列 sidecar 产物——双向校验失败）。
+        run_case(&|builtin| {
+            std::fs::write(
+                builtin.join("content-manifest.json"),
+                r#"{"algorithm":"sha256","files":[]}"#,
+            )
+            .unwrap();
+        });
+        // sidecar 入口缺失。
+        run_case(&|builtin| {
+            std::fs::remove_file(builtin.join("sidecar/main.mjs")).unwrap();
+            builtin_content_manifest(builtin);
+        });
     }
 }
 

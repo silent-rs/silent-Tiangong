@@ -330,6 +330,20 @@ impl PluginManifest {
                     }
                 }
             }
+            // 无界面工具直连形态（ui 为空且声明 tools、经解释器 sidecar 执行）
+            // 只允许按需生命周期：常驻进程为单实例共享，超时/取消是进程级
+            // 动作，无法按请求归属，会中断并发中的其他调用。协议级按请求
+            // 取消为后续增强，在此之前该形态显式禁用常驻。
+            if self.ui_contributions().is_empty()
+                && self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                && sidecar.runtime != SidecarRuntime::Native
+                && sidecar.lifecycle == SidecarLifecycle::Resident
+            {
+                bail!(
+                    "插件 {} 无界面工具直连形态只允许按需 sidecar（lifecycle=on_demand）；常驻进程的取消无法按请求归属",
+                    self.id
+                );
+            }
             if sidecar.args.len() > 16 {
                 bail!("插件 {} sidecar.args 数量超过上限 16", self.id);
             }
@@ -1104,6 +1118,29 @@ mod tests {
             manifest.sidecar.as_ref().unwrap().runtime,
             SidecarRuntime::Native
         );
+    }
+
+    #[test]
+    fn 无界面工具直连_禁止常驻生命周期() {
+        let manifest = |lifecycle: &str, with_ui: bool| {
+            let ui = if with_ui {
+                r#""ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"dist/index.html"}]},"#
+            } else {
+                ""
+            };
+            serde_json::from_str::<PluginManifest>(&format!(
+                r#"{{"schema_version":2,"id":"sc.demo","version":"0.1.0","entrypoints":["desktop"],                "permissions":["tool.provide","sidecar.invoke"],{ui}                "capabilities":{{"tools":true}},                "tools":[{{"name":"t","description":"工具","input_schema":{{"type":"object"}},"timeout_ms":5000}}],                "sidecar":{{"runtime":"node","entry":"sidecar/main.mjs","lifecycle":"{lifecycle}"}}}}"#
+            ))
+            .unwrap()
+        };
+        manifest("on_demand", false)
+            .validate()
+            .expect("按需直连形态应合法");
+        let error = manifest("resident", false).validate().unwrap_err();
+        assert!(format!("{error:#}").contains("只允许按需"));
+        manifest("resident", true)
+            .validate()
+            .expect("有界面常驻不受限");
     }
 
     #[test]
