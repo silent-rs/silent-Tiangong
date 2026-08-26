@@ -912,6 +912,19 @@ fn generate_oss_distribution(
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
         .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
+    // 解释器形态 sidecar（如 plugin-creator）：一期不进官方分发目录——签名结构
+    // 与下载链均未定义解释器条目，生成残缺目录会让安装端报"缺少平台 sidecar"。
+    // 跳过 OSS 目录生成（本地部署不受影响），官方分发形态待后续分支交付。
+    if let Some(sidecar) = manifest.get("sidecar") {
+        let runtime = sidecar.get("runtime").and_then(serde_json::Value::as_str);
+        if runtime.is_some_and(|value| value != "native") {
+            eprintln!(
+                "[xtask] 跳过 {} 的 OSS 分发目录生成：解释器形态 sidecar 暂不支持官方分发（本地部署已完成）",
+                config.id
+            );
+            return Ok(());
+        }
+    }
     let version = manifest
         .get("version")
         .and_then(serde_json::Value::as_str)

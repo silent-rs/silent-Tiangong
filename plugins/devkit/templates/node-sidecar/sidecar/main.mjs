@@ -9,7 +9,8 @@ import { runSidecar, SidecarError } from './vendor/tiangong-sidecar-sdk/index.mj
 
 await runSidecar({
   pluginId: '{{PLUGIN_ID}}',
-  pluginVersion: '0.1.0',
+  // pluginVersion 由宿主环境变量注入（协议库缺省读 TIANGONG_PLUGIN_VERSION）。
+  businessProtocol: 0,
   dispatch(operation, payload, ctx) {
     if (operation === 'demo.echo') {
       ctx.progress('echo 处理中');

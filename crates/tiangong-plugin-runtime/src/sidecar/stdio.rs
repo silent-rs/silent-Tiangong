@@ -106,13 +106,31 @@ impl StdioSidecarConnection {
         Ok(())
     }
 
-    /// 确保进程存活并完成握手（安装验证 / trait ensure_running 用）。
+    /// 确保进程存活并完成握手（安装验证 / 预热用）。
+    ///
+    /// 按需生命周期不保留进程：临时启动、握手校验后立即清理——预热/安装
+    /// 验证仍确认可达性，但不留下任何存活进程。
     pub fn ensure_running_checked(&self) -> Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-        self.ensure_running(&mut state).map(|_| ())
+        match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => {
+                if self.stopped.load(Ordering::Acquire) {
+                    bail!("stdio sidecar 已停止");
+                }
+                let process = self.start_fresh(&mut state)?;
+                if let Ok(mut child) = process.child.lock() {
+                    terminate_process_tree(&process, &mut child);
+                }
+                state.process = None;
+                Ok(())
+            }
+            crate::manifest::SidecarLifecycle::Resident => {
+                self.ensure_running(&mut state).map(|_| ())
+            }
+        }
     }
 
     /// 确保子进程存活且完成过握手。进程退出时自动重启（换代）。
@@ -147,7 +165,13 @@ impl StdioSidecarConnection {
     }
 
     /// 启动全新进程并完成握手（写入 state.process）。
+    /// 覆盖前先终止旧进程——预热残留或异常路径留下的进程不允许失去管理引用。
     fn start_fresh(&self, state: &mut StdioState) -> Result<Arc<StdioProcess>> {
+        if let Some(process) = state.process.take()
+            && let Ok(mut child) = process.child.lock()
+        {
+            terminate_process_tree(&process, &mut child);
+        }
         let process = Arc::new(self.spawn()?);
         state.process = Some(Arc::clone(&process));
         if let Err(error) = self.handshake(&process) {
@@ -329,6 +353,22 @@ impl StdioSidecarConnection {
             return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "stdio sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                 handshake.protocol_version
+            ))
+            .into());
+        }
+        // 对齐 TCP health_check：插件版本与业务协议版本一并校验，旧制品在
+        // 握手阶段即明确拒绝，不留到业务调用以不确定方式失败。
+        if handshake.plugin_version != self.config.plugin_version {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "stdio sidecar 插件版本不匹配: expected={}, actual={}",
+                self.config.plugin_version, handshake.plugin_version
+            ))
+            .into());
+        }
+        if handshake.business_protocol != self.config.business_protocol {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "stdio sidecar 业务协议版本不匹配: expected={}, actual={}",
+                self.config.business_protocol, handshake.business_protocol
             ))
             .into());
         }

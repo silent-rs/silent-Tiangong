@@ -32,8 +32,11 @@
 - `vendor/plugin-sdk/`：页面 SDK 副本（上游 `plugins/sdk`，与 ts-tool 同源）。
 - `scripts/build.mjs` / `scripts/package.mjs`：构建与组装 release。
 
-## 运行要求
+## 运行形态
 
+- 本模板声明 `lifecycle: "resident"`（常驻）：跨调用复用进程，可保存进程内
+  状态与发送通知。省略该字段即为按需（默认）——每次调用独立进程、完成即清，
+  适合一次性任务；按需模式无进程内状态，通知不可用。
 - 开发机构建：yarn + Node ≥ 20（网络装依赖）。
 - 宿主运行：PATH 中的 `node` ≥ 20（或 `TIANGONG_NODE_PATH` 指定）。
 - 安装经 plugin-creator 原生确认；安装后 sidecar 文件被改动将拒绝启动

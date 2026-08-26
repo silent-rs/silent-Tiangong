@@ -281,6 +281,8 @@ impl SidecarConfig {
             .with_context(|| format!("读取内容清单失败: {}", manifest_path.display()))?;
         let content: ContentManifest = serde_json::from_slice(&raw)
             .with_context(|| format!("解析内容清单失败: {}", manifest_path.display()))?;
+        // 路径唯一性：清单不允许重复条目。
+        let mut listed = std::collections::BTreeSet::new();
         for file in &content.files {
             let relative = Path::new(&file.path);
             if relative.components().any(|component| {
@@ -293,7 +295,15 @@ impl SidecarConfig {
             }) {
                 bail!("内容清单包含不安全路径: {}", file.path);
             }
+            if !listed.insert(file.path.clone()) {
+                bail!("内容清单包含重复路径: {}", file.path);
+            }
             let path = root.join(relative);
+            let metadata = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("内容清单条目不是普通文件: {}", file.path);
+            }
             let raw = std::fs::read(&path)
                 .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
             let actual = hex::encode(Sha256::digest(&raw));
@@ -303,6 +313,51 @@ impl SidecarConfig {
                     file.path
                 );
             }
+        }
+        // 反向遍历受管文件树：清单必须完整覆盖——未列出的受管文件视为
+        // 篡改（绕过哈希锁定的替换/新增通道）。运行时自管目录与信任标记除外。
+        const UNMANAGED: [&str; 5] = [
+            "runtime",
+            "logs",
+            "data",
+            "local-trust.json",
+            "content-manifest.json",
+        ];
+        let mut actual_files = std::collections::BTreeSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .with_context(|| format!("读取插件目录失败: {}", directory.display()))?
+            {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if directory == root && UNMANAGED.contains(&name.as_ref()) {
+                    continue;
+                }
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    stack.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .context("插件文件相对路径推算失败")?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    actual_files.insert(relative);
+                }
+            }
+        }
+        let unexpected: Vec<&String> = actual_files.difference(&listed).collect();
+        if !unexpected.is_empty() {
+            bail!(
+                "插件目录存在内容清单未覆盖的文件（可能被篡改），拒绝启动: {}",
+                unexpected
+                    .iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
         Ok(())
     }

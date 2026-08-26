@@ -58,6 +58,7 @@ export async function runSidecar(options) {
     process.exit(1);
   }
   const pluginId = options.pluginId ?? process.env[PLUGIN_ID_ENV] ?? 'sidecar';
+  // pluginVersion 缺省读宿主注入的环境变量，避免与清单版本漂移导致握手被拒。
   const pluginVersion = options.pluginVersion ?? process.env[PLUGIN_VERSION_ENV] ?? '0.0.0';
   const expectedToken = process.env[STDIO_TOKEN_ENV] ?? '';
   const dispatch = options.dispatch;

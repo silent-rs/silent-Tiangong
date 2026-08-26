@@ -15,7 +15,8 @@ const commands = { init, add, validate, build, run, logs };
 
 await runSidecar({
   pluginId: 'plugin-creator',
-  pluginVersion: '0.1.0',
+  // pluginVersion 由宿主环境变量注入（协议库缺省读 TIANGONG_PLUGIN_VERSION）。
+  businessProtocol: 0,
   dispatch(operation, payload) {
     const command = operation.startsWith('devkit.')
       ? operation.slice('devkit.'.length)

@@ -273,6 +273,9 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
 /// 仅当构建产物带 content-manifest.json（devkit build 必然生成）时可落锚。
 fn write_local_trust(staged_path: &Path) -> Result<()> {
     let manifest_path = staged_path.join("content-manifest.json");
+    // 锚定前先双向校验：清单必须完整覆盖暂存目录的受管文件树且哈希一致，
+    // 不完整清单（漏列文件）在安装时即拒绝，不给"未列出文件可被替换"留通道。
+    crate::sidecar::SidecarConfig::verify_integrity_manifest(&manifest_path, staged_path)?;
     let raw = std::fs::read(&manifest_path).with_context(|| {
         "本地安装缺少内容清单（content-manifest.json），无法建立本地信任；请用 plugin-creator 重新构建".to_string()
     })?;
