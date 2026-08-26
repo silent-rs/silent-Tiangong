@@ -161,6 +161,39 @@ impl Drop for StagedPlugin {
 }
 
 /// 将用户选择的本地完整插件目录复制到受管事务目录。
+/// 安全解包插件归档（tar.zst）：逐条目校验相对路径（拒绝绝对路径、`..`
+/// 与符号链接条目）后解到目标目录，防止归档路径逃逸。
+pub fn extract_plugin_archive(archive: &Path, destination: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("打开插件归档失败: {}", archive.display()))?;
+    let decoder = zstd::Decoder::new(file)?;
+    let mut tar = tar::Archive::new(decoder);
+    for entry in tar.entries().with_context(|| "读取插件归档条目失败")? {
+        let mut entry = entry.with_context(|| "读取插件归档条目失败")?;
+        let path = entry
+            .path()
+            .with_context(|| "归档条目路径无效")?
+            .to_path_buf();
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            })
+        {
+            bail!("插件归档包含不安全路径: {}", path.display());
+        }
+        if entry.link_name()?.is_some() {
+            bail!("插件归档包含链接条目: {}", path.display());
+        }
+        entry
+            .unpack_in(destination)
+            .with_context(|| format!("解包归档条目失败: {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPlugin> {
     ensure_source_directory(source)?;
     let source_manifest = source.join(MANIFEST_FILE);
@@ -415,13 +448,22 @@ impl PluginRepository {
             );
         }
 
-        let ui_entries = manifest
-            .ui_contributions()
-            .into_iter()
-            .map(|contribution| contribution.entry)
-            .collect::<BTreeSet<_>>();
+        let interpreter_plugin = manifest
+            .sidecar
+            .as_ref()
+            .is_some_and(|sidecar| sidecar.runtime != crate::manifest::SidecarRuntime::Native);
+        let ui_entries = if interpreter_plugin {
+            // 解释器插件的全部制品（含 UI）在单一归档内，独立条目校验跳过。
+            BTreeSet::<String>::new()
+        } else {
+            manifest
+                .ui_contributions()
+                .into_iter()
+                .map(|contribution| contribution.entry)
+                .collect::<BTreeSet<String>>()
+        };
         let catalog_ui_entries = release.ui.keys().cloned().collect::<BTreeSet<_>>();
-        if ui_entries != catalog_ui_entries {
+        if !interpreter_plugin && ui_entries != catalog_ui_entries {
             bail!(
                 "插件 {} 的目录 UI 制品与 plugin.json 声明不一致",
                 release.id
@@ -474,14 +516,51 @@ impl PluginRepository {
         }
 
         if has_sidecar {
+            let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
+            if sidecar_binary.runtime != crate::manifest::SidecarRuntime::Native {
+                // 解释器插件：下载平台无关的完整归档并解包到暂存目录——
+                // 归档含全部受管文件（清单/UI/sidecar/模板/内容清单/签名），
+                // 校验和锚定归档整体，签名验签由安装链（verify_signed_release，
+                // 含内容清单全树校验）完成。
+                let artifact = release.sidecars.get("any").ok_or_else(|| {
+                    anyhow!("插件 {} 没有解释器 sidecar 归档条目（any）", release.id)
+                })?;
+                let archive_path = staged
+                    .path
+                    .parent()
+                    .ok_or_else(|| anyhow!("暂存目录缺少父目录"))?
+                    .join(format!(".{}-download.tar.zst", release.id));
+                self.download_file(artifact, &archive_path, make_file_progress(step_index))
+                    .await?;
+                let extracted = extract_plugin_archive(&archive_path, &staged.path);
+                let _ = std::fs::remove_file(&archive_path);
+                extracted?;
+                step_index += 1;
+                // 签名清单独立于归档（签名非确定）：按目录条目下载到暂存，
+                // 验签由安装链完成（含内容清单全树校验）。
+                let signed = release
+                    .signed_releases
+                    .get("any")
+                    .ok_or_else(|| anyhow!("插件 {} 没有解释器签名条目（any）", release.id))?;
+                self.download_unchecked(&signed.url, &staged.path.join("release.json"))
+                    .await?;
+                self.download_unchecked(
+                    &signed.signature_url,
+                    &staged.path.join("release.json.sig"),
+                )
+                .await?;
+                if let Some(cb) = make_file_progress(step_index) {
+                    cb(100, 100);
+                }
+                for directory in ["runtime", "logs", "data"] {
+                    std::fs::create_dir_all(staged.path.join(directory))?;
+                }
+                return Ok(staged);
+            }
             let artifact = release
                 .sidecars
                 .get(&platform)
                 .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的 sidecar", release.id))?;
-            let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
-            if sidecar_binary.runtime != crate::manifest::SidecarRuntime::Native {
-                bail!("插件 {} 解释器 sidecar 暂不经官方市场分发", release.id);
-            }
             let binary = sidecar_binary
                 .binary
                 .as_ref()

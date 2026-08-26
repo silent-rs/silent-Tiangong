@@ -10422,7 +10422,6 @@ dependencies = [
  "reqwest 0.13.4",
  "rmcp",
  "scru128",
- "semver",
  "serde",
  "serde_json",
  "serial_test",
@@ -11220,6 +11219,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.11.0",
+ "tar",
  "tempfile",
  "tiangong-config",
  "tiangong-core",
@@ -11230,6 +11230,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "windows-sys 0.61.2",
+ "zstd",
 ]
 
 [[package]]
@@ -13744,8 +13745,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "toml 1.1.4+spec-1.1.0",
  "url",
+ "zstd",
 ]
 
 [[package]]

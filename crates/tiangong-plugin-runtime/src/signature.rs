@@ -35,6 +35,10 @@ pub struct SignedPluginRelease {
     pub ui: Vec<SignedArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SignedArtifact>,
+    /// 解释器 sidecar 插件：官方签名锚定完整内容清单（content-manifest.json
+    /// 的哈希），清单覆盖全树——与本地信任锚同构，签名即信任根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_manifest: Option<SignedArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,18 +136,23 @@ impl SignedPluginRelease {
                 if !self.has_permission("sidecar.invoke") {
                     bail!("插件签名清单未授权 sidecar.invoke");
                 }
-                if sidecar.runtime != crate::manifest::SidecarRuntime::Native {
-                    bail!("插件 {} 官方签名暂不支持解释器 sidecar", plugin_manifest.id);
+                if sidecar.runtime == crate::manifest::SidecarRuntime::Native {
+                    let binary = sidecar.binary.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "插件 {} native sidecar 缺少 binary 声明",
+                            plugin_manifest.id
+                        )
+                    })?;
+                    signed.verify(directory, &sidecar_binary_path(binary)?)?;
                 }
-                let binary = sidecar.binary.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "插件 {} native sidecar 缺少 binary 声明",
-                        plugin_manifest.id
-                    )
-                })?;
-                signed.verify(directory, &sidecar_binary_path(binary)?)?;
+                // 解释器形态由下方 content_manifest 条目验证（签名锚定
+                // 完整内容清单，清单双向校验覆盖全树）。
             }
             (None, None) => {}
+            // 解释器形态：签名无二进制条目，由内容清单条目承载（上方分支
+            // 已在 runtime 非 Native 时要求 content_manifest 并完成校验）。
+            (None, Some(sidecar)) if sidecar.runtime != crate::manifest::SidecarRuntime::Native => {
+            }
             _ => bail!("插件签名清单与 plugin.json 的 sidecar 声明不一致"),
         }
         Ok(())

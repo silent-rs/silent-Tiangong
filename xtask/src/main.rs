@@ -420,7 +420,6 @@ fn main() {
             Ok(config) => build_plugin(config),
             Err(error) => Err(error),
         },
-        [command] if command == "prepare-builtin-plugins" => prepare_builtin_plugins(),
         [command, plugin, output] if command == "build-plugin-wasm" => {
             match plugin_config(plugin) {
                 Ok(config) => build_plugin_wasm(config, output),
@@ -737,7 +736,21 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
     }
 
     // sidecar 声明（无 sidecar 的插件跳过，保持清单与 plugin.json 一致）。
-    if let Some(sidecar_artifact) = config.sidecar_artifact {
+    // 解释器形态：签名锚定完整内容清单（覆盖全树），不签单个二进制。
+    let manifest_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json"))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let runtime = (manifest_value.get("sidecar").cloned().unwrap_or_default())
+        .get("runtime")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("native")
+        .to_string();
+    if runtime != "native" {
+        release["content_manifest"] = serde_json::json!({
+            "path": "content-manifest.json",
+            "sha256": sha256(&plugin.join("content-manifest.json"))?,
+        });
+    } else if let Some(sidecar_artifact) = config.sidecar_artifact {
         let sidecar_name = format!("{sidecar_artifact}{}", std::env::consts::EXE_SUFFIX);
         release["sidecar"] = serde_json::json!({
             "path": sidecar_name,
@@ -898,6 +911,153 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// 解释器插件的官方发布：单一 tar.zst 归档（含全部受管文件与签名清单）
+/// 置于版本目录根（平台无关）；目录条目 sidecars.any 指向归档、
+/// signed_releases.any 指向签名；fragment 为 <id>-any.json。
+#[allow(clippy::too_many_arguments)]
+fn generate_interpreter_distribution(
+    _workspace_root: &Path,
+    plugin: &Path,
+    config: &PluginConfig,
+    _manifest: &serde_json::Value,
+    version: &str,
+    base_url: &str,
+) -> io::Result<()> {
+    let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
+    let dist_root = _workspace_root.join(PLUGIN_DIST);
+    let release_root = dist_root.join("plugins").join(config.id).join(version);
+    let index_root = dist_root.join("plugins-index");
+    std::fs::create_dir_all(&release_root)?;
+    std::fs::create_dir_all(index_root.join("fragments"))?;
+
+    // 独立清单（目录发现用）与签名清单复制到版本目录根。
+    std::fs::copy(plugin.join("plugin.json"), release_root.join("plugin.json"))?;
+    for file in ["release.json", "release.json.sig"] {
+        std::fs::copy(plugin.join(file), release_root.join(file)).map_err(|error| {
+            invalid_data(format!(
+                "缺少 {file}（先经 write_signed_release 签名）：{error}"
+            ))
+        })?;
+    }
+    // 确定性归档（排除本地信任标记、运行时目录与签名文件）。
+    // 幂等保护：同版本归档已存在则跳过（多平台 CI 产物合并语义）。
+    let archive_name = format!("{}-{}.tar.zst", config.id, version);
+    let archive_path = release_root.join(&archive_name);
+    if !archive_path.exists() {
+        create_plugin_archive(plugin, &archive_path)?;
+    }
+    let archive_checksum = format!("sha256:{}", sha256(&archive_path)?);
+
+    let manifest_checksum = format!("sha256:{}", sha256(&plugin.join("plugin.json"))?);
+    let release = serde_json::json!({
+        "id": config.id,
+        "name": config.name,
+        "version": version,
+        "description": config.description,
+        "manifest": {
+            "url": format!("{release_url}/plugin.json"),
+            "checksum": manifest_checksum,
+        },
+        "sidecars": {
+            "any": {
+                "url": format!("{release_url}/{archive_name}"),
+                "checksum": archive_checksum,
+            }
+        },
+        "ui": {},
+        "signed_releases": {
+            "any": {
+                "url": format!("{release_url}/release.json"),
+                "signature_url": format!("{release_url}/release.json.sig"),
+            }
+        },
+    });
+    write_json(
+        &index_root.join("catalog.json"),
+        &serde_json::json!({"version": 1, "plugins": [release.clone()]}),
+    )?;
+    write_json(
+        &index_root
+            .join("fragments")
+            .join(format!("{}-any.json", config.id)),
+        &release,
+    )?;
+    let mut checksums = format!(
+        "{}  release.json\n{}  release.json.sig\n{}  {}\n",
+        sha256(&release_root.join("release.json"))?,
+        sha256(&release_root.join("release.json.sig"))?,
+        sha256(&archive_path)?,
+        archive_name,
+    );
+    checksums.push_str(&format!(
+        "{}  plugin.json\n",
+        sha256(&plugin.join("plugin.json"))?
+    ));
+    std::fs::write(release_root.join("SHA256SUMS"), checksums)?;
+    eprintln!(
+        "[xtask] 解释器插件 {} 归档已生成: {}",
+        config.id,
+        archive_path.display()
+    );
+    Ok(())
+}
+
+/// 生成确定性插件归档（tar.zst）：条目 mtime/uid/gid/mode 固定，同内容必得
+/// 同哈希——多平台 CI 各自生成可幂等合并。排除本地信任标记与打包元数据
+///（官方签名与本地信任不混用；归档内容为发布受管文件全集，含签名清单）。
+fn create_plugin_archive(source: &Path, destination: &Path) -> io::Result<()> {
+    let file = std::fs::File::create(destination)?;
+    let zstd_encoder = zstd::Encoder::new(file, 19)?;
+    let mut builder = tar::Builder::new(zstd_encoder);
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if directory == source
+                && matches!(
+                    name.as_ref(),
+                    "local-trust.json"
+                        | ".package-info"
+                        | "runtime"
+                        | "logs"
+                        | "data"
+                        // 签名非确定（minisign 随机 nonce），独立于归档存在——
+                        // 归档保持内容确定性，多平台产物可幂等合并。
+                        | "release.json"
+                        | "release.json.sig"
+                )
+            {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(source)
+                .map_err(|error| invalid_data(format!("归档相对路径推算失败: {error}")))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(entry.metadata()?.len());
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder.append_data(&mut header, relative, std::fs::File::open(&path)?)?;
+        }
+    }
+    let zstd_encoder = builder
+        .into_inner()
+        .map_err(|error| io::Error::other(format!("归档写入失败: {error}")))?;
+    zstd_encoder
+        .finish()
+        .map_err(|error| io::Error::other(format!("归档压缩失败: {error}")))?;
+    Ok(())
+}
+
 fn generate_oss_distribution(
     workspace_root: &Path,
     plugin: &Path,
@@ -905,7 +1065,17 @@ fn generate_oss_distribution(
 ) -> io::Result<()> {
     // 只有带 sidecar 的插件才生成签名发布清单：签名用于建立 sidecar 信任边界，
     // 纯 WASM 插件（如 prompt）不需要 sidecar，运行时不强制要求签名。
-    let has_sidecar = config.sidecar_artifact.is_some();
+    // 签名触发：native sidecar 插件与解释器插件（官方信任根，解释器签名
+    // 锚定内容清单）。纯 WASM/UI 插件不携带签名。
+    let manifest_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json"))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let interpreter_release = manifest_value
+        .get("sidecar")
+        .and_then(|sidecar| sidecar.get("runtime"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|runtime| runtime != "native");
+    let has_sidecar = config.sidecar_artifact.is_some() || interpreter_release;
     if has_sidecar {
         write_signed_release(plugin, config)?;
     }
@@ -913,19 +1083,6 @@ fn generate_oss_distribution(
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
         .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
-    // 解释器形态 sidecar（如 plugin-creator）：一期不进官方分发目录——签名结构
-    // 与下载链均未定义解释器条目，生成残缺目录会让安装端报"缺少平台 sidecar"。
-    // 跳过 OSS 目录生成（本地部署不受影响），官方分发形态待后续分支交付。
-    if let Some(sidecar) = manifest.get("sidecar") {
-        let runtime = sidecar.get("runtime").and_then(serde_json::Value::as_str);
-        if runtime.is_some_and(|value| value != "native") {
-            eprintln!(
-                "[xtask] 跳过 {} 的 OSS 分发目录生成：解释器形态 sidecar 暂不支持官方分发（本地部署已完成）",
-                config.id
-            );
-            return Ok(());
-        }
-    }
     let version = manifest
         .get("version")
         .and_then(serde_json::Value::as_str)
@@ -935,6 +1092,23 @@ fn generate_oss_distribution(
         .to_string();
     let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
     let platform = current_platform_key();
+    // 解释器 sidecar 插件：发布形态为单一确定性归档（平台无关，目录键 any）；
+    // 官方资格由 plugin_config 白名单决定（build-plugin 仅接受登记插件）。
+    let interpreter_runtime = manifest
+        .get("sidecar")
+        .and_then(|sidecar| sidecar.get("runtime"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|runtime| runtime != "native");
+    if interpreter_runtime {
+        return generate_interpreter_distribution(
+            workspace_root,
+            plugin,
+            config,
+            &manifest,
+            version,
+            &base_url,
+        );
+    }
     let dist_root = workspace_root.join(PLUGIN_DIST);
     let release_root = dist_root.join("plugins").join(config.id).join(version);
     let platform_root = release_root.join(&platform);
@@ -1626,28 +1800,6 @@ fn new_plugin(plugin_id: &str, output_dir: Option<&str>) -> io::Result<()> {
     println!("[xtask] 插件骨架已生成: {}", target.display());
     println!("[xtask] 本地导入: 在天工「设置 → 插件管理 → 导入本地插件」选择该目录");
     println!("[xtask] 工程化开发: 参阅 plugins/sdk/README.md 与 docs/plugin-development.md");
-    Ok(())
-}
-
-/// 准备随 App 打包的内置插件资源：构建 plugin-creator 并把 release 产物
-/// 复制到 src-tauri/resources/plugins/<id>/（tauri bundle resources 已配置）。
-/// 打包前调用；dev 模式资源缺失时启动部署自动跳过。
-pub fn prepare_builtin_plugins() -> io::Result<()> {
-    let root = workspace_root();
-    let config = plugin_config("plugin-creator")?;
-    // 完整打包（package 脚本内部含 yarn build：类型检查 + 页面 + sidecar 双端
-    // 打包并组装 release/ 与内容清单）。build_plugin 只部署本机安装目录、不
-    // 组装 release，不能用作内置产物来源。
-    let plugin_root = root.join(config.plugin_root);
-    run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
-    run_yarn(&plugin_root, &["run", "package"])?;
-    let release = plugin_root.join("release");
-    require_file(&release.join("plugin.json"))?;
-    let destination = root.join("src-tauri/resources/plugins").join(config.id);
-    remove_dir_if_exists(&destination)?;
-    std::fs::create_dir_all(&destination)?;
-    copy_dir_recursive(&release, &destination)?;
-    eprintln!("[xtask] 内置插件资源已就绪: {}", destination.display());
     Ok(())
 }
 

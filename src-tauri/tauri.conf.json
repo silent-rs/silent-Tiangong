@@ -5,7 +5,7 @@
   "identifier": "com.silent.tiangong",
   "build": {
     "beforeDevCommand": "yarn --cwd ../frontend dev",
-    "beforeBuildCommand": "yarn --cwd ../frontend build && cargo run -p xtask -- prepare-builtin-plugins",
+    "beforeBuildCommand": "yarn --cwd ../frontend build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
   },
@@ -65,9 +65,6 @@
       "nsis": {
         "template": "templates/installer.nsi"
       }
-    },
-    "resources": {
-      "resources/plugins/": "plugins/"
     }
   },
   "plugins": {

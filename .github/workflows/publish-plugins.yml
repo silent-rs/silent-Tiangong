@@ -27,7 +27,6 @@ jobs:
       plugin_root: ${{ steps.plugin.outputs.plugin_root }}
       has_wasm: ${{ steps.plugin.outputs.has_wasm }}
       has_ui: ${{ steps.plugin.outputs.has_ui }}
-      publishable: ${{ steps.plugin.outputs.publishable }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,23 +60,9 @@ jobs:
                   manifest = json.load(open(f"{root}/plugin.json"))
                   has_wasm = "true" if manifest.get("wasm") else "false"
                   has_ui = "true" if manifest.get("ui", {}).get("contributions") else "false"
-                  # 解释器形态 sidecar（runtime 非 native）暂不支持官方 OSS 分发：
-                  # 签名与下载条目未定义。发布链整体跳过（本地部署不受影响），
-                  # 避免构建中途缺 fragment 失败或产出残缺目录。
-                  runtime = (manifest.get("sidecar") or {}).get("runtime", "native")
-                  publishable = "false" if runtime != "native" else "true"
-                  if publishable == "false":
-                      # 警告必须写 stderr：本脚本 stdout 整体重定向到 GITHUB_OUTPUT，
-                      # 该文件只接受 key=value 记录，混入注解行会导致输出解析失败。
-                      print(
-                          f"::warning::插件 {plugin_id} 声明解释器 sidecar（runtime={runtime}），"
-                          "官方 OSS 分发暂不支持，本次发布链整体跳过（本地部署可用）",
-                          file=sys.stderr,
-                      )
                   print(f"plugin_root={root}")
                   print(f"has_wasm={has_wasm}")
                   print(f"has_ui={has_ui}")
-                  print(f"publishable={publishable}")
                   break
           else:
               raise SystemExit(f"plugin.json not found for {plugin_id}")
@@ -86,7 +71,7 @@ jobs:
   build-wasm:
     name: Build shared WASM
     needs: resolve-plugin
-    if: needs.resolve-plugin.outputs.has_wasm == 'true' && needs.resolve-plugin.outputs.publishable != 'false'
+    if: needs.resolve-plugin.outputs.has_wasm == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -110,7 +95,7 @@ jobs:
   build-ui:
     name: Build shared UI
     needs: resolve-plugin
-    if: needs.resolve-plugin.outputs.has_ui == 'true' && needs.resolve-plugin.outputs.publishable != 'false'
+    if: needs.resolve-plugin.outputs.has_ui == 'true'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -141,7 +126,7 @@ jobs:
     needs: [resolve-plugin, build-wasm, build-ui]
     # 纯 UI 插件会跳过 build-wasm；显式判定 needs 结果，避免
     # skipped 状态传播导致整条发布链被跳过。
-    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.publishable != 'false' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

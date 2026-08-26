@@ -210,9 +210,6 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare builtin plugins (plugin-creator)
-        run: cargo run -p xtask -- prepare-builtin-plugins
-
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0.6.2
         env:

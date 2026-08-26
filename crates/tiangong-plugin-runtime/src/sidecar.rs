@@ -320,12 +320,16 @@ impl SidecarConfig {
         }
         // 反向遍历受管文件树：清单必须完整覆盖——未列出的受管文件视为
         // 篡改（绕过哈希锁定的替换/新增通道）。运行时自管目录与信任标记除外。
-        const UNMANAGED: [&str; 5] = [
+        // 运行时自管目录、信任标记与官方签名文件（验签产物，非内容清单
+        // 管辖——签名锚定的是清单本身）。
+        const UNMANAGED: [&str; 7] = [
             "runtime",
             "logs",
             "data",
             "local-trust.json",
             "content-manifest.json",
+            "release.json",
+            "release.json.sig",
         ];
         let mut actual_files = std::collections::BTreeSet::new();
         let mut stack = vec![root.to_path_buf()];

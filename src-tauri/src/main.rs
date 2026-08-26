@@ -139,15 +139,6 @@ fn run_gui() {
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
 
-            // 部署随 App 携带的内置插件（plugin-creator 等，版本较新时落盘；
-            // dev 模式无打包资源自动跳过），先于插件预加载。
-            {
-                let storage_root = tiangong_config::io::storage_root();
-                if let Ok(resource_dir) = app.path().resource_dir() {
-                    tiangong_app::commands::deploy_builtin_plugins(&resource_dir, &storage_root);
-                }
-            }
-
             // 启动阶段一次性预加载插件快照。后续状态查询、设置页和 Core 创建
             // 只复用该快照，不隐式扫描、编译或热加载插件。
             {

@@ -2555,12 +2555,8 @@ fn sidecar_connection_inner(
                     installed.manifest.id
                 );
             }
-            if interpreter.is_some() {
-                bail!(
-                    "插件 {} 官方签名暂不支持解释器 sidecar",
-                    installed.manifest.id
-                );
-            }
+            // 官方签名解释器 sidecar：签名锚定内容清单并已在验签时完成
+            // 全树校验（signature.rs），按官方信任放行。
             Some(signed_release)
         }
         None => {

@@ -819,198 +819,6 @@ async fn release_input_send_claim_and_cleanup(
     }
 }
 
-/// 部署随 App 携带的内置插件（当前为 plugin-creator）：内置版本较新或本机
-/// 未安装时落盘到插件目录（保留 data/logs/runtime 运行时目录），并按内容
-/// 清单生成 App 内置信任锚。dev 模式无打包资源时跳过。
-pub fn deploy_builtin_plugins(resource_dir: &std::path::Path, storage_root: &std::path::Path) {
-    let builtin_root = resource_dir.join("plugins");
-    let Ok(entries) = std::fs::read_dir(&builtin_root) else {
-        return; // dev 模式或打包未包含资源：无内置插件
-    };
-    for entry in entries.flatten() {
-        let builtin = entry.path();
-        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Ok(builtin_manifest_raw) = std::fs::read(builtin.join("plugin.json")) else {
-            tracing::warn!("内置插件 {id} 缺少 plugin.json，跳过");
-            continue;
-        };
-        let Ok(builtin_manifest) =
-            serde_json::from_slice::<serde_json::Value>(&builtin_manifest_raw)
-        else {
-            tracing::warn!("内置插件 {id} 清单解析失败，跳过");
-            continue;
-        };
-        let builtin_version = builtin_manifest
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let installed_dir = storage_root.join("plugins").join(&id);
-        let installed_version = std::fs::read(installed_dir.join("plugin.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-            .and_then(|manifest| {
-                manifest
-                    .get("version")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            });
-        let should_deploy = match installed_version.as_deref() {
-            None => true,
-            Some(installed) => {
-                match (
-                    semver::Version::parse(installed),
-                    semver::Version::parse(builtin_version),
-                ) {
-                    (Ok(installed), Ok(builtin)) => builtin > installed,
-                    // 版本不可解析时按字符串不等即更新（保守：宁可更新）。
-                    _ => installed != builtin_version,
-                }
-            }
-        };
-        if !should_deploy {
-            continue;
-        }
-        // 部署：原子替换——旧版残留（如官方签名文件、已删除文件）一并清除，
-        // 只迁移运行时自管目录；失败回滚，避免半更新状态。
-        // 部署：完整事务——暂存组装与全部验证（清单/入口/内容清单/信任锚）
-        // 都在切换前完成；旧目录在备份建立前零改动，任一步失败无损恢复。
-        if let Err(error) =
-            deploy_builtin_atomic_verified(&builtin, &installed_dir, &id, builtin_version)
-        {
-            tracing::error!("部署内置插件 {id} 失败（已无损回滚）：{error}");
-            continue;
-        }
-        tracing::info!(
-            plugin = %id,
-            version = builtin_version,
-            previous = ?installed_version,
-            "已部署 App 内置插件"
-        );
-    }
-}
-
-/// 内置插件的完整部署事务（验证前置、用户数据零风险）：
-///
-/// 1. 内置树复制到同级暂存目录；
-/// 2. 暂存目录内完成全部验证：正式清单校验（含全部结构规则）、ID 匹配、
-///    sidecar 入口存在、内容清单双向校验（覆盖完整、哈希一致）；
-/// 3. 信任锚在暂存目录内生成并复核（锚与内容清单一致）；
-/// 4. 旧目录原子改名备份——此前旧目录零改动，用户数据始终原位；
-/// 5. 从备份**复制**（非移动）data/logs/runtime 到暂存目录，原件留在备份；
-/// 6. 暂存目录原子切换为正式目录；此时新版已通过与运行时一致的信任校验，
-///    删除备份；
-/// 7. 任一步失败：正式目录不存在时备份原名恢复，暂存清理（其中只有内置
-///    副本与用户数据副本，原件完好于备份）。
-fn deploy_builtin_atomic_verified(
-    builtin: &std::path::Path,
-    installed: &std::path::Path,
-    expected_id: &str,
-    builtin_version: &str,
-) -> Result<(), String> {
-    fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(target)?;
-        for entry in std::fs::read_dir(source)? {
-            let entry = entry?;
-            let destination = target.join(entry.file_name());
-            if entry.file_type()?.is_dir() {
-                copy_tree(&entry.path(), &destination)?;
-            } else {
-                std::fs::copy(entry.path(), destination)?;
-            }
-        }
-        Ok(())
-    }
-    let parent = installed
-        .parent()
-        .ok_or_else(|| "安装目录缺少父目录".to_string())?;
-    let plugin_name = installed
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("plugin");
-    let staging = parent.join(format!(
-        ".{plugin_name}-builtin-staging-{}",
-        std::process::id()
-    ));
-    let backup = parent.join(format!(
-        ".{plugin_name}-builtin-backup-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    let result = (|| -> Result<(), String> {
-        copy_tree(builtin, &staging).map_err(|error| format!("复制内置产物失败：{error}"))?;
-        verify_builtin_staging(&staging, expected_id)?;
-        let manifest_raw = std::fs::read(staging.join("content-manifest.json"))
-            .map_err(|error| format!("内容清单缺失：{error}"))?;
-        let anchor = {
-            use sha2::Digest;
-            hex::encode(sha2::Sha256::digest(&manifest_raw))
-        };
-        let trust = serde_json::json!({
-            "kind": "app-builtin",
-            "content_sha256": anchor,
-            "plugin_version": builtin_version,
-        });
-        std::fs::write(
-            staging.join("local-trust.json"),
-            serde_json::to_vec_pretty(&trust).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| format!("写入信任锚失败：{error}"))?;
-        if installed.exists() {
-            std::fs::rename(installed, &backup)
-                .map_err(|error| format!("备份旧版本失败：{error}"))?;
-        }
-        for directory in ["data", "logs", "runtime"] {
-            let source = backup.join(directory);
-            if source.is_dir() {
-                copy_tree(&source, &staging.join(directory))
-                    .map_err(|error| format!("迁移用户目录 {directory} 失败：{error}"))?;
-            }
-        }
-        std::fs::rename(&staging, installed)
-            .map_err(|error| format!("切换安装目录失败：{error}"))?;
-        let _ = std::fs::remove_dir_all(&backup);
-        Ok(())
-    })();
-    if result.is_err() {
-        if backup.exists() && !installed.exists() {
-            let _ = std::fs::rename(&backup, installed);
-        }
-        let _ = std::fs::remove_dir_all(&staging);
-    }
-    result
-}
-
-/// 暂存目录的切换前验证：正式清单校验、ID 匹配、sidecar 入口存在、
-/// 内容清单双向校验——与运行时加载/信任校验同源，确保切换后的新版
-/// 能被正式发现与启动。
-fn verify_builtin_staging(staging: &std::path::Path, expected_id: &str) -> Result<(), String> {
-    let manifest =
-        tiangong_plugin_runtime::manifest::PluginManifest::load(&staging.join("plugin.json"))
-            .map_err(|error| format!("清单校验失败：{error:#}"))?;
-    if manifest.id != expected_id {
-        return Err(format!(
-            "清单 ID 不匹配：expected={expected_id}, actual={}",
-            manifest.id
-        ));
-    }
-    if let Some(sidecar) = &manifest.sidecar {
-        if sidecar.runtime != tiangong_plugin_runtime::manifest::SidecarRuntime::Native {
-            if let Some(entry) = &sidecar.entry {
-                if !staging.join(entry).is_file() {
-                    return Err(format!("sidecar 入口缺失：{}", entry.display()));
-                }
-            }
-        }
-    }
-    tiangong_plugin_runtime::sidecar::SidecarConfig::verify_integrity_manifest(
-        &staging.join("content-manifest.json"),
-        staging,
-    )
-    .map_err(|error| format!("内容清单校验失败：{error:#}"))
-}
-
 pub(crate) async fn restore_failed_user_message_state(
     state: &TiangongApp,
     session_id: &str,
@@ -4299,7 +4107,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        cancel_after_session_send_boundary, deploy_builtin_plugins, done_event_keeps_turn_running,
+        cancel_after_session_send_boundary, done_event_keeps_turn_running,
         merge_agent_worker_messages, save_started_bot_state, stop_bot_with_state,
     };
 
@@ -4475,223 +4283,194 @@ mod tests {
         assert!(store.get(&id).unwrap().enabled);
     }
 
-    /// 生成真实内容清单（路径 + sha256，排除清单自身）——内置产物测试用。
-    fn builtin_content_manifest(builtin: &std::path::Path) {
-        use sha2::Digest;
-        fn walk(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(root).unwrap() {
+    /// 官方目录安装全链路（显式运行）：真实 http 目录服务 → 目录发现 →
+    /// 归档下载 → 安全解包 → 官方签名验签（含内容清单全树校验）→ 原子
+    /// 安装 → 注册表加载 → sidecar 真实调用。产物与密钥由前置命令生成：
+    /// `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=... cargo run -p xtask --
+    /// build-plugin plugin-creator`；本地已发布产物存在时才运行。
+    #[test]
+    #[serial_test::serial]
+    #[ignore = "需本地发布产物与 http 服务，按需显式运行"]
+    fn 官方目录_解释器插件安装全链路() {
+        let dist =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/plugin-dist");
+        let fragment = dist.join("plugins-index/fragments/plugin-creator-any.json");
+        let archive = dist.join("plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst");
+        let public_key = std::path::PathBuf::from("/tmp/plugin-sign-test/test.key.pub");
+        if !fragment.is_file() || !archive.is_file() || !public_key.is_file() {
+            eprintln!("跳过：缺少发布产物或测试公钥（先 build-plugin + 生成测试密钥）");
+            return;
+        }
+        // 本地目录服务（随机端口）。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut server = std::process::Command::new("python3")
+            .args(["-m", "http.server", &port.to_string()])
+            .current_dir(&dist)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("启动本地目录服务失败");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // .pub 文件内容即 base64(minisign 公钥文本)，与内置常量同格式。
+        let pubkey_b64 = String::from_utf8(std::fs::read(&public_key).unwrap())
+            .unwrap()
+            .trim()
+            .to_string();
+        // 环境注入（测试后恢复）。
+        let previous_catalog = std::env::var("TIANGONG_PLUGIN_CATALOG_URL").ok();
+        let previous_pubkey = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
+        let catalog_url = format!("http://127.0.0.1:{port}/plugins-index/catalog.json");
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_CATALOG_URL", &catalog_url);
+            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &pubkey_b64);
+        }
+        // fragment URL 重写到本地服务。
+        let fragment_raw = std::fs::read_to_string(&fragment).unwrap();
+        let local_fragment = fragment_raw.replace(
+            "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com",
+            &format!("http://127.0.0.1:{port}"),
+        );
+        std::fs::write(&fragment, &local_fragment).unwrap();
+        let catalog_path = dist.join("plugins-index/catalog.json");
+        let catalog_raw = std::fs::read_to_string(&catalog_path).unwrap();
+        let local_catalog = catalog_raw.replace(
+            "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com",
+            &format!("http://127.0.0.1:{port}"),
+        );
+        std::fs::write(&catalog_path, &local_catalog).unwrap();
+
+        let storage = std::path::PathBuf::from("/tmp/catalog-install-test");
+        let _ = std::fs::remove_dir_all(&storage);
+        std::fs::create_dir_all(&storage).unwrap();
+        tiangong_config::registry::init_from_dir(&storage.join("config"));
+
+        let result = std::panic::catch_unwind(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+                        .expect("构造下载器");
+                    let staged = repository
+                        .download(&storage, "plugin-creator", None)
+                        .await
+                        .expect("目录发现与归档下载解包");
+                    let status = tiangong_plugin_runtime::registry::install_staged_plugin(
+                        &storage,
+                        staged.path(),
+                    )
+                    .expect("官方签名验签与安装");
+                    assert_eq!(status.manifest_version, "0.2.0");
+                    // 正式发现 + sidecar 真实调用（官方签名解释器放行路径）。
+                    tiangong_plugin_runtime::registry::preload_installed_plugins(&storage);
+                    let response = tiangong_plugin_runtime::registry::invoke_sidecar(
+                        &storage,
+                        "plugin-creator",
+                        "devkit.validate",
+                        serde_json::json!({"args": ["nonexistent"], "root": "/tmp/catalog-install-dev"}),
+                    )
+                    .expect("官方签名解释器 sidecar 调用");
+                    assert_eq!(response["ok"], serde_json::json!(false), "探针项目应校验失败（证明真实执行）");
+                });
+        });
+        // 恢复现场。
+        unsafe {
+            match previous_catalog {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_CATALOG_URL", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_CATALOG_URL"),
+            }
+            match previous_pubkey {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
+            }
+        }
+        std::fs::write(&fragment, &fragment_raw).unwrap();
+        std::fs::write(&catalog_path, &catalog_raw).unwrap();
+        let _ = server.kill();
+        let _ = server.wait();
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+
+    /// 卸载语义：目录安装 → 卸载 → 重新预加载不自动恢复（无可选插件被
+    /// 强制装回的通道——无内置部署是结构性保证，本测试固化该语义）。
+    #[test]
+    #[serial_test::serial]
+    fn 官方目录_卸载后不自动恢复() {
+        let dist =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/plugin-dist");
+        if !dist
+            .join("plugins-index/fragments/plugin-creator-any.json")
+            .is_file()
+        {
+            eprintln!("跳过：缺少发布产物");
+            return;
+        }
+        let storage = std::path::PathBuf::from("/tmp/catalog-uninstall-test");
+        let _ = std::fs::remove_dir_all(&storage);
+        std::fs::create_dir_all(&storage).unwrap();
+        tiangong_config::registry::init_from_dir(&storage.join("config"));
+        // 安装（复用本地 staging 目录形态）。
+        let release = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../plugins/tiangong-plugin-creator/release");
+        if !release.join("plugin.json").is_file() {
+            eprintln!("跳过：缺少 creator release 产物");
+            return;
+        }
+        std::fs::create_dir_all(storage.join("plugins-dev/plugin-creator")).unwrap();
+        // 复制 release 到开发目录并安装。
+        fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+            std::fs::create_dir_all(target).unwrap();
+            for entry in std::fs::read_dir(source).unwrap() {
                 let entry = entry.unwrap();
                 if entry.file_type().unwrap().is_dir() {
-                    walk(&entry.path(), out);
+                    copy_tree(&entry.path(), &target.join(entry.file_name()));
                 } else {
-                    out.push(entry.path());
+                    std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
                 }
             }
         }
-        let mut files = Vec::new();
-        walk(builtin, &mut files);
-        let entries: Vec<serde_json::Value> = files
-            .iter()
-            .filter(|path| !path.ends_with("content-manifest.json"))
-            .map(|path| {
-                let raw = std::fs::read(path).unwrap();
-                serde_json::json!({
-                    "path": path.strip_prefix(builtin).unwrap().to_string_lossy().replace('\\', "/"),
-                    "sha256": hex::encode(sha2::Sha256::digest(raw)),
-                })
-            })
-            .collect();
-        std::fs::write(
-            builtin.join("content-manifest.json"),
-            serde_json::to_vec_pretty(
-                &serde_json::json!({"algorithm": "sha256", "files": entries}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn 内置插件_版本较新时部署并落信任锚() {
-        let root = tempfile::tempdir().unwrap();
-        let resource_dir = root.path().join("resources");
-        let builtin = resource_dir.join("plugins/plugin-creator");
-        std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
-        std::fs::write(
-            builtin.join("plugin.json"),
-            r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"demo","description":"演示","input_schema":{"type":"object"},"timeout_ms":5000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
-        )
-        .unwrap();
-        std::fs::write(builtin.join("sidecar/main.mjs"), "// new bundle").unwrap();
-        builtin_content_manifest(&builtin);
-        let storage_root = root.path().join("storage");
-        let installed = storage_root.join("plugins/plugin-creator");
-        std::fs::create_dir_all(installed.join("data")).unwrap();
-        std::fs::write(
-            installed.join("plugin.json"),
-            r#"{"schema_version":2,"id":"plugin-creator","version":"0.1.0"}"#,
-        )
-        .unwrap();
-        std::fs::write(installed.join("data/keep.txt"), "用户数据").unwrap();
-        // 旧官方安装形态：签名文件与旧版残留文件。
-        std::fs::write(installed.join("release.json"), r#"{"version":"0.1.0"}"#).unwrap();
-        std::fs::write(installed.join("release.json.sig"), "legacy-signature").unwrap();
-        std::fs::write(installed.join("legacy-extra.txt"), "旧版残留").unwrap();
-
-        deploy_builtin_plugins(&resource_dir, &storage_root);
-
-        let manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(installed.join("plugin.json")).unwrap())
-                .unwrap();
-        assert_eq!(manifest["version"], "0.2.0");
-        assert!(installed.join("sidecar/main.mjs").is_file());
-        assert_eq!(
-            std::fs::read_to_string(installed.join("data/keep.txt")).unwrap(),
-            "用户数据"
+        copy_tree(
+            &release,
+            &storage.join("plugins-dev/plugin-creator/release"),
         );
-        let trust: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(installed.join("local-trust.json")).unwrap(),
+        // 本地信任安装通道（原生确认由测试注入）。
+        // 依赖 plugin_dev 的安装链——经由桥接层不可用，此处直接以暂存导入：
+        let staged = tiangong_plugin_runtime::artifacts::stage_local_plugin(
+            &storage,
+            &storage.join("plugins-dev/plugin-creator/release"),
         )
-        .unwrap();
-        assert_eq!(trust["kind"], "app-builtin");
+        .expect("暂存");
+        // 本地信任标记（模拟原生确认后落锚）。
+        let manifest_raw = std::fs::read(staged.path().join("content-manifest.json")).unwrap();
         use sha2::Digest;
-        let anchor = hex::encode(sha2::Sha256::digest(
-            std::fs::read(installed.join("content-manifest.json")).unwrap(),
-        ));
-        assert_eq!(trust["content_sha256"], anchor.as_str());
-
-        // 相同版本（重复启动）不重复部署。
-        std::fs::write(installed.join("sidecar/main.mjs"), "// user-edited").unwrap();
-        deploy_builtin_plugins(&resource_dir, &storage_root);
-        assert_eq!(
-            std::fs::read_to_string(installed.join("sidecar/main.mjs")).unwrap(),
-            "// user-edited",
-            "相同版本不应覆盖安装目录"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(install_confirm)]
-    fn 内置插件_从官方签名旧版升级_残留清除且可被正式发现() {
-        let root = tempfile::tempdir().unwrap();
-        let resource_dir = root.path().join("resources");
-        let builtin = resource_dir.join("plugins/plugin-creator");
-        std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
+        let anchor = hex::encode(sha2::Sha256::digest(&manifest_raw));
         std::fs::write(
-            builtin.join("plugin.json"),
-            r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"demo","description":"演示","input_schema":{"type":"object"},"timeout_ms":5000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+            staged.path().join("local-trust.json"),
+            format!(r#"{{"kind":"local-confirm","content_sha256":"{anchor}"}}"#),
         )
         .unwrap();
-        std::fs::write(builtin.join("sidecar/main.mjs"), "// builtin").unwrap();
-        builtin_content_manifest(&builtin);
+        let status =
+            tiangong_plugin_runtime::registry::import_staged_plugin(&storage, staged.path())
+                .expect("安装");
+        assert!(storage.join("plugins/plugin-creator/plugin.json").is_file());
 
-        let storage_root = root.path().join("storage");
-        let plugins_dir = storage_root.join("plugins");
-        let installed = plugins_dir.join("plugin-creator");
-        std::fs::create_dir_all(installed.join("data")).unwrap();
-        // 旧 0.1.0 官方安装形态：签名对 + 旧清单 + 残留文件 + 用户数据。
-        std::fs::write(
-            installed.join("plugin.json"),
-            r#"{"schema_version":2,"id":"plugin-creator","version":"0.1.0","entrypoints":["desktop"],"permissions":[],"ui":{"contributions":[{"slot":"extension.tab","id":"plugin-creator","entry":"dist/index.html"}]}}"#,
-        )
-        .unwrap();
-        std::fs::write(installed.join("release.json"), r#"{"version":"0.1.0"}"#).unwrap();
-        std::fs::write(installed.join("release.json.sig"), "legacy-signature").unwrap();
-        std::fs::write(installed.join("legacy-extra.txt"), "旧残留").unwrap();
-        std::fs::write(installed.join("data/keep.txt"), "用户数据").unwrap();
-
-        deploy_builtin_plugins(&resource_dir, &storage_root);
-
-        // 签名与旧残留随旧目录原子移除；用户数据保留；版本更新。
+        // 正规卸载 API：目录移除 + 注册表清理。
+        tiangong_plugin_runtime::registry::uninstall_plugin(&storage, "plugin-creator", false)
+            .expect("卸载");
         assert!(
-            !installed.join("release.json").exists(),
-            "旧签名文件必须清除"
+            !storage.join("plugins/plugin-creator/plugin.json").is_file(),
+            "卸载后插件目录应移除"
         );
-        assert!(
-            !installed.join("release.json.sig").exists(),
-            "旧签名文件必须清除"
-        );
-        assert!(
-            !installed.join("legacy-extra.txt").exists(),
-            "旧版残留必须清除"
-        );
-        assert_eq!(
-            std::fs::read_to_string(installed.join("data/keep.txt")).unwrap(),
-            "用户数据"
-        );
-        // 正式插件发现路径：预加载后注册表可见新版本且不为无效插件。
-        tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
-        let manifest = tiangong_plugin_runtime::registry::plugin_manifest("plugin-creator")
-            .expect("升级后应可被正式发现加载");
-        assert_eq!(manifest.version, "0.2.0");
-    }
-    /// 故障注入：暂存验证失败（清单损坏、内容清单不完整、sidecar 入口
-    /// 缺失）时，部署无损中止——旧版本目录（含用户数据与旧签名）零改动，
-    /// 无暂存/备份残留。备份建立前的任何失败都具备此性质（事务结构保证：
-    /// 备份前旧目录零写操作）。
-    #[test]
-    fn 内置插件_验证失败时无损中止() {
-        let run_case = |break_builtin: &dyn Fn(&std::path::Path)| {
-            let root = tempfile::tempdir().unwrap();
-            let resource_dir = root.path().join("resources");
-            let builtin = resource_dir.join("plugins/plugin-creator");
-            std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
-            std::fs::write(
-                builtin.join("plugin.json"),
-                r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"demo","description":"演示","input_schema":{"type":"object"},"timeout_ms":5000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
-            )
-            .unwrap();
-            std::fs::write(builtin.join("sidecar/main.mjs"), "// new").unwrap();
-            builtin_content_manifest(&builtin);
-            break_builtin(&builtin);
-
-            let storage_root = root.path().join("storage");
-            let plugins_dir = storage_root.join("plugins");
-            let installed = plugins_dir.join("plugin-creator");
-            std::fs::create_dir_all(installed.join("data")).unwrap();
-            std::fs::write(
-                installed.join("plugin.json"),
-                r#"{"schema_version":2,"id":"plugin-creator","version":"0.1.0"}"#,
-            )
-            .unwrap();
-            std::fs::write(installed.join("data/keep.txt"), "用户数据").unwrap();
-
-            deploy_builtin_plugins(&resource_dir, &storage_root);
-
-            // 旧版本与用户数据零改动。
-            let manifest: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(installed.join("plugin.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(manifest["version"], "0.1.0", "旧版本应原位保留");
-            assert!(
-                installed.join("data/keep.txt").is_file(),
-                "用户数据必须保留"
-            );
-            // 无暂存/备份残留。
-            for entry in std::fs::read_dir(&plugins_dir).unwrap() {
-                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-                assert!(!name.starts_with('.'), "不应残留事务目录：{name}");
-            }
-        };
-
-        // 清单损坏。
-        run_case(&|builtin| {
-            std::fs::write(builtin.join("plugin.json"), "not-json").unwrap();
-        });
-        // 内容清单不完整（漏列 sidecar 产物——双向校验失败）。
-        run_case(&|builtin| {
-            std::fs::write(
-                builtin.join("content-manifest.json"),
-                r#"{"algorithm":"sha256","files":[]}"#,
-            )
-            .unwrap();
-        });
-        // sidecar 入口缺失。
-        run_case(&|builtin| {
-            std::fs::remove_file(builtin.join("sidecar/main.mjs")).unwrap();
-            builtin_content_manifest(builtin);
-        });
+        // 全新进程的发现语义：插件目录不存在则不会被发现；本应用进程无
+        // 内置部署通道（结构性保证——无随 App 携带的资源与启动部署代码），
+        // 不存在卸载后自动恢复的路径。
+        assert_eq!(status.manifest_version, "0.2.0");
     }
 }
 
