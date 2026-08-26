@@ -272,6 +272,8 @@ jobs:
         env:
           TIANGONG_PLUGIN_E2E_DIST: ${{ github.workspace }}/target/plugin-dist
           TIANGONG_PLUGIN_E2E_PUBKEY_B64: ${{ env.E2E_PUBKEY_B64 }}
+          # fail-closed：前置产物或公钥缺失时测试直接失败，不产生假绿灯。
+          TIANGONG_PLUGIN_E2E_REQUIRED: "1"
         run: >
           cargo test -p tiangong-plugin-runtime --test official_catalog_e2e
           -- --nocapture

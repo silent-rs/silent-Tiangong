@@ -379,14 +379,26 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         *registered = discovered_invalid;
     }
     for installed in &installed_plugins {
-        let exists = loaded_plugins()
+        // 幂等跳过仅当登记属于本次扫描到的同一安装目录：同 id 但目录
+        // 不同（如测试以不同 storage root 反复预加载）必须以最后一次
+        // 为准，否则注册表沿用已失效的旧目录，桥接等按目录推导的路径
+        // 会写进旧根。
+        let unchanged = loaded_plugins()
             .lock()
-            .map(|plugins| plugins.contains_key(&installed.manifest.id))
+            .map(|plugins| {
+                plugins
+                    .get(&installed.manifest.id)
+                    .is_some_and(|loaded| loaded.directory == installed.directory)
+            })
             .unwrap_or(false);
-        if exists {
+        if unchanged {
             continue;
         }
-
+        if let Ok(plugins) = loaded_plugins().lock()
+            && let Some(previous) = plugins.get(&installed.manifest.id)
+        {
+            remove_sidecar_connection(&previous.directory);
+        }
         let loaded = load_plugin_record(storage_root, installed.clone());
         if let Ok(mut plugins) = loaded_plugins().lock() {
             plugins.insert(installed.manifest.id.clone(), loaded);

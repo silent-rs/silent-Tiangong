@@ -798,16 +798,21 @@ fn sign_file_minisign(key_path: &Path, password: &str, content_path: &Path) -> i
     let raw = std::fs::read_to_string(key_path)
         .map_err(|error| invalid_input(format!("读取插件签名私钥失败: {error}")))?;
     let key_text = normalize_signing_key_text(&raw)?;
-    let secret_key_box = minisign::SecretKeyBox::from_string(&key_text).map_err(|error| {
-        invalid_input(format!(
-            "解析插件签名私钥失败（期望 minisign 格式）: {error}"
-        ))
-    })?;
-    // 始终以显式密码解密：tauri signer 的空密码密钥同样以空字符串解密，
-    // None 会触发交互式提示（CI 卡死）。
-    let secret_key = secret_key_box
-        .into_secret_key(Some(password.to_string()))
-        .map_err(|error| invalid_input(format!("解密插件签名私钥失败（检查密码）: {error}")))?;
+    // 双路径加载：未加密密钥（generate-plugin-test-key 产物）走非交互的
+    // 未加密通道；加密密钥（tauri signer / 正式密钥）以显式密码解密——
+    // 传 Some 会拒绝未加密密钥（"Key is not encrypted"），传 None 会对
+    // 加密密钥触发交互提示（CI 卡死），因此按先未加密后加密的顺序尝试。
+    let secret_key = minisign::SecretKeyBox::from_string(&key_text)
+        .and_then(|secret_key_box| secret_key_box.into_unencrypted_secret_key())
+        .or_else(|_| {
+            minisign::SecretKeyBox::from_string(&key_text)?
+                .into_secret_key(Some(password.to_string()))
+        })
+        .map_err(|error| {
+            invalid_input(format!(
+                "加载插件签名私钥失败（未加密密钥不适用或密码错误）: {error}"
+            ))
+        })?;
     let public_key = minisign::PublicKey::from_secret_key(&secret_key)
         .map_err(|error| invalid_data(format!("推导插件签名公钥失败: {error}")))?;
     let content = std::fs::read(content_path)?;
@@ -851,7 +856,9 @@ fn normalize_signing_key_text(raw: &str) -> io::Result<String> {
 }
 
 /// 生成插件签名测试密钥对（CI 端到端验证用）：`generate-plugin-test-key
-/// <私钥路径>`，公钥落在 `<路径>.pub`。密钥为 minisign 格式、无密码。
+/// <私钥路径>`，公钥落在 `<路径>.pub`。密钥为 minisign 格式、无密码；
+/// `.pub` 内容为 base64(公钥文本)——与 tauri signer 公钥文件及运行时
+/// TIANGONG_PLUGIN_PUBKEY_B64 期望格式一致。
 fn generate_plugin_test_key(key_path: &Path) -> io::Result<()> {
     let keypair = minisign::KeyPair::generate_unencrypted_keypair()
         .map_err(|error| invalid_data(format!("生成测试密钥失败: {error}")))?;
@@ -868,13 +875,16 @@ fn generate_plugin_test_key(key_path: &Path) -> io::Result<()> {
     )?;
     let mut public_path = key_path.as_os_str().to_os_string();
     public_path.push(".pub");
+    use base64::Engine;
     std::fs::write(
         PathBuf::from(public_path),
-        keypair
-            .pk
-            .to_box()
-            .map_err(invalid_data_string)?
-            .into_string(),
+        base64::engine::general_purpose::STANDARD.encode(
+            keypair
+                .pk
+                .to_box()
+                .map_err(invalid_data_string)?
+                .into_string(),
+        ),
     )?;
     eprintln!("[xtask] 测试密钥已生成: {}", key_path.display());
     Ok(())
@@ -2214,4 +2224,111 @@ fn merge_plugin_catalog(
         output_catalog.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CI 同款链路：generate-plugin-test-key（未加密）→ 签名 → 公钥验证。
+    #[test]
+    fn 测试密钥_未加密签名与验证闭环() {
+        let root = std::env::temp_dir().join(format!("xtask-sign-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let key_path = root.join("test.key");
+        generate_plugin_test_key(&key_path).expect("生成测试密钥");
+
+        let content_path = root.join("release.json");
+        std::fs::write(&content_path, br#"{"schema_version":1}"#).unwrap();
+        sign_file_minisign(&key_path, "", &content_path).expect("未加密密钥签名");
+
+        // 用 .pub 公钥验证签名（与运行时 verify_minisign 相同的格式链）。
+        verify_signature_with_pub(&key_path.with_extension("key.pub"), &content_path)
+            .expect("签名应可通过公钥验证");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 正式密钥形态（密码加密）同样可加载与签名，错误密码明确失败。
+    #[test]
+    fn 加密密钥_密码加载与错误密码拒绝() {
+        let root = std::env::temp_dir().join(format!("xtask-sign-enc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let keypair =
+            minisign::KeyPair::generate_encrypted_keypair(Some("secret-pass".to_string()))
+                .expect("生成加密密钥");
+        let key_path = root.join("enc.key");
+        std::fs::write(
+            &key_path,
+            keypair
+                .sk
+                .to_box(Some("secret-pass"))
+                .expect("导出私钥")
+                .into_string(),
+        )
+        .unwrap();
+        use base64::Engine;
+        std::fs::write(
+            key_path.with_extension("key.pub"),
+            base64::engine::general_purpose::STANDARD
+                .encode(keypair.pk.to_box().expect("导出公钥").into_string()),
+        )
+        .unwrap();
+
+        let content_path = root.join("release.json");
+        std::fs::write(&content_path, b"encrypted key signing").unwrap();
+        sign_file_minisign(&key_path, "secret-pass", &content_path).expect("加密密钥签名");
+        verify_signature_with_pub(&key_path.with_extension("key.pub"), &content_path)
+            .expect("签名应可通过公钥验证");
+
+        // 错误密码必须明确失败（不得触发交互提示）。
+        std::fs::write(&content_path, b"another content").unwrap();
+        let error =
+            sign_file_minisign(&key_path, "wrong-pass", &content_path).expect_err("错误密码应拒绝");
+        assert!(
+            error.to_string().contains("加载插件签名私钥失败"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 用 minisign 公钥文本验证「整体 base64 包装」签名文件（与运行时
+    /// verify_minisign 的读取格式一致）。
+    fn verify_signature_with_pub(public_key_path: &Path, content_path: &Path) -> io::Result<()> {
+        use base64::Engine;
+        // .pub 文件为 base64(公钥文本)——与 generate_plugin_test_key 输出一致。
+        let public_key_text = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(std::fs::read_to_string(public_key_path)?.trim())
+                .map_err(|error| invalid_data(format!("公钥文件 base64 解码失败: {error}")))?,
+        )
+        .map_err(|error| invalid_data(format!("公钥文件非 UTF-8: {error}")))?;
+        let public_key_box = minisign::PublicKeyBox::from_string(&public_key_text)
+            .map_err(|error| invalid_data(format!("解析公钥失败: {error}")))?;
+        let public_key = public_key_box
+            .into_public_key()
+            .map_err(|error| invalid_data(format!("加载公钥失败: {error}")))?;
+        let signature_raw = std::fs::read_to_string(content_path.with_extension("json.sig"))?;
+        let signature_text = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(signature_raw.trim())
+                .map_err(|error| invalid_data(format!("签名文件 base64 解码失败: {error}")))?,
+        )
+        .map_err(|error| invalid_data(format!("签名文件非 UTF-8: {error}")))?;
+        let signature_box = minisign::SignatureBox::from_string(&signature_text)
+            .map_err(|error| invalid_data(format!("解析签名失败: {error}")))?;
+        let content = std::fs::read(content_path)?;
+        let mut reader = std::io::Cursor::new(content);
+        minisign::verify(
+            &public_key,
+            &signature_box,
+            &mut reader,
+            false,
+            false,
+            false,
+        )
+        .map_err(|error| invalid_data(format!("签名验证失败: {error}")))?;
+        Ok(())
+    }
 }

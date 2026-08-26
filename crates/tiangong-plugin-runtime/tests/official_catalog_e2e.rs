@@ -2,7 +2,9 @@
 //! 安全解包（含归档内外 plugin.json 一致性比对）→ 官方签名验签（内容清单
 //! 全树校验）→ 原子安装 → 注册表加载 → sidecar 真实调用 → 卸载。
 //!
-//! 触发条件（产物与公钥均就绪才运行；两者由环境提供）：
+//! 触发条件（产物与公钥均就绪才运行；两者由环境提供）；设置
+//! `TIANGONG_PLUGIN_E2E_REQUIRED=1` 后进入 fail-closed 模式——缺产物或
+//! 公钥直接失败而非跳过（CI 使用，防止工作流前置断言缺失时假绿灯）：
 //! - `TIANGONG_PLUGIN_E2E_DIST`：发布产物目录（默认 workspace 的
 //!   `target/plugin-dist`，先经 `cargo run -p xtask -- build-plugin
 //!   plugin-creator` 生成）；
@@ -46,10 +48,17 @@ fn 官方目录_解释器插件安装全链路() {
     let fragment = dist.join("plugins-index/fragments/plugin-creator-any.json");
     let archive = dist.join("plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst");
     if !fragment.is_file() || !archive.is_file() || pubkey_b64.is_none() {
-        eprintln!(
-            "跳过：缺少发布产物或测试公钥（先 build-plugin plugin-creator，并设置 \
-             TIANGONG_PLUGIN_E2E_PUBKEY_B64；CI 侧保证必跑）"
+        let reason = format!(
+            "缺少发布产物（fragment={} archive={}）或测试公钥（pubkey={}）",
+            fragment.display(),
+            archive.display(),
+            pubkey_b64.is_some()
         );
+        assert!(
+            std::env::var_os("TIANGONG_PLUGIN_E2E_REQUIRED").is_none(),
+            "E2E fail-closed 模式下不得跳过：{reason}"
+        );
+        eprintln!("跳过：{reason}（CI 设 TIANGONG_PLUGIN_E2E_REQUIRED=1 强制必跑）");
         return;
     }
 
@@ -179,6 +188,10 @@ fn 官方目录_卸载后不自动恢复() {
     } else if local_release.join("plugin.json").is_file() {
         copy_tree(&local_release, &release_copy);
     } else {
+        assert!(
+            std::env::var_os("TIANGONG_PLUGIN_E2E_REQUIRED").is_none(),
+            "E2E fail-closed 模式下不得跳过：缺少发布归档与 creator release 产物"
+        );
         eprintln!("跳过：缺少发布归档或 creator release 产物");
         return;
     }
