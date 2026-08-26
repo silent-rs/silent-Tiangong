@@ -42,3 +42,4 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = { workspace = true }
+minisign = "0.9.1"

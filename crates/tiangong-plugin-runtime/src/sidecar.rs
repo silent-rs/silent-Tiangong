@@ -39,6 +39,9 @@ pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 /// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
 pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
+/// 插件内容清单固定文件名（devkit 构建生成，本地信任与官方签名共用的信任锚）。
+pub const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
+
 /// 宿主在单次工具调用边界确定的权威上下文。
 ///
 /// 该上下文不经过插件协议，也不从工具参数推导；command 沙箱只使用这里的

@@ -17,6 +17,8 @@ use crate::manifest::{MANIFEST_FILE, PluginManifest};
 pub const PLUGIN_CATALOG_ENDPOINT: &str =
     "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/plugins-index/catalog.json";
 const CATALOG_VERSION: u32 = 1;
+/// 平台无关制品的目录键（解释器插件归档）：任一具体平台均可安装。
+const ANY_PLATFORM_KEY: &str = "any";
 const TRANSACTIONS_DIR: &str = ".transactions";
 const FIRST_LAUNCH_MARKER: &str = ".first_launch_completed";
 
@@ -161,14 +163,32 @@ impl Drop for StagedPlugin {
 }
 
 /// 将用户选择的本地完整插件目录复制到受管事务目录。
-/// 安全解包插件归档（tar.zst）：逐条目校验相对路径（拒绝绝对路径、`..`
-/// 与符号链接条目）后解到目标目录，防止归档路径逃逸。
+/// 安全解包插件归档（tar.zst）：逐条目校验相对路径（拒绝绝对路径与 `..`），
+/// 只接受普通文件与目录条目（拒绝符号链接/硬链接/设备/FIFO 等特殊类型），
+/// 并施加条目数、路径长度与解包总量上限，防止归档路径逃逸与资源耗尽。
 pub fn extract_plugin_archive(archive: &Path, destination: &Path) -> Result<()> {
+    /// 归档条目数上限（受管文件树远小于此量级）。
+    const MAX_ENTRIES: usize = 4096;
+    /// 单文件大小上限。
+    const MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
+    /// 解包总大小上限。
+    const MAX_TOTAL_SIZE: u64 = 256 * 1024 * 1024;
+    /// 条目相对路径长度上限。
+    const MAX_PATH_LEN: usize = 512;
+
     let file = std::fs::File::open(archive)
         .with_context(|| format!("打开插件归档失败: {}", archive.display()))?;
     let decoder = zstd::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
-    for entry in tar.entries().with_context(|| "读取插件归档条目失败")? {
+    let mut total_size = 0u64;
+    for (entry_count, entry) in tar
+        .entries()
+        .with_context(|| "读取插件归档条目失败")?
+        .enumerate()
+    {
+        if entry_count >= MAX_ENTRIES {
+            bail!("插件归档条目数超过上限 {MAX_ENTRIES}");
+        }
         let mut entry = entry.with_context(|| "读取插件归档条目失败")?;
         let path = entry
             .path()
@@ -184,8 +204,20 @@ pub fn extract_plugin_archive(archive: &Path, destination: &Path) -> Result<()> 
         {
             bail!("插件归档包含不安全路径: {}", path.display());
         }
-        if entry.link_name()?.is_some() {
-            bail!("插件归档包含链接条目: {}", path.display());
+        if path.as_os_str().len() > MAX_PATH_LEN {
+            bail!("插件归档条目路径过长: {}", path.display());
+        }
+        match entry.header().entry_type() {
+            tar::EntryType::Regular | tar::EntryType::Directory => {}
+            other => bail!("插件归档包含不支持的条目类型 {other:?}: {}", path.display()),
+        }
+        let size = entry.header().size().unwrap_or(0);
+        if size > MAX_FILE_SIZE {
+            bail!("插件归档条目超过单文件大小上限: {}", path.display());
+        }
+        total_size += size;
+        if total_size > MAX_TOTAL_SIZE {
+            bail!("插件归档解包总量超过上限 {MAX_TOTAL_SIZE} 字节");
         }
         entry
             .unpack_in(destination)
@@ -339,6 +371,15 @@ pub struct PluginRepository {
     http: reqwest::Client,
 }
 
+/// 平台支持判断（市场列表与下载共用规则）：无 sidecar 制品的纯 UI/WASM
+/// 插件全平台可用；`any` 平台无关归档（解释器插件）全平台可用；原生
+/// sidecar 插件要求当前平台条目存在。
+fn sidecar_supported(sidecars: &BTreeMap<String, RemoteArtifact>, platform: &str) -> bool {
+    sidecars.is_empty()
+        || sidecars.contains_key(platform)
+        || sidecars.contains_key(ANY_PLATFORM_KEY)
+}
+
 impl PluginRepository {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -364,8 +405,7 @@ impl PluginRepository {
                     .as_deref()
                     .is_some_and(|local| version_is_newer(local, &plugin.version));
                 AvailablePlugin {
-                    supported: plugin.sidecars.is_empty()
-                        || plugin.sidecars.contains_key(&platform),
+                    supported: sidecar_supported(&plugin.sidecars, &platform),
                     is_default: is_default_plugin(&plugin.id),
                     categories: plugin_categories(&plugin.id),
                     installed_enabled: installed_state.is_some_and(|state| state.enabled),
@@ -522,7 +562,7 @@ impl PluginRepository {
                 // 归档含全部受管文件（清单/UI/sidecar/模板/内容清单/签名），
                 // 校验和锚定归档整体，签名验签由安装链（verify_signed_release，
                 // 含内容清单全树校验）完成。
-                let artifact = release.sidecars.get("any").ok_or_else(|| {
+                let artifact = release.sidecars.get(ANY_PLATFORM_KEY).ok_or_else(|| {
                     anyhow!("插件 {} 没有解释器 sidecar 归档条目（any）", release.id)
                 })?;
                 let archive_path = staged
@@ -532,15 +572,56 @@ impl PluginRepository {
                     .join(format!(".{}-download.tar.zst", release.id));
                 self.download_file(artifact, &archive_path, make_file_progress(step_index))
                     .await?;
-                let extracted = extract_plugin_archive(&archive_path, &staged.path);
+                // 先解包到独立目录并与目录清单下载的 plugin.json 逐字节比对，
+                // 防止归档偷换 ID/版本后覆盖已校验的清单；一致后才合并进暂存。
+                let extract_dir = staged
+                    .path
+                    .parent()
+                    .ok_or_else(|| anyhow!("暂存目录缺少父目录"))?
+                    .join(format!(".{}-extract", release.id));
+                let _ = std::fs::remove_dir_all(&extract_dir);
+                std::fs::create_dir_all(&extract_dir).context("创建插件归档解包目录失败")?;
+                let extracted = extract_plugin_archive(&archive_path, &extract_dir);
                 let _ = std::fs::remove_file(&archive_path);
                 extracted?;
+                let archive_manifest = std::fs::read(extract_dir.join(MANIFEST_FILE))
+                    .with_context(|| format!("插件 {} 归档缺少 plugin.json", release.id))?;
+                let catalog_manifest =
+                    std::fs::read(&manifest_path).context("读取已下载的插件清单失败")?;
+                if archive_manifest != catalog_manifest {
+                    bail!(
+                        "插件 {} 归档内 plugin.json 与目录声明不一致，拒绝安装",
+                        release.id
+                    );
+                }
+                // 暂存目录此刻只含 plugin.json，逐顶层条目原子迁入（同分区 rename）。
+                for entry in
+                    std::fs::read_dir(&extract_dir).with_context(|| "读取插件归档解包结果失败")?
+                {
+                    let entry = entry.context("读取插件归档解包结果失败")?;
+                    let destination = staged.path.join(entry.file_name());
+                    if destination.symlink_metadata().is_ok() {
+                        if destination.is_dir() {
+                            std::fs::remove_dir_all(&destination)
+                                .context("清理暂存目录冲突条目失败")?;
+                        } else {
+                            std::fs::remove_file(&destination)
+                                .context("清理暂存目录冲突条目失败")?;
+                        }
+                    }
+                    std::fs::rename(entry.path(), &destination).with_context(|| {
+                        format!("合并插件归档条目失败: {}", entry.path().display())
+                    })?;
+                }
+                std::fs::remove_dir(&extract_dir).with_context(|| {
+                    format!("清理插件归档解包目录失败: {}", extract_dir.display())
+                })?;
                 step_index += 1;
                 // 签名清单独立于归档（签名非确定）：按目录条目下载到暂存，
                 // 验签由安装链完成（含内容清单全树校验）。
                 let signed = release
                     .signed_releases
-                    .get("any")
+                    .get(ANY_PLATFORM_KEY)
                     .ok_or_else(|| anyhow!("插件 {} 没有解释器签名条目（any）", release.id))?;
                 self.download_unchecked(&signed.url, &staged.path.join("release.json"))
                     .await?;
@@ -820,6 +901,14 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
             validate_download_url(&signed.url, "插件签名清单")?;
             validate_download_url(&signed.signature_url, "插件签名文件")?;
         }
+        // 平台键约定：`any`（解释器归档，平台无关）与具体平台键（原生二进制）
+        // 不得混用——混用意味着发布形态不明确。
+        if plugin.sidecars.contains_key(ANY_PLATFORM_KEY) && plugin.sidecars.len() > 1 {
+            bail!(
+                "插件 {} 的 sidecars 混用平台无关条目（any）与具体平台条目",
+                plugin.id
+            );
+        }
         // 纯 WASM 插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
         // 因此签名清单不强制要求对应 sidecar，这里只校验签名 URL 合法性。
         for signed in plugin.signed_releases.values() {
@@ -1003,5 +1092,218 @@ mod tests {
                 .is_file()
         );
         assert!(!staged.path().join("templates/ui-app/node_modules").exists());
+    }
+}
+
+#[cfg(test)]
+mod extract_and_catalog_tests {
+    use super::*;
+
+    fn remote_artifact(name: &str) -> RemoteArtifact {
+        RemoteArtifact {
+            url: format!("https://example.com/plugins/demo/0.2.0/{name}"),
+            checksum: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    fn signed_release() -> RemoteSignedRelease {
+        RemoteSignedRelease {
+            url: "https://example.com/plugins/demo/0.2.0/release.json".to_string(),
+            signature_url: "https://example.com/plugins/demo/0.2.0/release.json.sig".to_string(),
+        }
+    }
+
+    #[test]
+    fn 平台支持判断_any归档全平台可用() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            ANY_PLATFORM_KEY.to_string(),
+            remote_artifact("demo.tar.zst"),
+        );
+        assert!(sidecar_supported(&sidecars, "darwin-aarch64"));
+        assert!(sidecar_supported(&sidecars, "linux-x86_64"));
+        assert!(sidecar_supported(&sidecars, "windows-x86_64"));
+        assert!(sidecar_supported(&sidecars, "plan9-arm"));
+    }
+
+    #[test]
+    fn 平台支持判断_原生制品按平台匹配() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            "darwin-aarch64".to_string(),
+            remote_artifact("demo-aarch64"),
+        );
+        assert!(sidecar_supported(&sidecars, "darwin-aarch64"));
+        assert!(!sidecar_supported(&sidecars, "linux-x86_64"));
+        // 无 sidecar 制品（纯 UI/WASM 插件）全平台可用。
+        assert!(sidecar_supported(&BTreeMap::new(), "darwin-aarch64"));
+    }
+
+    fn catalog_with_sidecars(
+        sidecars: BTreeMap<String, RemoteArtifact>,
+        signed: BTreeMap<String, RemoteSignedRelease>,
+    ) -> PluginCatalog {
+        PluginCatalog {
+            version: CATALOG_VERSION,
+            plugins: vec![PluginRelease {
+                id: "demo".to_string(),
+                name: "Demo".to_string(),
+                version: "0.2.0".to_string(),
+                description: String::new(),
+                manifest: remote_artifact("plugin.json"),
+                wasm: None,
+                signed_releases: signed,
+                sidecars,
+                ui: BTreeMap::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn 目录校验_any与平台条目混用拒绝() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            ANY_PLATFORM_KEY.to_string(),
+            remote_artifact("demo.tar.zst"),
+        );
+        sidecars.insert(
+            "darwin-aarch64".to_string(),
+            remote_artifact("demo-aarch64"),
+        );
+        let mut signed = BTreeMap::new();
+        signed.insert(ANY_PLATFORM_KEY.to_string(), signed_release());
+        signed.insert("darwin-aarch64".to_string(), signed_release());
+        let catalog = catalog_with_sidecars(sidecars, signed);
+        let error = validate_catalog(&catalog).expect_err("混用 any 与平台条目应拒绝");
+        assert!(error.to_string().contains("混用"), "{error:#}");
+    }
+
+    #[test]
+    fn 目录校验_any缺少签名条目拒绝() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            ANY_PLATFORM_KEY.to_string(),
+            remote_artifact("demo.tar.zst"),
+        );
+        let catalog = catalog_with_sidecars(sidecars, BTreeMap::new());
+        let error = validate_catalog(&catalog).expect_err("any 缺签名条目应拒绝");
+        assert!(error.to_string().contains("缺少签名清单"), "{error:#}");
+    }
+
+    #[test]
+    fn 目录校验_单一any条目通过() {
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert(
+            ANY_PLATFORM_KEY.to_string(),
+            remote_artifact("demo.tar.zst"),
+        );
+        let mut signed = BTreeMap::new();
+        signed.insert(ANY_PLATFORM_KEY.to_string(), signed_release());
+        let catalog = catalog_with_sidecars(sidecars, signed);
+        validate_catalog(&catalog).expect("单一 any 条目应通过");
+    }
+
+    /// 构造含自定义条目的 tar.zst 归档。绕过 tar::Builder 的写入端路径
+    /// 校验（测试需要投递 `..` 等恶意路径验证读取端防护）。
+    fn build_archive(destination: &Path, entries: &[(&str, tar::EntryType, &[u8])]) {
+        let file = std::fs::File::create(destination).unwrap();
+        let encoder = zstd::Encoder::new(file, 3).unwrap();
+        let mut builder = tar::Builder::new(encoder);
+        for (name, entry_type, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(if *entry_type == tar::EntryType::Directory {
+                0o755
+            } else {
+                0o644
+            });
+            header.set_entry_type(*entry_type);
+            if name.len() < 100 {
+                let old = header.as_old_mut();
+                let name_bytes = name.as_bytes();
+                old.name[..name_bytes.len()].copy_from_slice(name_bytes);
+                old.name[name_bytes.len()] = 0;
+                header.set_cksum();
+                builder
+                    .append(&header, std::io::Cursor::new(data.to_vec()))
+                    .unwrap();
+            } else {
+                // 超长路径经 GNU longname 扩展投递（路径本身合法，仅超长）。
+                builder
+                    .append_data(&mut header, name, std::io::Cursor::new(data.to_vec()))
+                    .unwrap();
+            }
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+    }
+
+    #[test]
+    fn 解包_普通文件与目录通过() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("ok.tar.zst");
+        build_archive(
+            &archive,
+            &[
+                ("plugin.json", tar::EntryType::Regular, b"{}"),
+                ("sidecar/", tar::EntryType::Directory, b""),
+                ("sidecar/main.mjs", tar::EntryType::Regular, b"// entry"),
+            ],
+        );
+        let destination = root.path().join("out");
+        std::fs::create_dir_all(&destination).unwrap();
+        extract_plugin_archive(&archive, &destination).expect("普通文件与目录应解包通过");
+        assert_eq!(
+            std::fs::read(destination.join("sidecar/main.mjs")).unwrap(),
+            b"// entry"
+        );
+    }
+
+    #[test]
+    fn 解包_符号链接条目拒绝() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("link.tar.zst");
+        build_archive(&archive, &[("link", tar::EntryType::Symlink, b"")]);
+        let destination = root.path().join("out");
+        std::fs::create_dir_all(&destination).unwrap();
+        let error = extract_plugin_archive(&archive, &destination).expect_err("符号链接条目应拒绝");
+        assert!(error.to_string().contains("不支持的条目类型"), "{error:#}");
+    }
+
+    #[test]
+    fn 解包_fifo条目拒绝() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("fifo.tar.zst");
+        build_archive(&archive, &[("pipe", tar::EntryType::Fifo, b"")]);
+        let destination = root.path().join("out");
+        std::fs::create_dir_all(&destination).unwrap();
+        let error = extract_plugin_archive(&archive, &destination).expect_err("FIFO 条目应拒绝");
+        assert!(error.to_string().contains("不支持的条目类型"), "{error:#}");
+    }
+
+    #[test]
+    fn 解包_父目录逃逸拒绝() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("escape.tar.zst");
+        build_archive(
+            &archive,
+            &[("../escape.txt", tar::EntryType::Regular, b"x")],
+        );
+        let destination = root.path().join("out");
+        std::fs::create_dir_all(&destination).unwrap();
+        let error = extract_plugin_archive(&archive, &destination).expect_err("逃逸路径应拒绝");
+        assert!(error.to_string().contains("不安全路径"), "{error:#}");
+    }
+
+    #[test]
+    fn 解包_超长路径拒绝() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("long.tar.zst");
+        let long_name = format!("{}.txt", "n".repeat(600));
+        build_archive(&archive, &[(&long_name, tar::EntryType::Regular, b"x")]);
+        let destination = root.path().join("out");
+        std::fs::create_dir_all(&destination).unwrap();
+        let error = extract_plugin_archive(&archive, &destination).expect_err("超长路径应拒绝");
+        assert!(error.to_string().contains("路径过长"), "{error:#}");
     }
 }

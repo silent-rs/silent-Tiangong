@@ -431,6 +431,9 @@ fn main() {
             Err(error) => Err(error),
         },
         [command, directory] if command == "sign-plugin" => sign_plugin(Path::new(directory)),
+        [command, key_path] if command == "generate-plugin-test-key" => {
+            generate_plugin_test_key(Path::new(key_path))
+        }
         [command, input, output] if command == "merge-plugin-dist" => {
             merge_plugin_distributions(Path::new(input), Path::new(output), None)
         }
@@ -483,6 +486,7 @@ fn print_help() {
     eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
     eprintln!("  cargo run -p xtask -- sign-plugin <插件包目录>");
+    eprintln!("  cargo run -p xtask -- generate-plugin-test-key <私钥路径>");
     eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
     eprintln!(
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
@@ -781,19 +785,103 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
         })?;
     let password =
         std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-    let status = Command::new("cargo")
-        .args(["tauri", "signer", "sign", "-f"])
-        .arg(&key_path)
-        .args(["-p", &password])
-        .arg(&release_path)
-        .status()?;
-    if !status.success() {
-        return Err(invalid_data("插件发布清单签名失败"));
-    }
-    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
-    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
+    sign_file_minisign(&key_path, &password, &release_path)?;
     eprintln!("[xtask] release.json 已签名");
     Ok(())
+}
+
+/// 用 minisign 私钥对文件签名，落盘「签名文本整体 base64」格式的 `.sig`
+/// （运行时 verify_minisign 读取格式）。私钥兼容 tauri signer 生成的
+/// minisign 密钥（含密码加密形态），签出的制品与 `cargo tauri signer sign`
+/// 完全同构，本地发布不再依赖 tauri-cli。
+fn sign_file_minisign(key_path: &Path, password: &str, content_path: &Path) -> io::Result<()> {
+    let raw = std::fs::read_to_string(key_path)
+        .map_err(|error| invalid_input(format!("读取插件签名私钥失败: {error}")))?;
+    let key_text = normalize_signing_key_text(&raw)?;
+    let secret_key_box = minisign::SecretKeyBox::from_string(&key_text).map_err(|error| {
+        invalid_input(format!(
+            "解析插件签名私钥失败（期望 minisign 格式）: {error}"
+        ))
+    })?;
+    // 始终以显式密码解密：tauri signer 的空密码密钥同样以空字符串解密，
+    // None 会触发交互式提示（CI 卡死）。
+    let secret_key = secret_key_box
+        .into_secret_key(Some(password.to_string()))
+        .map_err(|error| invalid_input(format!("解密插件签名私钥失败（检查密码）: {error}")))?;
+    let public_key = minisign::PublicKey::from_secret_key(&secret_key)
+        .map_err(|error| invalid_data(format!("推导插件签名公钥失败: {error}")))?;
+    let content = std::fs::read(content_path)?;
+    let signature = minisign::sign(
+        Some(&public_key),
+        &secret_key,
+        content.as_slice(),
+        None,
+        None,
+    )
+    .map_err(|error| invalid_data(format!("插件签名生成失败: {error}")))?;
+    use base64::Engine;
+    let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.into_string());
+    let mut signature_path = content_path.as_os_str().to_os_string();
+    signature_path.push(".sig");
+    std::fs::write(PathBuf::from(signature_path), signature_b64)?;
+    Ok(())
+}
+
+/// 私钥文件形态归一：标准 minisign 密钥是两行文本；tauri signer 生成的
+/// 密钥文件是整体 base64 包装的两行文本（与其 .pub 一致）。两种都接受。
+fn normalize_signing_key_text(raw: &str) -> io::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("untrusted comment") {
+        return Ok(trimmed.to_string());
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|_| {
+            invalid_input("插件签名私钥格式无效（期望 minisign 密钥文本或其 base64 包装）")
+        })?;
+    let text = String::from_utf8(decoded)
+        .map_err(|_| invalid_input("插件签名私钥 base64 内容不是有效 UTF-8"))?;
+    if !text.trim().starts_with("untrusted comment") {
+        return Err(invalid_input(
+            "插件签名私钥内容无效（缺少 minisign 注释头）",
+        ));
+    }
+    Ok(text.trim().to_string())
+}
+
+/// 生成插件签名测试密钥对（CI 端到端验证用）：`generate-plugin-test-key
+/// <私钥路径>`，公钥落在 `<路径>.pub`。密钥为 minisign 格式、无密码。
+fn generate_plugin_test_key(key_path: &Path) -> io::Result<()> {
+    let keypair = minisign::KeyPair::generate_unencrypted_keypair()
+        .map_err(|error| invalid_data(format!("生成测试密钥失败: {error}")))?;
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        key_path,
+        keypair
+            .sk
+            .to_box(None)
+            .map_err(invalid_data_string)?
+            .into_string(),
+    )?;
+    let mut public_path = key_path.as_os_str().to_os_string();
+    public_path.push(".pub");
+    std::fs::write(
+        PathBuf::from(public_path),
+        keypair
+            .pk
+            .to_box()
+            .map_err(invalid_data_string)?
+            .into_string(),
+    )?;
+    eprintln!("[xtask] 测试密钥已生成: {}", key_path.display());
+    Ok(())
+}
+
+fn invalid_data_string(error: minisign::PError) -> io::Error {
+    invalid_data(format!("序列化密钥失败: {error}"))
 }
 
 /// 为本地开发插件包生成签名发布清单：`sign-plugin <插件包目录>`。
@@ -883,8 +971,8 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
     let release_path = directory.join("release.json");
     write_json(&release_path, &release)?;
 
-    // 与 CI write_signed_release 一致：tauri signer 签名后，把原生两行
-    // 签名文本整体 base64 包装（运行时 verify_minisign 读取的格式）。
+    // 与 write_signed_release 一致：minisign 库直签（base64 包装的签名文本，
+    // 即运行时 verify_minisign 读取的格式）。
     let key_path = std::env::var_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
@@ -896,17 +984,7 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
         })?;
     let password =
         std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-    let status = Command::new("cargo")
-        .args(["tauri", "signer", "sign", "-f"])
-        .arg(&key_path)
-        .args(["-p", &password])
-        .arg(&release_path)
-        .status()?;
-    if !status.success() {
-        return Err(invalid_data("插件发布清单签名失败"));
-    }
-    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
-    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
+    sign_file_minisign(&key_path, &password, &release_path)?;
     eprintln!("[xtask] release.json 已签名（key: {}）", key_path.display());
     Ok(())
 }

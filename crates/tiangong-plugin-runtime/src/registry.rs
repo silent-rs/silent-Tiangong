@@ -19,16 +19,14 @@ use crate::loader::{
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::{
-    InterpreterLaunch, ProcessSidecarConnection, SidecarConfig, SidecarConnection,
-    StdioSidecarConnection,
+    CONTENT_MANIFEST_FILE, InterpreterLaunch, ProcessSidecarConnection, SidecarConfig,
+    SidecarConnection, StdioSidecarConnection,
 };
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
 
 /// 本地信任标记（安装时原生确认后由宿主写入插件目录）。
 const LOCAL_TRUST_FILE: &str = "local-trust.json";
-/// devkit 构建生成的内容哈希清单（本地信任的篡改检测锚）。
-const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
@@ -2549,14 +2547,14 @@ fn sidecar_connection_inner(
     };
     let signed_release = match installed.signed_release.as_ref() {
         Some(signed_release) => {
-            if !signed_release.has_permission("sidecar.invoke") {
+            if installed.directory.join(LOCAL_TRUST_FILE).is_file() {
                 bail!(
-                    "插件 {} 的官方签名未授权 sidecar.invoke",
+                    "插件 {} 同时携带官方签名与本地信任标记，来源不明确，拒绝启动",
                     installed.manifest.id
                 );
             }
-            // 官方签名解释器 sidecar：签名锚定内容清单并已在验签时完成
-            // 全树校验（signature.rs），按官方信任放行。
+            // 官方签名解释器 sidecar：验签时已按内容清单完成全树校验
+            // （signature.rs validate），按官方信任放行。
             Some(signed_release)
         }
         None => {

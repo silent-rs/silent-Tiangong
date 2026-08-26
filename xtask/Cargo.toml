@@ -9,6 +9,7 @@ description = "辅助构建任务：wasm 组件构建与部署"
 [dependencies]
 base64 = { workspace = true }
 hex = { workspace = true }
+minisign = "0.9"
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

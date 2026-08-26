@@ -653,6 +653,87 @@ await runSidecar({
         );
     }
 
+    /// 官方签名与本地信任混用拒绝：本地信任安装后再落入官方签名文件，
+    /// 两种信任来源同时存在时启动门槛必须拒绝（来源不明确）。
+    #[test]
+    #[serial_test::serial]
+    fn 解释器sidecar_官方签名与本地信任混用拒绝() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "node-sc-mixed-trust";
+        make_project(root.path(), id);
+        make_node_sidecar_release(root.path(), id);
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        install(root.path(), id).expect("本地信任安装");
+
+        // 在已本地信任的安装目录上追加真实有效的官方签名（解释器形态，
+        // 内容清单哈希与目录一致），制造双信任来源。
+        let installed = root.path().join("plugins").join(id);
+        let sha256_of = |path: std::path::PathBuf| {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(std::fs::read(&path).unwrap()))
+        };
+        let release = json!({
+            "schema_version": 1,
+            "id": id,
+            "version": "0.1.0",
+            "publisher": "tiangong-official",
+            "permissions": ["sidecar.invoke"],
+            "manifest": {
+                "path": "plugin.json",
+                "sha256": sha256_of(installed.join("plugin.json")),
+            },
+            "ui": [{
+                "path": "app/index.html",
+                "sha256": sha256_of(installed.join("app/index.html")),
+            }],
+            "content_manifest": {
+                "path": "content-manifest.json",
+                "sha256": sha256_of(installed.join("content-manifest.json")),
+            },
+        });
+        let release_raw = serde_json::to_vec_pretty(&release).unwrap();
+        std::fs::write(installed.join("release.json"), &release_raw).unwrap();
+        let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signature = minisign::sign(
+            Some(&keypair.pk),
+            &keypair.sk,
+            release_raw.as_slice(),
+            None,
+            None,
+        )
+        .unwrap();
+        // 与 tauri signer 输出一致：两行签名文本整体 base64（verify_minisign 格式）。
+        use base64::Engine;
+        std::fs::write(
+            installed.join("release.json.sig"),
+            base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
+        )
+        .unwrap();
+        let pubkey_b64 = base64::engine::general_purpose::STANDARD
+            .encode(keypair.pk.to_box().unwrap().into_string());
+        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &pubkey_b64);
+        }
+        let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
+            .expect_err("混用信任来源应拒绝启动");
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
+            }
+        }
+        assert!(
+            format!("{error:#}").contains("同时携带官方签名与本地信任标记"),
+            "应报混用拒绝：{error:#}"
+        );
+    }
+
     /// 真实 creator 产物全链路：package → plugin-dev 安装（原生确认 + 暂存 +
     /// 双向完整性 + 本地信任落锚）→ 按需 sidecar 真实执行 devkit.init（验证
     /// templates 随行资源经 resources 声明进入安装目录并被 devkit 使用）。
