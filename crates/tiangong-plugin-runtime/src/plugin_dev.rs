@@ -642,4 +642,55 @@ await runSidecar({
             "应提示本地信任安装：{error:#}"
         );
     }
+
+    /// 真实 creator 产物全链路：package → plugin-dev 安装（原生确认 + 暂存 +
+    /// 双向完整性 + 本地信任落锚）→ 按需 sidecar 真实执行 devkit.init（验证
+    /// templates 随行资源经 resources 声明进入安装目录并被 devkit 使用）。
+    /// 产物（release/）由 `yarn package` 生成、不入库：CI 无产物时跳过。
+    #[test]
+    fn creator真实产物_安装与devkit_init全链路() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let release_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/tiangong-plugin-creator/release");
+        if !release_source.join("plugin.json").is_file() {
+            eprintln!(
+                "跳过：缺少真实构建产物 {}（先 yarn package）",
+                release_source.display()
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        // 安装链的可用性探测读取全局模型配置；测试进程用隔离目录初始化。
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "plugin-creator";
+        let dev_root = root.path().join(PLUGIN_DEV_DIR).join(id);
+        copy_tree_for_test(&release_source, &dev_root.join("release"));
+        make_project(root.path(), id);
+
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        let result = install(root.path(), id).expect("creator 真实产物安装");
+        assert_eq!(result.plugin_id, id);
+
+        // 按需 sidecar 真实执行 devkit.init：安装目录内的 templates 必须可用。
+        let init_root = root.path().join("init-output");
+        let response = crate::registry::invoke_sidecar(
+            root.path(),
+            id,
+            "devkit.init",
+            json!({"args": ["ui-app", "chain-probe", "--name", "链路探针"], "root": init_root}),
+        )
+        .expect("devkit.init 经按需 sidecar 执行");
+        assert_eq!(
+            response["ok"],
+            json!(true),
+            "devkit.init 应成功: {response}"
+        );
+        assert!(
+            init_root.join("chain-probe/plugin.json").is_file(),
+            "模板项目应真实创建（templates 随行资源可用）"
+        );
+    }
 }
