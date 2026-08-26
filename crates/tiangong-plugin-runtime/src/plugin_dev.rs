@@ -14,11 +14,9 @@
 //! 均可复用本通道。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 
 use crate::manifest::PluginManifest;
 
@@ -26,32 +24,6 @@ use crate::manifest::PluginManifest;
 pub const PLUGIN_DEV_DIR: &str = "plugins-dev";
 /// 项目元数据文件名（位于项目目录根部）。
 const PROJECT_META_FILE: &str = ".plugin-dev.json";
-
-/// 安装确认请求（原生确认对话框的展示内容）。
-#[derive(Debug, Clone, Serialize)]
-pub struct InstallRequest {
-    pub plugin_id: String,
-    pub name: String,
-    pub version: String,
-    pub permissions: Vec<String>,
-    /// 待安装内容所在目录。
-    pub directory: String,
-}
-
-/// 安装确认回调：返回 false 视为用户拒绝。必须由宿主原生对话框实现。
-pub type InstallConfirmHandler = Arc<dyn Fn(&InstallRequest) -> bool + Send + Sync>;
-
-static INSTALL_CONFIRM: std::sync::RwLock<Option<InstallConfirmHandler>> =
-    std::sync::RwLock::new(None);
-
-/// 注入安装确认回调（桌面入口启动时调用）。
-pub fn set_plugin_dev_install_confirm(handler: InstallConfirmHandler) {
-    // 覆盖语义：宿主启动注入一次；测试在隔离目录间重置。读取方在缺失时
-    // fail-closed（拒绝安装）。
-    if let Ok(mut current) = INSTALL_CONFIRM.write() {
-        *current = Some(handler);
-    }
-}
 
 /// 处理一次 `plugin-dev.*` 桥接调用（权限校验由 bridge 层完成）。
 pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
@@ -228,39 +200,15 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
             manifest.id
         );
     }
-    let name = manifest
-        .ui
-        .as_ref()
-        .and_then(|ui| ui.contributions.first())
-        .map(|contribution| {
-            if contribution.title.is_empty() {
-                contribution.id.clone()
-            } else {
-                contribution.title.clone()
-            }
-        })
-        .unwrap_or_else(|| manifest.id.clone());
-    let request = InstallRequest {
-        plugin_id: manifest.id.clone(),
-        name,
-        version: manifest.version.clone(),
-        permissions: manifest.permissions.clone(),
-        directory: release_dir.display().to_string(),
-    };
-    let confirm = INSTALL_CONFIRM
-        .read()
-        .ok()
-        .and_then(|current| current.clone())
-        .ok_or_else(|| anyhow::anyhow!("宿主未接入原生安装确认，拒绝安装（fail-closed）"))?;
-    if !confirm(&request) {
-        bail!("用户取消了插件 {} 的安装", request.plugin_id);
-    }
-    // 原生确认通过：为解释器 sidecar 落本地信任锚（内容清单整体哈希）。
+    // 统一签名信任：创作链安装免交互——宿主以本机用户密钥为解释器插件
+    // 自动签发签名清单（发布者 local），导入时经与官方/三方完全相同的
+    // 签名验证路径（内容清单全树校验）。原生安装确认随之退役（信任根
+    // 从「确认动作」转移到「用户密钥」，构建 → 签名 → 验证 → 安装全程
+    // 可自动化，远程 / Agent 创作闭环不再被弹窗阻塞）。
     if manifest.sidecar.is_some() {
-        write_local_trust(staged.path())?;
+        sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
     }
-    // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化；
-    // 确认等待不持锁（避免阻塞其它插件的加载操作）。
+    // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化。
     let status = crate::registry::import_staged_plugin(storage_root, staged.path())?;
     tracing::info!(plugin = %status.id, version = %status.manifest_version, "plugin-dev 安装完成");
     Ok(InstallResult {
@@ -271,34 +219,54 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     })
 }
 
-// ── status ──
-
-/// 在暂存目录写入本地信任标记：锚定当前内容清单的整体哈希。
-///
-/// 信任语义：用户经原生确认对话框亲手安装的本地插件，其解释器 sidecar
-/// 允许以 stdio 常驻运行；安装后任何文件与清单不一致即拒绝启动。
-/// 仅当构建产物带 content-manifest.json（devkit build 必然生成）时可落锚。
-fn write_local_trust(staged_path: &Path) -> Result<()> {
-    let manifest_path = staged_path.join("content-manifest.json");
-    // 锚定前先双向校验：清单必须完整覆盖暂存目录的受管文件树且哈希一致，
-    // 不完整清单（漏列文件）在安装时即拒绝，不给"未列出文件可被替换"留通道。
-    crate::sidecar::SidecarConfig::verify_integrity_manifest(&manifest_path, staged_path)?;
-    let raw = std::fs::read(&manifest_path).with_context(|| {
-        "本地安装缺少内容清单（content-manifest.json），无法建立本地信任；请用 plugin-creator 重新构建".to_string()
-    })?;
-    let anchor = hex::encode(sha2::Sha256::digest(&raw));
-    let trust = serde_json::json!({
-        "kind": "local-confirm",
-        "content_sha256": anchor,
-        "created_at": chrono::Local::now().naive_local().to_string(),
-    });
-    std::fs::write(
-        staged_path.join("local-trust.json"),
-        serde_json::to_vec_pretty(&trust)?,
-    )
-    .with_context(|| "写入本地信任标记失败".to_string())?;
+/// 以用户密钥为暂存的解释器插件签发签名清单：构造 `SignedPluginRelease`
+/// （发布者 local，锚定内容清单）并签名落盘。导入链的
+/// `verify_signed_release` 会按 local 路由到用户公钥完成同款验证。
+fn sign_staged_with_user_key(
+    storage_root: &Path,
+    staged_path: &Path,
+    manifest: &PluginManifest,
+) -> Result<()> {
+    let manifest_path = staged_path.join(crate::manifest::MANIFEST_FILE);
+    let content_manifest_path = staged_path.join(crate::sidecar::CONTENT_MANIFEST_FILE);
+    // 签名前先双向校验内容清单（与旧本地信任落锚同款前置），不完整清单
+    // 在安装时即拒绝。
+    crate::sidecar::SidecarConfig::verify_integrity_manifest(&content_manifest_path, staged_path)?;
+    let artifact = |path: &Path| -> Result<crate::signature::SignedArtifact> {
+        Ok(crate::signature::SignedArtifact {
+            path: path
+                .strip_prefix(staged_path)
+                .with_context(|| "签名制品路径推算失败")?
+                .to_path_buf(),
+            sha256: {
+                use sha2::Digest;
+                hex::encode(sha2::Sha256::digest(std::fs::read(path)?))
+            },
+        })
+    };
+    let release = crate::signature::SignedPluginRelease {
+        schema_version: crate::signature::SIGNED_RELEASE_SCHEMA_VERSION,
+        id: manifest.id.clone(),
+        version: manifest.version.clone(),
+        publisher: crate::trust::LOCAL_PUBLISHER.to_string(),
+        permissions: manifest.permissions.clone(),
+        manifest: artifact(&manifest_path)?,
+        wasm: None,
+        ui: manifest
+            .ui_contributions()
+            .into_iter()
+            .map(|contribution| artifact(&staged_path.join(contribution.entry)))
+            .collect::<Result<Vec<_>>>()?,
+        sidecar: None,
+        content_manifest: Some(artifact(&content_manifest_path)?),
+    };
+    let release_path = staged_path.join(crate::signature::SIGNED_RELEASE_FILE);
+    std::fs::write(&release_path, serde_json::to_vec_pretty(&release)?)?;
+    crate::trust::sign_with_user_key(storage_root, &release_path)?;
     Ok(())
 }
+
+// ── status ──
 
 fn status(storage_root: &Path, project_id: &str) -> Result<StatusResult> {
     let project_dir = dev_project_dir(storage_root, project_id)?;
@@ -447,24 +415,10 @@ mod tests {
         .unwrap();
         std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
 
-        let confirmed = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = Arc::clone(&confirmed);
-        set_plugin_dev_install_confirm(Arc::new(move |request: &InstallRequest| {
-            sink.lock()
-                .unwrap()
-                .push((request.plugin_id.clone(), request.version.clone()));
-            true
-        }));
         let result = install(root.path(), "inst-demo").expect("安装完整链");
         assert_eq!(result.plugin_id, "inst-demo");
         assert_eq!(result.version, "9.9.9");
         assert!(result.enabled, "安装后应启用");
-        // 确认信息来自暂存副本（版本正确）
-        let confirmed = confirmed.lock().unwrap();
-        assert_eq!(
-            confirmed.as_slice(),
-            [("inst-demo".to_string(), "9.9.9".to_string())]
-        );
         // 安装目录与注册表
         assert!(root.path().join("plugins/inst-demo/plugin.json").is_file());
         assert!(
@@ -596,7 +550,7 @@ await runSidecar({
 
     #[test]
     #[serial_test::serial]
-    fn 解释器sidecar_本地信任安装_真实调用与篡改拒绝() {
+    fn 解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -607,7 +561,6 @@ await runSidecar({
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
 
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         let result = install(root.path(), id).expect("解释器 sidecar 安装");
         assert_eq!(result.plugin_id, id);
 
@@ -637,7 +590,7 @@ await runSidecar({
     }
 
     #[test]
-    fn 解释器sidecar_无本地信任时拒绝启动() {
+    fn 解释器sidecar_无有效签名时拒绝启动() {
         let root = tempfile::tempdir().unwrap();
         let id = "node-sc-notrusted";
         make_project(root.path(), id);
@@ -646,10 +599,131 @@ await runSidecar({
         let installed = root.path().join("plugins").join(id);
         copy_tree_for_test(&release, &installed);
         let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
-            .expect_err("未建立本地信任应拒绝");
+            .expect_err("无有效签名应拒绝");
         assert!(
-            format!("{error:#}").contains("本地信任"),
-            "应提示本地信任安装：{error:#}"
+            format!("{error:#}").contains("需签名安装"),
+            "应提示签名安装路径：{error:#}"
+        );
+    }
+
+    /// 三方导入链：签名归档 → 导入发布者公钥 → 暂存解包 → 签名验证安装
+    /// → sidecar 真实调用 → 移除公钥后失效。
+    #[test]
+    #[serial_test::serial]
+    fn 三方导入_签名归档安装与移除公钥后失效() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "node-sc-third-party";
+        make_project(root.path(), id);
+        let release = make_node_sidecar_release(root.path(), id);
+
+        // 三方开发者视角：以自己的密钥为插件签发签名清单（发布者 acme-dev）。
+        let sha256_of = |path: std::path::PathBuf| {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(std::fs::read(&path).unwrap()))
+        };
+        let release_json = json!({
+            "schema_version": 1,
+            "id": id,
+            "version": "0.1.0",
+            "publisher": "acme-dev",
+            "permissions": ["sidecar.invoke"],
+            "manifest": {
+                "path": "plugin.json",
+                "sha256": sha256_of(release.join("plugin.json")),
+            },
+            "ui": [{
+                "path": "app/index.html",
+                "sha256": sha256_of(release.join("app/index.html")),
+            }],
+            "content_manifest": {
+                "path": "content-manifest.json",
+                "sha256": sha256_of(release.join("content-manifest.json")),
+            },
+        });
+        std::fs::write(
+            release.join("release.json"),
+            serde_json::to_vec_pretty(&release_json).unwrap(),
+        )
+        .unwrap();
+        let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signature = minisign::sign(
+            Some(&keypair.pk),
+            &keypair.sk,
+            serde_json::to_vec_pretty(&release_json).unwrap().as_slice(),
+            None,
+            None,
+        )
+        .unwrap();
+        use base64::Engine;
+        std::fs::write(
+            release.join("release.json.sig"),
+            base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
+        )
+        .unwrap();
+
+        // 打三方分发归档（tar.zst，含签名清单与内容清单，排除 local-trust）。
+        let archive = root.path().join(format!("{id}-0.1.0.tar.zst"));
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let encoder = zstd::Encoder::new(file, 3).unwrap();
+            let mut builder = tar::Builder::new(encoder);
+            let mut stack = vec![release.clone()];
+            while let Some(directory) = stack.pop() {
+                for entry in std::fs::read_dir(&directory).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    let name = entry.file_name();
+                    if directory == release
+                        && matches!(name.to_string_lossy().as_ref(), "local-trust.json")
+                    {
+                        continue;
+                    }
+                    if entry.file_type().unwrap().is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    let relative = path.strip_prefix(&release).unwrap();
+                    builder.append_path_with_name(&path, relative).unwrap();
+                }
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        // 未导入公钥：归档可解包暂存，但安装（签名验证）拒绝。
+        let staged =
+            crate::artifacts::stage_plugin_archive(root.path(), &archive).expect("归档暂存");
+        let error = crate::registry::import_staged_plugin(root.path(), staged.path())
+            .expect_err("未导入三方公钥应拒绝安装");
+        assert!(
+            format!("{error:#}").contains("未导入"),
+            "应给出公钥导入指引：{error:#}"
+        );
+
+        // 导入公钥后：安装 → 真实调用成功。
+        let public_b64 = base64::engine::general_purpose::STANDARD
+            .encode(keypair.pk.to_box().unwrap().into_string());
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &public_b64).unwrap();
+        let staged =
+            crate::artifacts::stage_plugin_archive(root.path(), &archive).expect("归档暂存");
+        crate::registry::import_staged_plugin(root.path(), staged.path())
+            .expect("三方签名插件安装");
+        let response =
+            crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({"text": "三方"}))
+                .expect("三方插件 sidecar 调用");
+        assert_eq!(response["text"], "三方");
+
+        // 移除公钥：下次启动即失效（重新发现验证时公钥缺失）。
+        crate::trust::remove_trusted_publisher(root.path(), "acme-dev").unwrap();
+        let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
+            .expect_err("移除公钥后应拒绝启动");
+        assert!(
+            format!("{error:#}").contains("未导入"),
+            "应报公钥缺失：{error:#}"
         );
     }
 
@@ -667,12 +741,25 @@ await runSidecar({
         let id = "node-sc-mixed-trust";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
-        install(root.path(), id).expect("本地信任安装");
+        install(root.path(), id).expect("签名链安装");
 
-        // 在已本地信任的安装目录上追加真实有效的官方签名（解释器形态，
-        // 内容清单哈希与目录一致），制造双信任来源。
+        // 遗留本地信任插件（升级前存量形态）+ 官方签名同存：制造双信任
+        // 来源。安装链已不落锚，这里手工补遗留标记。
         let installed = root.path().join("plugins").join(id);
+        {
+            use sha2::Digest;
+            let manifest_raw = std::fs::read(installed.join("content-manifest.json")).unwrap();
+            let anchor = hex::encode(sha2::Sha256::digest(&manifest_raw));
+            std::fs::write(
+                installed.join("local-trust.json"),
+                format!(r#"{{"kind":"local-confirm","content_sha256":"{anchor}"}}"#),
+            )
+            .unwrap();
+        }
+
+        // 在已带遗留本地信任标记的安装目录上追加真实有效的官方签名
+        // （解释器形态，内容清单哈希与目录一致）。
+
         let sha256_of = |path: std::path::PathBuf| {
             use sha2::Digest;
             hex::encode(sha2::Sha256::digest(std::fs::read(&path).unwrap()))
@@ -762,7 +849,6 @@ await runSidecar({
         copy_tree_for_test(&release_source, &dev_root.join("release"));
         make_project(root.path(), id);
 
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         let result = install(root.path(), id).expect("creator 真实产物安装");
         assert_eq!(result.plugin_id, id);
 
@@ -809,7 +895,6 @@ await runSidecar({
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
         copy_tree_for_test(&release_source, &dev_root.join("release"));
         make_project(root.path(), creator);
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         install(root.path(), creator).expect("creator 安装");
 
         let devkit = |command: &str, args: serde_json::Value| {
@@ -917,7 +1002,6 @@ await runSidecar({
         .unwrap();
         write_content_manifest(&release);
 
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         let result = install(root.path(), id).expect("无界面纯工具插件应可安装");
         assert_eq!(result.plugin_id, id);
 
@@ -962,7 +1046,6 @@ await runSidecar({
         std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
         write_content_manifest(&release);
 
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         install(root.path(), id).expect("带图标插件安装");
 
         let (data, mime) = crate::registry::read_plugin_icon(id, "app").expect("读取插件图标");
@@ -1016,7 +1099,6 @@ await runSidecar({
         .unwrap();
         write_content_manifest(&release);
 
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         install(root.path(), id).expect("安装阻塞工具插件");
 
         let pid_file = root.path().join("slow.pid");
@@ -1120,7 +1202,6 @@ await runSidecar({
         )
         .unwrap();
         write_content_manifest(&release);
-        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
         install(root.path(), id).expect("安装并发工具插件");
 
         let pid_file = root.path().join("slow.pid");

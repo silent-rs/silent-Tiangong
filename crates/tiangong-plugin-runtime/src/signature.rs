@@ -18,7 +18,7 @@ pub const SIGNED_RELEASE_SCHEMA_VERSION: u32 = 1;
 
 /// 插件专用 minisign 公钥。私钥只保存在官方发布环境（CI secret 与
 /// 官方开发者本机，打包时经 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 提供）。
-const OFFICIAL_PLUGIN_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
+pub const OFFICIAL_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedPluginRelease {
@@ -74,9 +74,16 @@ pub fn verify_signed_release(
 
     let release_bytes = std::fs::read(&release_path)
         .with_context(|| format!("读取插件签名清单失败: {}", release_path.display()))?;
-    verify_minisign(&release_bytes, &std::fs::read_to_string(&signature_path)?)?;
+    // 先解析拿到发布者标识，再按信任根路由验签（官方内置 / 本机用户
+    // 密钥 / 已导入第三方公钥——见 trust.rs）。
     let release: SignedPluginRelease =
         serde_json::from_slice(&release_bytes).context("解析插件签名清单失败")?;
+    verify_minisign(
+        &release.publisher,
+        directory,
+        &release_bytes,
+        &std::fs::read_to_string(&signature_path)?,
+    )?;
     release.validate(directory, plugin_manifest)?;
     Ok(Some(release))
 }
@@ -86,8 +93,13 @@ impl SignedPluginRelease {
         if self.schema_version != SIGNED_RELEASE_SCHEMA_VERSION {
             bail!("插件签名清单版本不支持: {}", self.schema_version);
         }
-        if self.publisher != "tiangong-official" {
-            bail!("插件签名发布者无效: {}", self.publisher);
+        // 发布者格式校验（合法标识由路由侧解析为对应信任根；保留标识
+        // 与三方标识均在 trust.rs 路由，未导入即验签失败）。
+        if self.publisher != crate::trust::OFFICIAL_PUBLISHER
+            && self.publisher != crate::trust::LOCAL_PUBLISHER
+        {
+            crate::trust::validate_publisher_id(&self.publisher)
+                .with_context(|| "插件签名发布者无效")?;
         }
         if self.id != plugin_manifest.id || self.version != plugin_manifest.version {
             bail!("插件签名清单与 plugin.json 的 ID 或版本不一致");
@@ -207,14 +219,25 @@ fn permission_set(permissions: &[String]) -> Result<BTreeSet<&str>> {
     Ok(permissions.iter().map(String::as_str).collect())
 }
 
-fn verify_minisign(content: &[u8], signature_b64: &str) -> Result<()> {
-    // 公钥可被环境变量覆盖（CI/本地端到端验证用；不改变内置官方公钥）
-    let pubkey_b64 = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
-        .unwrap_or_else(|_| OFFICIAL_PLUGIN_PUBKEY_B64.to_string());
+fn verify_minisign(
+    publisher: &str,
+    directory: &Path,
+    content: &[u8],
+    signature_b64: &str,
+) -> Result<()> {
+    // 按发布者路由信任根（官方内置 / 本机用户密钥 / 已导入第三方公钥）；
+    // 官方形态支持环境变量覆盖公钥（CI/本地端到端验证通道），且不依赖
+    // 本地存储布局。
+    let pubkey_b64 = if publisher == crate::trust::OFFICIAL_PUBLISHER {
+        crate::trust::official_pubkey_b64()
+    } else {
+        let storage_root = crate::trust::storage_root_of(directory)?;
+        crate::trust::resolve_publisher_pubkey(storage_root, publisher)?
+    };
     let public_text = base64::engine::general_purpose::STANDARD
-        .decode(pubkey_b64)
-        .context("解析内置插件公钥失败")?;
-    let public_text = String::from_utf8(public_text).context("内置插件公钥非 UTF-8")?;
+        .decode(pubkey_b64.trim())
+        .context("解析插件信任公钥失败")?;
+    let public_text = String::from_utf8(public_text).context("插件信任公钥非 UTF-8")?;
     let public_key = PublicKey::decode(&public_text).context("解析插件公钥失败")?;
     let signature_text = base64::engine::general_purpose::STANDARD
         .decode(signature_b64.trim())
@@ -386,6 +409,91 @@ mod tests {
     fn assert_verify_err(dir: &Path, manifest: &PluginManifest, needle: &str) {
         let error = verify_signed_release(dir, manifest).expect_err("官方签名验证应被拒绝");
         assert!(error.to_string().contains(needle), "{error:#}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn 本机用户签名_验签通过并覆盖全树() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, manifest) = setup_official_interpreter_plugin(root.path());
+        // 创作链同款：用户密钥自动生成 + local 发布者签名清单。
+        crate::trust::ensure_user_signing_key(root.path()).unwrap();
+        let mut release = SignedPluginRelease {
+            schema_version: SIGNED_RELEASE_SCHEMA_VERSION,
+            id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            publisher: crate::trust::LOCAL_PUBLISHER.to_string(),
+            permissions: manifest.permissions.clone(),
+            manifest: artifact(&dir, MANIFEST_FILE),
+            wasm: None,
+            ui: manifest
+                .ui_contributions()
+                .into_iter()
+                .map(|contribution| artifact(&dir, &contribution.entry))
+                .collect(),
+            sidecar: None,
+            content_manifest: Some(artifact(&dir, CONTENT_MANIFEST_FILE)),
+        };
+        release.manifest = artifact(&dir, MANIFEST_FILE);
+        let bytes = serde_json::to_vec_pretty(&release).unwrap();
+        std::fs::write(dir.join(SIGNED_RELEASE_FILE), &bytes).unwrap();
+        crate::trust::sign_with_user_key(root.path(), &dir.join(SIGNED_RELEASE_FILE)).unwrap();
+        verify_signed_release(&dir, &manifest)
+            .expect("用户签名（local 发布者）应验签通过")
+            .expect("应返回签名清单");
+        // 篡改 sidecar 后用户签名同样拒绝（全树校验与官方一致）。
+        std::fs::write(dir.join("sidecar/main.mjs"), "// tampered").unwrap();
+        assert!(verify_signed_release(&dir, &manifest).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn 三方发布者_导入公钥后验签_未导入拒绝() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, manifest) = setup_official_interpreter_plugin(root.path());
+        let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let release = SignedPluginRelease {
+            schema_version: SIGNED_RELEASE_SCHEMA_VERSION,
+            id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            publisher: "acme-dev".to_string(),
+            permissions: manifest.permissions.clone(),
+            manifest: artifact(&dir, MANIFEST_FILE),
+            wasm: None,
+            ui: manifest
+                .ui_contributions()
+                .into_iter()
+                .map(|contribution| artifact(&dir, &contribution.entry))
+                .collect(),
+            sidecar: None,
+            content_manifest: Some(artifact(&dir, CONTENT_MANIFEST_FILE)),
+        };
+        let bytes = serde_json::to_vec_pretty(&release).unwrap();
+        std::fs::write(dir.join(SIGNED_RELEASE_FILE), &bytes).unwrap();
+        let signature =
+            minisign::sign(Some(&keypair.pk), &keypair.sk, bytes.as_slice(), None, None).unwrap();
+        use base64::Engine;
+        std::fs::write(
+            dir.join(SIGNATURE_FILE),
+            base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
+        )
+        .unwrap();
+
+        // 未导入公钥：拒绝并给出导入指引。
+        let error = verify_signed_release(&dir, &manifest).expect_err("未导入三方公钥应拒绝");
+        assert!(format!("{error:#}").contains("未导入"), "{error:#}");
+
+        // 导入后验签通过。
+        let public_b64 = base64::engine::general_purpose::STANDARD
+            .encode(keypair.pk.to_box().unwrap().into_string());
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &public_b64).unwrap();
+        verify_signed_release(&dir, &manifest)
+            .expect("导入公钥后三方插件应验签通过")
+            .expect("应返回签名清单");
+
+        // 移除公钥后失效。
+        crate::trust::remove_trusted_publisher(root.path(), "acme-dev").unwrap();
+        assert!(verify_signed_release(&dir, &manifest).is_err());
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub mod seams;
 pub mod sidecar;
 pub mod signature;
 pub mod slots;
+pub mod trust;
 mod ts_plugin;
 mod ts_tools;
 
@@ -41,7 +42,6 @@ pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
 };
-pub use plugin_dev::{InstallConfirmHandler, InstallRequest, set_plugin_dev_install_confirm};
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
@@ -50,4 +50,9 @@ pub use sidecar::{
 pub use slots::{
     BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
     SlotInstances, SlotRegistry, UiContribution,
+};
+pub use trust::{
+    LOCAL_PUBLISHER, OFFICIAL_PUBLISHER, TrustedPublisher, ensure_user_signing_key,
+    import_trusted_publisher, list_trusted_publishers, publisher_fingerprint,
+    remove_trusted_publisher,
 };

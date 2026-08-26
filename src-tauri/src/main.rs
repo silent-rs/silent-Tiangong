@@ -465,40 +465,6 @@ fn run_gui() {
                 },
             ));
 
-            // plugin-dev 安装确认：宿主原生对话框（非 webview，Agent 的界面
-            // 自动化无法触达），用户是唯一授权主体（RFC 0017 §11：plugin_install
-            // 必须经原生确认弹窗）。未注入时 plugin-dev.install fail-closed。
-            {
-                let app_handle = app.handle().clone();
-                tiangong_plugin_runtime::set_plugin_dev_install_confirm(Arc::new(
-                    move |request: &tiangong_plugin_runtime::InstallRequest| -> bool {
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-                        let permissions = if request.permissions.is_empty() {
-                            "无（纯 UI 插件）".to_string()
-                        } else {
-                            request.permissions.join("、")
-                        };
-                        let message = format!(
-                            "即将安装自建插件：\n\n插件：{}（id: {}）\n版本：{}\n权限：{}\n来源：{}\n\n安装后该插件将按上述权限运行，请确认内容可信。",
-                            request.name,
-                            request.plugin_id,
-                            request.version,
-                            permissions,
-                            request.directory
-                        );
-                        app_handle
-                            .dialog()
-                            .message(message)
-                            .title("安装自建插件确认")
-                            .kind(MessageDialogKind::Warning)
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "安装".to_string(),
-                                "取消".to_string(),
-                            ))
-                            .blocking_show()
-                    },
-                ));
-            }
 
             // 系统对话框原语：插件保存文件（导出结果等）。宿主 webview 是
             // WebKit（macOS），无 File System Access API——保存必须经原生
@@ -785,6 +751,11 @@ fn run_gui() {
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
             tiangong_app::commands::plugin_read_icon,
+            tiangong_app::commands::plugin_list_trusted_publishers,
+            tiangong_app::commands::plugin_import_trusted_publisher,
+            tiangong_app::commands::plugin_remove_trusted_publisher,
+            tiangong_app::commands::plugin_user_key_fingerprint,
+            tiangong_app::commands::plugin_read_public_key_file,
             tiangong_app::commands::bridge_call,
             tiangong_app::commands::bridge_subscribe,
             tiangong_app::commands::bridge_unsubscribe,

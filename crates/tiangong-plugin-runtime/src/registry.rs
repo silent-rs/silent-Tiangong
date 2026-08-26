@@ -2573,7 +2573,7 @@ fn sidecar_connection_inner(
             let trusted = interpreter.is_some() && verify_local_trust(&installed.directory)?;
             if !trusted {
                 bail!(
-                    "未签名插件 {} 不允许启动原生 sidecar（解释器 sidecar 需经插件创作链本地信任安装）",
+                    "未签名插件 {} 不允许启动原生 sidecar（解释器 sidecar 需签名安装：官方目录、创作链自动签名或已导入的第三方公钥）",
                     installed.manifest.id
                 );
             }

@@ -226,6 +226,22 @@ pub fn extract_plugin_archive(archive: &Path, destination: &Path) -> Result<()> 
     Ok(())
 }
 
+/// 从签名插件归档（tar.zst）暂存插件（三方导入通道）：安全解包到事务
+/// 目录并校验清单可加载。签名验证（按发布者路由信任根）由安装链完成。
+pub fn stage_plugin_archive(storage_root: &Path, archive: &Path) -> Result<StagedPlugin> {
+    let staged = create_staged_plugin(storage_root)?;
+    extract_plugin_archive(archive, staged.path())?;
+    let manifest_path = staged.path().join(MANIFEST_FILE);
+    ensure_regular_file(&manifest_path, "插件清单")?;
+    let manifest = PluginManifest::load(&manifest_path)?;
+    Version::parse(&manifest.version)
+        .with_context(|| format!("插件 {} 版本不是有效语义版本", manifest.id))?;
+    for directory in ["runtime", "logs", "data"] {
+        std::fs::create_dir_all(staged.path().join(directory))?;
+    }
+    Ok(staged)
+}
+
 pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPlugin> {
     ensure_source_directory(source)?;
     let source_manifest = source.join(MANIFEST_FILE);
