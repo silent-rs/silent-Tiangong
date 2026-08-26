@@ -25,3 +25,5 @@ AGENTS.md
 .zcode
 plugins/*/build/
 release/
+src-tauri/resources/plugins/*/
+!src-tauri/resources/plugins/.gitkeep

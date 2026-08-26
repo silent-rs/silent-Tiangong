@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "plugin-creator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entrypoints": [
     "desktop"
   ],
@@ -114,7 +114,7 @@
     },
     {
       "name": "plugin_install",
-      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物）。宿主会弹出原生确认对话框（展示插件名、版本、权限清单），用户确认后完成安装与启用，用户取消则失败。迭代修改代码后需重新 build 再 install，内容变化会再次要求用户确认。",
+      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物）。宿主会弹出原生确认对话框（展示插件名、版本、权限清单），用户确认后完成安装与启用，用户取消则失败。迭代修改代码后需重新 build 再 install，内容变化会再次要求用户确认。插件工具自新会话起生效（已存在会话不动态纳入），安装完成后提醒用户新开会话使用。",
       "input_schema": {
         "type": "object",
         "properties": {

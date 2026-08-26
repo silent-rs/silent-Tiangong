@@ -123,6 +123,10 @@ pub trait SidecarConnection: Send + Sync {
         Ok(())
     }
 
+    /// 终止当前进行中的调用（工具级超时 / 会话取消用）。与 stop 不同，
+    /// 不改变停止标志——后续调用继续服务。默认无操作（非按需连接无此语义）。
+    fn cancel_current(&self) {}
+
     /// 当前 sidecar 的插件 ID。默认空。
     fn plugin_id(&self) -> &str {
         ""

@@ -819,6 +819,129 @@ async fn release_input_send_claim_and_cleanup(
     }
 }
 
+/// 部署随 App 携带的内置插件（当前为 plugin-creator）：内置版本较新或本机
+/// 未安装时落盘到插件目录（保留 data/logs/runtime 运行时目录），并按内容
+/// 清单生成 App 内置信任锚。dev 模式无打包资源时跳过。
+pub fn deploy_builtin_plugins(resource_dir: &std::path::Path, storage_root: &std::path::Path) {
+    use sha2::Digest;
+    let builtin_root = resource_dir.join("plugins");
+    let Ok(entries) = std::fs::read_dir(&builtin_root) else {
+        return; // dev 模式或打包未包含资源：无内置插件
+    };
+    for entry in entries.flatten() {
+        let builtin = entry.path();
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Ok(builtin_manifest_raw) = std::fs::read(builtin.join("plugin.json")) else {
+            tracing::warn!("内置插件 {id} 缺少 plugin.json，跳过");
+            continue;
+        };
+        let Ok(builtin_manifest) =
+            serde_json::from_slice::<serde_json::Value>(&builtin_manifest_raw)
+        else {
+            tracing::warn!("内置插件 {id} 清单解析失败，跳过");
+            continue;
+        };
+        let builtin_version = builtin_manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let installed_dir = storage_root.join("plugins").join(&id);
+        let installed_version = std::fs::read(installed_dir.join("plugin.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .and_then(|manifest| {
+                manifest
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            });
+        let should_deploy = match installed_version.as_deref() {
+            None => true,
+            Some(installed) => {
+                match (
+                    semver::Version::parse(installed),
+                    semver::Version::parse(builtin_version),
+                ) {
+                    (Ok(installed), Ok(builtin)) => builtin > installed,
+                    // 版本不可解析时按字符串不等即更新（保守：宁可更新）。
+                    _ => installed != builtin_version,
+                }
+            }
+        };
+        if !should_deploy {
+            continue;
+        }
+        // 部署：复制内置文件树（保留运行时目录），生成 App 内置信任锚。
+        if let Err(error) = deploy_builtin_tree(&builtin, &installed_dir) {
+            tracing::error!("部署内置插件 {id} 失败：{error}");
+            continue;
+        }
+        let manifest_path = installed_dir.join("content-manifest.json");
+        match std::fs::read(&manifest_path).map(|raw| hex::encode(sha2::Sha256::digest(raw))) {
+            Ok(anchor) => {
+                let trust = serde_json::json!({
+                    "kind": "app-builtin",
+                    "content_sha256": anchor,
+                    "plugin_version": builtin_version,
+                });
+                let _ = std::fs::write(
+                    installed_dir.join("local-trust.json"),
+                    serde_json::to_vec_pretty(&trust).unwrap_or_default(),
+                );
+            }
+            Err(error) => tracing::warn!("内置插件 {id} 缺少内容清单：{error}"),
+        }
+        tracing::info!(
+            plugin = %id,
+            version = builtin_version,
+            previous = ?installed_version,
+            "已部署 App 内置插件"
+        );
+    }
+}
+
+/// 复制内置插件文件树到安装目录：运行时自管目录（data/logs/runtime）与
+/// 信任标记不覆盖（保留用户数据与既有信任状态——信任随后重写）。
+fn deploy_builtin_tree(
+    builtin: &std::path::Path,
+    installed: &std::path::Path,
+) -> std::io::Result<()> {
+    fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(target)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let destination = target.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &destination)?;
+            } else {
+                std::fs::copy(entry.path(), destination)?;
+            }
+        }
+        Ok(())
+    }
+    std::fs::create_dir_all(installed)?;
+    for entry in std::fs::read_dir(builtin)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            "data" | "logs" | "runtime" | "local-trust.json"
+        ) {
+            continue;
+        }
+        let destination = installed.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else {
+            std::fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn restore_failed_user_message_state(
     state: &TiangongApp,
     session_id: &str,
@@ -4107,7 +4230,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        cancel_after_session_send_boundary, done_event_keeps_turn_running,
+        cancel_after_session_send_boundary, deploy_builtin_plugins, done_event_keeps_turn_running,
         merge_agent_worker_messages, save_started_bot_state, stop_bot_with_state,
     };
 
@@ -4281,6 +4404,64 @@ mod tests {
 
         assert!(error.contains("已恢复自动运行状态"));
         assert!(store.get(&id).unwrap().enabled);
+    }
+    #[test]
+    fn 内置插件_版本较新时部署并落信任锚() {
+        let root = tempfile::tempdir().unwrap();
+        let resource_dir = root.path().join("resources");
+        let builtin = resource_dir.join("plugins/plugin-creator");
+        std::fs::create_dir_all(builtin.join("sidecar")).unwrap();
+        std::fs::write(
+            builtin.join("plugin.json"),
+            r#"{"schema_version":2,"id":"plugin-creator","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(builtin.join("sidecar/main.mjs"), "// new bundle").unwrap();
+        std::fs::write(
+            builtin.join("content-manifest.json"),
+            r#"{"algorithm":"sha256","files":[]}"#,
+        )
+        .unwrap();
+        let storage_root = root.path().join("storage");
+        let installed = storage_root.join("plugins/plugin-creator");
+        std::fs::create_dir_all(installed.join("data")).unwrap();
+        std::fs::write(
+            installed.join("plugin.json"),
+            r#"{"schema_version":2,"id":"plugin-creator","version":"0.1.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(installed.join("data/keep.txt"), "用户数据").unwrap();
+
+        deploy_builtin_plugins(&resource_dir, &storage_root);
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(installed.join("plugin.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["version"], "0.2.0");
+        assert!(installed.join("sidecar/main.mjs").is_file());
+        assert_eq!(
+            std::fs::read_to_string(installed.join("data/keep.txt")).unwrap(),
+            "用户数据"
+        );
+        let trust: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(installed.join("local-trust.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trust["kind"], "app-builtin");
+        use sha2::Digest;
+        let anchor = hex::encode(sha2::Sha256::digest(
+            std::fs::read(installed.join("content-manifest.json")).unwrap(),
+        ));
+        assert_eq!(trust["content_sha256"], anchor.as_str());
+
+        // 相同版本（重复启动）不重复部署。
+        std::fs::write(installed.join("sidecar/main.mjs"), "// user-edited").unwrap();
+        deploy_builtin_plugins(&resource_dir, &storage_root);
+        assert_eq!(
+            std::fs::read_to_string(installed.join("sidecar/main.mjs")).unwrap(),
+            "// user-edited",
+            "相同版本不应覆盖安装目录"
+        );
     }
 }
 

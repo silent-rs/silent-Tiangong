@@ -420,6 +420,7 @@ fn main() {
             Ok(config) => build_plugin(config),
             Err(error) => Err(error),
         },
+        [command] if command == "prepare-builtin-plugins" => prepare_builtin_plugins(),
         [command, plugin, output] if command == "build-plugin-wasm" => {
             match plugin_config(plugin) {
                 Ok(config) => build_plugin_wasm(config, output),
@@ -1625,6 +1626,23 @@ fn new_plugin(plugin_id: &str, output_dir: Option<&str>) -> io::Result<()> {
     println!("[xtask] 插件骨架已生成: {}", target.display());
     println!("[xtask] 本地导入: 在天工「设置 → 插件管理 → 导入本地插件」选择该目录");
     println!("[xtask] 工程化开发: 参阅 plugins/sdk/README.md 与 docs/plugin-development.md");
+    Ok(())
+}
+
+/// 准备随 App 打包的内置插件资源：构建 plugin-creator 并把 release 产物
+/// 复制到 src-tauri/resources/plugins/<id>/（tauri bundle resources 已配置）。
+/// 打包前调用；dev 模式资源缺失时启动部署自动跳过。
+pub fn prepare_builtin_plugins() -> io::Result<()> {
+    let root = workspace_root();
+    let config = plugin_config("plugin-creator")?;
+    build_plugin(config)?;
+    let release = root.join(config.plugin_root).join("release");
+    require_file(&release.join("plugin.json"))?;
+    let destination = root.join("src-tauri/resources/plugins").join(config.id);
+    remove_dir_if_exists(&destination)?;
+    std::fs::create_dir_all(&destination)?;
+    copy_dir_recursive(&release, &destination)?;
+    eprintln!("[xtask] 内置插件资源已就绪: {}", destination.display());
     Ok(())
 }
 

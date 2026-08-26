@@ -14,7 +14,7 @@
 //! 均可复用本通道。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -41,11 +41,16 @@ pub struct InstallRequest {
 /// 安装确认回调：返回 false 视为用户拒绝。必须由宿主原生对话框实现。
 pub type InstallConfirmHandler = Arc<dyn Fn(&InstallRequest) -> bool + Send + Sync>;
 
-static INSTALL_CONFIRM: OnceLock<InstallConfirmHandler> = OnceLock::new();
+static INSTALL_CONFIRM: std::sync::RwLock<Option<InstallConfirmHandler>> =
+    std::sync::RwLock::new(None);
 
 /// 注入安装确认回调（桌面入口启动时调用）。
 pub fn set_plugin_dev_install_confirm(handler: InstallConfirmHandler) {
-    let _ = INSTALL_CONFIRM.set(handler);
+    // 覆盖语义：宿主启动注入一次；测试在隔离目录间重置。读取方在缺失时
+    // fail-closed（拒绝安装）。
+    if let Ok(mut current) = INSTALL_CONFIRM.write() {
+        *current = Some(handler);
+    }
 }
 
 /// 处理一次 `plugin-dev.*` 桥接调用（权限校验由 bridge 层完成）。
@@ -242,9 +247,11 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
         permissions: manifest.permissions.clone(),
         directory: release_dir.display().to_string(),
     };
-    let Some(confirm) = INSTALL_CONFIRM.get() else {
-        bail!("宿主未接入原生安装确认，拒绝安装（fail-closed）");
-    };
+    let confirm = INSTALL_CONFIRM
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+        .ok_or_else(|| anyhow::anyhow!("宿主未接入原生安装确认，拒绝安装（fail-closed）"))?;
     if !confirm(&request) {
         bail!("用户取消了插件 {} 的安装", request.plugin_id);
     }
@@ -422,6 +429,7 @@ mod tests {
     /// 安装完整链（功能验证）：确认桩 → 暂存（不可变副本）→ 导入 → 安装目录
     /// 与注册表就位；确认信息（版本）来自暂存副本而非可变的 release/。
     #[test]
+    #[serial_test::serial]
     fn install_完整链_暂存确认导入与注册表() {
         let root = tempfile::tempdir().unwrap();
         tiangong_config::registry::init_from_dir(root.path());
@@ -587,12 +595,14 @@ await runSidecar({
     }
 
     #[test]
+    #[serial_test::serial]
     fn 解释器sidecar_本地信任安装_真实调用与篡改拒绝() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
         let id = "node-sc-demo";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
@@ -648,6 +658,7 @@ await runSidecar({
     /// templates 随行资源经 resources 声明进入安装目录并被 devkit 使用）。
     /// 产物（release/）由 `yarn package` 生成、不入库：CI 无产物时跳过。
     #[test]
+    #[serial_test::serial]
     fn creator真实产物_安装与devkit_init全链路() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
@@ -699,6 +710,7 @@ await runSidecar({
     /// 宿主连接新插件的 sidecar 真实调用。全程不经 GUI，等价于 Agent 操作序列。
     #[test]
     #[ignore = "真实 yarn 构建需数分钟与网络，按需显式运行"]
+    #[serial_test::serial]
     fn 从零创建node_sidecar插件_完整旅程() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
@@ -780,6 +792,7 @@ await runSidecar({
     /// 无界面纯工具插件（node-tool 形态）：无 ui 贡献即可安装（校验解耦），
     /// 工具契约（操作名=工具名、ToolOutcome 形状）经 sidecar 真实往返。
     #[test]
+    #[serial_test::serial]
     fn 无界面纯工具插件_安装与工具契约() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
@@ -842,6 +855,7 @@ await runSidecar({
     /// 自定义图标往返：带 png 图标的插件安装后，read_plugin_icon 返回正确
     /// 字节与 MIME（read 走 loaded_plugins 内存表，install 后可用）。
     #[test]
+    #[serial_test::serial]
     fn 插件图标_安装与读取往返() {
         let root = tempfile::tempdir().unwrap();
         tiangong_config::registry::init_from_dir(&root.path().join("config"));
@@ -873,5 +887,106 @@ await runSidecar({
         let (data, mime) = crate::registry::read_plugin_icon(id, "app").expect("读取插件图标");
         assert_eq!(mime, "image/png");
         assert_eq!(data.as_slice(), MINIMAL_PNG);
+    }
+    /// 工具级超时与进程终止：阻塞型 node 工具（sleep）超过工具声明的
+    /// timeout_ms 时及时失败，且按需 sidecar 进程被终止（不留活进程）。
+    #[test]
+    #[serial_test::serial]
+    fn 直连工具_超时终止进程() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "blocking-tool";
+        make_project(root.path(), id);
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"blocking-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"slow_job","description":"慢任务","input_schema":{"type":"object"},"timeout_ms":1500}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
+        )
+        .unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { writeFileSync } from 'node:fs';
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'blocking-tool',
+  dispatch(operation, payload) {
+    if (operation === 'slow_job') {
+      writeFileSync(payload.pid_file, String(process.pid));
+      return new Promise(() => {});
+    }
+    return { payload: {} };
+  },
+});
+"#,
+        )
+        .unwrap();
+        write_content_manifest(&release);
+
+        set_plugin_dev_install_confirm(Arc::new(|_: &InstallRequest| true));
+        install(root.path(), id).expect("安装阻塞工具插件");
+
+        let pid_file = root.path().join("slow.pid");
+        let started = std::time::Instant::now();
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                crate::ts_plugin::invoke_sidecar_tool_for_test(
+                    id,
+                    tiangong_llm::tool::ToolCall {
+                        id: "test-call".to_string(),
+                        name: "slow_job".to_string(),
+                        arguments: json!({"pid_file": &pid_file}),
+                    },
+                    1500,
+                )
+                .await
+            });
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "超时应及时返回，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!result.ok, "超时应失败: {}", result.summary);
+        // 进程终止断言：pid 文件出现后，对应进程应在短时间内消失。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        while std::time::Instant::now() < deadline {
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(!alive, "超时后按需 sidecar 进程（pid {pid}）应被终止");
     }
 }

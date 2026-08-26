@@ -124,7 +124,10 @@ impl ToolOverrideHandler for TsPluginAdapter {
         let plugin_id = self.id.clone();
         let call = call.clone();
         if self.sidecar_direct.load(Ordering::Acquire) {
-            Box::pin(async move { Some(invoke_sidecar_tool(&plugin_id, call).await) })
+            let tool_timeout_ms = tool.timeout_ms;
+            Box::pin(
+                async move { Some(invoke_sidecar_tool(&plugin_id, call, tool_timeout_ms).await) },
+            )
         } else {
             let session_id = session.id.clone();
             Box::pin(async move {
@@ -142,7 +145,10 @@ fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
 /// 插件的 WASM 桥接层一致（透传）——operation 为工具名、参数为调用参数
 /// 对象，sidecar 返回 ToolOutcome 形状（ok/summary/stdout/stderr/exit_code，
 /// 后四项可缺省）。
-async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall) -> ToolResult {
+///
+/// 生命周期对齐页面接应路径：按工具声明的 `timeout_ms` 限时；超时或会话
+/// 取消（Future 被 drop）时终止本次按需 sidecar 进程，不遗留阻塞调用。
+async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
     };
@@ -153,15 +159,46 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall) -> ToolResult {
     else {
         return sidecar_tool_failure(plugin_id, "无法定位插件存储根");
     };
-    let plugin_id_owned = plugin_id.to_string();
+    let installed = match crate::registry::find_installed_plugin(&storage_root, plugin_id) {
+        Ok(installed) => installed,
+        Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
+    };
+    let connection = match crate::registry::sidecar_connection(&storage_root, &installed, false) {
+        Ok(connection) => connection,
+        Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
+    };
+    // 进程守卫：调用完成（disarm）前，超时返回、panic 或会话取消（drop）
+    // 都终止本次按需进程——后台 spawn_blocking 里的调用随进程断开而失败，
+    // 不再运行到 sidecar 总超时。
+    let mut guard = SidecarProcessGuard {
+        connection: Some(connection.clone()),
+    };
     let operation = call.name.clone();
+    let timeout_operation = operation.clone();
     let arguments = call.arguments.clone();
-    let invoked = tokio::task::spawn_blocking(move || {
-        crate::registry::invoke_sidecar(&storage_root, &plugin_id_owned, &operation, arguments)
-    })
+    let blocking = connection.clone();
+    let invoked = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        tokio::task::spawn_blocking(move || {
+            blocking.invoke(
+                &operation,
+                &serde_json::to_string(&arguments).unwrap_or_default(),
+            )
+        }),
+    )
     .await;
-    match invoked {
-        Ok(Ok(value)) => ToolResult {
+    let outcome = match invoked {
+        // 工具级超时：guard drop 终止进程。
+        Err(_) => Err(anyhow::anyhow!(
+            "sidecar 工具 {timeout_operation} 超时（{timeout_ms}ms），已终止本次执行"
+        )),
+        Ok(Ok(Ok(raw))) => serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| anyhow::anyhow!("解析 sidecar 工具响应失败：{error}")),
+        Ok(Ok(Err(error))) => Err(error),
+        Ok(Err(error)) => Err(anyhow::anyhow!("sidecar 调用任务失败：{error}")),
+    };
+    let result = match outcome {
+        Ok(value) => ToolResult {
             ok: value
                 .get("ok")
                 .and_then(serde_json::Value::as_bool)
@@ -193,9 +230,36 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall) -> ToolResult {
                 ) as i32,
             execution: None,
         },
-        Ok(Err(error)) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
-        Err(error) => sidecar_tool_failure(plugin_id, format!("sidecar 调用任务失败：{error}")),
+        Err(error) => sidecar_tool_failure(plugin_id, format!("{error:#}")),
+    };
+    if result.ok {
+        // 正常路径解除守卫：按需进程已由调用自身清理；常驻进程不受影响。
+        // 超时/取消/panic 路径经 Drop 终止进程（后台阻塞调用随进程断开结束）。
+        guard.connection.take();
     }
+    result
+}
+
+struct SidecarProcessGuard {
+    connection: Option<std::sync::Arc<dyn crate::sidecar::SidecarConnection>>,
+}
+
+impl Drop for SidecarProcessGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            connection.cancel_current();
+        }
+    }
+}
+
+/// 测试通道：经真实直连路径调用（安装与阻塞超时验证）。
+#[cfg(test)]
+pub(crate) async fn invoke_sidecar_tool_for_test(
+    plugin_id: &str,
+    call: ToolCall,
+    timeout_ms: u64,
+) -> ToolResult {
+    invoke_sidecar_tool(plugin_id, call, timeout_ms).await
 }
 
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {

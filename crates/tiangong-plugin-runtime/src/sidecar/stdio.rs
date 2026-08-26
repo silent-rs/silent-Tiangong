@@ -120,12 +120,14 @@ impl StdioSidecarConnection {
                 if self.stopped.load(Ordering::Acquire) {
                     bail!("stdio sidecar 已停止");
                 }
-                let process = self.start_fresh(&mut state)?;
+                // 临时校验进程完全不经过共享 state：按需调用可能正在进行
+                //（state.process 是其活跃进程），经 state 启停会误杀它。
+                let process = Arc::new(self.spawn()?);
+                let result = self.handshake(&process);
                 if let Ok(mut child) = process.child.lock() {
                     terminate_process_tree(&process, &mut child);
                 }
-                state.process = None;
-                Ok(())
+                result.map(|_| ())
             }
             crate::manifest::SidecarLifecycle::Resident => {
                 self.ensure_running(&mut state).map(|_| ())
@@ -190,26 +192,52 @@ impl StdioSidecarConnection {
 
     /// 按需调用：每次请求独立进程（spawn → 握手 → 请求 → 清理），
     /// 不复用也不保留进程——工具型调用的最小存活窗口。
+    ///
+    /// 锁只在起止瞬间持有：round_trip 期间不持锁，工具级超时/会话取消
+    /// （cancel_current）才能及时终止进行中的进程而不与调用方互等。
     fn invoke_on_demand(
         &self,
         operation: &str,
         payload: Value,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
+        let process = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+            if self.stopped.load(Ordering::Acquire) {
+                bail!("stdio sidecar 已停止");
+            }
+            self.start_fresh(&mut state)?
+        };
+        let result = self.round_trip(&process, operation, payload, on_progress);
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-        if self.stopped.load(Ordering::Acquire) {
-            bail!("stdio sidecar 已停止");
-        }
-        let process = self.start_fresh(&mut state)?;
-        let result = self.round_trip(&process, operation, payload, on_progress);
         if let Ok(mut child) = process.child.lock() {
             terminate_process_tree(&process, &mut child);
         }
-        state.process = None;
+        // cancel_current 可能已抢先清理（进程已被杀并移出）——幂等处理。
+        let already_cleared = state.process.is_none();
+        if !already_cleared {
+            state.process = None;
+        }
         result
+    }
+
+    /// 终止当前进行中的调用进程（工具级超时 / 会话取消用）：
+    /// 与 stop 不同，不改变停止标志——后续调用会重新起进程继续服务。
+    pub fn cancel_current(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(process) = state.process.take()
+            && let Ok(mut child) = process.child.lock()
+        {
+            terminate_process_tree(&process, &mut child);
+        }
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
@@ -767,6 +795,10 @@ impl SidecarConnection for StdioSidecarConnection {
 
     fn stop(&self) -> Result<()> {
         StdioSidecarConnection::stop(self)
+    }
+
+    fn cancel_current(&self) {
+        StdioSidecarConnection::cancel_current(self)
     }
 
     fn ensure_running(&self) -> Result<()> {

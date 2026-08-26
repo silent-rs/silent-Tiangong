@@ -273,7 +273,7 @@ fn archive_legacy_directory(storage_root: &Path, legacy_id: &str) {
 }
 
 #[derive(Clone)]
-struct InstalledPlugin {
+pub(crate) struct InstalledPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
     enabled: bool,
@@ -2455,7 +2455,10 @@ fn discover_installed_plugins(
     (installed_plugins, invalid_plugins)
 }
 
-fn find_installed_plugin(storage_root: &Path, plugin_id: &str) -> Result<InstalledPlugin> {
+pub(crate) fn find_installed_plugin(
+    storage_root: &Path,
+    plugin_id: &str,
+) -> Result<InstalledPlugin> {
     if plugin_id.is_empty()
         || !plugin_id
             .bytes()
@@ -2507,7 +2510,7 @@ fn resolve_sidecar(
     sidecar_connection(storage_root, installed, refresh).map(Some)
 }
 
-fn sidecar_connection(
+pub(crate) fn sidecar_connection(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,

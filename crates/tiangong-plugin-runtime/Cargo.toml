@@ -39,3 +39,4 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serial_test = { workspace = true }
