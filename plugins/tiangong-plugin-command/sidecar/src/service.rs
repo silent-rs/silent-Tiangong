@@ -130,10 +130,10 @@ impl CommandService {
     /// 以请求内宿主权威上下文（workspace/full_trust/allowed_commands）
     /// 为准刷新；常驻形态下与 init 注入同值，幂等。
     fn refresh_context_from_request(&self, access: &CommandAccessContext) {
-        if let Some(workspace) = &access.workspace {
-            if let Ok(mut guard) = self.workspace.write() {
-                *guard = Some(PathBuf::from(workspace));
-            }
+        if let Some(workspace) = &access.workspace
+            && let Ok(mut guard) = self.workspace.write()
+        {
+            *guard = Some(PathBuf::from(workspace));
         }
         if let Ok(mut guard) = self.full_trust.write() {
             *guard = access.full_trust;
