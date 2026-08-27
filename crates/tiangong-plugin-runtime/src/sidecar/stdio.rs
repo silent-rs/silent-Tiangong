@@ -391,11 +391,16 @@ impl StdioSidecarConnection {
             .env(
                 SANDBOX_MEMORY_LIMIT_ENV,
                 resource_limits.max_memory_bytes.to_string(),
-            )
-            .env(
+            );
+        // 进程数上限（RLIMIT_NPROC）按真实用户全局计数：无沙箱直跑时与
+        // 宿主既有进程共享配额，进程数较多的环境（CI runner、桌面）会令
+        // 命令 fork 直接失败（Cannot fork）。仅在沙箱链路保持既有注入。
+        if launch_policy.is_some() {
+            command.env(
                 SANDBOX_PROCESS_LIMIT_ENV,
                 resource_limits.max_processes.to_string(),
             );
+        }
         if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
                 bail!("sidecar 专用临时目录无效: {}", temp_dir.display());
