@@ -231,31 +231,38 @@ fn apply_unix_resource_limits(
     let memory_bytes = limits.max_memory_bytes;
     unsafe {
         command.pre_exec(move || {
-            let apply = |resource: libc::c_int, value: u64| -> std::io::Result<()> {
-                let wanted = libc::rlimit {
-                    rlim_cur: value as libc::rlim_t,
-                    rlim_max: value as libc::rlim_t,
-                };
-                if libc::setrlimit(resource, &wanted) == 0 {
-                    return Ok(());
-                }
-                // 设置失败且外层环境已施加不宽于目标的限制（嵌套受限终端、
-                // 受管 CI 外壳）时继承现状——只向更严格方向收缩，不拒绝。
-                let mut current = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(resource, (&raw mut current) as *mut libc::rlimit) == 0
-                    && current.rlim_cur != libc::RLIM_INFINITY
-                    && current.rlim_cur <= value as libc::rlim_t
-                {
-                    return Ok(());
-                }
-                Err(std::io::Error::last_os_error())
-            };
-            apply(libc::RLIMIT_CPU, cpu_seconds)?;
+            // 资源参数类型随平台不同（Linux glibc 为 u32，darwin 为 c_int），
+            // 以宏在调用点展开让 libc 常量类型自然匹配。
+            macro_rules! apply {
+                ($resource:expr, $value:expr) => {{
+                    let wanted = libc::rlimit {
+                        rlim_cur: ($value) as libc::rlim_t,
+                        rlim_max: ($value) as libc::rlim_t,
+                    };
+                    if libc::setrlimit($resource, &wanted) == 0 {
+                        Ok(())
+                    } else {
+                        // 设置失败且外层环境已施加不宽于目标的限制（嵌套受
+                        // 限终端、受管 CI 外壳）时继承现状——只向更严格方向
+                        // 收缩，不拒绝。
+                        let mut current = libc::rlimit {
+                            rlim_cur: 0,
+                            rlim_max: 0,
+                        };
+                        if libc::getrlimit($resource, (&raw mut current).cast()) == 0
+                            && current.rlim_cur != libc::RLIM_INFINITY
+                            && current.rlim_cur <= ($value) as libc::rlim_t
+                        {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    }
+                }};
+            }
+            apply!(libc::RLIMIT_CPU, cpu_seconds)?;
             #[cfg(target_os = "linux")]
-            apply(libc::RLIMIT_AS, memory_bytes)?;
+            apply!(libc::RLIMIT_AS, memory_bytes)?;
             Ok(())
         });
     }
