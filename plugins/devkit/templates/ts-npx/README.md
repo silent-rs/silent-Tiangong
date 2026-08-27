@@ -14,7 +14,7 @@
    （npx -y @silent-ai/plugin-creator@1.0.2 run <id> -- <参数>，
    按 run.json 声明执行，日志在 `logs/run.log`）；
 3. 分发：plugin_validate → plugin_build（零构建直接打包）→ plugin_install
-   （原生确认，内容哈希锁定）；
+   （自动签名免确认，内容哈希锁定）；
 4. 装好后：Agent 按说明书经命令通道执行
    `npx -y tsx@4.19.2 ~/.tiangong/plugins/{{PLUGIN_ID}}/tools/main.ts ...`。
 

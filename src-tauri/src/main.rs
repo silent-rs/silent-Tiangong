@@ -463,7 +463,7 @@ fn run_gui() {
                 },
             ));
             tiangong_plugin_runtime::set_sidecar_result_observer(Arc::new(
-                |plugin_id: &str, operation: &str, payload: &str, _result: &str| {
+                |plugin_id: &str, operation: &str, payload: &str, result: &str| {
                     if plugin_id != "plugin-creator" || operation != "devkit.build" {
                         return;
                     }
@@ -487,7 +487,39 @@ fn run_gui() {
                     else {
                         return;
                     };
-                    tiangong_plugin_runtime::note_trusted_build(plugin_id, project);
+                    // 仅成功构建登记安装资格；失败构建撤销旧登记（devkit 以
+                    // ok:false 报告业务失败——sidecar 通信本身仍算成功）。
+                    let build_ok = serde_json::from_str::<serde_json::Value>(result)
+                        .ok()
+                        .and_then(|value| {
+                            value.get("ok").and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false);
+                    if !build_ok {
+                        tiangong_plugin_runtime::note_trusted_build(plugin_id, project, None);
+                        return;
+                    }
+                    // 指纹锚定构建产物：release 内容清单的整体哈希，install
+                    // 时与暂存副本比对（构建后替换产物即失配）。
+                    let release_dir = tiangong_config::io::storage_root()
+                        .join("plugins-dev")
+                        .join(project)
+                        .join("release");
+                    match tiangong_plugin_runtime::content_manifest_fingerprint(&release_dir) {
+                        Ok(fingerprint) => {
+                            tiangong_plugin_runtime::note_trusted_build(
+                                plugin_id,
+                                project,
+                                Some(fingerprint),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "构建成功但产物内容清单读取失败，不登记安装资格"
+                            );
+                        }
+                    }
                 },
             ));
 

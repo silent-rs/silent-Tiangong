@@ -28,4 +28,4 @@ npx -y @silent-ai/plugin-creator@1.0.2 validate <id>
 npx -y @silent-ai/plugin-creator@1.0.2 build <id>
 ```
 
-然后用 plugin_install 安装（原生确认）。
+然后用 plugin_install 安装（官方 Creator 自动签名免确认）。

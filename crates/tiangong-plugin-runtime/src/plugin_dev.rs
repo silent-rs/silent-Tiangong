@@ -61,32 +61,68 @@ pub(crate) fn clear_plugin_dev_trusted_installer_for_test() {
 /// 项目。install 只接受有登记的项目——自动签名的授权对象是「使用 Creator
 /// 开发的产物」，产物必须经宿主进程内发起的真实构建，堵住前端自报身份
 /// 冒充安装任意目录内容的通道。
-static TRUSTED_BUILDS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
-> = std::sync::OnceLock::new();
+type TrustedBuildKey = (String, String);
+type TrustedBuildTable = std::collections::HashMap<TrustedBuildKey, String>;
 
-fn trusted_builds() -> &'static std::sync::Mutex<std::collections::HashSet<(String, String)>> {
-    TRUSTED_BUILDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+static TRUSTED_BUILDS: std::sync::OnceLock<std::sync::Mutex<TrustedBuildTable>> =
+    std::sync::OnceLock::new();
+
+fn trusted_builds() -> &'static std::sync::Mutex<TrustedBuildTable> {
+    TRUSTED_BUILDS.get_or_init(|| std::sync::Mutex::new(TrustedBuildTable::new()))
 }
 
-/// 登记一个受信构建（插件 × 项目）。仅宿主观察者调用。
-pub fn note_trusted_build(plugin_id: &str, project_id: &str) {
+/// 计算构建产物内容清单指纹（`<目录>/content-manifest.json` 整体 sha256）。
+/// 宿主观察者登记受信构建与 install 核验暂存副本使用同一算法。
+pub fn content_manifest_fingerprint(directory: &Path) -> Result<String> {
+    let raw = std::fs::read(directory.join(crate::sidecar::CONTENT_MANIFEST_FILE)).with_context(
+        || {
+            format!(
+                "读取构建产物内容清单失败: {}",
+                directory
+                    .join(crate::sidecar::CONTENT_MANIFEST_FILE)
+                    .display()
+            )
+        },
+    )?;
+    use sha2::Digest;
+    Ok(hex::encode(sha2::Sha256::digest(&raw)))
+}
+
+/// 登记一次成功构建的产物指纹（插件 × 项目 → 内容清单整体 sha256）；
+/// `manifest_sha256` 为 None 表示撤销登记（构建失败或安装消费后失效）。
+///
+/// 指纹在观察者侧由「release 目录的 content-manifest.json 整体哈希」计算，
+/// install 时与暂存副本逐一比对——授权对象是真实构建出的那份内容，
+/// 构建后替换 release/ 无法通过签名安装。
+pub fn note_trusted_build(plugin_id: &str, project_id: &str, manifest_sha256: Option<String>) {
     if let Ok(mut builds) = trusted_builds().lock() {
-        builds.insert((plugin_id.to_string(), project_id.to_string()));
+        match manifest_sha256 {
+            Some(fingerprint) => {
+                builds.insert((plugin_id.to_string(), project_id.to_string()), fingerprint);
+            }
+            None => {
+                builds.remove(&(plugin_id.to_string(), project_id.to_string()));
+            }
+        }
     }
 }
 
-/// 项目是否存在受信构建登记。
-pub fn has_trusted_build(plugin_id: &str, project_id: &str) -> bool {
-    trusted_builds()
-        .lock()
-        .map(|builds| builds.contains(&(plugin_id.to_string(), project_id.to_string())))
-        .unwrap_or(false)
+/// 读取项目当前登记的产物指纹（None 表示无有效登记）。
+pub fn trusted_build_fingerprint(plugin_id: &str, project_id: &str) -> Option<String> {
+    trusted_builds().lock().ok().and_then(|builds| {
+        builds
+            .get(&(plugin_id.to_string(), project_id.to_string()))
+            .cloned()
+    })
 }
 
 /// install 桥接入口的授权检查：调用方是宿主判定的受信创作插件，且目标
 /// 项目存在受信构建登记。任一不满足即拒绝（fail-closed）。
-fn ensure_install_authorized(storage_root: &Path, plugin_id: &str, project_id: &str) -> Result<()> {
+fn ensure_install_authorized(
+    storage_root: &Path,
+    plugin_id: &str,
+    project_id: &str,
+) -> Result<String> {
     let official_signed = crate::registry::find_installed_plugin(storage_root, plugin_id)
         .ok()
         .and_then(|installed| installed.signed_release)
@@ -103,10 +139,11 @@ fn ensure_install_authorized(storage_root: &Path, plugin_id: &str, project_id: &
     if !handler(&identity) {
         bail!("插件 {plugin_id} 无自动签名安装资格（用户密钥签名安装仅限受信创作插件）");
     }
-    if !has_trusted_build(plugin_id, project_id) {
-        bail!("项目 {project_id} 缺少受信构建登记（先经该插件的 sidecar 完成构建，再安装）");
-    }
-    Ok(())
+    trusted_build_fingerprint(plugin_id, project_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "项目 {project_id} 缺少受信构建登记（先经该插件的 sidecar 完成构建，再安装）"
+        )
+    })
 }
 
 pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
@@ -117,8 +154,17 @@ pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     let result = match operation {
         "install" => {
             let request: IdRequest = parse_payload(payload)?;
-            ensure_install_authorized(&storage_root, plugin_id, &request.id)?;
-            serde_json::to_value(install(&storage_root, &request.id)?)?
+            let expected_fingerprint =
+                ensure_install_authorized(&storage_root, plugin_id, &request.id)?;
+            let result = install(
+                &storage_root,
+                &request.id,
+                Some((plugin_id, &expected_fingerprint)),
+            )?;
+            // 安装成功即消费登记：一次构建只授予一次安装资格，再次安装需
+            // 重新构建（防止旧登记被无限复用）。
+            note_trusted_build(plugin_id, &request.id, None);
+            serde_json::to_value(result)?
         }
         "list" => serde_json::to_value(list(&storage_root)?)?,
         "status" => {
@@ -259,7 +305,15 @@ fn installed_plugin_manifest(storage_root: &Path, plugin_id: &str) -> Option<Plu
 
 // ── install ──
 
-fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
+/// 指纹核验期望：`(发起受信插件 ID, 登记的产物指纹)`。直调（测试/内部
+/// 流程）传 None 跳过核验。
+type TrustedBuildExpectation<'a> = Option<(&'a str, &'a str)>;
+
+fn install(
+    storage_root: &Path,
+    project_id: &str,
+    trusted_build: TrustedBuildExpectation<'_>,
+) -> Result<InstallResult> {
     let project_dir = dev_project_dir(storage_root, project_id)?;
     let release_dir = project_dir.join("release");
     let release_manifest = release_dir.join("plugin.json");
@@ -290,6 +344,18 @@ fn install(storage_root: &Path, project_id: &str) -> Result<InstallResult> {
     // 从「确认动作」转移到「用户密钥」，构建 → 签名 → 验证 → 安装全程
     // 可自动化，远程 / Agent 创作闭环不再被弹窗阻塞）。
     if manifest.sidecar.is_some() {
+        // 受信构建指纹核验：暂存副本的内容清单哈希必须与构建登记一致——
+        // 授权对象是「真实构建出的那份内容」，构建后替换 release/（哪怕
+        // 重算内容清单）都无法通过签名安装。直调（测试）传 None 跳过，
+        // 生产路径必经 call 层携带登记指纹。
+        if let Some((_installer, expected_fingerprint)) = trusted_build {
+            let actual_fingerprint = content_manifest_fingerprint(staged.path())?;
+            if !actual_fingerprint.eq_ignore_ascii_case(expected_fingerprint) {
+                bail!(
+                    "项目 {project_id} 构建产物与受信构建登记不一致（构建后产物被修改？），                     请重新构建后再安装"
+                );
+            }
+        }
         sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
     }
     // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化。
@@ -499,7 +565,7 @@ mod tests {
         .unwrap();
         std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
 
-        let result = install(root.path(), "inst-demo").expect("安装完整链");
+        let result = install(root.path(), "inst-demo", None).expect("安装完整链");
         assert_eq!(result.plugin_id, "inst-demo");
         assert_eq!(result.version, "9.9.9");
         assert!(result.enabled, "安装后应启用");
@@ -528,7 +594,7 @@ mod tests {
     fn install_缺构建产物时给出devkit指引() {
         let root = tempfile::tempdir().unwrap();
         make_project(root.path(), "demo");
-        let error = install(root.path(), "demo").unwrap_err();
+        let error = install(root.path(), "demo", None).unwrap_err();
         assert!(
             error.to_string().contains("@silent-ai/plugin-creator"),
             "应指引 devkit 命令：{error}"
@@ -645,7 +711,7 @@ await runSidecar({
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
 
-        let result = install(root.path(), id).expect("解释器 sidecar 安装");
+        let result = install(root.path(), id, None).expect("解释器 sidecar 安装");
         assert_eq!(result.plugin_id, id);
 
         // 真实调用：宿主 stdio 连接 ↔ node 解释器 sidecar。
@@ -709,7 +775,7 @@ await runSidecar({
         make_project(root.path(), target);
         make_node_sidecar_release(root.path(), target);
         // 调用方插件本体先经 install 直调装好（其自身安装不经桥接授权）。
-        install(root.path(), caller).expect("调用方插件安装");
+        install(root.path(), caller, None).expect("调用方插件安装");
 
         let payload = |id: &str| serde_json::json!({ "id": id }).to_string();
 
@@ -742,12 +808,141 @@ await runSidecar({
             "{error:#}"
         );
 
-        // 4) 受信 + 已登记：完整签名安装链成功。
-        note_trusted_build(caller, target);
+        // 4) 受信 + 已登记（指纹锚定构建产物）：完整签名安装链成功。
+        let target_fingerprint = {
+            use sha2::Digest;
+            let manifest_raw = std::fs::read(
+                root.path()
+                    .join(PLUGIN_DEV_DIR)
+                    .join(target)
+                    .join("release/content-manifest.json"),
+            )
+            .unwrap();
+            hex::encode(sha2::Sha256::digest(&manifest_raw))
+        };
+        note_trusted_build(caller, target, Some(target_fingerprint.clone()));
         let result =
             call(caller, "plugin-dev.install", &payload(target)).expect("受信且已登记应安装成功");
         assert!(result.contains(target), "{result}");
         // 清理全局态，避免污染其他测试。
+        clear_plugin_dev_trusted_installer_for_test();
+    }
+
+    /// 指纹核验：构建登记后篡改产物（重算内容清单）再经桥接安装必须拒绝；
+    /// 成功安装消费登记（再次安装需重新构建）。
+    #[test]
+    #[serial_test::serial]
+    fn 指纹核验_篡改产物拒绝与安装消费() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let caller = "node-sc-fp-caller";
+        let target = "node-sc-fp-target";
+        make_project(root.path(), caller);
+        make_node_sidecar_release(root.path(), caller);
+        make_project(root.path(), target);
+        make_node_sidecar_release(root.path(), target);
+        install(root.path(), caller, None).expect("调用方插件安装");
+
+        let expected_caller = caller.to_string();
+        set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
+            identity.plugin_id == expected_caller
+        }));
+        let release_dir = root
+            .path()
+            .join(PLUGIN_DEV_DIR)
+            .join(target)
+            .join("release");
+        let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
+        note_trusted_build(caller, target, Some(fingerprint));
+
+        // 构建后篡改产物（改文件并重算内容清单）：指纹失配拒绝。
+        std::fs::write(
+            release_dir.join("sidecar/main.mjs"),
+            "// tampered after build",
+        )
+        .unwrap();
+        write_content_manifest(&release_dir);
+        let error = call(
+            caller,
+            "plugin-dev.install",
+            &serde_json::json!({ "id": target }).to_string(),
+        )
+        .expect_err("篡改产物应拒绝安装");
+        assert!(format!("{error:#}").contains("不一致"), "{error:#}");
+
+        // 恢复产物并重新登记（等价重新构建）：安装成功且登记被消费。
+        make_node_sidecar_release(root.path(), target);
+        let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
+        note_trusted_build(caller, target, Some(fingerprint));
+        call(
+            caller,
+            "plugin-dev.install",
+            &serde_json::json!({ "id": target }).to_string(),
+        )
+        .expect("登记匹配应安装成功");
+        assert!(
+            trusted_build_fingerprint(caller, target).is_none(),
+            "安装成功后登记应被消费"
+        );
+        // 消费后再次安装：要求重新构建。
+        let error = call(
+            caller,
+            "plugin-dev.install",
+            &serde_json::json!({ "id": target }).to_string(),
+        )
+        .expect_err("消费后应要求重新构建");
+        assert!(
+            format!("{error:#}").contains("缺少受信构建登记"),
+            "{error:#}"
+        );
+        clear_plugin_dev_trusted_installer_for_test();
+    }
+
+    /// 失败构建撤销：note(None) 语义清除旧登记后不可安装。
+    #[test]
+    #[serial_test::serial]
+    fn 失败构建_撤销登记后不可安装() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let caller = "node-sc-revoke-caller";
+        let target = "node-sc-revoke-target";
+        make_project(root.path(), caller);
+        make_node_sidecar_release(root.path(), caller);
+        make_project(root.path(), target);
+        make_node_sidecar_release(root.path(), target);
+        install(root.path(), caller, None).expect("调用方插件安装");
+
+        let expected_caller = caller.to_string();
+        set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
+            identity.plugin_id == expected_caller
+        }));
+        let release_dir = root
+            .path()
+            .join(PLUGIN_DEV_DIR)
+            .join(target)
+            .join("release");
+        let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
+        note_trusted_build(caller, target, Some(fingerprint));
+        // 构建失败：观察者撤销登记。
+        note_trusted_build(caller, target, None);
+        let error = call(
+            caller,
+            "plugin-dev.install",
+            &serde_json::json!({ "id": target }).to_string(),
+        )
+        .expect_err("撤销后应拒绝安装");
+        assert!(
+            format!("{error:#}").contains("缺少受信构建登记"),
+            "{error:#}"
+        );
         clear_plugin_dev_trusted_installer_for_test();
     }
 
@@ -765,7 +960,7 @@ await runSidecar({
         let id = "node-sc-observer";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
-        install(root.path(), id).expect("安装");
+        install(root.path(), id, None).expect("安装");
 
         let observed = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
         let sink = Arc::clone(&observed);
@@ -929,7 +1124,7 @@ await runSidecar({
         let id = "node-sc-mixed-trust";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
-        install(root.path(), id).expect("签名链安装");
+        install(root.path(), id, None).expect("签名链安装");
 
         // 遗留本地信任插件（升级前存量形态）+ 官方签名同存：制造双信任
         // 来源。安装链已不落锚，这里手工补遗留标记。
@@ -1037,7 +1232,7 @@ await runSidecar({
         copy_tree_for_test(&release_source, &dev_root.join("release"));
         make_project(root.path(), id);
 
-        let result = install(root.path(), id).expect("creator 真实产物安装");
+        let result = install(root.path(), id, None).expect("creator 真实产物安装");
         assert_eq!(result.plugin_id, id);
 
         // 按需 sidecar 真实执行 devkit.init：安装目录内的 templates 必须可用。
@@ -1083,7 +1278,7 @@ await runSidecar({
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
         copy_tree_for_test(&release_source, &dev_root.join("release"));
         make_project(root.path(), creator);
-        install(root.path(), creator).expect("creator 安装");
+        install(root.path(), creator, None).expect("creator 安装");
 
         let devkit = |command: &str, args: serde_json::Value| {
             crate::registry::invoke_sidecar(
@@ -1126,7 +1321,7 @@ await runSidecar({
         assert_eq!(response["ok"], json!(true), "build 失败: {response}");
 
         // 4) 安装新插件（原生确认通道 + 完整性 + 本地信任）。
-        let result = install(root.path(), project_id).expect("新插件安装");
+        let result = install(root.path(), project_id, None).expect("新插件安装");
         assert_eq!(result.plugin_id, project_id);
 
         // 5) 宿主连接新插件 sidecar，真实调用自定义操作。
@@ -1190,7 +1385,7 @@ await runSidecar({
         .unwrap();
         write_content_manifest(&release);
 
-        let result = install(root.path(), id).expect("无界面纯工具插件应可安装");
+        let result = install(root.path(), id, None).expect("无界面纯工具插件应可安装");
         assert_eq!(result.plugin_id, id);
 
         // 工具契约：操作名 = 工具名，参数 = 工具参数对象，返回 ToolOutcome。
@@ -1234,7 +1429,7 @@ await runSidecar({
         std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
         write_content_manifest(&release);
 
-        install(root.path(), id).expect("带图标插件安装");
+        install(root.path(), id, None).expect("带图标插件安装");
 
         let (data, mime) = crate::registry::read_plugin_icon(id, "app").expect("读取插件图标");
         assert_eq!(mime, "image/png");
@@ -1287,7 +1482,7 @@ await runSidecar({
         .unwrap();
         write_content_manifest(&release);
 
-        install(root.path(), id).expect("安装阻塞工具插件");
+        install(root.path(), id, None).expect("安装阻塞工具插件");
 
         let pid_file = root.path().join("slow.pid");
         let started = std::time::Instant::now();
@@ -1390,7 +1585,7 @@ await runSidecar({
         )
         .unwrap();
         write_content_manifest(&release);
-        install(root.path(), id).expect("安装并发工具插件");
+        install(root.path(), id, None).expect("安装并发工具插件");
 
         let pid_file = root.path().join("slow.pid");
         let call = |name: &str, args: serde_json::Value| tiangong_llm::tool::ToolCall {

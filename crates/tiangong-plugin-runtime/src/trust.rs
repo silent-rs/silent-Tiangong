@@ -33,14 +33,34 @@ const TRUSTED_PUBLISHERS_FILE: &str = "trusted-publishers.json";
 static TRUST_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 临时文件 + 原子改名落盘：写一半崩溃不会留下半截密钥/登记表。
-fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+/// `private` 为 true 时临时文件以 0600 创建（Unix）——私钥不存在短暂的
+/// 宽权限窗口，与永久存留同等危险。
+fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建目录失败: {}", parent.display()))?;
     }
     let temporary = path.with_extension(format!("tmp-{}", scru128::new()));
-    std::fs::write(&temporary, content)
-        .with_context(|| format!("写入临时文件失败: {}", temporary.display()))?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        if private {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("写入临时文件失败: {}", temporary.display()))?;
+        file.write_all(content)
+            .with_context(|| format!("写入临时文件失败: {}", temporary.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&temporary, content)
+            .with_context(|| format!("写入临时文件失败: {}", temporary.display()))?;
+    }
     std::fs::rename(&temporary, path)
         .with_context(|| format!("原子落盘失败: {}", path.display()))?;
     Ok(())
@@ -114,17 +134,16 @@ fn decode_public_key_text(public_key_b64: &str) -> Result<String> {
 
 /// 确保用户签名密钥存在（不存在则生成），返回私钥路径。
 ///
-/// 密钥为未加密 minisign 格式——创作链要求免交互签名；密钥文件权限收紧
-/// 到仅当前用户可读写（Unix 0600）。
+/// 密钥为未加密 minisign 格式——创作链要求免交互签名；私钥临时文件以
+/// 0600 创建（Unix，无宽权限窗口）。已存在的密钥对做一致性校验：公钥
+/// 缺失或与私钥不一致时从私钥重建（崩溃残缺自愈）。
 pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
     let key_path = user_key_path(storage_root);
-    if key_path.is_file() {
-        return Ok(key_path);
-    }
     let _guard = TRUST_STORE_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("信任存储锁已损坏"))?;
     if key_path.is_file() {
+        verify_or_repair_user_public_key(&key_path, &public_key_path(storage_root))?;
         return Ok(key_path);
     }
     std::fs::create_dir_all(keys_root(storage_root))
@@ -135,13 +154,7 @@ pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
         .to_box(None)
         .context("序列化用户私钥失败")?
         .into_string();
-    atomic_write(&key_path, secret_text.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("收紧私钥权限失败: {}", key_path.display()))?;
-    }
+    atomic_write(&key_path, secret_text.as_bytes(), true)?;
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(
         keypair
             .pk
@@ -152,9 +165,53 @@ pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
     atomic_write(
         &public_key_path(storage_root),
         format!("{public_b64}\n").as_bytes(),
+        false,
     )?;
     tracing::info!(key = %key_path.display(), "已生成插件用户签名密钥");
     Ok(key_path)
+}
+
+/// 从私钥文本推导对应公钥（base64(公钥文本)，与 `.pub` 文件同格式）。
+fn derive_public_b64_from_secret_text(secret_text: &str) -> Result<String> {
+    let secret_key = minisign::SecretKeyBox::from_string(secret_text.trim())
+        .and_then(|secret_key_box| secret_key_box.into_unencrypted_secret_key())
+        .or_else(|_| {
+            // 加密形态回退（兼容手工替换的带密码密钥；空密码解密，不触发交互）。
+            minisign::SecretKeyBox::from_string(secret_text.trim())?
+                .into_secret_key(Some(String::new()))
+        })
+        .context("加载用户私钥失败（文件可能损坏）")?;
+    let public_key =
+        minisign::PublicKey::from_secret_key(&secret_key).context("从私钥推导公钥失败")?;
+    Ok(base64::engine::general_purpose::STANDARD
+        .encode(public_key.to_box().context("序列化公钥失败")?.into_string()))
+}
+
+/// 公钥一致性保障：缺失或不匹配时从私钥推导真实公钥重建（自愈）。
+///
+/// 残缺状态（私钥已写、公钥未写即崩溃）会在下次创作安装时自动修复；
+/// 不匹配以私钥推导值为准（公钥非秘密、无独立完整性来源）。私钥本身
+/// 无法解析时明确报错，不静默重置用户信任根。
+fn verify_or_repair_user_public_key(private_key_path: &Path, public_key_path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(private_key_path)
+        .with_context(|| format!("读取用户私钥失败: {}", private_key_path.display()))?;
+    let expected_public_b64 = derive_public_b64_from_secret_text(&raw)?;
+    let current_ok = std::fs::read_to_string(public_key_path)
+        .ok()
+        .map(|content| content.trim() == expected_public_b64)
+        .unwrap_or(false);
+    if !current_ok {
+        atomic_write(
+            public_key_path,
+            format!("{expected_public_b64}\n").as_bytes(),
+            false,
+        )?;
+        tracing::warn!(
+            public_key = %public_key_path.display(),
+            "用户公钥缺失或与私钥不一致，已从私钥重建"
+        );
+    }
+    Ok(())
 }
 
 /// 用户公钥路径。
@@ -238,7 +295,7 @@ fn save_trusted_publishers(storage_root: &Path, publishers: &[TrustedPublisher])
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    atomic_write(&path, &serde_json::to_vec_pretty(publishers)?)
+    atomic_write(&path, &serde_json::to_vec_pretty(publishers)?, false)
         .with_context(|| format!("写入第三方公钥登记表失败: {}", path.display()))?;
     Ok(())
 }
@@ -344,6 +401,24 @@ mod tests {
         ensure_user_signing_key(root.path()).unwrap();
         let public_b64 = user_public_key_b64(root.path()).unwrap();
         assert!(publisher_fingerprint(&public_b64).unwrap().len() == 16);
+    }
+
+    #[test]
+    fn 用户密钥_公钥残缺自动恢复() {
+        let root = storage();
+        ensure_user_signing_key(root.path()).unwrap();
+        let expected = user_public_key_b64(root.path()).unwrap();
+        // 崩溃残缺：私钥已写、公钥缺失 → 下次 ensure 从私钥恢复。
+        std::fs::remove_file(public_key_path(root.path())).unwrap();
+        ensure_user_signing_key(root.path()).unwrap();
+        assert_eq!(user_public_key_b64(root.path()).unwrap(), expected);
+        // 公钥被改坏（与私钥不匹配）→ 以私钥推导值重建。
+        std::fs::write(public_key_path(root.path()), "broken").unwrap();
+        ensure_user_signing_key(root.path()).unwrap();
+        assert_eq!(user_public_key_b64(root.path()).unwrap(), expected);
+        // 私钥损坏：明确报错，不静默重置信任根。
+        std::fs::write(user_key_path(root.path()), "not a key").unwrap();
+        assert!(ensure_user_signing_key(root.path()).is_err());
     }
 
     #[test]

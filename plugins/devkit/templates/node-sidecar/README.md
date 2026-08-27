@@ -39,7 +39,7 @@
   适合一次性任务；按需模式无进程内状态，通知不可用。
 - 开发机构建：yarn + Node ≥ 20（网络装依赖）。
 - 宿主运行：PATH 中的 `node` ≥ 20（或 `TIANGONG_NODE_PATH` 指定）。
-- 安装经 plugin-creator 原生确认；安装后 sidecar 文件被改动将拒绝启动
+- 安装经 plugin-creator 自动签名（免确认）；安装后 sidecar 文件被改动将拒绝启动
   （内容哈希锁定）。
 
 ## 迭代
