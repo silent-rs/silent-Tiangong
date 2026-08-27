@@ -356,7 +356,7 @@ jobs:
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
         run: |
-          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json"
+          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json
           if compgen -G "$pattern" > /dev/null; then
             release_json="$(compgen -G "$pattern")"
             cargo run -p xtask -- verify-official-release "$release_json"
