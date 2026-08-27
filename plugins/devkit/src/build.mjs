@@ -74,7 +74,7 @@ async function yarnBuild(projectDir) {
   return { ok: true, release_dir: join(projectDir, 'release') };
 }
 
-function runYarn(cwd, args) {
+export function runYarn(cwd, args, timeoutMs = BUILD_TIMEOUT_MS) {
   return new Promise((resolvePromise) => {
     let settled = false;
     const settle = (value) => {
@@ -105,7 +105,7 @@ function runYarn(cwd, args) {
     const timer = setTimeout(() => {
       killTree(child);
       // 终止进程树后 close 事件仍会到达并完成 Promise（等待真正退出）。
-    }, BUILD_TIMEOUT_MS);
+    }, timeoutMs);
     child.on('close', (code) => {
       clearTimeout(timer);
       appendLog(cwd, `$ yarn ${args.join(' ')}\n${stdout}\n${stderr}\n# 退出码 ${code ?? -1}\n`);

@@ -31,7 +31,12 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$HOME/.tiangong/**", "$HOME/Documents/**", "$HOME/Downloads/**", "/tmp/**"]
+        "scope": [
+          "$HOME/.tiangong/**",
+          "$HOME/Documents/**",
+          "$HOME/Downloads/**",
+          "/tmp/**"
+        ]
       }
     }
   },

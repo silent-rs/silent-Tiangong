@@ -447,6 +447,82 @@ fn run_gui() {
                 ));
             }
 
+            // 统一签名信任的授权注入（runtime 保持插件中立，策略在宿主层）：
+            //
+            // 1) 受信安装方 = 官方签名的固定 Plugin Creator。自动签名安装
+            //    （用户密钥）只对该插件放行，其他插件（哪怕声明 plugin-dev.use）
+            //    不可触发；宿主未注入时 runtime fail-closed。
+            // 2) sidecar 结果观察者：官方 Creator 的 devkit.build 在默认开发根
+            //    下真实执行成功时登记「受信构建」。install 只接受有登记的
+            //    项目——签名授权的是「使用 Creator 开发的产物」，产物必须经
+            //    宿主进程内发起的真实构建，堵住前端自报身份冒装任意目录
+            //    内容的通道。
+            tiangong_plugin_runtime::set_plugin_dev_trusted_installer(Arc::new(
+                |identity: &tiangong_plugin_runtime::InstallerIdentity| {
+                    identity.plugin_id == "plugin-creator" && identity.official_signed
+                },
+            ));
+            tiangong_plugin_runtime::set_sidecar_result_observer(Arc::new(
+                |plugin_id: &str, operation: &str, payload: &str, result: &str| {
+                    if plugin_id != "plugin-creator" || operation != "devkit.build" {
+                        return;
+                    }
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        return;
+                    };
+                    // 非默认根（root 覆盖，测试/CI 用）不产生安装资格。
+                    if value
+                        .get("root")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|root| !root.trim().is_empty())
+                    {
+                        return;
+                    }
+                    let Some(project) = value
+                        .get("args")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|args| args.first())
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|project| !project.trim().is_empty())
+                    else {
+                        return;
+                    };
+                    // 仅成功构建登记安装资格；失败构建撤销旧登记（devkit 以
+                    // ok:false 报告业务失败——sidecar 通信本身仍算成功）。
+                    let build_ok = serde_json::from_str::<serde_json::Value>(result)
+                        .ok()
+                        .and_then(|value| {
+                            value.get("ok").and_then(serde_json::Value::as_bool)
+                        })
+                        .unwrap_or(false);
+                    if !build_ok {
+                        tiangong_plugin_runtime::note_trusted_build(plugin_id, project, None);
+                        return;
+                    }
+                    // 指纹锚定构建产物：release 内容清单的整体哈希，install
+                    // 时与暂存副本比对（构建后替换产物即失配）。
+                    let release_dir = tiangong_config::io::storage_root()
+                        .join("plugins-dev")
+                        .join(project)
+                        .join("release");
+                    match tiangong_plugin_runtime::content_manifest_fingerprint(&release_dir) {
+                        Ok(fingerprint) => {
+                            tiangong_plugin_runtime::note_trusted_build(
+                                plugin_id,
+                                project,
+                                Some(fingerprint),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "构建成功但产物内容清单读取失败，不登记安装资格"
+                            );
+                        }
+                    }
+                },
+            ));
+
             // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
             // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
             // 终端等流式界面将收不到任何输出。
@@ -465,40 +541,6 @@ fn run_gui() {
                 },
             ));
 
-            // plugin-dev 安装确认：宿主原生对话框（非 webview，Agent 的界面
-            // 自动化无法触达），用户是唯一授权主体（RFC 0017 §11：plugin_install
-            // 必须经原生确认弹窗）。未注入时 plugin-dev.install fail-closed。
-            {
-                let app_handle = app.handle().clone();
-                tiangong_plugin_runtime::set_plugin_dev_install_confirm(Arc::new(
-                    move |request: &tiangong_plugin_runtime::InstallRequest| -> bool {
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-                        let permissions = if request.permissions.is_empty() {
-                            "无（纯 UI 插件）".to_string()
-                        } else {
-                            request.permissions.join("、")
-                        };
-                        let message = format!(
-                            "即将安装自建插件：\n\n插件：{}（id: {}）\n版本：{}\n权限：{}\n来源：{}\n\n安装后该插件将按上述权限运行，请确认内容可信。",
-                            request.name,
-                            request.plugin_id,
-                            request.version,
-                            permissions,
-                            request.directory
-                        );
-                        app_handle
-                            .dialog()
-                            .message(message)
-                            .title("安装自建插件确认")
-                            .kind(MessageDialogKind::Warning)
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "安装".to_string(),
-                                "取消".to_string(),
-                            ))
-                            .blocking_show()
-                    },
-                ));
-            }
 
             // 系统对话框原语：插件保存文件（导出结果等）。宿主 webview 是
             // WebKit（macOS），无 File System Access API——保存必须经原生
@@ -784,6 +826,12 @@ fn run_gui() {
             tiangong_app::commands::list_extension_apps,
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
+            tiangong_app::commands::plugin_read_icon,
+            tiangong_app::commands::plugin_list_trusted_publishers,
+            tiangong_app::commands::plugin_import_trusted_publisher,
+            tiangong_app::commands::plugin_remove_trusted_publisher,
+            tiangong_app::commands::plugin_user_key_fingerprint,
+            tiangong_app::commands::plugin_read_public_key_file,
             tiangong_app::commands::bridge_call,
             tiangong_app::commands::bridge_subscribe,
             tiangong_app::commands::bridge_unsubscribe,

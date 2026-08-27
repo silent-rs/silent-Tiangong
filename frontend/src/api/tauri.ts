@@ -664,6 +664,13 @@ export interface WebhookRun {
 // API 方法
 // ============================================================================
 
+export type TrustedPublisherEntry = {
+  publisher: string;
+  public_key_b64: string;
+  fingerprint: string;
+  imported_at: string;
+};
+
 export const api = {
   // ----------------------------------------------------------------
   // 会话管理
@@ -1093,6 +1100,21 @@ export const api = {
   importLocalPlugin: (path: string): Promise<PluginStatus> =>
     invoke('import_local_plugin', { path }),
 
+  listTrustedPublishers: (): Promise<TrustedPublisherEntry[]> =>
+    invoke('plugin_list_trusted_publishers'),
+
+  importTrustedPublisher: (publisher: string, publicKey: string): Promise<TrustedPublisherEntry> =>
+    invoke('plugin_import_trusted_publisher', { publisher, publicKey }),
+
+  removeTrustedPublisher: (publisher: string): Promise<boolean> =>
+    invoke('plugin_remove_trusted_publisher', { publisher }),
+
+  userKeyFingerprint: (): Promise<string | null> =>
+    invoke('plugin_user_key_fingerprint'),
+
+  readPublicKeyFile: (path: string): Promise<string> =>
+    invoke('plugin_read_public_key_file', { path }),
+
   installPlugin: (pluginId: string): Promise<PluginStatus> =>
     invoke('install_plugin', { pluginId }),
 
@@ -1130,6 +1152,10 @@ export const api = {
   /// 读取 v2 manifest UI 贡献的入口 HTML。
   pluginOpenEntry: (pluginId: string, contributionId: string): Promise<string> =>
     invoke('plugin_open_entry', { pluginId, contributionId }),
+
+  /// 读取插件 App 的自定义图标（拓展区矩阵渲染；插件根为根、白名单与上限见宿主）。
+  pluginReadIcon: (pluginId: string, contributionId: string): Promise<PluginEntryResource> =>
+    invoke('plugin_read_icon', { pluginId, contributionId }),
 
   /// 读取 v2 manifest UI 贡献的相对资源（沙箱容器加载外链脚本/样式）。
   pluginReadEntryResource: (

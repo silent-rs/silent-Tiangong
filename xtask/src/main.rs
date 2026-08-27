@@ -431,6 +431,12 @@ fn main() {
             Err(error) => Err(error),
         },
         [command, directory] if command == "sign-plugin" => sign_plugin(Path::new(directory)),
+        [command, key_path] if command == "generate-plugin-test-key" => {
+            generate_plugin_test_key(Path::new(key_path))
+        }
+        [command, release_path] if command == "verify-official-release" => {
+            verify_official_release(Path::new(release_path))
+        }
         [command, input, output] if command == "merge-plugin-dist" => {
             merge_plugin_distributions(Path::new(input), Path::new(output), None)
         }
@@ -483,6 +489,8 @@ fn print_help() {
     eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
     eprintln!("  cargo run -p xtask -- sign-plugin <插件包目录>");
+    eprintln!("  cargo run -p xtask -- generate-plugin-test-key <私钥路径>");
+    eprintln!("  cargo run -p xtask -- verify-official-release <release.json路径>");
     eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
     eprintln!(
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
@@ -635,6 +643,7 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         staging.join("plugin.json"),
     )?;
     stage_plugin_ui(&workspace_root, &staging, config)?;
+    stage_interpreter_sidecar(&workspace_root, &staging, config)?;
     for directory in PRESERVED_DIRS {
         std::fs::create_dir_all(staging.join(directory))?;
     }
@@ -653,11 +662,26 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         eprintln!("[xtask] sidecar sha256: {}", sha256(&staged_sidecar)?);
     }
     generate_oss_distribution(&workspace_root, &staging, config)?;
-    deploy_atomically(&staging, &destination, config)?;
-    eprintln!(
-        "[xtask] {plugin_name} 插件已部署到: {}",
-        destination.display()
-    );
+    // 部署守卫：仅官方签名形态部署到本机（官方开发者本地即官方形态，
+    // App 端内置公钥可直接验证）。非官方密钥（测试密钥等）签名的 staging
+    // 验签不过——产物照常生成，部署跳过并警告，避免本机出现必然无效
+    // 的插件目录。发布 CI 以 verify-official-release 强制校验正式私钥
+    // 与内置公钥匹配。
+    if staging_passes_official_verification(&staging)? {
+        deploy_atomically(&staging, &destination, config)?;
+        eprintln!(
+            "[xtask] {plugin_name} 插件已部署到: {}",
+            destination.display()
+        );
+    } else {
+        eprintln!(
+            "[xtask] 跳过部署：staging 签名未通过官方公钥验证（使用非官方密钥？）\n      \
+             发布产物不受影响；如需本机部署请以官方私钥（TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH）运行"
+        );
+    }
+    // 部署成功时 staging 已被原子改名带走（此处 no-op）；守卫跳过或任意
+    // 失败路径统一收尾清理，不在插件目录残留暂存。
+    remove_dir_if_exists(&staging)?;
     Ok(())
 }
 
@@ -735,7 +759,21 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
     }
 
     // sidecar 声明（无 sidecar 的插件跳过，保持清单与 plugin.json 一致）。
-    if let Some(sidecar_artifact) = config.sidecar_artifact {
+    // 解释器形态：签名锚定完整内容清单（覆盖全树），不签单个二进制。
+    let manifest_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json"))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let runtime = (manifest_value.get("sidecar").cloned().unwrap_or_default())
+        .get("runtime")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("native")
+        .to_string();
+    if runtime != "native" {
+        release["content_manifest"] = serde_json::json!({
+            "path": "content-manifest.json",
+            "sha256": sha256(&plugin.join("content-manifest.json"))?,
+        });
+    } else if let Some(sidecar_artifact) = config.sidecar_artifact {
         let sidecar_name = format!("{sidecar_artifact}{}", std::env::consts::EXE_SUFFIX);
         release["sidecar"] = serde_json::json!({
             "path": sidecar_name,
@@ -766,19 +804,114 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
         })?;
     let password =
         std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-    let status = Command::new("cargo")
-        .args(["tauri", "signer", "sign", "-f"])
-        .arg(&key_path)
-        .args(["-p", &password])
-        .arg(&release_path)
-        .status()?;
-    if !status.success() {
-        return Err(invalid_data("插件发布清单签名失败"));
-    }
-    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
-    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
+    sign_file_minisign(&key_path, &password, &release_path)?;
     eprintln!("[xtask] release.json 已签名");
     Ok(())
+}
+
+/// 用 minisign 私钥对文件签名，落盘「签名文本整体 base64」格式的 `.sig`
+/// （运行时 verify_minisign 读取格式）。私钥兼容 tauri signer 生成的
+/// minisign 密钥（含密码加密形态），签出的制品与 `cargo tauri signer sign`
+/// 完全同构，本地发布不再依赖 tauri-cli。
+fn sign_file_minisign(key_path: &Path, password: &str, content_path: &Path) -> io::Result<()> {
+    let raw = std::fs::read_to_string(key_path)
+        .map_err(|error| invalid_input(format!("读取插件签名私钥失败: {error}")))?;
+    let key_text = normalize_signing_key_text(&raw)?;
+    // 双路径加载：未加密密钥（generate-plugin-test-key 产物）走非交互的
+    // 未加密通道；加密密钥（tauri signer / 正式密钥）以显式密码解密——
+    // 传 Some 会拒绝未加密密钥（"Key is not encrypted"），传 None 会对
+    // 加密密钥触发交互提示（CI 卡死），因此按先未加密后加密的顺序尝试。
+    let secret_key = minisign::SecretKeyBox::from_string(&key_text)
+        .and_then(|secret_key_box| secret_key_box.into_unencrypted_secret_key())
+        .or_else(|_| {
+            minisign::SecretKeyBox::from_string(&key_text)?
+                .into_secret_key(Some(password.to_string()))
+        })
+        .map_err(|error| {
+            invalid_input(format!(
+                "加载插件签名私钥失败（未加密密钥不适用或密码错误）: {error}"
+            ))
+        })?;
+    let public_key = minisign::PublicKey::from_secret_key(&secret_key)
+        .map_err(|error| invalid_data(format!("推导插件签名公钥失败: {error}")))?;
+    let content = std::fs::read(content_path)?;
+    let signature = minisign::sign(
+        Some(&public_key),
+        &secret_key,
+        content.as_slice(),
+        None,
+        None,
+    )
+    .map_err(|error| invalid_data(format!("插件签名生成失败: {error}")))?;
+    use base64::Engine;
+    let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.into_string());
+    let mut signature_path = content_path.as_os_str().to_os_string();
+    signature_path.push(".sig");
+    std::fs::write(PathBuf::from(signature_path), signature_b64)?;
+    Ok(())
+}
+
+/// 私钥文件形态归一：标准 minisign 密钥是两行文本；tauri signer 生成的
+/// 密钥文件是整体 base64 包装的两行文本（与其 .pub 一致）。两种都接受。
+fn normalize_signing_key_text(raw: &str) -> io::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("untrusted comment") {
+        return Ok(trimmed.to_string());
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|_| {
+            invalid_input("插件签名私钥格式无效（期望 minisign 密钥文本或其 base64 包装）")
+        })?;
+    let text = String::from_utf8(decoded)
+        .map_err(|_| invalid_input("插件签名私钥 base64 内容不是有效 UTF-8"))?;
+    if !text.trim().starts_with("untrusted comment") {
+        return Err(invalid_input(
+            "插件签名私钥内容无效（缺少 minisign 注释头）",
+        ));
+    }
+    Ok(text.trim().to_string())
+}
+
+/// 生成插件签名测试密钥对（CI 端到端验证用）：`generate-plugin-test-key
+/// <私钥路径>`，公钥落在 `<路径>.pub`。密钥为 minisign 格式、无密码；
+/// `.pub` 内容为 base64(公钥文本)——与 tauri signer 公钥文件及运行时
+/// 运行时公钥环境格式一致（运行时官方信任根为内置公钥，测试密钥仅用于
+/// 局部签名闭环与第三方信任链测试，不可被识别为官方密钥）。
+fn generate_plugin_test_key(key_path: &Path) -> io::Result<()> {
+    let keypair = minisign::KeyPair::generate_unencrypted_keypair()
+        .map_err(|error| invalid_data(format!("生成测试密钥失败: {error}")))?;
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        key_path,
+        keypair
+            .sk
+            .to_box(None)
+            .map_err(invalid_data_string)?
+            .into_string(),
+    )?;
+    let mut public_path = key_path.as_os_str().to_os_string();
+    public_path.push(".pub");
+    use base64::Engine;
+    std::fs::write(
+        PathBuf::from(public_path),
+        base64::engine::general_purpose::STANDARD.encode(
+            keypair
+                .pk
+                .to_box()
+                .map_err(invalid_data_string)?
+                .into_string(),
+        ),
+    )?;
+    eprintln!("[xtask] 测试密钥已生成: {}", key_path.display());
+    Ok(())
+}
+
+fn invalid_data_string(error: minisign::PError) -> io::Error {
+    invalid_data(format!("序列化密钥失败: {error}"))
 }
 
 /// 为本地开发插件包生成签名发布清单：`sign-plugin <插件包目录>`。
@@ -868,8 +1001,8 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
     let release_path = directory.join("release.json");
     write_json(&release_path, &release)?;
 
-    // 与 CI write_signed_release 一致：tauri signer 签名后，把原生两行
-    // 签名文本整体 base64 包装（运行时 verify_minisign 读取的格式）。
+    // 与 write_signed_release 一致：minisign 库直签（base64 包装的签名文本，
+    // 即运行时 verify_minisign 读取的格式）。
     let key_path = std::env::var_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
@@ -881,18 +1014,155 @@ fn sign_plugin(directory: &Path) -> io::Result<()> {
         })?;
     let password =
         std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-    let status = Command::new("cargo")
-        .args(["tauri", "signer", "sign", "-f"])
-        .arg(&key_path)
-        .args(["-p", &password])
-        .arg(&release_path)
-        .status()?;
-    if !status.success() {
-        return Err(invalid_data("插件发布清单签名失败"));
-    }
-    // tauri signer 输出的 .sig 即运行时 verify_minisign 期望的
-    // 「minisign 签名文本整体 base64」格式，直接落盘，无需再包装。
+    sign_file_minisign(&key_path, &password, &release_path)?;
     eprintln!("[xtask] release.json 已签名（key: {}）", key_path.display());
+    Ok(())
+}
+
+/// 解释器插件的官方发布：单一 tar.zst 归档（含全部受管文件与签名清单）
+/// 置于版本目录根（平台无关）；目录条目 sidecars.any 指向归档、
+/// signed_releases.any 指向签名；fragment 为 <id>-any.json。
+#[allow(clippy::too_many_arguments)]
+fn generate_interpreter_distribution(
+    _workspace_root: &Path,
+    plugin: &Path,
+    config: &PluginConfig,
+    _manifest: &serde_json::Value,
+    version: &str,
+    base_url: &str,
+) -> io::Result<()> {
+    let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
+    let dist_root = _workspace_root.join(PLUGIN_DIST);
+    let release_root = dist_root.join("plugins").join(config.id).join(version);
+    let index_root = dist_root.join("plugins-index");
+    std::fs::create_dir_all(&release_root)?;
+    std::fs::create_dir_all(index_root.join("fragments"))?;
+
+    // 独立清单（目录发现用）与签名清单复制到版本目录根。
+    std::fs::copy(plugin.join("plugin.json"), release_root.join("plugin.json"))?;
+    for file in ["release.json", "release.json.sig"] {
+        std::fs::copy(plugin.join(file), release_root.join(file)).map_err(|error| {
+            invalid_data(format!(
+                "缺少 {file}（先经 write_signed_release 签名）：{error}"
+            ))
+        })?;
+    }
+    // 确定性归档（排除本地信任标记、运行时目录与签名文件）。
+    // 幂等保护：同版本归档已存在则跳过（多平台 CI 产物合并语义）。
+    let archive_name = format!("{}-{}.tar.zst", config.id, version);
+    let archive_path = release_root.join(&archive_name);
+    if !archive_path.exists() {
+        create_plugin_archive(plugin, &archive_path)?;
+    }
+    let archive_checksum = format!("sha256:{}", sha256(&archive_path)?);
+
+    let manifest_checksum = format!("sha256:{}", sha256(&plugin.join("plugin.json"))?);
+    let release = serde_json::json!({
+        "id": config.id,
+        "name": config.name,
+        "version": version,
+        "description": config.description,
+        "manifest": {
+            "url": format!("{release_url}/plugin.json"),
+            "checksum": manifest_checksum,
+        },
+        "sidecars": {
+            "any": {
+                "url": format!("{release_url}/{archive_name}"),
+                "checksum": archive_checksum,
+            }
+        },
+        "ui": {},
+        "signed_releases": {
+            "any": {
+                "url": format!("{release_url}/release.json"),
+                "signature_url": format!("{release_url}/release.json.sig"),
+            }
+        },
+    });
+    write_json(
+        &index_root.join("catalog.json"),
+        &serde_json::json!({"version": 1, "plugins": [release.clone()]}),
+    )?;
+    write_json(
+        &index_root
+            .join("fragments")
+            .join(format!("{}-any.json", config.id)),
+        &release,
+    )?;
+    let mut checksums = format!(
+        "{}  release.json\n{}  release.json.sig\n{}  {}\n",
+        sha256(&release_root.join("release.json"))?,
+        sha256(&release_root.join("release.json.sig"))?,
+        sha256(&archive_path)?,
+        archive_name,
+    );
+    checksums.push_str(&format!(
+        "{}  plugin.json\n",
+        sha256(&plugin.join("plugin.json"))?
+    ));
+    std::fs::write(release_root.join("SHA256SUMS"), checksums)?;
+    eprintln!(
+        "[xtask] 解释器插件 {} 归档已生成: {}",
+        config.id,
+        archive_path.display()
+    );
+    Ok(())
+}
+
+/// 生成确定性插件归档（tar.zst）：条目 mtime/uid/gid/mode 固定，同内容必得
+/// 同哈希——多平台 CI 各自生成可幂等合并。排除本地信任标记与打包元数据
+///（官方签名与本地信任不混用；归档内容为发布受管文件全集，含签名清单）。
+fn create_plugin_archive(source: &Path, destination: &Path) -> io::Result<()> {
+    let file = std::fs::File::create(destination)?;
+    let zstd_encoder = zstd::Encoder::new(file, 19)?;
+    let mut builder = tar::Builder::new(zstd_encoder);
+    let mut stack = vec![source.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if directory == source
+                && matches!(
+                    name.as_ref(),
+                    "local-trust.json"
+                        | ".package-info"
+                        | "runtime"
+                        | "logs"
+                        | "data"
+                        // 签名非确定（minisign 随机 nonce），独立于归档存在——
+                        // 归档保持内容确定性，多平台产物可幂等合并。
+                        | "release.json"
+                        | "release.json.sig"
+                )
+            {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(source)
+                .map_err(|error| invalid_data(format!("归档相对路径推算失败: {error}")))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(entry.metadata()?.len());
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder.append_data(&mut header, relative, std::fs::File::open(&path)?)?;
+        }
+    }
+    let zstd_encoder = builder
+        .into_inner()
+        .map_err(|error| io::Error::other(format!("归档写入失败: {error}")))?;
+    zstd_encoder
+        .finish()
+        .map_err(|error| io::Error::other(format!("归档压缩失败: {error}")))?;
     Ok(())
 }
 
@@ -903,7 +1173,17 @@ fn generate_oss_distribution(
 ) -> io::Result<()> {
     // 只有带 sidecar 的插件才生成签名发布清单：签名用于建立 sidecar 信任边界，
     // 纯 WASM 插件（如 prompt）不需要 sidecar，运行时不强制要求签名。
-    let has_sidecar = config.sidecar_artifact.is_some();
+    // 签名触发：native sidecar 插件与解释器插件（官方信任根，解释器签名
+    // 锚定内容清单）。纯 WASM/UI 插件不携带签名。
+    let manifest_value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(plugin.join("plugin.json"))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let interpreter_release = manifest_value
+        .get("sidecar")
+        .and_then(|sidecar| sidecar.get("runtime"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|runtime| runtime != "native");
+    let has_sidecar = config.sidecar_artifact.is_some() || interpreter_release;
     if has_sidecar {
         write_signed_release(plugin, config)?;
     }
@@ -920,6 +1200,23 @@ fn generate_oss_distribution(
         .to_string();
     let release_url = format!("{base_url}/plugins/{}/{}", config.id, version);
     let platform = current_platform_key();
+    // 解释器 sidecar 插件：发布形态为单一确定性归档（平台无关，目录键 any）；
+    // 官方资格由 plugin_config 白名单决定（build-plugin 仅接受登记插件）。
+    let interpreter_runtime = manifest
+        .get("sidecar")
+        .and_then(|sidecar| sidecar.get("runtime"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|runtime| runtime != "native");
+    if interpreter_runtime {
+        return generate_interpreter_distribution(
+            workspace_root,
+            plugin,
+            config,
+            &manifest,
+            version,
+            &base_url,
+        );
+    }
     let dist_root = workspace_root.join(PLUGIN_DIST);
     let release_root = dist_root.join("plugins").join(config.id).join(version);
     let platform_root = release_root.join(&platform);
@@ -1352,6 +1649,118 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     Ok(())
 }
 
+/// 官方公钥单一来源：与运行时共用同一文件（include_str!），杜绝两份
+/// 常量漂移导致发布验签与运行时信任根不一致。
+const OFFICIAL_PLUGIN_PUBKEY_B64: &str =
+    include_str!("../../crates/tiangong-plugin-runtime/src/official-pubkey.b64");
+
+/// staging 的 release.json 签名是否通过内置官方公钥验证（官方信任根
+/// 固定，不接受环境变量或配置覆盖）。无签名清单的插件（纯 UI 等）不设部署门槛。
+fn staging_passes_official_verification(staging: &Path) -> io::Result<bool> {
+    let release_path = staging.join("release.json");
+    let signature_path = staging.join("release.json.sig");
+    if !release_path.is_file() && !signature_path.is_file() {
+        return Ok(true);
+    }
+    if !release_path.is_file() || !signature_path.is_file() {
+        return Ok(false);
+    }
+    // 官方信任根唯一且不可配置：不读环境变量（测试密钥无法绕过守卫）。
+    let public_b64 = OFFICIAL_PLUGIN_PUBKEY_B64;
+    let Some(public_text) = decode_base64_utf8(public_b64) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = public_key.into_public_key() else {
+        return Ok(false);
+    };
+    let Ok(signature_raw) = std::fs::read_to_string(&signature_path) else {
+        return Ok(false);
+    };
+    let Some(signature_text) = decode_base64_utf8(signature_raw.trim()) else {
+        return Ok(false);
+    };
+    let Ok(signature_box) = minisign::SignatureBox::from_string(signature_text.trim()) else {
+        return Ok(false);
+    };
+    let content = std::fs::read(&release_path)?;
+    let mut reader = std::io::Cursor::new(content);
+    Ok(minisign::verify(
+        &public_key,
+        &signature_box,
+        &mut reader,
+        false,
+        false,
+        false,
+    )
+    .is_ok())
+}
+
+/// 校验 release.json 与内置官方公钥匹配（发布 CI 强制步骤）：签名验证
+/// 失败即非零退出——正式私钥与内置公钥不匹配时发布中止，防止错误密钥
+/// 产物流入官方目录。
+fn verify_official_release(release_path: &Path) -> io::Result<()> {
+    let signature_path = release_path.with_extension("json.sig");
+    if !release_path.is_file() || !signature_path.is_file() {
+        return Err(invalid_input(format!(
+            "缺少签名清单或签名文件: {}",
+            release_path.display()
+        )));
+    }
+    let verified = verify_with_official_pubkey(release_path, &signature_path)?;
+    if verified {
+        eprintln!("[xtask] 官方公钥验签通过: {}", release_path.display());
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "当前签名私钥与应用内置官方公钥不匹配，拒绝发布或部署",
+        ))
+    }
+}
+
+/// 以内置官方公钥验证签名文件（true = 匹配）。
+fn verify_with_official_pubkey(release_path: &Path, signature_path: &Path) -> io::Result<bool> {
+    let Some(public_text) = decode_base64_utf8(OFFICIAL_PLUGIN_PUBKEY_B64) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = public_key.into_public_key() else {
+        return Ok(false);
+    };
+    let Ok(signature_raw) = std::fs::read_to_string(signature_path) else {
+        return Ok(false);
+    };
+    let Some(signature_text) = decode_base64_utf8(signature_raw.trim()) else {
+        return Ok(false);
+    };
+    let Ok(signature_box) = minisign::SignatureBox::from_string(signature_text.trim()) else {
+        return Ok(false);
+    };
+    let content = std::fs::read(release_path)?;
+    let mut reader = std::io::Cursor::new(content);
+    Ok(minisign::verify(
+        &public_key,
+        &signature_box,
+        &mut reader,
+        false,
+        false,
+        false,
+    )
+    .is_ok())
+}
+
+fn decode_base64_utf8(value: &str) -> Option<String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
 fn deploy_atomically(staging: &Path, destination: &Path, config: &PluginConfig) -> io::Result<()> {
     if !destination.exists() {
         return std::fs::rename(staging, destination);
@@ -1448,6 +1857,80 @@ fn remove_dir_if_exists(path: &Path) -> io::Result<()> {
 fn sha256(path: &Path) -> io::Result<String> {
     let bytes = std::fs::read(path)?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// 解释器形态 sidecar 插件（如 plugin-creator）：部署自包含 sidecar 产物、
+/// 随行资源与内容清单。信任由官方签名清单承载（部署前经官方公钥
+/// 验签守卫），不再落本地信任锚。
+fn stage_interpreter_sidecar(
+    workspace_root: &Path,
+    staging: &Path,
+    config: &PluginConfig,
+) -> io::Result<()> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(workspace_root.join(config.plugin_manifest))?)
+            .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let Some(sidecar) = manifest.get("sidecar") else {
+        return Ok(());
+    };
+    let runtime = sidecar.get("runtime").and_then(serde_json::Value::as_str);
+    if runtime.is_none_or(|value| value == "native") {
+        return Ok(());
+    }
+    let entry = sidecar
+        .get("entry")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("解释器 sidecar 缺少 entry"))?;
+    let plugin_root = workspace_root.join(config.plugin_root);
+    // 产物由该插件的 yarn build（scripts/build-sidecar.mjs）生成。
+    let bundled = plugin_root.join("build/sidecar-main.mjs");
+    require_file(&bundled)?;
+    let destination = staging.join(entry);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&bundled, &destination)?;
+    eprintln!("[xtask] sidecar sha256: {}", sha256(&destination)?);
+
+    // creator 专属随行资源：devkit 模板（bundle 内按 ../templates 相对定位）。
+    if config.id == "plugin-creator" {
+        copy_dir_recursive(
+            &workspace_root.join("plugins/devkit/templates"),
+            &staging.join("templates"),
+        )?;
+    }
+
+    // 内容清单：staging 全树（排除清单自身），路径 + sha256。
+    fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                walk_files(&path, out)?;
+            } else {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk_files(staging, &mut files)?;
+    files.sort();
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .filter(|path| !path.ends_with("content-manifest.json"))
+        .map(|path| {
+            Ok(serde_json::json!({
+                "path": path.strip_prefix(staging).unwrap().to_string_lossy().replace('\\', "/"),
+                "sha256": sha256(path)?,
+            }))
+        })
+        .collect::<io::Result<_>>()?;
+    let content = serde_json::json!({ "algorithm": "sha256", "files": entries });
+    let content_raw = serde_json::to_vec_pretty(&content)
+        .map_err(|error| invalid_data(format!("序列化内容清单失败: {error}")))?;
+    std::fs::write(staging.join("content-manifest.json"), &content_raw)?;
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {
@@ -1861,4 +2344,153 @@ fn merge_plugin_catalog(
         output_catalog.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CI 同款链路：generate-plugin-test-key（未加密）→ 签名 → 公钥验证。
+    /// 部署守卫只认内置官方公钥：测试密钥签名（即使注入同名环境变量）
+    /// 验不过；无签名清单的纯 UI 插件不设门槛。
+    #[test]
+    fn 部署守卫_只认内置官方公钥() {
+        let root = std::env::temp_dir().join(format!("xtask-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("plugin.json"), b"{}").unwrap();
+
+        // 测试密钥签名：内置官方公钥验不过 → 跳过部署（守卫只认内置公钥，
+        // 不读环境变量——环境注入测试公钥也无法绕过）。
+        let key_path = root.join("test.key");
+        generate_plugin_test_key(&key_path).unwrap();
+        let release_path = staging.join("release.json");
+        std::fs::write(&release_path, br#"{"schema_version":1}"#).unwrap();
+        sign_file_minisign(&key_path, "", &release_path).unwrap();
+        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
+        let public_b64 = std::fs::read_to_string(key_path.with_extension("key.pub"))
+            .unwrap()
+            .trim()
+            .to_string();
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &public_b64);
+        }
+        let guarded = staging_passes_official_verification(&staging).unwrap();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
+            }
+        }
+        assert!(!guarded, "测试密钥（即使注入同名环境变量）不得通过部署守卫");
+
+        // 无签名清单的插件（纯 UI）不设部署门槛。
+        std::fs::remove_file(&release_path).unwrap();
+        let _ = std::fs::remove_file(staging.join("release.json.sig"));
+        assert!(staging_passes_official_verification(&staging).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 测试密钥_未加密签名与验证闭环() {
+        let root = std::env::temp_dir().join(format!("xtask-sign-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let key_path = root.join("test.key");
+        generate_plugin_test_key(&key_path).expect("生成测试密钥");
+
+        let content_path = root.join("release.json");
+        std::fs::write(&content_path, br#"{"schema_version":1}"#).unwrap();
+        sign_file_minisign(&key_path, "", &content_path).expect("未加密密钥签名");
+
+        // 用 .pub 公钥验证签名（与运行时 verify_minisign 相同的格式链）。
+        verify_signature_with_pub(&key_path.with_extension("key.pub"), &content_path)
+            .expect("签名应可通过公钥验证");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 正式密钥形态（密码加密）同样可加载与签名，错误密码明确失败。
+    #[test]
+    fn 加密密钥_密码加载与错误密码拒绝() {
+        let root = std::env::temp_dir().join(format!("xtask-sign-enc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let keypair =
+            minisign::KeyPair::generate_encrypted_keypair(Some("secret-pass".to_string()))
+                .expect("生成加密密钥");
+        let key_path = root.join("enc.key");
+        std::fs::write(
+            &key_path,
+            keypair
+                .sk
+                .to_box(Some("secret-pass"))
+                .expect("导出私钥")
+                .into_string(),
+        )
+        .unwrap();
+        use base64::Engine;
+        std::fs::write(
+            key_path.with_extension("key.pub"),
+            base64::engine::general_purpose::STANDARD
+                .encode(keypair.pk.to_box().expect("导出公钥").into_string()),
+        )
+        .unwrap();
+
+        let content_path = root.join("release.json");
+        std::fs::write(&content_path, b"encrypted key signing").unwrap();
+        sign_file_minisign(&key_path, "secret-pass", &content_path).expect("加密密钥签名");
+        verify_signature_with_pub(&key_path.with_extension("key.pub"), &content_path)
+            .expect("签名应可通过公钥验证");
+
+        // 错误密码必须明确失败（不得触发交互提示）。
+        std::fs::write(&content_path, b"another content").unwrap();
+        let error =
+            sign_file_minisign(&key_path, "wrong-pass", &content_path).expect_err("错误密码应拒绝");
+        assert!(
+            error.to_string().contains("加载插件签名私钥失败"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 用 minisign 公钥文本验证「整体 base64 包装」签名文件（与运行时
+    /// verify_minisign 的读取格式一致）。
+    fn verify_signature_with_pub(public_key_path: &Path, content_path: &Path) -> io::Result<()> {
+        use base64::Engine;
+        // .pub 文件为 base64(公钥文本)——与 generate_plugin_test_key 输出一致。
+        let public_key_text = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(std::fs::read_to_string(public_key_path)?.trim())
+                .map_err(|error| invalid_data(format!("公钥文件 base64 解码失败: {error}")))?,
+        )
+        .map_err(|error| invalid_data(format!("公钥文件非 UTF-8: {error}")))?;
+        let public_key_box = minisign::PublicKeyBox::from_string(&public_key_text)
+            .map_err(|error| invalid_data(format!("解析公钥失败: {error}")))?;
+        let public_key = public_key_box
+            .into_public_key()
+            .map_err(|error| invalid_data(format!("加载公钥失败: {error}")))?;
+        let signature_raw = std::fs::read_to_string(content_path.with_extension("json.sig"))?;
+        let signature_text = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(signature_raw.trim())
+                .map_err(|error| invalid_data(format!("签名文件 base64 解码失败: {error}")))?,
+        )
+        .map_err(|error| invalid_data(format!("签名文件非 UTF-8: {error}")))?;
+        let signature_box = minisign::SignatureBox::from_string(&signature_text)
+            .map_err(|error| invalid_data(format!("解析签名失败: {error}")))?;
+        let content = std::fs::read(content_path)?;
+        let mut reader = std::io::Cursor::new(content);
+        minisign::verify(
+            &public_key,
+            &signature_box,
+            &mut reader,
+            false,
+            false,
+            false,
+        )
+        .map_err(|error| invalid_data(format!("签名验证失败: {error}")))?;
+        Ok(())
+    }
 }

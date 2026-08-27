@@ -10,6 +10,7 @@ import { validate } from '../src/validate.mjs';
 import { build } from '../src/build.mjs';
 import { run } from '../src/run.mjs';
 import { logs } from '../src/logs.mjs';
+import { add } from '../src/add.mjs';
 
 const VERSION = '1.0.0';
 
@@ -19,13 +20,15 @@ function usage() {
     '',
     '用法（stdout 输出 JSON 结果）：',
     '  plugin-creator init <template> <id> [--name 显示名]    按模板生成项目骨架',
+    '  plugin-creator add <id> <包名...> [--dev]              添加依赖（锁定精确版本）',
     '  plugin-creator validate <id>                            清单与结构校验',
     '  plugin-creator build <id>                               构建（yarn 或零构建打包）',
     '  plugin-creator run <id> [-- 脚本参数...]                按 run.json 试运行',
     '  plugin-creator logs <dev:id|plugin:id> [--lines N]      读日志尾部',
     '',
     '全局：--root <path> 覆盖开发根（默认 ~/.tiangong/plugins-dev）。',
-    '模板：ui-app（纯 UI，零构建）、ts-tool（TS 工具插件）、ts-npx（npx 脚本插件）。',
+    '模板：ui-app（纯 UI，零构建）、ts-tool（TS 工具插件）、ts-npx（npx 脚本插件）、',
+    '      node-sidecar（常驻 node sidecar 插件）、node-tool（无界面纯工具插件）。',
   ].join('\n');
 }
 
@@ -44,7 +47,7 @@ async function main() {
   const rootOverride = parseGlobalArgs(argv);
   const [command, ...rest] = argv;
   const ctx = { rootOverride };
-  const table = { init, validate, build, run, logs };
+  const table = { init, add, validate, build, run, logs };
   const handler = table[command];
   if (!handler) {
     process.stderr.write(usage());

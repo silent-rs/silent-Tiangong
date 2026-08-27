@@ -166,3 +166,34 @@ fn 纯_ui_插件启停状态即时且不受其他无效插件影响() {
         "单插件操作与刷新列表状态应一致"
     );
 }
+
+/// 回归：preload 对同 id 但不同 storage root 的安装目录必须以最后一次
+/// 为准（此前的登记只按 id 判重，沿用旧目录导致桥接存储写进已失效的
+/// 旧根——"启停"测试先跑时"免 wasm"测试偶发失败）。
+#[test]
+fn 预加载_同id不同存储根时以最后一次预加载为准() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    let first = tempfile::TempDir::new().unwrap();
+    let second = tempfile::TempDir::new().unwrap();
+    stage_ui_only_plugin(first.path());
+    stage_ui_only_plugin(second.path());
+    assert_eq!(preload_installed_plugins(first.path()), 1);
+    assert_eq!(preload_installed_plugins(second.path()), 1);
+
+    bridge_call(
+        "com.example.board",
+        "storage.set",
+        r#"{"key":"root","value":"second"}"#,
+    )
+    .expect("storage.set 应成功");
+    let storage_file = second
+        .path()
+        .join("plugins")
+        .join("com.example.board")
+        .join("data")
+        .join("bridge-storage.json");
+    assert!(
+        storage_file.exists(),
+        "桥接存储必须落在最后一次预加载的存储根"
+    );
+}

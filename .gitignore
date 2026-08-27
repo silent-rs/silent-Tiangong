@@ -23,4 +23,5 @@ AGENTS.md
 /TODO.md
 /docs/requirements.md
 .zcode
+plugins/*/build/
 release/

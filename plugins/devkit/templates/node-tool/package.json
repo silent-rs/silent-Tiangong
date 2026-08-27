@@ -1,0 +1,12 @@
+{
+  "name": "{{PLUGIN_ID}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

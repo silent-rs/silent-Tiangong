@@ -1,0 +1,18 @@
+{
+  "name": "@tiangong/sidecar-sdk",
+  "version": "0.1.0",
+  "description": "天工插件 sidecar 协议库（Node/stdio 通道），与宿主 tiangong-plugin-runtime 的 stdio 传输对齐",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0"
+}

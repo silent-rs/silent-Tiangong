@@ -12,8 +12,8 @@ plugin_install / plugin_validate / plugin_logs` 工具集，页面与 Agent 调�
 3. Agent 按需求在该目录填充代码（普通编码工作流）；
 4. `plugin_validate` → `plugin_build`（零构建模板直接打包；工程模板执行
    yarn install/build/package，需 Node ≥ 20 与 yarn）；
-5. `plugin_install` → 宿主原生确认弹窗（插件名/版本/权限）→ 安装启用；
-6. 迭代：修改 → 重新 build/install → 再次确认；故障：`plugin_logs` 诊断。
+5. `plugin_install` → 宿主以本机用户密钥自动签名并安装启用（免确认，仅官方 Plugin Creator 可触发）；
+6. 迭代：修改 → 重新 build/install；故障：`plugin_logs` 诊断。
 
 ## 模板
 

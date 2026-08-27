@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "id": "{{PLUGIN_ID}}",
+  "version": "0.1.0",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "sidecar.invoke"
+  ],
+  "capabilities": {
+    "tools": true
+  },
+  "tools": [
+    {
+      "name": "text_analyze",
+      "description": "统计文本字数并返回倒序文本（示例能力，改造 sidecar/main.mjs 的同名分支与此处声明）",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要处理的文本"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      },
+      "timeout_ms": 30000
+    }
+  ],
+  "sidecar": {
+    "runtime": "node",
+    "entry": "sidecar/main.mjs",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 0,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 30000
+  },
+  "mention": {
+    "hint": "{{PLUGIN_NAME}}（无界面纯工具插件）"
+  }
+}

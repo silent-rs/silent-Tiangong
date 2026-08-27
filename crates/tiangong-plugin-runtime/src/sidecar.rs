@@ -39,6 +39,9 @@ pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 /// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
 pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
+/// 插件内容清单固定文件名（devkit 构建生成，本地信任与官方签名共用的信任锚）。
+pub const CONTENT_MANIFEST_FILE: &str = "content-manifest.json";
+
 /// 宿主在单次工具调用边界确定的权威上下文。
 ///
 /// 该上下文不经过插件协议，也不从工具参数推导；command 沙箱只使用这里的
@@ -123,6 +126,10 @@ pub trait SidecarConnection: Send + Sync {
         Ok(())
     }
 
+    /// 终止当前进行中的调用（工具级超时 / 会话取消用）。与 stop 不同，
+    /// 不改变停止标志——后续调用继续服务。默认无操作（非按需连接无此语义）。
+    fn cancel_current(&self) {}
+
     /// 当前 sidecar 的插件 ID。默认空。
     fn plugin_id(&self) -> &str {
         ""
@@ -137,6 +144,17 @@ pub trait SidecarConnection: Send + Sync {
     fn has_runtime_endpoint(&self) -> bool {
         false
     }
+}
+
+/// 解释器形态 sidecar 的启动规格：宿主白名单程序 + 插件目录内入口脚本。
+#[derive(Debug, Clone)]
+pub struct InterpreterLaunch {
+    /// 解释器程序（node/python 等，宿主解析，不接受清单命令）。
+    pub program: PathBuf,
+    /// 入口脚本绝对路径（插件目录内，参与内容哈希锁定）。
+    pub entry: PathBuf,
+    /// 清单声明的固定参数。
+    pub args: Vec<String>,
 }
 
 /// 一个插件 sidecar 的本地运行配置。
@@ -158,6 +176,12 @@ pub struct SidecarConfig {
     pub server_url: Option<String>,
     /// 本机 server 的鉴权 token。
     pub server_token: Option<String>,
+    /// 解释器启动规格；存在时以「程序 + entry + args」替代直接启动 binary。
+    pub interpreter: Option<InterpreterLaunch>,
+    /// 进程生命周期：按需（默认，每次调用独立进程即起即清）或常驻复用。
+    pub lifecycle: crate::manifest::SidecarLifecycle,
+    /// 内容哈希清单（本地信任解释器 sidecar 的 spawn 前复核锚）。
+    pub integrity_manifest: Option<PathBuf>,
     // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
     /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
     #[allow(dead_code)]
@@ -209,6 +233,9 @@ impl SidecarConfig {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
             server_token: None,
+            interpreter: None,
+            lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
+            integrity_manifest: None,
             sandbox: false,
             sandbox_workspace: None,
             sandbox_extra_writable: Vec::new(),
@@ -224,6 +251,128 @@ impl SidecarConfig {
         self.allow_sensitive_storage = allowed;
         self
     }
+
+    /// 设置解释器启动规格（存在时 spawn 以解释器运行 entry 而非直接启动 binary）。
+    pub fn with_interpreter(mut self, launch: InterpreterLaunch) -> Self {
+        self.interpreter = Some(launch);
+        self
+    }
+
+    /// 设置进程生命周期（按需默认；常驻需显式声明）。
+    pub fn with_lifecycle(mut self, lifecycle: crate::manifest::SidecarLifecycle) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
+    /// 设置内容哈希清单路径；spawn 前复核清单内全部文件防篡改。
+    pub fn with_integrity_manifest(mut self, manifest_path: impl Into<PathBuf>) -> Self {
+        self.integrity_manifest = Some(manifest_path.into());
+        self
+    }
+
+    /// 按 devkit 内容清单（路径 + sha256）复核插件目录文件树，任一文件缺失、
+    /// 路径逃逸或哈希不一致即报错。本地信任解释器 sidecar 的启动前与安装时
+    /// 校验共用本函数。
+    pub fn verify_integrity_manifest(manifest_path: &Path, root: &Path) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct ContentFile {
+            path: String,
+            sha256: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct ContentManifest {
+            files: Vec<ContentFile>,
+        }
+        use sha2::{Digest, Sha256};
+        let raw = std::fs::read(manifest_path)
+            .with_context(|| format!("读取内容清单失败: {}", manifest_path.display()))?;
+        let content: ContentManifest = serde_json::from_slice(&raw)
+            .with_context(|| format!("解析内容清单失败: {}", manifest_path.display()))?;
+        // 路径唯一性：清单不允许重复条目。
+        let mut listed = std::collections::BTreeSet::new();
+        for file in &content.files {
+            let relative = Path::new(&file.path);
+            if relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                bail!("内容清单包含不安全路径: {}", file.path);
+            }
+            if !listed.insert(file.path.clone()) {
+                bail!("内容清单包含重复路径: {}", file.path);
+            }
+            let path = root.join(relative);
+            let metadata = std::fs::symlink_metadata(&path)
+                .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("内容清单条目不是普通文件: {}", file.path);
+            }
+            let raw = std::fs::read(&path)
+                .with_context(|| format!("内容清单文件缺失: {}", path.display()))?;
+            let actual = hex::encode(Sha256::digest(&raw));
+            if !actual.eq_ignore_ascii_case(&file.sha256) {
+                bail!(
+                    "插件文件 {} 与内容清单不一致（可能被篡改），拒绝启动",
+                    file.path
+                );
+            }
+        }
+        // 反向遍历受管文件树：清单必须完整覆盖——未列出的受管文件视为
+        // 篡改（绕过哈希锁定的替换/新增通道）。运行时自管目录与信任标记除外。
+        // 运行时自管目录、信任标记与官方签名文件（验签产物，非内容清单
+        // 管辖——签名锚定的是清单本身）。
+        const UNMANAGED: [&str; 7] = [
+            "runtime",
+            "logs",
+            "data",
+            "local-trust.json",
+            "content-manifest.json",
+            "release.json",
+            "release.json.sig",
+        ];
+        let mut actual_files = std::collections::BTreeSet::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(directory) = stack.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .with_context(|| format!("读取插件目录失败: {}", directory.display()))?
+            {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if directory == root && UNMANAGED.contains(&name.as_ref()) {
+                    continue;
+                }
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    stack.push(path);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .context("插件文件相对路径推算失败")?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    actual_files.insert(relative);
+                }
+            }
+        }
+        let unexpected: Vec<&String> = actual_files.difference(&listed).collect();
+        if !unexpected.is_empty() {
+            bail!(
+                "插件目录存在内容清单未覆盖的文件（可能被篡改），拒绝启动: {}",
+                unexpected
+                    .iter()
+                    .map(|path| path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(())
+    }
+
     pub fn with_protocols(
         mut self,
         transport_protocol: impl Into<String>,

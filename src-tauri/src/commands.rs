@@ -4374,7 +4374,130 @@ pub async fn plugin_read_entry_resource(
     Ok(PluginEntryResource { data, mime })
 }
 
+/// 列出已导入的第三方插件信任公钥。
+#[tauri::command]
+pub async fn plugin_list_trusted_publishers(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_plugin_runtime::trust::TrustedPublisher>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::trust::list_trusted_publishers(&storage_root)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("读取信任公钥列表失败: {error}"))?
+}
+
+/// 导入第三方插件信任公钥（设置界面手动操作；内容为 base64(公钥文本)，
+/// 与开发者公开的 .pub 公钥文件内容同格式）。
+#[tauri::command]
+pub async fn plugin_import_trusted_publisher(
+    publisher: String,
+    public_key: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::trust::TrustedPublisher, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::trust::import_trusted_publisher(
+            &storage_root,
+            &publisher,
+            &public_key,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("导入信任公钥失败: {error}"))?
+}
+
+/// 移除第三方插件信任公钥（移除后对应插件下次启动即失效）。
+#[tauri::command]
+pub async fn plugin_remove_trusted_publisher(
+    publisher: String,
+    state: State<'_, TiangongApp>,
+) -> Result<bool, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::trust::remove_trusted_publisher(&storage_root, &publisher)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("移除信任公钥失败: {error}"))?
+}
+
+/// 读取用户选择的公钥文件内容（信任导入辅助）：仅接受 .pub/.txt 后缀、
+/// 不超过 16KB 的文本文件，返回 trim 后内容。
+#[tauri::command]
+pub async fn plugin_read_public_key_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::PathBuf::from(&path);
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if !matches!(extension.as_str(), "pub" | "txt") {
+            return Err(format!(
+                "仅支持 .pub / .txt 公钥文件: {path}",
+                path = path.display()
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("读取文件信息失败: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("公钥必须是普通文件".to_string());
+        }
+        if metadata.len() > 16 * 1024 {
+            return Err("公钥文件超过 16KB 上限".to_string());
+        }
+        std::fs::read_to_string(&path)
+            .map(|content| content.trim().to_string())
+            .map_err(|error| format!("读取公钥文件失败: {error}"))
+    })
+    .await
+    .map_err(|error| format!("读取公钥文件任务失败: {error}"))?
+}
+
+/// 读取本机用户签名密钥的公钥指纹（尚未生成时返回 None——首次创作安装
+/// 时自动生成）。
+#[tauri::command]
+pub async fn plugin_user_key_fingerprint(
+    state: State<'_, TiangongApp>,
+) -> Result<Option<String>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        match tiangong_plugin_runtime::trust::user_public_key_b64(&storage_root) {
+            Ok(public_b64) => tiangong_plugin_runtime::trust::publisher_fingerprint(&public_b64)
+                .map(Some)
+                .map_err(|error| error.to_string()),
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+    .map_err(|error| format!("读取用户密钥指纹失败: {error}"))?
+}
+
 /// 插件入口资源响应（字节数组 + MIME）。
+/// 读取插件 App 的自定义图标（拓展区矩阵渲染；插件根为根、扩展名白名单、
+/// 256KB 上限、防逃逸，见 registry::read_plugin_icon）。
+#[tauri::command]
+pub async fn plugin_read_icon(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<PluginEntryResource, String> {
+    let (data, mime) =
+        tiangong_plugin_runtime::registry::read_plugin_icon(&plugin_id, &contribution_id)
+            .map_err(|error| error.to_string())?;
+    Ok(PluginEntryResource { data, mime })
+}
+
 #[derive(serde::Serialize)]
 pub struct PluginEntryResource {
     pub data: Vec<u8>,
@@ -4489,6 +4612,9 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
 /// 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播，拓展区等消费方刷新。
 fn notify_plugins_changed(app: &AppHandle) {
     let _ = app.emit("plugins_changed", &());
+    // 主前端事件到达不了插件沙箱；插件页面（如插件创作的项目列表）经
+    // 桥接订阅 plugins.changed 获知插件集变化后自行刷新。
+    tiangong_plugin_runtime::emit_plugins_changed();
 }
 
 pub(crate) async fn download_and_install_plugin(
@@ -4550,7 +4676,13 @@ pub(crate) async fn download_and_install_plugin(
     result
 }
 
-/// 从用户选择的本地完整目录导入插件。
+/// 从用户选择的本地完整目录或签名插件归档（tar.zst）导入插件。
+///
+/// 信任语义：三方签名插件经导入的发布者公钥验证（见 runtime trust 模块），
+/// 验证发生在安装链（verify_signed_release 按发布者路由）。带 sidecar 的
+/// 插件在安装前展示权限清单（敏感权限显著标记）由用户确认一次——导入
+/// 是用户手动触发的低频操作，此处确认不阻碍创作链自动化（创作链经
+/// plugin-dev 自动签名，不经本命令）。
 #[tauri::command]
 pub async fn import_local_plugin(
     path: String,
@@ -4560,13 +4692,20 @@ pub async fn import_local_plugin(
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
+    let app_handle = app.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
         let total_started = Instant::now();
+        let source = std::path::Path::new(&path);
         let stage_started = Instant::now();
-        let staged_result = tiangong_plugin_runtime::artifacts::stage_local_plugin(
-            &storage_root,
-            std::path::Path::new(&path),
-        )
+        let staged_result = if source
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("zst"))
+        {
+            tiangong_plugin_runtime::artifacts::stage_plugin_archive(&storage_root, source)
+        } else {
+            tiangong_plugin_runtime::artifacts::stage_local_plugin(&storage_root, source)
+        }
         .map_err(|error| error.to_string());
         let stage_ms = stage_started.elapsed().as_millis() as u64;
         let staged = match staged_result {
@@ -4581,6 +4720,49 @@ pub async fn import_local_plugin(
                 return Err(error);
             }
         };
+
+        // 带 sidecar 的插件（本地进程能力）：安装前展示权限清单确认一次。
+        let manifest = tiangong_plugin_runtime::manifest::PluginManifest::load(
+            &staged.path().join(tiangong_plugin_runtime::manifest::MANIFEST_FILE),
+        )
+        .map_err(|error| format!("插件清单无效: {error}"))?;
+        if manifest.sidecar.is_some() {
+            let sensitive: &[&str] = &["model-config.read", "app-storage.read"];
+            let permissions = if manifest.permissions.is_empty() {
+                "无".to_string()
+            } else {
+                manifest
+                    .permissions
+                    .iter()
+                    .map(|permission| {
+                        if sensitive.contains(&permission.as_str()) {
+                            format!("{permission}（敏感）")
+                        } else {
+                            permission.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("、")
+            };
+            let message = format!(
+                "即将导入插件：\n\n插件：{}（id: {}）\n版本：{}\n权限：{}\n来源：{}\n\n带本地进程能力的插件将按上述权限运行；签名插件经已导入的发布者公钥验证。请确认内容可信。",
+                manifest.id, manifest.id, manifest.version, permissions, path
+            );
+            use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+            let confirmed = app_handle
+                .dialog()
+                .message(message)
+                .title("导入插件确认")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "导入".to_string(),
+                    "取消".to_string(),
+                ))
+                .blocking_show();
+            if !confirmed {
+                return Err("用户取消了插件导入".to_string());
+            }
+        }
 
         let install_started = Instant::now();
         let result =

@@ -6,11 +6,12 @@ import { onMounted, onBeforeUnmount, ref } from 'vue';
 import {
   createTiangongBridge,
   createToolProvider,
+  getShadowHostRuntime,
   pluginStorage,
   type HostBridge,
   type ToolInvocation,
 } from '@tiangong/plugin-sdk';
-import { DEVKIT_COMMANDS, handleAgentTool, pluginDev, type ProjectEntry } from './tools';
+import { devkitCommand, handleAgentTool, pluginDev, type ProjectEntry } from './tools';
 
 type OutputKind = 'info' | 'success' | 'error';
 interface OutputPanel {
@@ -36,6 +37,8 @@ const sending = ref(false);
 
 let providerStop: (() => void) | null = null;
 let closedStop: (() => void) | null = null;
+let pluginsChangedStop: (() => void) | null = null;
+let contextChangeStop: (() => void) | null = null;
 
 function show(kind: OutputKind, title: string, body: string) {
   output.value = { kind, title, body };
@@ -81,14 +84,24 @@ async function startCreation() {
   }
 }
 
-function showCommands(id: string) {
-  show(
-    'info',
-    `${id} 的 devkit 命令`,
-    Object.values(DEVKIT_COMMANDS)
-      .map((command) => command(id))
-      .join('\n'),
-  );
+/** 页面直连按需 sidecar 构建（与 Agent 工具同一后端）。 */
+async function buildProject(entry: ProjectEntry) {
+  if (!bridge.value || busy.value) return;
+  busy.value = true;
+  try {
+    const result = await devkitCommand(bridge.value, 'build', [entry.id]);
+    if (result.ok) {
+      show('success', `${entry.id} 构建完成`, '产物在项目 release/ 目录，可直接安装。');
+      await recordHistory(`构建 ${entry.id}`);
+    } else {
+      show('error', `${entry.id} 构建失败`, `${result.error ?? '未知错误'}（可让 Agent 用 plugin_devkit logs 读完整日志）`);
+    }
+    await refreshProjects();
+  } catch (error) {
+    show('error', `${entry.id} 构建失败`, error instanceof Error ? error.message : String(error));
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function installProject(entry: ProjectEntry) {
@@ -130,6 +143,11 @@ onMounted(async () => {
         invocation.name,
         invocation.arguments as Record<string, unknown>,
       );
+      // 本页执行的开发操作（init/build/add 等）改变了项目集，立即刷新——
+      // 这是 Agent 创建插件时项目列表的主刷新路径。
+      if (invocation.name === 'plugin_init' || invocation.name === 'plugin_devkit') {
+        void refreshProjects();
+      }
       try {
         await provider.resolve({
           invocation_id: invocation.invocation_id,
@@ -141,6 +159,16 @@ onMounted(async () => {
       }
     });
     closedStop = provider.onClosed(() => undefined);
+    // 插件集变更（Agent 在对话里完成 init/build/install 等）经桥接订阅实时
+    // 刷新项目列表——页面无需手动刷新 tab。
+    pluginsChangedStop = bridge.value.on('plugins.changed', () => {
+      void refreshProjects();
+    });
+    // 兜底：页面切回可见（上下文变化）时刷新，覆盖尚未触发插件变更事件的
+    // 中间状态（如 Agent 刚 init 完还没 install）。
+    contextChangeStop = getShadowHostRuntime()?.onContextChange(() => {
+      void refreshProjects();
+    }) ?? null;
     await refreshProjects();
   } catch (error) {
     connected.value = `桥接连接失败：${error instanceof Error ? error.message : String(error)}`;
@@ -150,6 +178,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   providerStop?.();
   closedStop?.();
+  pluginsChangedStop?.();
+  contextChangeStop?.();
 });
 
 // 安装历史落插件私有存储（storage.private 权限的实际消费），供追溯。
@@ -214,7 +244,7 @@ async function recordHistory(text: string) {
             <span class="versions">{{ versionLabel(entry) }}</span>
           </div>
           <div class="actions">
-            <button type="button" class="ghost" @click="showCommands(entry.id)">命令</button>
+            <button type="button" class="ghost" :disabled="busy" @click="buildProject(entry)">构建</button>
             <button type="button" :disabled="busy" @click="installProject(entry)">安装</button>
           </div>
         </li>

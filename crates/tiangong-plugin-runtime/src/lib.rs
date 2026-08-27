@@ -26,21 +26,27 @@ pub mod seams;
 pub mod sidecar;
 pub mod signature;
 pub mod slots;
+pub mod trust;
 mod ts_plugin;
 mod ts_tools;
 
 pub use adapter::WasmPluginAdapter;
 pub use bridge::{
     BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call, bridge_emit,
-    bridge_subscribe, bridge_unsubscribe, set_app_handler, set_browser_handler, set_dialog_handler,
-    set_event_emitter, set_session_input_handler, set_terminal_handler, set_webview_handler,
+    bridge_subscribe, bridge_unsubscribe, emit_plugins_changed, set_app_handler,
+    set_browser_handler, set_dialog_handler, set_event_emitter, set_session_input_handler,
+    set_terminal_handler, set_webview_handler,
 };
+pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
 };
-pub use plugin_dev::{InstallConfirmHandler, InstallRequest, set_plugin_dev_install_confirm};
+pub use plugin_dev::{
+    InstallerIdentity, TrustedInstallerHandler, content_manifest_fingerprint, note_trusted_build,
+    set_plugin_dev_trusted_installer, trusted_build_fingerprint,
+};
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
     ProcessSidecarConnection, SidecarConfig, SidecarConnection, SidecarNotificationForwarder,
@@ -49,4 +55,9 @@ pub use sidecar::{
 pub use slots::{
     BUILTIN_SLOTS, OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotContextKey, SlotDescriptor,
     SlotInstances, SlotRegistry, UiContribution,
+};
+pub use trust::{
+    LOCAL_PUBLISHER, OFFICIAL_PUBLISHER, TrustedPublisher, ensure_user_signing_key,
+    import_trusted_publisher, list_trusted_publishers, publisher_fingerprint,
+    remove_trusted_publisher,
 };

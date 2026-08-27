@@ -21,6 +21,7 @@ import {
   type AvailablePlugin,
   type SlotContributionEntry,
   type PluginStatus,
+  type TrustedPublisherEntry,
 } from '@/api/tauri';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -402,12 +403,15 @@ export function PluginManagerSettings({
 
         <Tabs defaultValue="installed" className="flex min-h-0 flex-1 flex-col">
           <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 sm:px-6">
-            <TabsList className="grid h-9 w-full max-w-56 grid-cols-2">
+            <TabsList className="grid h-9 w-full max-w-72 grid-cols-3">
               <TabsTrigger value="installed" className="py-1 text-xs">
                 已安装
               </TabsTrigger>
               <TabsTrigger value="available" className="py-1 text-xs">
                 可安装
+              </TabsTrigger>
+              <TabsTrigger value="trust" className="py-1 text-xs">
+                信任
               </TabsTrigger>
             </TabsList>
             <div className="relative ml-auto w-full max-w-48">
@@ -475,6 +479,10 @@ export function PluginManagerSettings({
                 />
               ))
             )}
+          </TabsContent>
+
+          <TabsContent value="trust" className="m-0 min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
+            <TrustManagerSection />
           </TabsContent>
         </Tabs>
       </div>
@@ -832,4 +840,188 @@ function operationLabel(operation: Operation) {
     uninstall: '卸载',
   };
   return labels[operation];
+}
+
+
+type TrustManagerSectionProps = Record<string, never>;
+
+/// 插件信任管理：本机用户密钥指纹 + 第三方发布者公钥（导入 / 指纹 / 移除）。
+/// 导入只在此界面手动进行（指纹需与开发者公开渠道人工比对），插件与
+/// Agent 均无导入通道。
+function TrustManagerSection({}: TrustManagerSectionProps) {
+  const { showError, showSuccess } = useToast();
+  const [publishers, setPublishers] = useState<TrustedPublisherEntry[]>([]);
+  const [userFingerprint, setUserFingerprint] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [publisherId, setPublisherId] = useState('');
+  const [publicKeyText, setPublicKeyText] = useState('');
+  const [importing, setImporting] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [entries, fingerprint] = await Promise.all([
+        api.listTrustedPublishers(),
+        api.userKeyFingerprint(),
+      ]);
+      setPublishers(entries);
+      setUserFingerprint(fingerprint);
+    } catch (error) {
+      showError(`读取信任信息失败：${String(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const importPublisher = useCallback(async () => {
+    const publisher = publisherId.trim();
+    const publicKey = publicKeyText.trim();
+    if (!publisher || !publicKey) {
+      showError('请填写发布者标识与公钥内容');
+      return;
+    }
+    setImporting(true);
+    try {
+      const entry = await api.importTrustedPublisher(publisher, publicKey);
+      showSuccess(
+        `已导入 ${entry.publisher}（指纹 ${entry.fingerprint}）——请与开发者公开渠道的指纹比对确认。`,
+      );
+      setPublisherId('');
+      setPublicKeyText('');
+      await refresh();
+    } catch (error) {
+      showError(`导入失败：${String(error)}`);
+    } finally {
+      setImporting(false);
+    }
+  }, [publisherId, publicKeyText, refresh]);
+
+  const removePublisher = useCallback(
+    async (publisher: string) => {
+      try {
+        await api.removeTrustedPublisher(publisher);
+        showSuccess(`已移除 ${publisher}（其签名插件下次启动将失效）`);
+        await refresh();
+      } catch (error) {
+        showError(`移除失败：${String(error)}`);
+      }
+    },
+    [refresh],
+  );
+
+  const pickKeyFile = useCallback(async () => {
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: '公钥文件', extensions: ['pub', 'txt'] }],
+    });
+    if (!picked) return;
+    try {
+      const content = await api.readPublicKeyFile(picked);
+      setPublicKeyText(content.trim());
+    } catch (error) {
+      showError(`读取公钥文件失败：${String(error)}`);
+    }
+  }, [showError]);
+
+  return (
+    <div className="space-y-6 py-4">
+      <section className="space-y-2">
+        <h4 className="text-sm font-medium">本机签名密钥</h4>
+        <p className="text-xs text-muted-foreground">
+          自建插件（插件创作链）安装时自动以此密钥签名，全程免确认；指纹用于
+          在你自己的多台设备间核验密钥一致性。
+        </p>
+        {userFingerprint ? (
+          <p className="font-mono text-xs">
+            指纹：<span className="text-primary">{userFingerprint}</span>
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            尚未生成（首次创作安装插件时自动生成）。
+          </p>
+        )}
+      </section>
+
+      <Separator />
+
+      <section className="space-y-3">
+        <h4 className="text-sm font-medium">第三方开发者公钥</h4>
+        <p className="text-xs text-muted-foreground">
+          导入第三方开发者的公钥后，即可安装该开发者签名的插件（本地导入插件
+          包）。导入后请将指纹与开发者公开渠道（GitHub / 官网）公布的指纹比对。
+        </p>
+        <div className="space-y-2">
+          <Input
+            value={publisherId}
+            onChange={(e) => setPublisherId(e.target.value)}
+            placeholder="发布者标识（如 acme-dev，来自插件签名清单）"
+            className="h-8 text-xs"
+          />
+          <textarea
+            value={publicKeyText}
+            onChange={(e) => setPublicKeyText(e.target.value)}
+            placeholder="公钥内容（base64 单行，即开发者公布的 .pub 文件内容）"
+            rows={3}
+            className="w-full rounded-md border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-1 focus:ring-ring"
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => void importPublisher()}
+              disabled={importing || loading}
+            >
+              {importing ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+              导入公钥
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 text-xs"
+              onClick={() => void pickKeyFile()}
+            >
+              <FolderInput className="mr-1 h-3 w-3" />
+              选择文件
+            </Button>
+          </div>
+        </div>
+
+        {loading ? (
+          <LoadingState label="正在读取信任公钥" />
+        ) : publishers.length === 0 ? (
+          <EmptyState label="尚未导入第三方公钥" />
+        ) : (
+          <div className="space-y-2">
+            {publishers.map((entry) => (
+              <div
+                key={entry.publisher}
+                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium">{entry.publisher}</p>
+                  <p className="truncate font-mono text-xs text-muted-foreground">
+                    指纹 {entry.fingerprint} · 导入于 {entry.imported_at}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 text-xs text-destructive hover:text-destructive"
+                  onClick={() => void removePublisher(entry.publisher)}
+                  disabled={loading}
+                >
+                  <Trash2 className="mr-1 h-3 w-3" />
+                  移除
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
 }

@@ -1,7 +1,7 @@
 // 工具处理核心：Agent 工具调用与创作页共用同一后端。
-// 外置化后插件侧只保留安装通道（plugin-dev.install）与只读查询
-//（plugin-dev.list/status）；init/validate/build/run/logs 由 Agent 经
-// 命令通道执行 @silent-ai/plugin-creator devkit（见 plugin.json 说明书）。
+// 开发工具链（init/validate/build/add/run/logs）经本插件的按需 node sidecar
+// 执行（bridge sidecar.devkit.*，每次调用独立进程）；安装与只读查询走宿主
+// 受限通道（plugin-dev.install/list）。
 import type { HostBridge } from '@tiangong/plugin-sdk';
 
 /** 工具结果（宿主 ts_tools 契约：ok/summary/exit_code 必填）。 */
@@ -30,12 +30,32 @@ export interface InstallResult {
   enabled: boolean;
 }
 
+/** devkit 命令结果（sidecar 响应负载）。 */
+export interface DevkitResult {
+  ok: boolean;
+  error?: string;
+  log_tail?: string;
+  [key: string]: unknown;
+}
+
 async function pluginDevCall<T>(
   bridge: HostBridge,
   operation: string,
   payload: Record<string, unknown>,
 ): Promise<T> {
   const raw = await bridge.call(`plugin-dev.${operation}`, JSON.stringify(payload));
+  return JSON.parse(raw) as T;
+}
+
+async function sidecarCall<T>(
+  bridge: HostBridge,
+  command: string,
+  args: string[],
+): Promise<T> {
+  const raw = await bridge.call(
+    `sidecar.devkit.${command}`,
+    JSON.stringify({ args }),
+  );
   return JSON.parse(raw) as T;
 }
 
@@ -49,15 +69,35 @@ export const pluginDev = {
   list: (bridge: HostBridge) => pluginDevCall<ProjectEntry[]>(bridge, 'list', {}),
 };
 
-/** devkit 命令模板（页面展示引导，实际由 Agent 经命令通道执行）。 */
-export const DEVKIT_VERSION = '1.0.2';
-export const DEVKIT_COMMANDS: Record<string, (id: string) => string> = {
-  init: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} init <模板> ${id} --name <显示名>`,
-  validate: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} validate ${id}`,
-  build: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} build ${id}`,
-  run: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} run ${id} -- <参数>`,
-  logs: (id) => `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} logs dev:${id}`,
+/** 按需 node sidecar 通道（devkit 工具链；args 不含命令名）。 */
+export const devkit = {
+  init: (bridge: HostBridge, template: string, id: string, name?: string) => {
+    const args = name ? [template, id, '--name', name] : [template, id];
+    return sidecarCall<DevkitResult>(bridge, 'init', args);
+  },
 };
+
+/** 对 devkit 命令的统一入口（command 不含在 args 内）。 */
+export function devkitCommand(
+  bridge: HostBridge,
+  command: string,
+  args: string[],
+): Promise<DevkitResult> {
+  return sidecarCall<DevkitResult>(bridge, command, args);
+}
+
+function summarizeDevkit(command: string, result: DevkitResult): ToolOutcome {
+  if (!result.ok) {
+    const detail = result.error ?? '未知错误';
+    const tail = result.log_tail ? `\n日志尾部：${String(result.log_tail).slice(0, 800)}` : '';
+    return { ok: false, summary: `devkit ${command} 失败：${detail}${tail}`, stdout: '', stderr: '', exit_code: 1 };
+  }
+  const extra = Object.entries(result)
+    .filter(([key]) => !['ok', 'log_tail'].includes(key))
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(' ');
+  return { ok: true, summary: `devkit ${command} 完成${extra ? `（${extra}）` : ''}`, stdout: '', stderr: '', exit_code: 0 };
+}
 
 function ok(summary: string): ToolOutcome {
   return { ok: true, summary, stdout: '', stderr: '', exit_code: 0 };
@@ -67,26 +107,40 @@ function fail(summary: string): ToolOutcome {
   return { ok: false, summary, stdout: '', stderr: '', exit_code: 1 };
 }
 
-/** 分发一次 Agent 工具调用（当前仅 plugin_install，其余操作经命令通道）。 */
+/** 分发一次 Agent 工具调用：plugin_init / plugin_devkit / plugin_install。 */
 export async function handleAgentTool(
   bridge: HostBridge,
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolOutcome> {
   try {
-    if (name !== 'plugin_install') {
-      return fail(
-        `未知工具 ${name}。开发操作（init/validate/build/run/logs）请经命令通道执行：` +
-          `npx -y @silent-ai/plugin-creator@${DEVKIT_VERSION} <命令>`,
+    if (name === 'plugin_init') {
+      const template = String(args.template ?? '');
+      const id = String(args.id ?? '');
+      const displayName = args.name === undefined ? undefined : String(args.name);
+      const result = await devkit.init(bridge, template, id, displayName);
+      return summarizeDevkit('init', result);
+    }
+    if (name === 'plugin_devkit') {
+      const command = String(args.command ?? '');
+      const commandArgs = Array.isArray(args.args)
+        ? args.args.map((item) => String(item))
+        : [];
+      const result = await devkitCommand(bridge, command, commandArgs);
+      return summarizeDevkit(command, result);
+    }
+    if (name === 'plugin_install') {
+      const id = String(args.id ?? '');
+      const result = await pluginDev.install(bridge, id);
+      return ok(
+        `插件 ${result.plugin_id} v${result.version} 已安装（状态 ${result.state}，` +
+          `${result.enabled ? '已启用' : '未启用'}）。含 extension.tab 贡献时可在拓展区打开；` +
+          '含 mention 声明时可在输入框 @plugin:<id> 点名调用。' +
+          '注意：插件工具自新会话起生效——当前已存在的会话不会动态纳入新装插件的工具，' +
+          '请告知用户新开会话使用。',
       );
     }
-    const id = String(args.id ?? '');
-    const result = await pluginDev.install(bridge, id);
-    return ok(
-      `插件 ${result.plugin_id} v${result.version} 已安装（状态 ${result.state}，` +
-        `${result.enabled ? '已启用' : '未启用'}）。含 extension.tab 贡献时可在拓展区打开；` +
-        '含 mention 声明时可在输入框 @plugin:<id> 点名调用。',
-    );
+    return fail(`未知工具 ${name}`);
   } catch (error) {
     return fail(`工具 ${name} 失败：${error instanceof Error ? error.message : String(error)}`);
   }

@@ -33,6 +33,49 @@ function appIcon(app: AppEntry): typeof Globe {
   return Puzzle;
 }
 
+/** icon 是否为自定义资源路径（如 "icons/app.png"；含 / 或 . 视为资源）。 */
+function isIconResource(icon: string): boolean {
+  return icon.includes('/') || icon.includes('.');
+}
+
+/** 自定义图标 object URL 缓存（按插件:贡献；组件生命周期内复用）。 */
+const iconUrlCache = new Map<string, Promise<string | null>>();
+
+function loadIconUrl(app: AppEntry): Promise<string | null> {
+  const key = `${app.plugin_id}:${app.contribution_id}`;
+  if (!iconUrlCache.has(key)) {
+    iconUrlCache.set(
+      key,
+      api
+        .pluginReadIcon(app.plugin_id, app.contribution_id)
+        .then((resource) =>
+          URL.createObjectURL(new Blob([new Uint8Array(resource.data)], { type: resource.mime })),
+        )
+        .catch((error) => {
+          console.warn(`插件 ${app.plugin_id} 图标加载失败：`, error);
+          return null;
+        }),
+    );
+  }
+  return iconUrlCache.get(key)!;
+}
+
+/** 自定义图标图元：img 渲染（img 中的 SVG 不执行脚本）；失败回落拼图。 */
+function AppIconImage({ app }: { app: AppEntry }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void loadIconUrl(app).then((value) => {
+      if (active) setUrl(value);
+    });
+    return () => {
+      active = false;
+    };
+  }, [app]);
+  if (!url) return <Puzzle className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />;
+  return <img src={url} alt={app.title} className="h-7 w-7 object-contain" draggable={false} />;
+}
+
 export function ExtensionMatrix({
   runningPluginApps = [],
   onOpenPluginApp,
@@ -79,7 +122,11 @@ export function ExtensionMatrix({
                 title={`${app.title}${running ? '（已打开）' : ''}（${multi ? '多实例' : '单实例'}）—— ${app.description}`}
               >
                 <span className="relative flex h-12 w-12 items-center justify-center rounded-lg border bg-muted/50 transition-colors group-hover:border-primary/50 group-hover:bg-accent">
-                  <Icon className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
+                  {isIconResource(app.icon) ? (
+                    <AppIconImage app={app} />
+                  ) : (
+                    <Icon className="h-6 w-6 text-muted-foreground group-hover:text-foreground" />
+                  )}
                   {running && (
                     <span
                       className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-background"

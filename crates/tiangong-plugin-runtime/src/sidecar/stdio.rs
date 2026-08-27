@@ -106,13 +106,33 @@ impl StdioSidecarConnection {
         Ok(())
     }
 
-    /// 确保进程存活并完成握手（安装验证 / trait ensure_running 用）。
+    /// 确保进程存活并完成握手（安装验证 / 预热用）。
+    ///
+    /// 按需生命周期不保留进程：临时启动、握手校验后立即清理——预热/安装
+    /// 验证仍确认可达性，但不留下任何存活进程。
     pub fn ensure_running_checked(&self) -> Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-        self.ensure_running(&mut state).map(|_| ())
+        match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => {
+                if self.stopped.load(Ordering::Acquire) {
+                    bail!("stdio sidecar 已停止");
+                }
+                // 临时校验进程完全不经过共享 state：按需调用可能正在进行
+                //（state.process 是其活跃进程），经 state 启停会误杀它。
+                let process = Arc::new(self.spawn()?);
+                let result = self.handshake(&process);
+                if let Ok(mut child) = process.child.lock() {
+                    terminate_process_tree(&process, &mut child);
+                }
+                result.map(|_| ())
+            }
+            crate::manifest::SidecarLifecycle::Resident => {
+                self.ensure_running(&mut state).map(|_| ())
+            }
+        }
     }
 
     /// 确保子进程存活且完成过握手。进程退出时自动重启（换代）。
@@ -143,6 +163,17 @@ impl StdioSidecarConnection {
             );
             state.process = None;
         }
+        self.start_fresh(state)
+    }
+
+    /// 启动全新进程并完成握手（写入 state.process）。
+    /// 覆盖前先终止旧进程——预热残留或异常路径留下的进程不允许失去管理引用。
+    fn start_fresh(&self, state: &mut StdioState) -> Result<Arc<StdioProcess>> {
+        if let Some(process) = state.process.take()
+            && let Ok(mut child) = process.child.lock()
+        {
+            terminate_process_tree(&process, &mut child);
+        }
         let process = Arc::new(self.spawn()?);
         state.process = Some(Arc::clone(&process));
         if let Err(error) = self.handshake(&process) {
@@ -157,6 +188,56 @@ impl StdioSidecarConnection {
             "stdio sidecar 已就绪"
         );
         Ok(process)
+    }
+
+    /// 按需调用：每次请求独立进程（spawn → 握手 → 请求 → 清理），
+    /// 不复用也不保留进程——工具型调用的最小存活窗口。
+    ///
+    /// 锁只在起止瞬间持有：round_trip 期间不持锁，工具级超时/会话取消
+    /// （cancel_current）才能及时终止进行中的进程而不与调用方互等。
+    fn invoke_on_demand(
+        &self,
+        operation: &str,
+        payload: Value,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<Value> {
+        let process = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+            if self.stopped.load(Ordering::Acquire) {
+                bail!("stdio sidecar 已停止");
+            }
+            self.start_fresh(&mut state)?
+        };
+        let result = self.round_trip(&process, operation, payload, on_progress);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+        if let Ok(mut child) = process.child.lock() {
+            terminate_process_tree(&process, &mut child);
+        }
+        // cancel_current 可能已抢先清理（进程已被杀并移出）——幂等处理。
+        let already_cleared = state.process.is_none();
+        if !already_cleared {
+            state.process = None;
+        }
+        result
+    }
+
+    /// 终止当前进行中的调用进程（工具级超时 / 会话取消用）：
+    /// 与 stop 不同，不改变停止标志——后续调用会重新起进程继续服务。
+    pub fn cancel_current(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(process) = state.process.take()
+            && let Ok(mut child) = process.child.lock()
+        {
+            terminate_process_tree(&process, &mut child);
+        }
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
@@ -182,7 +263,36 @@ impl StdioSidecarConnection {
         let token = scru128::new().to_string();
         // OS 沙箱路径（经 tiangong-sandbox Launcher 启动）由沙箱覆盖分支
         // 在本传输层之上叠加；此处仅负责直接 spawn 与 stdio 管道接续。
-        let mut command = Command::new(&self.config.binary);
+        // 解释器形态：以宿主解析的解释器程序运行 entry（本地信任时先复核内容清单）。
+        let mut command = match self.config.interpreter.as_ref() {
+            Some(launch) => {
+                if let Some(manifest_path) = &self.config.integrity_manifest {
+                    let root = manifest_path
+                        .parent()
+                        .ok_or_else(|| anyhow!("内容清单缺少父目录"))?;
+                    SidecarConfig::verify_integrity_manifest(manifest_path, root)?;
+                }
+                if !launch.program.is_file() {
+                    bail!(
+                        "解释器程序不存在: {}（可用 TIANGONG_NODE_PATH/TIANGONG_PYTHON_PATH 指定）",
+                        launch.program.display()
+                    );
+                }
+                if !launch.entry.is_file() {
+                    bail!("sidecar 入口脚本不存在: {}", launch.entry.display());
+                }
+                let mut command = Command::new(&launch.program);
+                command.arg(&launch.entry);
+                command.args(&launch.args);
+                command
+            }
+            None => {
+                if !self.config.binary.is_file() {
+                    bail!("sidecar 二进制不存在: {}", self.config.binary.display());
+                }
+                Command::new(&self.config.binary)
+            }
+        };
         sanitize_spawn_environment(&mut command);
         command
             .stdin(Stdio::piped())
@@ -271,6 +381,22 @@ impl StdioSidecarConnection {
             return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "stdio sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                 handshake.protocol_version
+            ))
+            .into());
+        }
+        // 对齐 TCP health_check：插件版本与业务协议版本一并校验，旧制品在
+        // 握手阶段即明确拒绝，不留到业务调用以不确定方式失败。
+        if handshake.plugin_version != self.config.plugin_version {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "stdio sidecar 插件版本不匹配: expected={}, actual={}",
+                self.config.plugin_version, handshake.plugin_version
+            ))
+            .into());
+        }
+        if handshake.business_protocol != self.config.business_protocol {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "stdio sidecar 业务协议版本不匹配: expected={}, actual={}",
+                self.config.business_protocol, handshake.business_protocol
             ))
             .into());
         }
@@ -627,29 +753,41 @@ impl SidecarConnection for StdioSidecarConnection {
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
-        let process = {
-            let mut state = self.state.lock().map_err(|_| {
-                anyhow!(SidecarInvokeError::Unavailable(
-                    "stdio sidecar 状态锁已损坏".to_string()
-                ))
-            })?;
-            self.ensure_running(&mut state).map_err(|error| {
-                if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                    error
-                } else {
-                    SidecarInvokeError::Unavailable(error.to_string()).into()
-                }
-            })?
+        let response = match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => self
+                .invoke_on_demand(operation, payload, on_progress)
+                .map_err(|error| {
+                    if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                        error
+                    } else {
+                        SidecarInvokeError::Unavailable(error.to_string()).into()
+                    }
+                })?,
+            crate::manifest::SidecarLifecycle::Resident => {
+                let process = {
+                    let mut state = self.state.lock().map_err(|_| {
+                        anyhow!(SidecarInvokeError::Unavailable(
+                            "stdio sidecar 状态锁已损坏".to_string()
+                        ))
+                    })?;
+                    self.ensure_running(&mut state).map_err(|error| {
+                        if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                            error
+                        } else {
+                            SidecarInvokeError::Unavailable(error.to_string()).into()
+                        }
+                    })?
+                };
+                self.round_trip(&process, operation, payload, on_progress)
+                    .map_err(|error| {
+                        if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                            error
+                        } else {
+                            SidecarInvokeError::Internal(error.to_string()).into()
+                        }
+                    })?
+            }
         };
-        let response = self
-            .round_trip(&process, operation, payload, on_progress)
-            .map_err(|error| {
-                if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                    error
-                } else {
-                    SidecarInvokeError::Internal(error.to_string()).into()
-                }
-            })?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }
 
@@ -659,6 +797,10 @@ impl SidecarConnection for StdioSidecarConnection {
 
     fn stop(&self) -> Result<()> {
         StdioSidecarConnection::stop(self)
+    }
+
+    fn cancel_current(&self) {
+        StdioSidecarConnection::cancel_current(self)
     }
 
     fn ensure_running(&self) -> Result<()> {

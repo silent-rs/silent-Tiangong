@@ -92,6 +92,9 @@ pub const EVENT_NAMESPACE_PREFIXES: &[&str] = &[
     "lifecycle.",
     "config.",
     "sidecar.",
+    // plugins.*：宿主插件集变更通知（安装/启停/卸载），插件页面据此刷新
+    // 自身状态（如插件创作页的项目列表）。
+    "plugins.",
     // webview.*：宿主 webview 容器原语的页面事件通道（如浏览器插件的
     // webview.event），插件在 capabilities.events 声明后可订阅。
     "webview.",
@@ -232,6 +235,12 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
                 .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
             let result =
                 crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
+            // 结果观察者（宿主注入的通用机制，不解析业务语义）：宿主可用
+            // 于受信产物溯源登记等策略（如创作链构建登记）。
+            if let Some(observer) = sidecar_result_observer() {
+                let result_text = serde_json::to_string(&result).unwrap_or_default();
+                observer(plugin_id, operation, payload, &result_text);
+            }
             serde_json::to_string(&result).with_context(|| "序列化 sidecar 结果失败")
         }
         "tool." if method.starts_with("browser.") => {
@@ -257,6 +266,27 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
 /// 输入草稿宿主处理器：桌面入口注入后，UI 插件可提交经宿主校验的输入附件。
 pub type SessionInputHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
 static SESSION_INPUT_HANDLER: OnceLock<SessionInputHandler> = OnceLock::new();
+
+/// sidecar 调用结果观察者：参数为（插件 ID、操作名、原始请求负载、响应
+/// JSON 文本）。仅成功调用触发；观察者异常不影响桥接结果。
+pub type SidecarResultObserver = std::sync::Arc<dyn Fn(&str, &str, &str, &str) + Send + Sync>;
+
+static SIDECAR_RESULT_OBSERVER: std::sync::RwLock<Option<SidecarResultObserver>> =
+    std::sync::RwLock::new(None);
+
+/// 注入 sidecar 结果观察者（宿主启动时调用，覆盖语义）。
+pub fn set_sidecar_result_observer(observer: SidecarResultObserver) {
+    if let Ok(mut current) = SIDECAR_RESULT_OBSERVER.write() {
+        *current = Some(observer);
+    }
+}
+
+fn sidecar_result_observer() -> Option<SidecarResultObserver> {
+    SIDECAR_RESULT_OBSERVER
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+}
 
 /// 原生能力宿主服务处理器：`(plugin_id, method, payload) -> 结果 JSON`。
 pub type NativeServiceHandler = Arc<dyn Fn(&str, &str, &str) -> Result<String> + Send + Sync>;
@@ -350,6 +380,22 @@ fn event_subscriptions() -> &'static Mutex<BTreeMap<String, BTreeMap<String, usi
 /// 注入事件推送回调（宿主入口启动时调用，把订阅事件送达前端/插件 UI）。
 pub fn set_event_emitter(emitter: BridgeEventEmitter) {
     let _ = EVENT_EMITTER.set(emitter);
+}
+
+/// 把插件集变更通知（安装/启停/卸载）下发给订阅了 `plugins.changed` 的
+/// 插件页面——主前端的 Tauri 事件到达不了插件沙箱，插件页面经桥接订阅获知。
+pub fn emit_plugins_changed() {
+    let Some(emitter) = EVENT_EMITTER.get() else {
+        return;
+    };
+    let Ok(subscriptions) = event_subscriptions().lock() else {
+        return;
+    };
+    for (plugin_id, channels) in subscriptions.iter() {
+        if channels.contains_key("plugins.changed") {
+            emitter(plugin_id, "plugins.changed", "{}");
+        }
+    }
 }
 
 /// 订阅宿主事件通道。

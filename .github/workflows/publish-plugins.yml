@@ -27,6 +27,7 @@ jobs:
       plugin_root: ${{ steps.plugin.outputs.plugin_root }}
       has_wasm: ${{ steps.plugin.outputs.has_wasm }}
       has_ui: ${{ steps.plugin.outputs.has_ui }}
+      release_kind: ${{ steps.plugin.outputs.release_kind }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,7 +48,8 @@ jobs:
           fi
           echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
           # 从 plugin.json 解析插件形态：纯 UI 插件（如 interaction/browser）
-          # 无 wasm；带 UI 贡献的插件需要预构建单文件页面。
+          # 无 wasm；带 UI 贡献的插件需要预构建单文件页面；解释器 sidecar
+          # 插件（node/python）为平台无关发布（单一 any 归档，独立构建任务）。
           python3 - "$plugin_id" >> "$GITHUB_OUTPUT" <<'PY'
           import json, os, sys
           plugin_id = sys.argv[1]
@@ -60,9 +62,16 @@ jobs:
                   manifest = json.load(open(f"{root}/plugin.json"))
                   has_wasm = "true" if manifest.get("wasm") else "false"
                   has_ui = "true" if manifest.get("ui", {}).get("contributions") else "false"
+                  runtime = manifest.get("sidecar", {}).get("runtime")
+                  release_kind = (
+                      "interpreter-sidecar"
+                      if runtime and runtime != "native"
+                      else "standard"
+                  )
                   print(f"plugin_root={root}")
                   print(f"has_wasm={has_wasm}")
                   print(f"has_ui={has_ui}")
+                  print(f"release_kind={release_kind}")
                   break
           else:
               raise SystemExit(f"plugin.json not found for {plugin_id}")
@@ -95,7 +104,9 @@ jobs:
   build-ui:
     name: Build shared UI
     needs: resolve-plugin
-    if: needs.resolve-plugin.outputs.has_ui == 'true'
+    # 解释器插件的 UI 与 sidecar bundle 由 build-interpreter 一次性完整构建，
+    # 不走共享 UI 通道（Fresh Checkout 需要完整产物，不只 dist/index.html）。
+    if: needs.resolve-plugin.outputs.has_ui == 'true' && needs.resolve-plugin.outputs.release_kind != 'interpreter-sidecar'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -125,8 +136,8 @@ jobs:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
     needs: [resolve-plugin, build-wasm, build-ui]
     # 纯 UI 插件会跳过 build-wasm；显式判定 needs 结果，避免
-    # skipped 状态传播导致整条发布链被跳过。
-    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    # skipped 状态传播导致整条发布链被跳过。解释器插件走 build-interpreter。
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind != 'interpreter-sidecar' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -237,6 +248,17 @@ jobs:
           fi
           cargo run -p xtask -- build-plugin "$PLUGIN_ID"
 
+      - name: Verify official signature (key must match built-in pubkey)
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          EXPECTED_PLATFORM: ${{ matrix.plugin_platform }}
+        run: |
+          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json"
+          if compgen -G "$pattern" > /dev/null; then
+            release_json="$(compgen -G "$pattern")"
+            cargo run -p xtask -- verify-official-release "$release_json"
+          fi
+
       - name: Verify platform output
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -266,12 +288,116 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-interpreter:
+    name: Build interpreter plugin (${{ needs.resolve-plugin.outputs.plugin_id }})
+    needs: [resolve-plugin, build-wasm, build-ui]
+    # 解释器 sidecar 插件：平台无关（any）发布形态，单一 ubuntu 任务完整
+    # 构建（UI + sidecar bundle + 归档 + 签名），不启动三平台矩阵。
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && needs.resolve-plugin.outputs.release_kind == 'interpreter-sidecar' && needs.build-wasm.result != 'failure' && needs.build-ui.result != 'failure' }}
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Validate plugin from repository configuration
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: cargo run -p xtask -- validate-plugin "$PLUGIN_ID"
+
+      - name: Prepare plugin signing key
+        id: plugin_signing
+        env:
+          PLUGIN_SIGNING_PRIVATE_KEY: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$PLUGIN_SIGNING_PRIVATE_KEY" ]]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY is required."
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/tiangong-plugin-signing.key"
+          printf '%s' "$PLUGIN_SIGNING_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      # Fresh Checkout 完整构建：xtask 内部执行 yarn install + yarn build
+      # （同时产出 dist/index.html 与 build/sidecar-main.mjs），随后组装
+      # release、生成内容清单、签名与平台无关归档。
+      - name: Build and sign plugin
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo run -p xtask -- build-plugin "$PLUGIN_ID"
+
+      - name: Verify official signature (key must match built-in pubkey)
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: |
+          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json"
+          if compgen -G "$pattern" > /dev/null; then
+            release_json="$(compgen -G "$pattern")"
+            cargo run -p xtask -- verify-official-release "$release_json"
+          else
+            echo "missing release.json for ${PLUGIN_ID}"
+            exit 1
+          fi
+
+      - name: Verify interpreter output
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: |
+          test -f "target/plugin-dist/plugins-index/fragments/${PLUGIN_ID}-any.json"
+          # 解释器分发的 release_root 无平台子目录：plugins/<id>/<version>/release.json。
+          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json
+          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json.sig
+          archive="$(compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}"/*"/${PLUGIN_ID}-"*.tar.zst)"
+          test -n "$archive" && test -f "$archive"
+
+      - name: Remove plugin signing key
+        if: always() && steps.plugin_signing.outputs.key_path != ''
+        env:
+          PLUGIN_SIGNING_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+        run: rm -f "$PLUGIN_SIGNING_KEY_PATH"
+
+      - name: Upload interpreter plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-dist-${{ needs.resolve-plugin.outputs.plugin_id }}-any
+          path: |
+            target/plugin-dist/plugins/${{ needs.resolve-plugin.outputs.plugin_id }}/
+            target/plugin-dist/plugins-index/fragments/${{ needs.resolve-plugin.outputs.plugin_id }}-any.json
+          if-no-files-found: error
+          retention-days: 7
+
   prepare-release:
     name: Prepare independent plugin release
-    needs: [resolve-plugin, build-plugin]
-    # skipped 沿依赖图传播：上游 build-wasm 被纯 UI 插件跳过后，
-    # 下游也必须显式判定结果，否则整条发布链静默跳过。
-    if: ${{ !cancelled() && needs.build-plugin.result == 'success' }}
+    needs: [resolve-plugin, build-plugin, build-interpreter]
+    # skipped 沿依赖图传播：上游构建任务被形态跳过后，下游也必须显式判定
+    # 结果（build-plugin 与 build-interpreter 互斥执行，任一成功即可）。
+    if: ${{ !cancelled() && needs.resolve-plugin.result == 'success' && (needs.build-plugin.result == 'success' || needs.build-interpreter.result == 'success') }}
     runs-on: ubuntu-22.04
     outputs:
       plugin_id: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -292,14 +418,23 @@ jobs:
       - name: Merge and validate selected plugin
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
-          TIANGONG_PLUGIN_EXPECTED_PLATFORMS: darwin-aarch64,linux-x86_64,windows-x86_64
+          RELEASE_KIND: ${{ needs.resolve-plugin.outputs.release_kind }}
         run: |
+          # 解释器插件期望单一平台无关片段（any，签名数量 1）；
+          # 原生 sidecar 插件期望三平台完整（签名数量 3）。
+          if [[ "$RELEASE_KIND" == "interpreter-sidecar" ]]; then
+            export TIANGONG_PLUGIN_EXPECTED_PLATFORMS=any
+            expected_signatures=1
+          else
+            export TIANGONG_PLUGIN_EXPECTED_PLATFORMS=darwin-aarch64,linux-x86_64,windows-x86_64
+            expected_signatures=3
+          fi
           cargo run -p xtask -- merge-plugin-dist "$PLUGIN_ID" target/plugin-platforms target/plugin-release
           # 纯 WASM 插件不生成 release.json/sig，只在有签名清单时验证数量。
           release_count=$(find target/plugin-release/plugins -name release.json | wc -l | tr -d ' ')
           if [ "$release_count" -gt 0 ]; then
-            test "$release_count" = "3"
-            test "$(find target/plugin-release/plugins -name release.json.sig | wc -l | tr -d ' ')" = "3"
+            test "$release_count" = "$expected_signatures"
+            test "$(find target/plugin-release/plugins -name release.json.sig | wc -l | tr -d ' ')" = "$expected_signatures"
           fi
 
       - name: Upload independent release artifact
