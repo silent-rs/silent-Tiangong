@@ -37,7 +37,14 @@ pub fn user_home_dir() -> Option<PathBuf> {
 }
 
 /// 天工存储根目录（`~/.tiangong`）。
+///
+/// 设置 `TIANGONG_STORAGE_ROOT` 时使用其指向的目录；与
+/// `tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV` 共用同一环境变量，
+/// 用于测试与多实例隔离。
 pub fn storage_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("TIANGONG_STORAGE_ROOT").filter(|v| !v.is_empty()) {
+        return PathBuf::from(root);
+    }
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join(".tiangong")

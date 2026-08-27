@@ -66,11 +66,7 @@ pub fn init_logging(options: LoggingOptions) -> Result<WorkerGuard> {
 }
 
 fn get_log_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| anyhow::anyhow!("无法获取用户主目录"))?;
-
-    Ok(PathBuf::from(home).join(".tiangong").join("logs"))
+    Ok(crate::loader::default_tiangong_dir().join("logs"))
 }
 
 #[cfg(test)]
@@ -80,6 +76,6 @@ mod tests {
     #[test]
     fn test_get_log_dir() {
         let log_dir = get_log_dir().unwrap();
-        assert!(log_dir.ends_with(".tiangong/logs"));
+        assert_eq!(log_dir.file_name().and_then(|n| n.to_str()), Some("logs"));
     }
 }

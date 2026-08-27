@@ -3248,17 +3248,12 @@ fn persist_zoom(shared: &Arc<BrowserSharedState>) {
 }
 
 fn browser_data_directory(session_id: &str) -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
     // per-session data 目录隔离 cookie/storage；空 session_id 回退全局目录（兼容）
+    let base = tiangong_config::io::storage_root().join("browser-data");
     let dir = if session_id.is_empty() {
-        PathBuf::from(home).join(".tiangong").join("browser-data")
+        base
     } else {
-        PathBuf::from(home)
-            .join(".tiangong")
-            .join("browser-data")
-            .join(session_id)
+        base.join(session_id)
     };
     let _ = std::fs::create_dir_all(&dir);
     dir

@@ -71,7 +71,13 @@ impl AppConfigFile {
 }
 
 /// 获取默认配置目录（~/.tiangong/）
+///
+/// 设置 `TIANGONG_STORAGE_ROOT` 时使用其指向的目录（与 `io::storage_root`
+/// 一致，用于测试与多实例隔离）。
 pub fn default_tiangong_dir() -> PathBuf {
+    if let Some(root) = std::env::var_os("TIANGONG_STORAGE_ROOT").filter(|v| !v.is_empty()) {
+        return PathBuf::from(root);
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
