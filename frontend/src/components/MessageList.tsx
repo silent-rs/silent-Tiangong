@@ -3,6 +3,7 @@ import { useSearchStore } from "@/store/useSearchStore";
 import { findSearchMatches } from "@/utils/search";
 import { SearchBar } from "./SearchBar";
 import { ScrollArea } from "./ui/scroll-area";
+import { RulerScrollbar } from "./ui/ruler-scrollbar";
 import {
   Loader2,
   Cpu,
@@ -939,21 +940,28 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧百分比磁吸轨道：离开底部时，鼠标移入右侧区域才显示。替代原生滚动条，贴右边缘。
+    {/* 右侧刻度尺滚动条：常驻贴右缘，整列均匀小横线刻度，当前视口对应区间的
+        刻度变亮（内容极长时表现为一条亮横杠）；点击/拖动直接映射滚动，
+        无可滚动内容时自动隐藏。替代原生滚动条与旧半透明圆角轨道条。 */}
+    <RulerScrollbar viewportRef={viewportRef} />
+
+    {/* 右侧百分比磁吸轨道：离开底部时，鼠标移入右侧区域才显示。
         ≤9 条平铺等间距；>9 条按游标（hover/激活）做高斯窗口，渲染离游标最近的 9 个点，
-        中心点最大并向两侧正态衰减；每点显示预览，点 hover 可点选跳转，
-        点击轨道空白按百分比跳转；背景条带滚动位置 thumb 指示当前视图。
-        外层为 group + 透明感应条（w-6）捕获 hover；内部交互层用 group-hover 控制显隐，
-        避免感应区过大遮挡消息内容。 */}
+        中心点最大并向两侧正态衰减；每点显示预览，点 hover 可点选跳转；
+        滚动位置指示由左侧的刻度尺滚动条承担，本层只负责按提问跳转。
+        外层为 group + 透明感应条（让开右侧 20px 刻度尺区域）捕获 hover；内部交互层用
+        group-hover 控制显隐，避免感应区过大遮挡消息内容。 */}
     {userCount > 0 && (
       <div
-        className={`group absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-opacity duration-200 ${
+        // pointer-events-none：容器矩形不得拦截下层刻度尺滚动条的点击/拖动，
+        // 需要交互的子元素（感应条/轨道层/按钮组）各自恢复 auto
+        className={`group pointer-events-none absolute inset-y-0 right-0 z-20 flex flex-col items-end transition-opacity duration-200 ${
           isAtBottom ? 'opacity-0' : 'opacity-100'
         }`}
       >
-        {/* 透明 hover 感应条：贴右边缘（24px 宽），仅捕获鼠标进出触发 group-hover。
-            不影响消息内容交互（消息内容不延伸到最右 24px 内的概率极低）。 */}
-        <div className="absolute inset-y-0 right-0 w-6" />
+        {/* 透明 hover 感应条（20px 宽，位于刻度尺左侧），仅捕获鼠标进出触发 group-hover；
+            不覆盖刻度尺，保证拖动滚动条时不误弹磁吸点列。 */}
+        <div className="pointer-events-auto absolute inset-y-0 right-5 w-5" />
         {/* 轨道主体：百分比磁吸。点列块整体跟随鼠标 Y 平移（中心点贴鼠标），
             内容随游标变化 —— 跟随、可点选、百分比三者统一 */}
         <div
@@ -995,22 +1003,6 @@ export function MessageList() {
             }, 1500);
           }}
         >
-          {/* 轨道背景条：贴右边缘，替代原生滚动条 */}
-          <div className="absolute inset-y-2 right-1 w-[15px] rounded-full bg-muted-foreground/15" />
-          <button
-            type="button"
-            data-rail="bg"
-            aria-label="按百分比跳转到用户提问"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const ratio = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-              const pos = Math.round(ratio * (userCount - 1));
-              if (pos >= 0 && pos < userCount) {
-                scrollToUserGroupTop(userGroupIndices[pos]);
-              }
-            }}
-            className="absolute inset-y-2 right-1 w-[15px] cursor-pointer"
-          />
           {(railSpread ? showRailDots : true) && (
           <TooltipProvider delayDuration={200}>
             {/* 点列块：absolute 定位，top 按鼠标 Y 计算（clamp 防溢出），
