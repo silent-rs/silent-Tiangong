@@ -1168,7 +1168,11 @@ function ProviderForm({
 }) {
   const handleProtocolChange = (protocol: string) => {
     const defaultUrl = PROTOCOL_DEFAULTS[protocol] || '';
-    setDraft({ ...draft, protocol, base_url: defaultUrl });
+    const oldDefault = PROTOCOL_DEFAULTS[draft.protocol] || '';
+    const current = draft.base_url.trim();
+    // 仅当地址为空或仍等于旧协议默认地址时跟随协议更新，避免覆盖用户自填地址。
+    const keepUrl = current !== '' && current !== oldDefault;
+    setDraft({ ...draft, protocol, base_url: keepUrl ? draft.base_url : defaultUrl });
   };
 
   return (

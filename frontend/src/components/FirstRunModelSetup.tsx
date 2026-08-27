@@ -33,6 +33,9 @@ const PROTOCOL_DEFAULT_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
 };
 
+/** 连接信息固定的预设供应商：Base URL 与协议不可修改。 */
+const LOCKED_PRESET_PROVIDERS = new Set(['DeepSeek']);
+
 const PROTOCOL_OPTIONS = [
   { value: 'openai', label: 'OpenAI Responses' },
   { value: 'openai_chatcompletions', label: 'OpenAI Chat Completions' },
@@ -97,8 +100,17 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
     setModelName('');
   };
 
+  // 锁定供应商（如 DeepSeek）：Base URL 与协议固定为官方值。
+  const urlLocked = !isCustomProvider && LOCKED_PRESET_PROVIDERS.has(providerKey);
+
   const handleProtocolChange = (protocol: string) => {
-    setDraft((prev) => ({ ...prev, protocol, base_url: PROTOCOL_DEFAULT_URLS[protocol] || '' }));
+    setDraft((prev) => {
+      const oldDefault = PROTOCOL_DEFAULT_URLS[prev.protocol] || '';
+      const current = prev.base_url.trim();
+      // 仅当地址为空或仍等于旧协议默认地址时跟随协议更新，避免覆盖用户自填地址。
+      const keepUrl = current !== '' && current !== oldDefault;
+      return { ...prev, protocol, base_url: keepUrl ? prev.base_url : (PROTOCOL_DEFAULT_URLS[protocol] || '') };
+    });
   };
 
   const fetchModels = async () => {
@@ -234,6 +246,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
               onChange={(e) => setDraft({ ...draft, base_url: e.target.value })}
               className="text-sm h-8 mt-1"
               placeholder="https://api.openai.com/v1"
+              disabled={urlLocked}
             />
           </div>
 
@@ -259,16 +272,22 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
 
           <div>
             <Label className="text-xs">请求格式</Label>
-            <Select value={draft.protocol || 'openai_chatcompletions'} onValueChange={handleProtocolChange}>
-              <SelectTrigger className="text-sm h-8 mt-1">
-                <SelectValue placeholder="选择协议" />
-              </SelectTrigger>
-              <SelectContent>
-                {PROTOCOL_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {urlLocked ? (
+              <div className="h-8 mt-1 px-3 flex items-center rounded-md border bg-muted/40 text-sm text-muted-foreground">
+                {providerKey} 官方协议（{draft.protocol}）
+              </div>
+            ) : (
+              <Select value={draft.protocol || 'openai_chatcompletions'} onValueChange={handleProtocolChange}>
+                <SelectTrigger className="text-sm h-8 mt-1">
+                  <SelectValue placeholder="选择协议" />
+                </SelectTrigger>
+                <SelectContent className="z-[95]">
+                  {PROTOCOL_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
 
           <div>
@@ -283,7 +302,7 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
             {availableModels.length > 0 ? (
               <Select value={modelName} onValueChange={setModelName}>
                 <SelectTrigger className="h-8 text-sm mt-1"><SelectValue placeholder="-- 选择模型 --" /></SelectTrigger>
-                <SelectContent>
+                <SelectContent className="z-[95]">
                   {availableModels.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
                 </SelectContent>
               </Select>
