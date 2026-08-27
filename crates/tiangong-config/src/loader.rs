@@ -26,6 +26,8 @@ struct AppConfigFile {
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
     #[serde(default)]
+    sandbox_disabled: bool,
+    #[serde(default)]
     custom_system_prompt: String,
     #[serde(default)]
     agent_config: Option<LegacyAgentConfig>,
@@ -129,6 +131,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         default_trust_mode: app.resolved_default_trust_mode(),
         custom_system_prompt,
         workspace_dir,
+        sandbox_disabled: app.sandbox_disabled,
         server,
     }
 }

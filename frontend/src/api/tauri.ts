@@ -788,6 +788,12 @@ export const api = {
   setDefaultTrustMode: (mode: string): Promise<void> =>
     invoke('set_default_trust_mode', { mode }),
 
+  getSandboxDisabled: (): Promise<boolean> =>
+    invoke('get_sandbox_disabled'),
+
+  setSandboxDisabled: (disabled: boolean): Promise<void> =>
+    invoke('set_sandbox_disabled', { disabled }),
+
 
   getReasoningEffort: (sessionId?: string): Promise<string> =>
     invoke('get_reasoning_effort', { sessionId }),

@@ -1464,6 +1464,40 @@ pub async fn set_default_trust_mode(
 }
 
 #[tauri::command]
+pub async fn get_sandbox_disabled(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.config.sandbox_disabled))
+        .await
+}
+
+#[tauri::command]
+pub async fn set_sandbox_disabled(
+    disabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    if config.sandbox_disabled == disabled {
+        return Ok(());
+    }
+    config.sandbox_disabled = disabled;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            Ok(())
+        })
+        .await?;
+    if disabled {
+        tracing::warn!("用户已在设置中关闭命令沙箱：command 将以完整用户权限执行");
+    } else {
+        tracing::info!("用户已重新开启命令沙箱");
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_reasoning_effort(
     session_id: Option<String>,
     state: State<'_, TiangongApp>,

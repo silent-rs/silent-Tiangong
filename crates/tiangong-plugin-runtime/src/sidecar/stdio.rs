@@ -377,21 +377,25 @@ impl StdioSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(PROCESS_GROUP_ENV, "1");
-        if let Some(policy) = &launch_policy {
-            command
-                .env(
-                    SANDBOX_CPU_LIMIT_ENV,
-                    policy.resource_limits.max_cpu_time_seconds.to_string(),
-                )
-                .env(
-                    SANDBOX_MEMORY_LIMIT_ENV,
-                    policy.resource_limits.max_memory_bytes.to_string(),
-                )
-                .env(
-                    SANDBOX_PROCESS_LIMIT_ENV,
-                    policy.resource_limits.max_processes.to_string(),
-                );
-        }
+        // 资源上限不依赖沙箱：无沙箱直跑（用户关闭命令沙箱）时也注入，
+        // sidecar 层 rlimit 照常自愿生效，防止关闭沙箱后命令失控烧机器。
+        let resource_limits = launch_policy
+            .as_ref()
+            .map(|policy| policy.resource_limits)
+            .unwrap_or_default();
+        command
+            .env(
+                SANDBOX_CPU_LIMIT_ENV,
+                resource_limits.max_cpu_time_seconds.to_string(),
+            )
+            .env(
+                SANDBOX_MEMORY_LIMIT_ENV,
+                resource_limits.max_memory_bytes.to_string(),
+            )
+            .env(
+                SANDBOX_PROCESS_LIMIT_ENV,
+                resource_limits.max_processes.to_string(),
+            );
         if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
                 bail!("sidecar 专用临时目录无效: {}", temp_dir.display());

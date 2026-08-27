@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -246,10 +246,17 @@ export function SettingsDialog() {
 function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
   const { showError } = useToast();
-  const { workspaceDir, setWorkspaceDir } = useStore();
+  const { workspaceDir, setWorkspaceDir, sandboxDisabled, loadSandboxDisabled, setSandboxDisabled } = useStore();
   const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
   const [isSavingWorkspace, setIsSavingWorkspace] = useState(false);
   const { showSuccess } = useToast();
+  const [confirmDisableSandbox, setConfirmDisableSandbox] = useState(false);
+
+  useEffect(() => {
+    if (sandboxDisabled === null) {
+      void loadSandboxDisabled();
+    }
+  }, [sandboxDisabled, loadSandboxDisabled]);
 
   useEffect(() => {
     setEditWorkspaceDir(workspaceDir);
@@ -277,6 +284,25 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
       console.error('保存默认审核模式失败:', error);
       onSaveStatusChange('error');
       showError('保存失败', '无法保存默认审核模式');
+    }
+  };
+
+  const handleSandboxToggle = async (disabled: boolean) => {
+    onSaveStatusChange('saving');
+    try {
+      await setSandboxDisabled(disabled);
+      onSaveStatusChange('saved');
+      showSuccess(
+        disabled ? '命令沙箱已关闭' : '命令沙箱已开启',
+        disabled
+          ? '命令将以完整用户权限运行，输入区会显示警告标识'
+          : '命令恢复工作区、联网与凭据限制',
+      );
+      setTimeout(() => onSaveStatusChange('idle'), 2000);
+    } catch (error) {
+      console.error('设置命令沙箱开关失败:', error);
+      onSaveStatusChange('error');
+      showError('保存失败', '无法保存命令沙箱开关');
     }
   };
 
@@ -333,6 +359,30 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
         </div>
 
         <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <Label>命令沙箱</Label>
+              <p className="text-xs text-muted-foreground max-w-md">
+                开启后命令只能写入当前工作区、默认禁止联网、无法读取你的凭据。
+                关闭后命令将以你的完整用户权限运行，输入区会持续显示警告标识。
+              </p>
+            </div>
+            <Switch
+              checked={sandboxDisabled !== true}
+              disabled={sandboxDisabled === null}
+              onCheckedChange={(enabled) => {
+                if (enabled) {
+                  void handleSandboxToggle(false);
+                } else {
+                  setConfirmDisableSandbox(true);
+                }
+              }}
+              aria-label="命令沙箱"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-2">
           <Label htmlFor="workspacePath">默认工作区目录</Label>
           <div className="flex gap-2">
             <Input
@@ -366,6 +416,30 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
         </div>
       </div>
 
+      {/* 关闭命令沙箱的警示确认 */}
+      <Dialog open={confirmDisableSandbox} onOpenChange={(open) => !open && setConfirmDisableSandbox(false)}>
+        <DialogContent className="mx-4 w-[calc(100%-2rem)] max-w-md">
+          <DialogHeader>
+            <DialogTitle>关闭命令沙箱？</DialogTitle>
+            <DialogDescription>
+              关闭后，Agent 执行的命令将以你的完整用户权限运行：可以读写任意文件、
+              访问网络和你的凭据，不再受工作区与联网限制。仅在你明确需要时短期关闭，
+              并在完成后重新开启。输入区会持续显示"沙箱关"警告标识。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDisableSandbox(false)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => {
+              setConfirmDisableSandbox(false);
+              void handleSandboxToggle(true);
+            }}>
+              关闭沙箱
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

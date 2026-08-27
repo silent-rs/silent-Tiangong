@@ -37,8 +37,9 @@ pub struct EphemeralCommandConnection {
 }
 
 impl EphemeralCommandConnection {
-    pub fn new(mut template: SidecarConfig) -> Self {
-        template.sandbox = true;
+    /// `template.sandbox` 由唯一生产构造点（registry 策略表，含用户
+    /// "命令沙箱"开关）显式决定，封套不再暗改——测试构造时需显式设置。
+    pub fn new(template: SidecarConfig) -> Self {
         Self {
             template,
             exec_env: Mutex::new(BTreeMap::new()),

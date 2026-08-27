@@ -960,6 +960,11 @@ export interface AppState {
   setSessionCwd: (cwd: string) => Promise<void>;
   setWorkspaceDir: (workspaceDir: string) => Promise<void>;
 
+  /** 用户"命令沙箱"开关（全局）：null 表示尚未从宿主加载。 */
+  sandboxDisabled: boolean | null;
+  loadSandboxDisabled: () => Promise<void>;
+  setSandboxDisabled: (disabled: boolean) => Promise<void>;
+
   loadMcpServers: () => Promise<void>;
 
   setSelectedAgentTab: (tab: string | null) => void;
@@ -1002,6 +1007,7 @@ export const useStore = create<AppState>((set, get) => ({
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  sandboxDisabled: null,
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
   setReasoningEffort: (effort: string) => {
@@ -1980,6 +1986,27 @@ export const useStore = create<AppState>((set, get) => ({
       set({ workspaceDir });
     } catch (error) {
       console.error('设置工作空间失败:', error);
+      throw error;
+    }
+  },
+
+  // 加载用户"命令沙箱"开关（设置页与输入区状态图标共用）
+  loadSandboxDisabled: async () => {
+    try {
+      const disabled = await api.getSandboxDisabled();
+      set({ sandboxDisabled: disabled });
+    } catch (error) {
+      console.error('加载命令沙箱开关失败:', error);
+    }
+  },
+
+  // 写入用户"命令沙箱"开关并同步宿主配置
+  setSandboxDisabled: async (disabled: boolean) => {
+    try {
+      await api.setSandboxDisabled(disabled);
+      set({ sandboxDisabled: disabled });
+    } catch (error) {
+      console.error('设置命令沙箱开关失败:', error);
       throw error;
     }
   },

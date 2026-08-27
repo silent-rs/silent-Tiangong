@@ -27,10 +27,14 @@ pub struct HostExecutionPolicy {
 }
 
 /// 解析插件的宿主执行策略。
-pub fn resolve(plugin_id: &str) -> HostExecutionPolicy {
+///
+/// `sandbox_disabled` 为用户全局设置（设置页"命令沙箱"开关）：仅影响
+/// command 的沙箱决策；其他插件的存量 TCP 行为不受影响。开关由宿主
+/// 读取配置传入，策略表本身不读全局状态。
+pub fn resolve(plugin_id: &str, sandbox_disabled: bool) -> HostExecutionPolicy {
     if plugin_id == "command" {
         return HostExecutionPolicy {
-            sandbox: true,
+            sandbox: !sandbox_disabled,
             allow_network: false,
             transport: SidecarTransport::Stdio,
         };
@@ -42,11 +46,11 @@ pub fn resolve(plugin_id: &str) -> HostExecutionPolicy {
     }
 }
 
-/// 策略表快照（审计与测试用）。
+/// 策略表快照（审计与测试用）；沙箱开关默认开启。
 pub fn catalog_snapshot() -> BTreeMap<String, HostExecutionPolicy> {
     ["command"]
         .iter()
-        .map(|id| ((*id).to_string(), resolve(id)))
+        .map(|id| ((*id).to_string(), resolve(id, false)))
         .collect()
 }
 
@@ -56,7 +60,7 @@ mod tests {
 
     #[test]
     fn command_is_the_only_sandboxed_official_plugin() {
-        let policy = resolve("command");
+        let policy = resolve("command", false);
         assert!(policy.sandbox);
         assert_eq!(policy.transport, SidecarTransport::Stdio);
         // 其它官方插件按存量默认（TCP、不沙箱），逐批迁移归独立分支。
@@ -69,9 +73,20 @@ mod tests {
             "terminal",
             "index",
         ] {
-            let policy = resolve(id);
+            let policy = resolve(id, false);
             assert!(!policy.sandbox, "{id} 本分支不沙箱化");
             assert_eq!(policy.transport, SidecarTransport::Tcp, "{id} 保持存量 TCP");
         }
+    }
+
+    #[test]
+    fn user_setting_disables_only_command_sandbox() {
+        let policy = resolve("command", true);
+        assert!(!policy.sandbox, "用户关闭后 command 不再走沙箱");
+        assert_eq!(policy.transport, SidecarTransport::Stdio);
+        // 开关不影响其他插件的存量策略。
+        let other = resolve("fetch", true);
+        assert!(!other.sandbox);
+        assert_eq!(other.transport, SidecarTransport::Tcp);
     }
 }

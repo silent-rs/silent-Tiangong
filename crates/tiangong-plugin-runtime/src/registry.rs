@@ -2604,7 +2604,14 @@ fn sidecar_connection_inner(
     if installed.manifest.id == "command" && !official_signed {
         bail!("command 插件必须由官方发布者签名");
     }
-    let host_policy = tiangong_sandbox::host_policy::resolve(&installed.manifest.id);
+    // 用户全局"命令沙箱"开关（设置页）：关闭时 command 以完整用户权限直跑。
+    // 配置读取失败按默认开启处理（fail-safe 向保护方向）。
+    let sandbox_disabled = tiangong_config::registry::try_sandbox_disabled().unwrap_or(false);
+    if sandbox_disabled && installed.manifest.id == "command" {
+        tracing::warn!("命令沙箱已被用户设置关闭：command 将以完整用户权限执行");
+    }
+    let host_policy =
+        tiangong_sandbox::host_policy::resolve(&installed.manifest.id, sandbox_disabled);
     let use_stdio = interpreter.is_some()
         || host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio;
 

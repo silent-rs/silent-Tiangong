@@ -123,7 +123,22 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
 fn sandbox_fixture_with_limits(
     limits: Option<tiangong_sandbox::SandboxResourceLimits>,
 ) -> Option<SandboxFixture> {
-    if !sandbox_binaries_ready() {
+    sandbox_fixture_configured(true, limits)
+}
+
+/// `sandbox=false` 模拟用户在设置中关闭命令沙箱：不经 Launcher 直跑，
+/// 不依赖平台沙箱可用性（嵌套受限环境也可真实执行）。
+#[cfg(any(unix, windows))]
+fn sandbox_fixture_configured(
+    sandbox: bool,
+    limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+) -> Option<SandboxFixture> {
+    if sandbox {
+        if !sandbox_binaries_ready() {
+            return None;
+        }
+    } else if command_sidecar_binary().is_none() {
+        eprintln!("跳过无沙箱测试：target/debug/tiangong-command-sidecar 尚未构建");
         return None;
     }
     let root = tempfile::tempdir().unwrap();
@@ -174,6 +189,7 @@ fn sandbox_fixture_with_limits(
     )
     .with_protocols(PROTOCOL_VERSION, COMMAND_PROTOCOL_VERSION)
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(90))
+    .with_sandbox(sandbox)
     .with_sandbox_program_root(Some(plugin_root))
     .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()])
     .with_sandbox_resource_limits(limits);
@@ -405,6 +421,35 @@ fn real_launcher_enforces_workspace_and_dedicated_temp() {
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(response["ok"], false, "工作区外写入必须失败: {raw}");
     assert!(!fixture.outside.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn sandbox_disabled_runs_command_without_launcher() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 模拟用户在设置中关闭命令沙箱：直跑链路（不经 Launcher），
+    // 命令真实执行成功；环境净化与资源上限注入仍然保留。
+    let Some(fixture) = sandbox_fixture_configured(false, None) else {
+        return;
+    };
+
+    let raw = fixture
+        .connection
+        .invoke_with_context(
+            RUN_SHELL_OPERATION,
+            &shell_request(
+                "printf direct > ran.txt && test -n \"$TMPDIR\" && printf '%s' ok".to_string(),
+                &fixture.workspace,
+            ),
+            &invocation_context(&fixture.workspace, "sandbox-disabled"),
+        )
+        .expect("无沙箱 command 执行失败");
+    let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(response["ok"], true, "关闭沙箱后命令应真实执行: {raw}");
+    assert_eq!(response["stdout"].as_str().unwrap_or_default(), "ok");
+    assert!(fixture.workspace.join("ran.txt").is_file());
 }
 
 #[cfg(unix)]

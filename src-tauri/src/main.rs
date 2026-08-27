@@ -841,6 +841,8 @@ fn run_gui() {
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_default_trust_mode,
             tiangong_app::commands::set_default_trust_mode,
+            tiangong_app::commands::get_sandbox_disabled,
+            tiangong_app::commands::set_sandbox_disabled,
             tiangong_app::commands::get_reasoning_effort,
             tiangong_app::commands::set_reasoning_effort,
             tiangong_app::commands::get_provider_balance,

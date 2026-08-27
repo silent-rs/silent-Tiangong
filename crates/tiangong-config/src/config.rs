@@ -133,6 +133,8 @@ pub struct TiangongConfig {
     // ===== 应用层配置 =====
     /// 默认工作目录
     pub workspace_dir: String,
+    /// 用户显式关闭命令沙箱（全局；关闭时 command 以完整用户权限直跑）
+    pub sandbox_disabled: bool,
     /// Server 配置
     pub server: ServerConfig,
 }
@@ -145,6 +147,7 @@ impl Default for TiangongConfig {
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             workspace_dir: crate::loader::default_workspace_dir(),
+            sandbox_disabled: false,
             server: ServerConfig::default(),
         }
     }

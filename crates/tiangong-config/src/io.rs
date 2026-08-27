@@ -63,6 +63,8 @@ pub fn custom_prompt_path() -> PathBuf {
 struct AppConfigFile<'a> {
     default_trust_mode: TrustMode,
     workspace_dir: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    sandbox_disabled: bool,
 }
 
 /// 保存应用长期配置到 `app.json`。
@@ -73,6 +75,7 @@ pub fn save_app_config_at(
     dir: &Path,
     default_trust_mode: TrustMode,
     workspace_dir: &str,
+    sandbox_disabled: bool,
 ) -> Result<()> {
     let path = dir.join("app.json");
     if let Some(parent) = path.parent() {
@@ -82,6 +85,7 @@ pub fn save_app_config_at(
     let content = serde_json::to_string_pretty(&AppConfigFile {
         default_trust_mode,
         workspace_dir,
+        sandbox_disabled,
     })
     .context("序列化应用配置失败")?;
     std::fs::write(&path, content)
@@ -294,6 +298,35 @@ mod tests {
     use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
+
+    /// 命令沙箱开关持久化：关闭状态写入 app.json 并能读回；
+    /// 默认开启时序列化省略该字段（旧版文件兼容）。
+    #[test]
+    fn app_config_roundtrips_sandbox_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            true,
+        )
+        .unwrap();
+        assert!(crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            !raw.contains("sandbox_disabled"),
+            "默认开启时不应写入字段: {raw}"
+        );
+        assert!(!crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+    }
 
     /// save_models_config_at 应把 routing 中未注册到 models 的条目自动补入 models。
     #[test]

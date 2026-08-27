@@ -63,6 +63,15 @@ pub fn try_models() -> Option<tiangong_llm::models_config::ModelsConfig> {
         .map(|config| config.models)
 }
 
+/// 读取用户"命令沙箱"开关；尚未初始化配置时返回 None（调用方按开启处理）。
+pub fn try_sandbox_disabled() -> Option<bool> {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| config.sandbox_disabled)
+}
+
 /// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
 ///
 /// 处理顺序：
@@ -108,7 +117,12 @@ impl TiangongConfig {
         } else {
             crate::io::save_custom_prompt_at(&prompt_path, &self.custom_system_prompt)?;
         }
-        crate::io::save_app_config_at(dir, self.default_trust_mode, &self.workspace_dir)?;
+        crate::io::save_app_config_at(
+            dir,
+            self.default_trust_mode,
+            &self.workspace_dir,
+            self.sandbox_disabled,
+        )?;
         Ok(())
     }
 }
