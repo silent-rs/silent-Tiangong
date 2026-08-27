@@ -18,7 +18,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use crate::bindings::tiangong::plugin::clock::Host as ClockHost;
 use crate::bindings::tiangong::plugin::feedback::Host as FeedbackHost;
 use crate::bindings::tiangong::plugin::sidecar::{Host as SidecarHost, SidecarError};
-use crate::sidecar::{SidecarConnection, SidecarInvokeError};
+use crate::sidecar::{SidecarConnection, SidecarInvocationContext, SidecarInvokeError};
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_types::StreamEvent;
 
@@ -31,6 +31,8 @@ pub struct HostState {
     sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 当前 turn 的插件反馈通道。
     feedback: Option<PluginFeedbackTx>,
+    /// 当前同步工具调用的宿主权威上下文；调用返回后立即清空。
+    invocation_context: Option<SidecarInvocationContext>,
     /// 插件 ID（构造时用于 preopen 插件配置目录）。
     #[allow(dead_code)]
     plugin_id: String,
@@ -50,6 +52,7 @@ impl HostState {
             table: ResourceTable::new(),
             sidecar,
             feedback: None,
+            invocation_context: None,
             plugin_id,
         }
     }
@@ -61,6 +64,10 @@ impl HostState {
 
     pub fn set_feedback(&mut self, feedback: PluginFeedbackTx) {
         self.feedback = Some(feedback);
+    }
+
+    pub fn set_invocation_context(&mut self, context: Option<SidecarInvocationContext>) {
+        self.invocation_context = context;
     }
 }
 
@@ -107,6 +114,7 @@ impl SidecarHost for HostState {
         };
         // 在独立 OS 线程上执行，避免 tokio worker 线程嵌套。
         let feedback = self.feedback.clone();
+        let invocation_context = self.invocation_context.clone();
         std::thread::scope(|s| {
             s.spawn(move || {
                 let mut on_progress = |event_json: String| {
@@ -118,7 +126,15 @@ impl SidecarHost for HostState {
                         Err(error) => tracing::warn!(%error, "sidecar 进度事件解析失败"),
                     }
                 };
-                conn.invoke_with_progress(&operation, &payload, &mut on_progress)
+                match invocation_context {
+                    Some(context) => conn.invoke_with_context_and_progress(
+                        &operation,
+                        &payload,
+                        &context,
+                        &mut on_progress,
+                    ),
+                    None => conn.invoke_with_progress(&operation, &payload, &mut on_progress),
+                }
             })
             .join()
             .map_err(|e| SidecarError::Internal(format!("sidecar 线程异常: {e:?}")))?

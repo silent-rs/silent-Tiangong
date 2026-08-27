@@ -30,5 +30,12 @@ base64 = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 minisign-verify = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

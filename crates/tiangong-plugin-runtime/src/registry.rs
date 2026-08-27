@@ -25,7 +25,7 @@ static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
 /// 随 `preload_installed_plugins` 全量刷新，供插件管理列表展示和清理。
 static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new();
-static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
+static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>>> =
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
 
@@ -281,7 +281,7 @@ struct LoadedPlugin {
     generation: u64,
     instances: Vec<Weak<WasmPluginAdapter>>,
     ts_instances: Vec<Weak<TsPluginAdapter>>,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     last_error: Option<String>,
     enabled: bool,
 }
@@ -326,7 +326,7 @@ fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>> {
+fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>> {
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1252,7 +1252,7 @@ type CompiledPlugin = (
 fn compile_plugin(
     bytes: Arc<Vec<u8>>,
     manifest: &PluginManifest,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     config: PluginRuntimeConfig,
 ) -> Result<CompiledPlugin> {
     // 纯 UI 插件（wasm 省略）：无逻辑层，返回空三元组
@@ -1262,7 +1262,6 @@ fn compile_plugin(
     let plugin_id = manifest.id.clone();
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
-        let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
         let component = Arc::new(compile_component(&bytes)?);
         let mut plugin = instantiate_component(
             &component,
@@ -1290,13 +1289,12 @@ fn compile_plugin(
 
 fn instantiate_from_compiled(
     component: Arc<wasmtime::component::Component>,
-    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
     config: PluginRuntimeConfig,
     plugin_id: String,
     storage_access: bool,
 ) -> Result<WasmPlugin> {
     crate::execution::run_outside_tokio(move || {
-        let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
         instantiate_component(&component, &config, sidecar, &plugin_id, storage_access)
     })
 }
@@ -2399,7 +2397,7 @@ fn resolve_sidecar(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,
-) -> Result<Option<Arc<ProcessSidecarConnection>>> {
+) -> Result<Option<Arc<dyn SidecarConnection>>> {
     if installed.manifest.sidecar.is_none() {
         return Ok(None);
     }
@@ -2410,7 +2408,7 @@ fn sidecar_connection(
     storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,
-) -> Result<Arc<ProcessSidecarConnection>> {
+) -> Result<Arc<dyn SidecarConnection>> {
     let sidecar = installed
         .manifest
         .sidecar

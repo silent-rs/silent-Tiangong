@@ -1,6 +1,12 @@
 //! 通用插件 sidecar 进程与连接管理。
 //!
 //! 本模块只处理进程、endpoint、鉴权和 JSON Lines 传输，不理解插件业务协议。
+//! TCP 与 stdio 两种传输并存：TCP 为存量默认，stdio 为沙箱友好的新传输
+//! （RFC 0017 D16）。通道由宿主策略决定，插件清单不参与通信通道决策。
+
+pub mod stdio;
+
+pub use stdio::{StdioSidecarConnection, TRANSPORT_STDIO};
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -32,6 +38,17 @@ pub const EXEC_ENV_JSON_ENV: &str = "TIANGONG_EXEC_ENV_JSON";
 pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 /// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
 pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
+
+/// 宿主在单次工具调用边界确定的权威上下文。
+///
+/// 该上下文不经过插件协议，也不从工具参数推导；command 沙箱只使用这里的
+/// 工作区构造策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarInvocationContext {
+    pub session_id: String,
+    pub invocation_id: String,
+    pub authoritative_workspace: PathBuf,
+}
 
 #[derive(Debug)]
 pub enum SidecarInvokeError {
@@ -70,8 +87,56 @@ pub trait SidecarConnection: Send + Sync {
         self.invoke(operation, payload)
     }
 
+    /// 带宿主权威调用上下文的请求。普通 sidecar 忽略上下文；command 的
+    /// 一次性连接覆写本方法，并拒绝缺少上下文的执行请求。
+    fn invoke_with_context(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &SidecarInvocationContext,
+    ) -> Result<String> {
+        let _ = context;
+        self.invoke(operation, payload)
+    }
+
+    fn invoke_with_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &SidecarInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        let _ = context;
+        self.invoke_with_progress(operation, payload, on_progress)
+    }
+
     /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
     fn update_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
+
+    /// 停止 sidecar 进程（宿主关闭流程调用）。默认空实现（无进程的连接）。
+    fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 终止指定会话仍在执行的临时 sidecar。常驻 sidecar 默认无需处理。
+    fn cancel_session(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// 当前 sidecar 的插件 ID。默认空。
+    fn plugin_id(&self) -> &str {
+        ""
+    }
+
+    /// 确保进程存活并完成握手（安装验证用）。默认空实现。
+    fn ensure_running(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// 是否存在可用的运行端点（安装验证用）。默认 false。
+    fn has_runtime_endpoint(&self) -> bool {
+        false
+    }
 }
 
 /// 一个插件 sidecar 的本地运行配置。
@@ -93,6 +158,30 @@ pub struct SidecarConfig {
     pub server_url: Option<String>,
     /// 本机 server 的鉴权 token。
     pub server_token: Option<String>,
+    // OS 沙箱字段为沙箱覆盖分支预留的配置面（本分支仅传输层，无消费方）。
+    /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
+    #[allow(dead_code)]
+    pub sandbox: bool,
+    /// 沙箱可写根覆盖（一次性实例的会话工作区；None 用数据目录）。
+    #[allow(dead_code)]
+    pub sandbox_workspace: Option<PathBuf>,
+    /// 沙箱额外可写根（每次执行的专用临时目录等）。
+    #[allow(dead_code)]
+    pub sandbox_extra_writable: Vec<PathBuf>,
+    /// 除宿主默认凭据路径外额外禁止读取的路径（受控验证使用）。
+    #[allow(dead_code)]
+    pub sandbox_denied_read_paths: Vec<PathBuf>,
+    /// 沙箱内进程使用的专用临时目录。
+    pub sandbox_temp_dir: Option<PathBuf>,
+    /// Launcher 允许启动目标程序的插件权威目录。
+    #[allow(dead_code)]
+    pub sandbox_program_root: Option<PathBuf>,
+    /// 宿主针对当前已安装制品计算的摘要；Launcher 仍会在每次启动时独立复核。
+    #[allow(dead_code)]
+    sandbox_program_sha256: Option<String>,
+    /// 沙箱内是否放行网络（文件写白名单不受影响）。
+    #[allow(dead_code)]
+    pub sandbox_network: bool,
 }
 
 impl SidecarConfig {
@@ -120,6 +209,14 @@ impl SidecarConfig {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
             server_token: None,
+            sandbox: false,
+            sandbox_workspace: None,
+            sandbox_extra_writable: Vec::new(),
+            sandbox_denied_read_paths: Vec::new(),
+            sandbox_temp_dir: None,
+            sandbox_program_root: None,
+            sandbox_program_sha256: None,
+            sandbox_network: false,
         }
     }
 
@@ -147,6 +244,48 @@ impl SidecarConfig {
     pub fn with_server_endpoint(mut self, url: Option<String>, token: Option<String>) -> Self {
         self.server_url = url;
         self.server_token = token;
+        self
+    }
+
+    /// sidecar 进程进 OS 沙箱（继承式，子进程树自动受约束；要求 stdio 传输）。
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// 沙箱内放行网络（fetch 等网络型插件；文件写白名单不受影响）。
+    pub fn with_sandbox_network(mut self, allow: bool) -> Self {
+        self.sandbox_network = allow;
+        self
+    }
+
+    /// 覆盖沙箱可写根（一次性实例按会话工作区构造策略）。
+    pub fn with_sandbox_workspace(mut self, workspace: Option<PathBuf>) -> Self {
+        self.sandbox_workspace = workspace;
+        self
+    }
+
+    /// 沙箱额外可写根（每次执行的专用临时目录等）。
+    pub fn with_sandbox_extra_writable(mut self, extra: Vec<PathBuf>) -> Self {
+        self.sandbox_extra_writable = extra;
+        self
+    }
+
+    /// 增加宿主权威的读取拒绝路径。
+    pub fn with_sandbox_denied_read_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.sandbox_denied_read_paths = paths;
+        self
+    }
+
+    /// 设置本次沙箱进程的临时目录；调用方还需将其父级或自身加入可写根。
+    pub fn with_sandbox_temp_dir(mut self, temp_dir: Option<PathBuf>) -> Self {
+        self.sandbox_temp_dir = temp_dir;
+        self
+    }
+
+    /// 设置 Launcher 可接受的目标程序根目录。
+    pub fn with_sandbox_program_root(mut self, root: Option<PathBuf>) -> Self {
+        self.sandbox_program_root = root;
         self
     }
 }
@@ -623,6 +762,22 @@ impl SidecarConnection for ProcessSidecarConnection {
             *guard = env;
         }
     }
+
+    fn stop(&self) -> Result<()> {
+        ProcessSidecarConnection::stop(self)
+    }
+
+    fn plugin_id(&self) -> &str {
+        ProcessSidecarConnection::plugin_id(self)
+    }
+
+    fn ensure_running(&self) -> Result<()> {
+        ProcessSidecarConnection::ensure_running(self)
+    }
+
+    fn has_runtime_endpoint(&self) -> bool {
+        ProcessSidecarConnection::has_runtime_endpoint(self)
+    }
 }
 
 fn classify_transport_error(error: anyhow::Error) -> anyhow::Error {
@@ -668,6 +823,11 @@ static SIDECAR_NOTIFICATION_FORWARDER: std::sync::OnceLock<SidecarNotificationFo
 /// 注入 sidecar 通知转发回调（宿主入口启动时调用）。
 pub fn set_sidecar_notification_forwarder(forwarder: SidecarNotificationForwarder) {
     let _ = SIDECAR_NOTIFICATION_FORWARDER.set(forwarder);
+}
+
+/// 当前通知转发回调（stdio 读线程与 TCP 通知监听共用）。
+pub(crate) fn sidecar_notification_forwarder() -> Option<SidecarNotificationForwarder> {
+    SIDECAR_NOTIFICATION_FORWARDER.get().cloned()
 }
 
 /// sidecar 通知常驻连接：认证后只读，收到 Notification 帧即转发。
