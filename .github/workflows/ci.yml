@@ -173,6 +173,9 @@ jobs:
         uses: ./.github/actions/setup-rust
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
+      - name: Prepare sandbox launcher artifact
+        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-app')
+        run: cargo run --locked -p xtask -- prepare-sandbox
       - name: Check crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
@@ -195,6 +198,9 @@ jobs:
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
           components: clippy
+      - name: Prepare sandbox launcher artifact
+        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-app')
+        run: cargo run --locked -p xtask -- prepare-sandbox
       - name: Lint crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
@@ -217,6 +223,9 @@ jobs:
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
           install-nextest: true
+      - name: Prepare sandbox launcher artifact
+        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-app')
+        run: cargo run --locked -p xtask -- prepare-sandbox
       - name: Test crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
@@ -316,6 +325,8 @@ jobs:
             patchelf
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare sandbox launcher artifact
+        run: cargo run --locked -p xtask -- prepare-sandbox
       - name: Check Tauri shell
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
