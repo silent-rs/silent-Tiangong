@@ -266,6 +266,8 @@ jobs:
           pubkey="$(tr -d '\n' < "${key_path}.pub")"
           {
             echo "E2E_PUBKEY_B64=${pubkey}"
+            # 同步注入部署守卫公钥（xtask 部署验证与运行时同通道）。
+            echo "TIANGONG_PLUGIN_PUBKEY_B64=${pubkey}"
           } >> "$GITHUB_ENV"
 
       - name: Run catalog install e2e

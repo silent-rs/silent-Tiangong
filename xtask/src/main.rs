@@ -658,11 +658,22 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         eprintln!("[xtask] sidecar sha256: {}", sha256(&staged_sidecar)?);
     }
     generate_oss_distribution(&workspace_root, &staging, config)?;
-    deploy_atomically(&staging, &destination, config)?;
-    eprintln!(
-        "[xtask] {plugin_name} 插件已部署到: {}",
-        destination.display()
-    );
+    // 部署守卫：仅官方签名形态部署到本机（官方开发者本地即官方形态，
+    // App 端内置公钥可直接验证）。非官方密钥（测试密钥等）签名的 staging
+    // 验签不过——产物照常生成，部署跳过并警告，避免本机出现必然无效
+    // 的插件目录。CI 端到端经 TIANGONG_PLUGIN_PUBKEY_B64 注入测试公钥。
+    if staging_passes_official_verification(&staging)? {
+        deploy_atomically(&staging, &destination, config)?;
+        eprintln!(
+            "[xtask] {plugin_name} 插件已部署到: {}",
+            destination.display()
+        );
+    } else {
+        eprintln!(
+            "[xtask] 跳过部署：staging 签名未通过官方公钥验证（使用非官方密钥？）\n      \
+             发布产物不受影响；如需本机部署请以官方私钥（TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH）运行"
+        );
+    }
     Ok(())
 }
 
@@ -1629,6 +1640,64 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     Ok(())
 }
 
+/// 与运行时内置官方公钥保持一致（signature.rs OFFICIAL_PUBKEY_B64）——
+/// 官方公钥轮换时两处需同步修改。
+const OFFICIAL_PLUGIN_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
+
+/// staging 的 release.json 签名是否通过官方公钥（或环境变量覆盖的公钥）
+/// 验证。无签名清单的插件（纯 UI 等）不设部署门槛。
+fn staging_passes_official_verification(staging: &Path) -> io::Result<bool> {
+    let release_path = staging.join("release.json");
+    let signature_path = staging.join("release.json.sig");
+    if !release_path.is_file() && !signature_path.is_file() {
+        return Ok(true);
+    }
+    if !release_path.is_file() || !signature_path.is_file() {
+        return Ok(false);
+    }
+    let public_b64 = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| OFFICIAL_PLUGIN_PUBKEY_B64.to_string());
+    let Some(public_text) = decode_base64_utf8(&public_b64) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = public_key.into_public_key() else {
+        return Ok(false);
+    };
+    let Ok(signature_raw) = std::fs::read_to_string(&signature_path) else {
+        return Ok(false);
+    };
+    let Some(signature_text) = decode_base64_utf8(signature_raw.trim()) else {
+        return Ok(false);
+    };
+    let Ok(signature_box) = minisign::SignatureBox::from_string(signature_text.trim()) else {
+        return Ok(false);
+    };
+    let content = std::fs::read(&release_path)?;
+    let mut reader = std::io::Cursor::new(content);
+    Ok(minisign::verify(
+        &public_key,
+        &signature_box,
+        &mut reader,
+        false,
+        false,
+        false,
+    )
+    .is_ok())
+}
+
+fn decode_base64_utf8(value: &str) -> Option<String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
 fn deploy_atomically(staging: &Path, destination: &Path, config: &PluginConfig) -> io::Result<()> {
     if !destination.exists() {
         return std::fs::rename(staging, destination);
@@ -1728,8 +1797,8 @@ fn sha256(path: &Path) -> io::Result<String> {
 }
 
 /// 解释器形态 sidecar 插件（如 plugin-creator）：部署自包含 sidecar 产物、
-/// 随行资源与内容清单，并落本地信任锚。官方签名与解释器形态互斥（一期），
-/// dev 部署即信任（kind: dev-deploy），运行时按内容清单复核防篡改。
+/// 随行资源与内容清单。信任由官方签名清单承载（部署前经官方公钥
+/// 验签守卫），不再落本地信任锚。
 fn stage_interpreter_sidecar(
     workspace_root: &Path,
     staging: &Path,
@@ -1798,18 +1867,6 @@ fn stage_interpreter_sidecar(
     let content_raw = serde_json::to_vec_pretty(&content)
         .map_err(|error| invalid_data(format!("序列化内容清单失败: {error}")))?;
     std::fs::write(staging.join("content-manifest.json"), &content_raw)?;
-    let anchor = hex::encode(Sha256::digest(&content_raw));
-    let trust = serde_json::json!({
-        "kind": "dev-deploy",
-        "content_sha256": anchor,
-        "created_at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs())
-            .unwrap_or_default(),
-    });
-    let trust_raw = serde_json::to_vec_pretty(&trust)
-        .map_err(|error| invalid_data(format!("序列化信任锚失败: {error}")))?;
-    std::fs::write(staging.join("local-trust.json"), trust_raw)?;
     Ok(())
 }
 
@@ -2231,6 +2288,51 @@ mod tests {
     use super::*;
 
     /// CI 同款链路：generate-plugin-test-key（未加密）→ 签名 → 公钥验证。
+    /// 部署守卫：官方公钥（或环境覆盖公钥）验签通过的 staging 才可部署；
+    /// 错误公钥签名（测试密钥未注入对应公钥）验签不过。
+    #[test]
+    fn 部署守卫_官方与错误公钥验签() {
+        let root = std::env::temp_dir().join(format!("xtask-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("plugin.json"), b"{}").unwrap();
+
+        // 测试密钥签名 + 环境注入对应公钥 → 守卫通过（CI 通道）。
+        let key_path = root.join("test.key");
+        generate_plugin_test_key(&key_path).unwrap();
+        let release_path = staging.join("release.json");
+        std::fs::write(&release_path, br#"{"schema_version":1}"#).unwrap();
+        sign_file_minisign(&key_path, "", &release_path).unwrap();
+        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
+        let public_b64 = std::fs::read_to_string(key_path.with_extension("key.pub"))
+            .unwrap()
+            .trim()
+            .to_string();
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &public_b64);
+        }
+        assert!(staging_passes_official_verification(&staging).unwrap());
+        // 换成内置官方公钥（未注入环境）→ 测试密钥签名验不过 → 跳过部署。
+        unsafe {
+            std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64");
+        }
+        assert!(!staging_passes_official_verification(&staging).unwrap());
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
+            }
+        }
+
+        // 无签名清单的插件（纯 UI）不设部署门槛。
+        std::fs::remove_file(&release_path).unwrap();
+        let _ = std::fs::remove_file(staging.join("release.json.sig"));
+        assert!(staging_passes_official_verification(&staging).unwrap());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn 测试密钥_未加密签名与验证闭环() {
         let root = std::env::temp_dir().join(format!("xtask-sign-test-{}", std::process::id()));
