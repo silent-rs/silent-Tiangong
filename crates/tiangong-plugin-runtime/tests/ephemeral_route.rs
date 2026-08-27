@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
+use tiangong_plugin_command_protocol::{COMMAND_PROTOCOL_VERSION, PLUGIN_VERSION};
+use tiangong_plugin_runtime::manifest::SidecarLifecycle;
+use tiangong_plugin_runtime::protocol::PROTOCOL_VERSION;
 #[cfg(any(unix, windows))]
 use tiangong_plugin_runtime::sidecar::SidecarInvocationContext;
 use tiangong_plugin_runtime::sidecar::{
@@ -155,13 +158,14 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
     let sidecar_log = plugin_root.join("unused-sidecar.log");
     let config = SidecarConfig::new(
         "command",
-        "0.0.0",
+        PLUGIN_VERSION,
         binary,
         plugin_root.join("unused-endpoint.json"),
         sidecar_log.clone(),
         plugin_root.join("unused-data"),
         storage_root,
     )
+    .with_protocols(PROTOCOL_VERSION, COMMAND_PROTOCOL_VERSION)
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(90))
     .with_sandbox_program_root(Some(plugin_root))
     .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()]);
@@ -1292,14 +1296,16 @@ fn stdio_stop_kills_background_process_tree() {
     let connection = Arc::new(StdioSidecarConnection::new(
         SidecarConfig::new(
             "command",
-            "0.0.0",
+            PLUGIN_VERSION,
             binary,
             root.path().join("endpoint.json"),
             sidecar_log.clone(),
             root.path().join("data"),
             root.path().join("storage"),
         )
-        .with_timeouts(Duration::from_secs(15), Duration::from_secs(30)),
+        .with_protocols(PROTOCOL_VERSION, COMMAND_PROTOCOL_VERSION)
+        .with_timeouts(Duration::from_secs(15), Duration::from_secs(30))
+        .with_lifecycle(SidecarLifecycle::Resident),
     ));
     connection
         .invoke(
@@ -1378,14 +1384,16 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
         let connection = StdioSidecarConnection::new(
             SidecarConfig::new(
                 "command",
-                "0.0.0",
+                PLUGIN_VERSION,
                 &binary,
                 instance.join("endpoint.json"),
                 instance.join("sidecar.log"),
                 instance.join("data"),
                 instance.join("storage"),
             )
-            .with_timeouts(Duration::from_secs(15), Duration::from_secs(15)),
+            .with_protocols(PROTOCOL_VERSION, COMMAND_PROTOCOL_VERSION)
+            .with_timeouts(Duration::from_secs(15), Duration::from_secs(15))
+            .with_lifecycle(SidecarLifecycle::Resident),
         );
         connection
             .invoke(

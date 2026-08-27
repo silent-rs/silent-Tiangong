@@ -11323,6 +11323,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-command-protocol",
  "tiangong-sandbox",
  "tiangong-types",
  "tokio",

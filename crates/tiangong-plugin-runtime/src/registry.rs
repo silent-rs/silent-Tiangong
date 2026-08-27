@@ -2605,7 +2605,8 @@ fn sidecar_connection_inner(
         bail!("command 插件必须由官方发布者签名");
     }
     let host_policy = tiangong_sandbox::host_policy::resolve(&installed.manifest.id);
-    let use_stdio = host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio;
+    let use_stdio = interpreter.is_some()
+        || host_policy.transport == tiangong_sandbox::host_policy::SidecarTransport::Stdio;
 
     // native：插件目录内可执行文件（补平台后缀）；解释器：宿主白名单程序 + 入口。
     let binary = match interpreter.as_ref() {

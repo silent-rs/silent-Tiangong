@@ -46,3 +46,4 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 serial_test = { workspace = true }
+tiangong-plugin-command-protocol = { workspace = true }
