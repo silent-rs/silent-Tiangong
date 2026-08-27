@@ -90,13 +90,10 @@ export function MessageList() {
   const editingGenerationRef = useRef(0);
   const editingBaseContentRef = useRef<ContentBlock[]>([]);
   const editingTextareaRef = useRef<MentionEditorHandle>(null!);
-  const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
-  // 刻度尺 hover 预览：指针在轨道内的 y 与轨道总高；null 表示未悬停
-  const [railHoverInfo, setRailHoverInfo] = useState<{ y: number; trackH: number } | null>(null);
+  // 用户消息边栏 hover：命中的用户消息序号及预览卡片位置
+  const [railHoverInfo, setRailHoverInfo] = useState<{ markerIndex: number; y: number; trackH: number } | null>(null);
   const railPreviewHideTimerRef = useRef<number | null>(null);
-  // 刻度尺轨道高度（挂载/尺寸变化时上报一次），用于把节点文档比例换算为像素
-  const [rulerTrackH, setRulerTrackH] = useState(0);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -108,7 +105,6 @@ export function MessageList() {
     useSearchStore.getState().closeSearch();
     // 切换会话视为重新进入，默认在底部
     isAtBottomRef.current = true;
-    setIsAtBottom(true);
   }, [activeSessionId]);
 
   // 卸载时清理刻度尺预览卡片的隐藏定时器
@@ -126,7 +122,6 @@ export function MessageList() {
       const next = distance < threshold;
       if (next !== isAtBottomRef.current) {
         isAtBottomRef.current = next;
-        setIsAtBottom(next);
       }
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
@@ -361,8 +356,7 @@ export function MessageList() {
     // 用户翻动页面离开底部后跟随自动关闭，拉回最底部时由滚动事件重新开启
     if (isUserSelfSent) {
       isAtBottomRef.current = true;
-      setIsAtBottom(true);
-    }
+      }
     // 用户离开底部时，新消息/流式 id 变化不强制拉回；tab 切换与用户主动发送始终跟随
     const shouldScroll =
       tabChanged
@@ -426,7 +420,6 @@ export function MessageList() {
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
     isAtBottomRef.current = true;
-    setIsAtBottom(true);
   }, []);
 
   // 滚动到指定 group 并对齐到视口顶部：两阶段定位避免虚拟列表估算高度导致的偏差
@@ -441,7 +434,6 @@ export function MessageList() {
       });
     });
     isAtBottomRef.current = false;
-    setIsAtBottom(false);
   }, [virtualizer]);
 
   // 根据参考 index 找到当前"游标"在 userGroupIndices 中的位置
@@ -669,12 +661,9 @@ export function MessageList() {
   // ---- 会话导航 ----
   const userCount = userGroupIndices.length;
 
-  // ---- 刻度尺 hover 预览的节点数据 ----
-  // 每轮会话：用户提问摘要 + 其后第一个有文字的回答轮摘要 + 全文比例位置
-  const totalSize = virtualizer.getTotalSize();
+  // ---- 用户消息边栏节点数据 ----
+  // 每根横条严格对应一条用户消息，顺序与 userGroupIndices 一致。
   const turnNodes = useMemo(() => {
-    if (!(totalSize > 0)) return [];
-    const measurements = virtualizer.measurementsCache;
     return userGroupIndices.map((groupIndex, pos) => {
       const qRaw = textContent(completedGroups[groupIndex].messages[0]);
       const scheduledTask = parseScheduledTaskMessage(qRaw);
@@ -686,42 +675,25 @@ export function MessageList() {
             ? `Webhook：${webhook.name || '未命名触发'}`
             : qRaw
       ).trim().slice(0, 160);
-      // 提问之后、下一条提问之前的回答里，取第一段有文字的回复
       let answer = '';
       for (let j = groupIndex + 1; j < completedGroups.length; j++) {
         if (completedGroups[j].type === 'user') break;
         const text = completedGroups[j].messages.map(m => textContent(m)).join('\n').trim();
         if (text) { answer = text; break; }
       }
-      return {
-        pos,
-        groupIndex,
-        question,
-        answer: answer.slice(0, 360),
-        docRatio: (measurements[groupIndex]?.start ?? 0) / totalSize,
-      };
+      return { pos, groupIndex, question, answer: answer.slice(0, 360) };
     });
-  }, [userGroupIndices, completedGroups, totalSize]);
+  }, [userGroupIndices, completedGroups]);
 
-  // 节点在刻度尺轨道上的像素位置（常显淡杠用）
-  const nodeTops = useMemo(() => {
-    if (!(rulerTrackH > 0)) return [];
-    return turnNodes.map(n => Math.round(n.docRatio * rulerTrackH));
-  }, [turnNodes, rulerTrackH]);
-
-  // hover 吸附：按轨道像素距离取最近的会话轮节点
-  const railActiveNodeIdx = (() => {
-    const trackH = railHoverInfo?.trackH ?? rulerTrackH;
-    if (!railHoverInfo || turnNodes.length === 0 || !(trackH > 0)) return -1;
-    let best = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < turnNodes.length; i++) {
-      const top = turnNodes[i].docRatio * trackH;
-      const dist = Math.abs(top - railHoverInfo.y);
-      if (dist < bestDist) { bestDist = dist; best = i; }
-    }
-    return best;
+  // 正文当前可见位置对应的用户消息，用于边栏弱高亮。
+  const activeUserPos = (() => {
+    if (userGroupIndices.length === 0) return -1;
+    const item = virtualizer.getVirtualItemForOffset(virtualizer.scrollOffset ?? 0);
+    if (!item) return -1;
+    return findUserCursorPos(item.index);
   })();
+
+  const railActiveNodeIdx = railHoverInfo?.markerIndex ?? -1;
 
   return (
     <div className="relative h-full">
@@ -918,16 +890,19 @@ export function MessageList() {
       </div>
     </ScrollArea>
 
-    {/* 右侧刻度尺滚动条：常驻贴右缘，整列均匀小横线刻度，当前视口对应区间的
-        刻度变亮（内容极长时表现为一条亮横杠）；点击/拖动直接映射滚动，
-        悬停在刻度尺上滚动滚轮可快速翻动长对话；无可滚动内容时自动隐藏。
-        悬停时刻度变亮、显示吸附节点亮杠，并在其左侧弹出问答预览小卡片；
-        各提问节点以淡色横杠常显。 */}
+    {/* 右侧导航区：横条边栏与三个导航按钮共用鼠标移入显示逻辑。
+        边栏始终为按钮组预留底部空间，避免最后几根横条被遮挡。 */}
+    {userCount > 0 && (
+    <div className="group/navigation absolute inset-y-0 right-0 z-20 w-[54px]">
     <RulerScrollbar
-      viewportRef={viewportRef}
-      markerTops={nodeTops}
-      activeMarker={railActiveNodeIdx >= 0 ? railActiveNodeIdx : null}
-      onLayout={setRulerTrackH}
+      markerCount={turnNodes.length}
+      bottomInset={152}
+      className="opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100"
+      currentMarker={activeUserPos >= 0 ? activeUserPos : null}
+      onSelect={(markerIndex) => {
+        const node = turnNodes[markerIndex];
+        if (node) scrollToUserGroupTop(node.groupIndex);
+      }}
       onHover={(info) => {
         if (railPreviewHideTimerRef.current) {
           window.clearTimeout(railPreviewHideTimerRef.current);
@@ -954,7 +929,7 @@ export function MessageList() {
       return (
         <div
           className="ruler-card-enter absolute z-30"
-          style={{ right: 30, top: cardTop, transform: 'translateY(-50%)' }}
+          style={{ right: 56, top: cardTop, transform: 'translateY(-50%)' }}
           onMouseEnter={() => {
             if (railPreviewHideTimerRef.current) {
               window.clearTimeout(railPreviewHideTimerRef.current);
@@ -981,16 +956,9 @@ export function MessageList() {
       );
     })()}
 
-    {/* 右下角导航按钮组：离开底部时出现；逐条跳转与回底由刻度尺旁边的按钮承担 */}
-    {userCount > 0 && (
-      <div
-        className={`pointer-events-none absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 transition-opacity duration-200 ${
-          isAtBottom ? 'opacity-0' : 'opacity-100'
-        }`}
-      >
-        <div className={`flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur ${
-          isAtBottom ? 'pointer-events-none' : 'pointer-events-auto'
-        }`}>
+    {/* 右下角导航按钮组：与横条边栏一起在鼠标进入右侧导航区时显示。 */}
+      <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100">
+        <div className="pointer-events-none flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur group-hover/navigation:pointer-events-auto group-focus-within/navigation:pointer-events-auto">
           <button
             type="button"
             onClick={scrollToPrevUserMessage}
@@ -1020,6 +988,7 @@ export function MessageList() {
           </button>
         </div>
       </div>
+    </div>
     )}
     </div>
   );
