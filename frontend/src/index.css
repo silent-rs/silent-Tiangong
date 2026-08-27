@@ -118,6 +118,21 @@
   }
 }
 
+/* 刻度尺滚动条的问答预览小卡片：淡入 + 轻微上浮 */
+@keyframes ruler-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) scale(1);
+  }
+}
+.ruler-card-enter > * {
+  animation: ruler-card-in 0.16s ease-out;
+}
+
 /* 自定义滚动条 */
 @layer components {
   .custom-scrollbar {
