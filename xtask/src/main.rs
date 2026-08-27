@@ -1649,12 +1649,13 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
     Ok(())
 }
 
-/// 与运行时内置官方公钥保持一致（signature.rs OFFICIAL_PUBKEY_B64）——
-/// 官方公钥轮换时两处需同步修改。
-const OFFICIAL_PLUGIN_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
+/// 官方公钥单一来源：与运行时共用同一文件（include_str!），杜绝两份
+/// 常量漂移导致发布验签与运行时信任根不一致。
+const OFFICIAL_PLUGIN_PUBKEY_B64: &str =
+    include_str!("../../crates/tiangong-plugin-runtime/src/official-pubkey.b64");
 
-/// staging 的 release.json 签名是否通过官方公钥（或环境变量覆盖的公钥）
-/// 验证。无签名清单的插件（纯 UI 等）不设部署门槛。
+/// staging 的 release.json 签名是否通过内置官方公钥验证（官方信任根
+/// 固定，不接受环境变量或配置覆盖）。无签名清单的插件（纯 UI 等）不设部署门槛。
 fn staging_passes_official_verification(staging: &Path) -> io::Result<bool> {
     let release_path = staging.join("release.json");
     let signature_path = staging.join("release.json.sig");

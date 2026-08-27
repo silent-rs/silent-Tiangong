@@ -253,8 +253,9 @@ jobs:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
           EXPECTED_PLATFORM: ${{ matrix.plugin_platform }}
         run: |
-          release_json="$(compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json")"
-          if [ -n "$release_json" ]; then
+          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json"
+          if compgen -G "$pattern" > /dev/null; then
+            release_json="$(compgen -G "$pattern")"
             cargo run -p xtask -- verify-official-release "$release_json"
           fi
 
@@ -355,9 +356,14 @@ jobs:
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
         run: |
-          release_json="$(compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json)"
-          test -n "$release_json"
-          cargo run -p xtask -- verify-official-release "$release_json"
+          pattern="target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json"
+          if compgen -G "$pattern" > /dev/null; then
+            release_json="$(compgen -G "$pattern")"
+            cargo run -p xtask -- verify-official-release "$release_json"
+          else
+            echo "missing release.json for ${PLUGIN_ID}"
+            exit 1
+          fi
 
       - name: Verify interpreter output
         env:

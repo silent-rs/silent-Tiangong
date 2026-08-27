@@ -303,8 +303,8 @@ fn save_trusted_publishers(storage_root: &Path, publishers: &[TrustedPublisher])
 /// 发布者 → 验签公钥（base64 格式）路由。
 ///
 /// 保留标识：`tiangong-official` 与 `local`；其余一律查第三方登记表，
-/// 未导入时返回带指引的错误。环境变量覆盖仅作用于官方形态（既有测试
-/// 通道，不改变多信任根路由）。
+/// 未导入时返回带指引的错误。官方信任根固定为内置公钥，不接受任何
+/// 覆盖（环境变量覆盖通道已删除）。
 pub fn resolve_publisher_pubkey(storage_root: &Path, publisher: &str) -> Result<String> {
     match publisher {
         // 官方信任根唯一且不可配置：不接受环境变量、配置文件或启动参数

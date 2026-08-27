@@ -18,7 +18,7 @@ pub const SIGNED_RELEASE_SCHEMA_VERSION: u32 = 1;
 
 /// 插件专用 minisign 公钥。私钥只保存在官方发布环境（CI secret 与
 /// 官方开发者本机，打包时经 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 提供）。
-pub const OFFICIAL_PUBKEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwQzBDOEJEQ0IzRTI5OTgKUldTWUtUN0x2Y2pBa0piU3JNQi9VRDlENVdxNzd6S3Z1MGo1ck5Sd2ZwNTRKTnpVTGkyWjE5dGMK";
+pub const OFFICIAL_PUBKEY_B64: &str = include_str!("official-pubkey.b64");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedPluginRelease {
