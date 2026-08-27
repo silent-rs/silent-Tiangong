@@ -309,6 +309,9 @@ impl StdioSidecarConnection {
                 .denied_read_paths
                 .extend(self.config.sandbox_denied_read_paths.clone());
             policy.allow_network = self.config.sandbox_network;
+            if let Some(limits) = &self.config.sandbox_resource_limits {
+                policy.resource_limits = *limits;
+            }
             Some(policy)
         } else {
             None
@@ -678,7 +681,22 @@ fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<Pol
 }
 
 fn sanitize_spawn_environment(command: &mut Command) {
-    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
+    // 解释器启动注入类（NODE_OPTIONS/PYTHON*/PERL5OPT/RUBY*/JAVA_TOOL_OPTIONS/
+    // ZDOTDIR）能让目标后续拉起的解释器在启动前加载额外代码，与动态加载
+    // 前缀同层级拒绝（对齐 octos 危险环境清单）。
+    const DENIED_EXACT: &[&str] = &[
+        "BASH_ENV",
+        "ENV",
+        "PS4",
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "PERL5OPT",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "ZDOTDIR",
+    ];
     const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
     for (key, _) in std::env::vars_os() {
         let upper = key.to_string_lossy().to_ascii_uppercase();

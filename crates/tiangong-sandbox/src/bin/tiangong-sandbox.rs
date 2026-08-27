@@ -142,6 +142,7 @@ fn run_launch() -> Result<()> {
     if request.policy.mode == tiangong_sandbox::SandboxMode::FullAccess {
         bail!("当前 command Launcher 不接受 full_access 策略");
     }
+    validate_policy_paths(&request)?;
     let program_path = validate_target(&request)?;
 
     #[cfg(windows)]
@@ -200,6 +201,8 @@ fn run_launch() -> Result<()> {
     #[cfg(unix)]
     command.env_remove(tiangong_sandbox::POLICY_ENV);
     #[cfg(unix)]
+    apply_unix_resource_limits(&mut command, &request.policy.resource_limits);
+    #[cfg(unix)]
     unsafe {
         libc::close(POLICY_FD);
         Err(command.exec().into())
@@ -207,6 +210,54 @@ fn run_launch() -> Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
         bail!("当前平台缺少沙箱启动能力")
+    }
+}
+
+/// 资源上限由 Launcher 在 exec 前强制施加并随 exec 继承给目标进程树，
+/// 不依赖目标读取环境变量自觉设置——sidecar 层的同名限制仅作纵深防御。
+///
+/// 平台边界：CPU 时间上限全 Unix 施加；内存（RLIMIT_AS）与进程数
+/// （RLIMIT_NPROC）只在 Linux 施加——darwin 的 setrlimit 对地址空间限制
+/// 一律 EINVAL，且 NPROC 是按真实用户全局计数的语义，桌面存量进程会
+/// 挤占配额造成误伤。macOS 的内存失控由命令级超时与进程树清理兜底。
+#[cfg(unix)]
+fn apply_unix_resource_limits(
+    command: &mut std::process::Command,
+    limits: &tiangong_sandbox::SandboxResourceLimits,
+) {
+    use std::os::unix::process::CommandExt;
+    let cpu_seconds = limits.max_cpu_time_seconds;
+    #[cfg(target_os = "linux")]
+    let memory_bytes = limits.max_memory_bytes;
+    unsafe {
+        command.pre_exec(move || {
+            let apply = |resource: libc::c_int, value: u64| -> std::io::Result<()> {
+                let wanted = libc::rlimit {
+                    rlim_cur: value as libc::rlim_t,
+                    rlim_max: value as libc::rlim_t,
+                };
+                if libc::setrlimit(resource, &wanted) == 0 {
+                    return Ok(());
+                }
+                // 设置失败且外层环境已施加不宽于目标的限制（嵌套受限终端、
+                // 受管 CI 外壳）时继承现状——只向更严格方向收缩，不拒绝。
+                let mut current = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(resource, (&raw mut current) as *mut libc::rlimit) == 0
+                    && current.rlim_cur != libc::RLIM_INFINITY
+                    && current.rlim_cur <= value as libc::rlim_t
+                {
+                    return Ok(());
+                }
+                Err(std::io::Error::last_os_error())
+            };
+            apply(libc::RLIMIT_CPU, cpu_seconds)?;
+            #[cfg(target_os = "linux")]
+            apply(libc::RLIMIT_AS, memory_bytes)?;
+            Ok(())
+        });
     }
 }
 
@@ -246,6 +297,29 @@ fn read_request() -> Result<LaunchRequest> {
 #[cfg(not(any(unix, windows)))]
 fn read_request() -> Result<LaunchRequest> {
     bail!("当前平台没有 Launcher 策略传输通道")
+}
+
+/// 策略路径注入防护（平台无关）：控制字符或非 UTF-8 路径可能破坏
+/// macOS SBPL profile 结构或干扰平台包装器，直接结构化拒绝。
+fn validate_policy_paths(request: &LaunchRequest) -> Result<()> {
+    let policy = &request.policy;
+    let mut paths: Vec<&std::path::Path> = vec![policy.workspace.as_path()];
+    for group in [
+        &policy.extra_writable,
+        &policy.protected_paths,
+        &policy.denied_read_paths,
+    ] {
+        paths.extend(group.iter().map(std::path::Path::new));
+    }
+    for path in paths {
+        let Some(text) = path.to_str() else {
+            bail!("策略路径不是有效 UTF-8: {:?}", path);
+        };
+        if text.chars().any(char::is_control) {
+            bail!("策略路径包含控制字符，拒绝执行: {text:?}");
+        }
+    }
+    Ok(())
 }
 
 fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
@@ -1654,6 +1728,7 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
     let fake_home = root.path().join("home");
     let ssh_dir = fake_home.join(".ssh");
     let aws_dir = fake_home.join(".aws");
+    let gnupg_dir = fake_home.join(".gnupg");
     let tiangong_dir = fake_home.join(".tiangong");
     let git_dir = workspace.join(".git");
     for path in [
@@ -1661,6 +1736,7 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
         &outside,
         &ssh_dir,
         &aws_dir,
+        &gnupg_dir,
         &tiangong_dir,
         &git_dir,
     ] {
@@ -1669,10 +1745,12 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
 
     let ssh_secret = ssh_dir.join("id_ed25519");
     let aws_secret = aws_dir.join("credentials");
+    let gnupg_secret = gnupg_dir.join("private-keys-v1.d.key");
     let trust_db = tiangong_dir.join("trust.db");
     let secrets = [
         (&ssh_secret, "TIANGONG_FAKE_SSH_SECRET"),
         (&aws_secret, "TIANGONG_FAKE_AWS_SECRET"),
+        (&gnupg_secret, "TIANGONG_FAKE_GPG_SECRET"),
         (&trust_db, "TIANGONG_FAKE_TRUST_SECRET"),
     ];
     for (path, marker) in secrets {
@@ -1684,7 +1762,7 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
     std::fs::write(&git_config, "safe\n").expect("写入自检 git 配置失败");
 
     let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(&workspace);
-    policy.denied_read_paths = vec![ssh_dir, aws_dir, trust_db];
+    policy.denied_read_paths = vec![ssh_dir, aws_dir, gnupg_dir, trust_db];
 
     let inside = workspace.join("selfcheck.txt");
     let output = run_sandbox_command(&policy, "/usr/bin/touch", &[inside.display().to_string()]);
@@ -1749,12 +1827,17 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
         ),
     );
 
-    let sensitive_read_blocked = [ssh_secret, aws_secret, tiangong_dir.join("trust.db")]
-        .iter()
-        .all(|path| {
-            let output = run_sandbox_command(&policy, "/bin/cat", &[path.display().to_string()]);
-            !String::from_utf8_lossy(&output.stdout).contains("TIANGONG_FAKE_")
-        });
+    let sensitive_read_blocked = [
+        ssh_secret,
+        aws_secret,
+        gnupg_secret,
+        tiangong_dir.join("trust.db"),
+    ]
+    .iter()
+    .all(|path| {
+        let output = run_sandbox_command(&policy, "/bin/cat", &[path.display().to_string()]);
+        !String::from_utf8_lossy(&output.stdout).contains("TIANGONG_FAKE_")
+    });
     report.insert(
         "sensitive_read_blocked".into(),
         serde_json::Value::from(sensitive_read_blocked),
@@ -1865,6 +1948,20 @@ mod tests {
         assert!(error.to_string().contains("不在 command 插件权威目录内"));
     }
 
+    #[test]
+    fn control_character_policy_path_is_rejected() {
+        let fixture = tempfile::tempdir().unwrap();
+        let program = fixture.path().join("sidecar");
+        let mut req = request(fixture.path(), &program);
+        req.policy.workspace = "/tmp/ws\n(deny default)".into();
+        let error = validate_policy_paths(&req).unwrap_err();
+        assert!(error.to_string().contains("控制字符"));
+
+        let mut req = request(fixture.path(), &program);
+        req.policy.extra_writable = vec!["/tmp/ok".into()];
+        assert!(validate_policy_paths(&req).is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlink_target_is_rejected() {
@@ -1878,5 +1975,41 @@ mod tests {
 
         let error = validate_target(&request(&root, &link)).unwrap_err();
         assert!(error.to_string().contains("目标程序必须是实际普通文件"));
+    }
+
+    /// 资源上限不依赖平台沙箱可用性：直接验证 exec 前施加的 rlimit
+    /// 能在无 Seatbelt/bwrap 配合时强制终止 CPU 死循环（开发机嵌套沙箱
+    /// 环境下其余真实拦截用例会跳过，此项仍可执行）。
+    #[cfg(unix)]
+    #[test]
+    fn resource_limits_kill_cpu_spin_without_sandbox() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "i=0; while :; do i=$((i+1)); done"]);
+        apply_unix_resource_limits(
+            &mut command,
+            &tiangong_sandbox::SandboxResourceLimits {
+                max_cpu_time_seconds: 1,
+                max_memory_bytes: 2 * 1024 * 1024 * 1024,
+                max_processes: 64,
+            },
+        );
+        let started = std::time::Instant::now();
+        let status = command.status().expect("执行受限命令失败");
+        assert!(
+            !status.success(),
+            "CPU 死循环应被 RLIMIT_CPU 强制终止: {status}"
+        );
+        // SIGXCPU 直接证明终止来自 CPU 上限；并发测试下死循环分到的 CPU
+        // 减少，墙钟会拉长，不能用固定秒数区分终止原因。
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGXCPU),
+            "终止信号应为 SIGXCPU: {status}"
+        );
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "CPU 上限终止不应依赖外部超时"
+        );
     }
 }

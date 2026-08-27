@@ -30,6 +30,23 @@ pub fn seatbelt_available() -> bool {
 
 /// 编译为 SBPL profile 文本。
 pub fn compile_profile(policy: &SandboxPolicy) -> String {
+    let writable = if policy.mode == super::policy::SandboxMode::WorkspaceWrite {
+        policy.writable_roots()
+    } else {
+        Vec::new()
+    };
+    // SBPL 注入防护：路径会拼进 profile 文本，控制字符或非 UTF-8 内容可能
+    // 破坏规则结构。不安全路径编译为拒绝一切的 profile（fail-closed），
+    // 绝不放行可能被注入的规则。
+    let paths_safe = writable
+        .iter()
+        .chain(policy.read_only_roots().iter())
+        .chain(policy.denied_read_roots().iter())
+        .all(|path| sbpl_safe_path(path));
+    if !paths_safe {
+        return "(version 1)\n(deny default)\n".to_string();
+    }
+
     let mut sbpl = String::new();
     sbpl.push_str("(version 1)\n");
     // 读全盘放行（工具链需要读系统目录、SDK、home 缓存）。
@@ -37,11 +54,6 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
     // 默认禁写，再逐个放行；/dev/null 是大量脚本的基础依赖。
     sbpl.push_str("(deny file-write*)\n");
     sbpl.push_str("(allow file-write* (literal \"/dev/null\"))\n");
-    let writable = if policy.mode == super::policy::SandboxMode::WorkspaceWrite {
-        policy.writable_roots()
-    } else {
-        Vec::new()
-    };
     for root in &writable {
         let _ = writeln!(sbpl, "(allow file-write* (subpath \"{}\"))", escape(root));
     }
@@ -61,6 +73,14 @@ pub fn compile_profile(policy: &SandboxPolicy) -> String {
         sbpl.push_str("(deny network*)\n");
     }
     sbpl
+}
+
+/// 路径可安全进入 SBPL 文本：必须是 UTF-8 且不含控制字符
+/// （换行/NUL 等会破坏 profile 结构）。括号在字符串字面量内无特殊含义，
+/// 不拒绝以免误伤 macOS 常见文件名。
+fn sbpl_safe_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|text| !text.chars().any(char::is_control))
 }
 
 /// 构造 sandbox-exec 的 argv 前缀（不含被包装命令本身）。
@@ -115,5 +135,19 @@ mod tests {
         assert_eq!(argv[0], "-p");
         assert!(argv[1].contains("(version 1)"));
         assert!(!argv.iter().any(|arg| arg == SEATBELT_BIN));
+    }
+
+    #[test]
+    fn control_character_path_compiles_to_deny_all() {
+        // 换行注入尝试：不安全路径必须编译为拒绝一切的 profile，
+        // 而不是让注入内容进入规则文本。
+        let policy = SandboxPolicy::workspace_write("/tmp/ws\n(deny file-write*)");
+        let sbpl = compile_profile(&policy);
+        assert_eq!(sbpl, "(version 1)\n(deny default)\n");
+
+        // 括号在字符串字面量内合法（macOS 常见文件名），不触发拒绝。
+        let policy = SandboxPolicy::workspace_write("/tmp/demo(1)");
+        let sbpl = compile_profile(&policy);
+        assert!(sbpl.contains("(allow file-write* (subpath \"/tmp/demo(1)\"))"));
     }
 }

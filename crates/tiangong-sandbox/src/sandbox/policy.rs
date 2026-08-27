@@ -86,12 +86,36 @@ impl SandboxPolicy {
     }
 
     /// 加入宿主权威的默认敏感读取拒绝项。
+    ///
+    /// 覆盖常见凭据位置：SSH/AWS/GPG/Kubernetes/Docker/Azure/GCP/GitHub CLI
+    /// 与 `.netrc`。天工数据根下的密钥、信任库与模型/MCP 凭据文件同样拒绝；
+    /// 工作区位于数据根之下，因此按敏感件精确拒绝而不是遮蔽整个数据根。
     pub fn protect_user_credentials(&mut self, storage_root: &Path) {
         if let Some(home) = user_home_dir() {
-            self.denied_read_paths.push(home.join(".ssh"));
-            self.denied_read_paths.push(home.join(".aws"));
+            for path in [
+                ".ssh",
+                ".aws",
+                ".gnupg",
+                ".kube",
+                ".docker",
+                ".azure",
+                ".config/gcloud",
+                ".config/gh",
+                ".netrc",
+            ] {
+                self.denied_read_paths.push(home.join(path));
+            }
         }
-        self.denied_read_paths.push(storage_root.join("trust.db"));
+        for path in [
+            "keys",
+            "trust.db",
+            "mcp.json",
+            "models.json",
+            "server.json",
+            "app.json",
+        ] {
+            self.denied_read_paths.push(storage_root.join(path));
+        }
     }
 
     /// 全部可写根（已规范化去重）：工作区、临时目录、额外可写。
@@ -279,5 +303,31 @@ mod tests {
                 .read_only_roots()
                 .contains(&canonical_or_keep(&git_file))
         );
+    }
+
+    #[test]
+    fn credential_protection_covers_common_secret_locations() {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = SandboxPolicy::workspace_write("/workspace");
+        policy.protect_user_credentials(root.path());
+        let denied = policy.denied_read_roots();
+
+        // 用户目录凭据位置。
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            for path in [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc"] {
+                assert!(
+                    denied.contains(&canonical_or_keep(&home.join(path))),
+                    "应拒绝读取 {}",
+                    path
+                );
+            }
+        }
+        // 天工数据根内的密钥与凭据文件。
+        for path in ["keys", "trust.db", "mcp.json", "models.json"] {
+            assert!(
+                denied.contains(&canonical_or_keep(&root.path().join(path))),
+                "应拒绝读取数据根内 {path}"
+            );
+        }
     }
 }

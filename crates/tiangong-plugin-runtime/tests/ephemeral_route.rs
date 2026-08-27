@@ -116,6 +116,13 @@ struct SandboxFixture {
 
 #[cfg(any(unix, windows))]
 fn sandbox_fixture() -> Option<SandboxFixture> {
+    sandbox_fixture_with_limits(None)
+}
+
+#[cfg(any(unix, windows))]
+fn sandbox_fixture_with_limits(
+    limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+) -> Option<SandboxFixture> {
     if !sandbox_binaries_ready() {
         return None;
     }
@@ -168,7 +175,8 @@ fn sandbox_fixture() -> Option<SandboxFixture> {
     .with_protocols(PROTOCOL_VERSION, COMMAND_PROTOCOL_VERSION)
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(90))
     .with_sandbox_program_root(Some(plugin_root))
-    .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()]);
+    .with_sandbox_denied_read_paths(vec![ssh_dir, aws_dir, trust_db.clone()])
+    .with_sandbox_resource_limits(limits);
     let connection = Arc::new(EphemeralCommandConnection::new(config));
     connection.update_exec_env(BTreeMap::from([(
         "HOME".to_string(),
@@ -397,6 +405,46 @@ fn real_launcher_enforces_workspace_and_dedicated_temp() {
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(response["ok"], false, "工作区外写入必须失败: {raw}");
     assert!(!fixture.outside.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn real_launcher_enforces_resource_limits() {
+    let _serial = REAL_SANDBOX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(fixture) =
+        sandbox_fixture_with_limits(Some(tiangong_sandbox::SandboxResourceLimits {
+            max_cpu_time_seconds: 1,
+            max_memory_bytes: 512 * 1024 * 1024,
+            max_processes: 64,
+        }))
+    else {
+        return;
+    };
+
+    // CPU 时间上限 1 秒：死循环在命令级超时（15 秒）之前被 SIGXCPU 强制
+    // 终止，证明上限在真实链路上强制施加，不依赖目标进程自觉配合。
+    let started = Instant::now();
+    let raw = fixture
+        .connection
+        .invoke_with_context(
+            RUN_SHELL_OPERATION,
+            &shell_request_with_timeout(
+                "i=0; while :; do i=$((i+1)); done".to_string(),
+                &fixture.workspace,
+                15,
+            ),
+            &invocation_context(&fixture.workspace, "cpu-limit"),
+        )
+        .expect("真实 Launcher 应返回 command 失败响应");
+    let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(response["ok"], false, "CPU 上限应强制终止死循环: {raw}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "死循环应在命令级超时前被 CPU 上限终止，实际耗时 {}",
+        started.elapsed().as_secs()
+    );
 }
 
 #[cfg(windows)]
@@ -650,10 +698,14 @@ fn real_launcher_sanitizes_environment() {
         ("LD_LIBRARY_PATH".into(), "PWNED_RUNTIME_LIBRARY".into()),
         ("DYLD_INSERT_LIBRARIES".into(), "PWNED_RUNTIME_DYLD".into()),
         ("BASH_ENV".into(), "PWNED_RUNTIME_BASH".into()),
+        ("NODE_OPTIONS".into(), "PWNED_RUNTIME_NODE".into()),
+        ("PYTHONPATH".into(), "PWNED_RUNTIME_PYTHON".into()),
+        ("JAVA_TOOL_OPTIONS".into(), "PWNED_RUNTIME_JAVA".into()),
+        ("ZDOTDIR".into(), "PWNED_RUNTIME_ZDOTDIR".into()),
     ]));
     std::fs::write(
         fixture.workspace.join(".env"),
-        "LD_PRELOAD=PWNED_FILE_LD\nDYLD_INSERT_LIBRARIES=PWNED_FILE_DYLD\nBASH_ENV=PWNED_FILE_BASH\nPATH=PWNED_FILE_PATH\nTMPDIR=PWNED_FILE_TMP\nTMP=PWNED_FILE_TMP\nTEMP=PWNED_FILE_TMP\n",
+        "LD_PRELOAD=PWNED_FILE_LD\nDYLD_INSERT_LIBRARIES=PWNED_FILE_DYLD\nBASH_ENV=PWNED_FILE_BASH\nPATH=PWNED_FILE_PATH\nTMPDIR=PWNED_FILE_TMP\nTMP=PWNED_FILE_TMP\nTEMP=PWNED_FILE_TMP\nNODE_OPTIONS=PWNED_FILE_NODE\nPYTHONPATH=PWNED_FILE_PYTHON\nPERL5OPT=PWNED_FILE_PERL\nRUBYOPT=PWNED_FILE_RUBY\n",
     )
     .unwrap();
 

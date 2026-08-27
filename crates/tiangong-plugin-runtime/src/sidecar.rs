@@ -200,6 +200,8 @@ pub struct SidecarConfig {
     pub sandbox_denied_read_paths: Vec<PathBuf>,
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,
+    /// 覆盖单次执行的资源上限（None 用沙箱默认值；Launcher 与 sidecar 双层施加）。
+    pub sandbox_resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
     /// Launcher 允许启动目标程序的插件权威目录。
     #[allow(dead_code)]
     pub sandbox_program_root: Option<PathBuf>,
@@ -243,6 +245,7 @@ impl SidecarConfig {
             sandbox_extra_writable: Vec::new(),
             sandbox_denied_read_paths: Vec::new(),
             sandbox_temp_dir: None,
+            sandbox_resource_limits: None,
             sandbox_program_root: None,
             sandbox_program_sha256: None,
             sandbox_network: false,
@@ -437,6 +440,15 @@ impl SidecarConfig {
     /// 设置 Launcher 可接受的目标程序根目录。
     pub fn with_sandbox_program_root(mut self, root: Option<PathBuf>) -> Self {
         self.sandbox_program_root = root;
+        self
+    }
+
+    /// 覆盖单次执行的沙箱资源上限（Launcher 强制施加，sidecar 层纵深防御）。
+    pub fn with_sandbox_resource_limits(
+        mut self,
+        limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    ) -> Self {
+        self.sandbox_resource_limits = limits;
         self
     }
 }

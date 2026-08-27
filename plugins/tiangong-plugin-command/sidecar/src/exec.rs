@@ -177,7 +177,25 @@ fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
 }
 
 fn is_safe_env_key(key: &str) -> bool {
-    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PATH", "PS4", "TEMP", "TMP", "TMPDIR"];
+    // 解释器启动注入类变量能让 node/python/perl/ruby/jvm 在启动前加载额外
+    // 代码，与动态加载器变量同层级拒绝（对齐 octos 危险环境清单）。
+    const DENIED_EXACT: &[&str] = &[
+        "BASH_ENV",
+        "ENV",
+        "PATH",
+        "PS4",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "PERL5OPT",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "ZDOTDIR",
+    ];
     const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
     let upper = key.to_ascii_uppercase();
     !DENIED_EXACT.contains(&upper.as_str())
@@ -194,6 +212,10 @@ fn configure_command_lifecycle(command: &mut Command) -> Result<()> {
                 .ok()
                 .and_then(|raw| raw.parse::<u64>().ok())
                 .filter(|limit| *limit > 0);
+        // 内存与进程数上限只在 Linux 施加：darwin 的 setrlimit 对地址空间限制
+        // 一律 EINVAL（会让 macOS 命令全部启动失败），NPROC 为按用户全局
+        // 计数语义。macOS 内存失控由命令级超时与进程树清理兜底。
+        #[cfg(target_os = "linux")]
         let memory_limit =
             std::env::var(tiangong_plugin_runtime::sidecar::stdio::SANDBOX_MEMORY_LIMIT_ENV)
                 .ok()
@@ -219,6 +241,7 @@ fn configure_command_lifecycle(command: &mut Command) -> Result<()> {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
+                #[cfg(target_os = "linux")]
                 if let Some(limit) = memory_limit {
                     let limit = libc::rlimit {
                         rlim_cur: limit as libc::rlim_t,
