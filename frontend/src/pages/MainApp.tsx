@@ -10,6 +10,7 @@ import {
 import { AppSidebar } from '@/components/AppSidebar';
 import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/components/BackgroundPluginHost';
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
+import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import {
@@ -133,6 +134,8 @@ export function MainApp() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   // 首次启动推荐安装的缺失默认插件列表；为 null 时不显示引导对话框。
   const [onboardingMissing, setOnboardingMissing] = useState<AvailablePlugin[] | null>(null);
+  // 未配置主对话模型时弹出快速配置弹窗。
+  const [modelSetupOpen, setModelSetupOpen] = useState(false);
   const showWorkspacePanelRef = useRef(false);
   const workspaceTabKindRef = useRef<TabKind>('browser');
   const workspaceOpenRequestIdRef = useRef(0);
@@ -391,6 +394,14 @@ export function MainApp() {
         }
       })
       .catch((error) => console.warn('默认插件检测失败', error));
+
+    // 未配置主对话模型（chat 路由）时在主页面弹出快速配置引导；
+    // 独立 catch，检测失败不影响主初始化流程。
+    api.getModelsConfig()
+      .then((cfg) => {
+        if (!cfg.routing.chat) setModelSetupOpen(true);
+      })
+      .catch((error) => console.warn('模型配置检测失败', error));
 
     const flushStreamEvents = () => {
       streamEventTimerRef.current = null;
@@ -866,6 +877,11 @@ export function MainApp() {
         onComplete={() => {
           /* 安装后 registry 会热加载，Core 创建时按需感知已装插件，无需额外刷新 */
         }}
+      />
+
+      <FirstRunModelSetup
+        open={modelSetupOpen}
+        onOpenChange={setModelSetupOpen}
       />
     </SidebarProvider>
   );

@@ -1655,10 +1655,7 @@ pub async fn synthesize_speech(
     let resp = output.response;
 
     // 将音频保存到临时文件，通过 asset 协议播放
-    let media_dir = user_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("media");
+    let media_dir = tiangong_config::io::storage_root().join("media");
     std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
 
     let ext = match resp.mime_type.as_str() {
@@ -1747,10 +1744,7 @@ pub async fn transcribe_speech(
         .map_err(|e| format!("音频数据解码失败：{e}"))?;
 
     // 保存音频文件
-    let media_dir = user_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("media");
+    let media_dir = tiangong_config::io::storage_root().join("media");
     std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
 
     let ext = match mime_type.as_str() {
@@ -3629,10 +3623,7 @@ pub fn is_server_running(config: &tiangong_server::config::ServerConfig) -> bool
 }
 
 fn server_pid_path() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("server.pid")
+    tiangong_config::io::storage_root().join("server.pid")
 }
 
 fn server_pid_alive() -> bool {
@@ -3730,18 +3721,6 @@ pub fn connect_host(host: &str) -> String {
         "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
         value => value.to_string(),
     }
-}
-
-/// 获取用户 home 目录
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| v != std::ffi::OsStr::new(""))
-    {
-        return Some(PathBuf::from(profile));
-    }
-    None
 }
 
 // ============================================================================
