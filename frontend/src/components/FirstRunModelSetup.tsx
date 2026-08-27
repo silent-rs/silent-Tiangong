@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Eye, EyeOff, Loader2, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { ModelEntryView, ModelsConfigView, ProviderConfigView } from '@/api/tauri';
@@ -66,10 +66,15 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
   const [showApiKey, setShowApiKey] = useState(false);
   // 表单内联错误提示：不依赖全局 Toast Provider，首次运行场景自包含。
   const [error, setError] = useState<{ title: string; detail?: string } | null>(null);
+  // 模型列表请求代号：切换供应商或重新打开弹窗时递增，旧请求返回后直接丢弃，
+  // 避免把 A 供应商的模型写入 B 供应商的表单。
+  const fetchSeqRef = useRef(0);
 
   // 每次打开重置表单，避免残留上次的输入。
   useEffect(() => {
     if (!open) return;
+    fetchSeqRef.current += 1;
+    setFetchingModels(false);
     setProviderKey('DeepSeek');
     setIsCustomProvider(false);
     setCustomName('');
@@ -83,6 +88,8 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
 
   const selectPreset = (key: string) => {
     setError(null);
+    fetchSeqRef.current += 1;
+    setFetchingModels(false);
     setProviderKey(key);
     setIsCustomProvider(false);
     setCustomName('');
@@ -93,6 +100,8 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
 
   const selectCustom = () => {
     setError(null);
+    fetchSeqRef.current += 1;
+    setFetchingModels(false);
     setIsCustomProvider(true);
     setProviderKey('');
     setDraft({ base_url: '', api_key: '', timeout_ms: 300000, protocol: 'openai_chatcompletions' });
@@ -118,20 +127,26 @@ export function FirstRunModelSetup({ open, onOpenChange }: Props) {
       setError({ title: '请先填写 Base URL 和 API Key' });
       return;
     }
+    const seq = ++fetchSeqRef.current;
     setFetchingModels(true);
     try {
       const models = await api.fetchProviderModels(draft.base_url.trim(), draft.api_key.trim(), draft.timeout_ms, draft.protocol);
+      // 请求期间已切换供应商或重开弹窗：结果已过期，丢弃且不改状态。
+      if (seq !== fetchSeqRef.current) return;
       if (models.length === 0) {
         setError({ title: '该供应商未返回任何模型', detail: '可手动输入模型名称' });
       } else {
         setError(null);
+        // 手动输入的模型名不在返回列表中时清空，避免保存界面上不可见的模型。
+        setModelName((prev) => (prev.trim() !== '' && !models.includes(prev.trim()) ? '' : prev));
       }
       setAvailableModels(models);
     } catch (err) {
+      if (seq !== fetchSeqRef.current) return;
       setError({ title: '无法获取模型列表', detail: String(err) });
       setAvailableModels([]);
     } finally {
-      setFetchingModels(false);
+      if (seq === fetchSeqRef.current) setFetchingModels(false);
     }
   };
 
