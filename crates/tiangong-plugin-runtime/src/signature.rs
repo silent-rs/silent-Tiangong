@@ -78,7 +78,7 @@ pub fn verify_signed_release(
     // 密钥 / 已导入第三方公钥——见 trust.rs）。
     let release: SignedPluginRelease =
         serde_json::from_slice(&release_bytes).context("解析插件签名清单失败")?;
-    verify_minisign(
+    verify_minisign_for_publisher(
         &release.publisher,
         directory,
         &release_bytes,
@@ -219,21 +219,30 @@ fn permission_set(permissions: &[String]) -> Result<BTreeSet<&str>> {
     Ok(permissions.iter().map(String::as_str).collect())
 }
 
-fn verify_minisign(
+/// 按发布者路由信任根验签（官方内置 / 本机用户密钥 / 已导入第三方公钥）。
+/// 官方信任根唯一且不可配置；本机与三方信任根按插件目录推导存储位置。
+fn verify_minisign_for_publisher(
     publisher: &str,
     directory: &Path,
     content: &[u8],
     signature_b64: &str,
 ) -> Result<()> {
-    // 按发布者路由信任根（官方内置 / 本机用户密钥 / 已导入第三方公钥）；
-    // 官方形态支持环境变量覆盖公钥（CI/本地端到端验证通道），且不依赖
-    // 本地存储布局。
+    // 官方形态直用内置公钥（唯一信任根，不依赖本地存储布局）。
     let pubkey_b64 = if publisher == crate::trust::OFFICIAL_PUBLISHER {
-        crate::trust::official_pubkey_b64()
+        crate::signature::OFFICIAL_PUBKEY_B64.to_string()
     } else {
         let storage_root = crate::trust::storage_root_of(directory)?;
         crate::trust::resolve_publisher_pubkey(storage_root, publisher)?
     };
+    verify_minisign_with_pubkey(content, signature_b64, &pubkey_b64)
+}
+
+/// 以显式公钥验签（不读任何全局状态；测试与路由层共用）。
+fn verify_minisign_with_pubkey(
+    content: &[u8],
+    signature_b64: &str,
+    pubkey_b64: &str,
+) -> Result<()> {
     let public_text = base64::engine::general_purpose::STANDARD
         .decode(pubkey_b64.trim())
         .context("解析插件信任公钥失败")?;
@@ -349,18 +358,19 @@ mod tests {
         }
     }
 
-    /// 生成密钥对、按回调调整签名清单、落盘 release.json 与签名；返回需注入
-    /// 环境的测试公钥（verify_minisign 读 TIANGONG_PLUGIN_PUBKEY_B64）。
-    fn sign_official_release(
+    /// 生成密钥对、按指定发布者构造签名清单并落盘签名；返回测试公钥
+    /// （base64 格式，供导入第三方信任根或做冒充官方的负面测试）。
+    fn sign_release_for_publisher(
         dir: &Path,
         manifest: &PluginManifest,
+        publisher: &str,
         mutate: impl FnOnce(&mut SignedPluginRelease),
     ) -> String {
         let mut release = SignedPluginRelease {
             schema_version: SIGNED_RELEASE_SCHEMA_VERSION,
             id: manifest.id.clone(),
             version: manifest.version.clone(),
-            publisher: "tiangong-official".to_string(),
+            publisher: publisher.to_string(),
             permissions: manifest.permissions.clone(),
             manifest: artifact(dir, MANIFEST_FILE),
             wasm: None,
@@ -388,20 +398,6 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(keypair.pk.to_box().unwrap().into_string())
     }
 
-    fn run_with_pubkey<F: FnOnce()>(pubkey_b64: &str, body: F) {
-        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
-        unsafe {
-            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", pubkey_b64);
-        }
-        body();
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
-                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
-            }
-        }
-    }
-
     fn assert_verify_ok(dir: &Path, manifest: &PluginManifest) {
         verify_signed_release(dir, manifest).expect("官方签名验证应通过");
     }
@@ -409,6 +405,34 @@ mod tests {
     fn assert_verify_err(dir: &Path, manifest: &PluginManifest, needle: &str) {
         let error = verify_signed_release(dir, manifest).expect_err("官方签名验证应被拒绝");
         assert!(error.to_string().contains(needle), "{error:#}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn 官方信任根不可替换_测试密钥冒充官方被拒() {
+        let root = tempfile::tempdir().unwrap();
+        let (dir, manifest) = setup_official_interpreter_plugin(root.path());
+        // 测试密钥签署 publisher=tiangong-official 的清单（签名格式合法、
+        // 内容清单完备）：官方信任根是内置公钥，必须拒绝。
+        let key = sign_release_for_publisher(&dir, &manifest, "tiangong-official", |_| {});
+        assert!(
+            verify_signed_release(&dir, &manifest).is_err(),
+            "测试密钥不得被识别为官方密钥"
+        );
+        // 环境残留同名变量不影响结果（运行时已完全忽略该变量——此处保留
+        // 攻击形态断言，证明覆盖通道已不存在）。
+        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &key);
+        }
+        let still_rejected = verify_signed_release(&dir, &manifest).is_err();
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
+                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
+            }
+        }
+        assert!(still_rejected, "官方信任根不得被环境变量替换");
     }
 
     #[test]
@@ -498,88 +522,92 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_验签通过并覆盖全树() {
+    fn 三方解释器插件_验签通过并覆盖全树() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |_| {});
-        run_with_pubkey(&key, || assert_verify_ok(&dir, &manifest));
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_ok(&dir, &manifest);
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_缺少内容清单条目拒绝() {
+    fn 三方解释器插件_缺少内容清单条目拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |release| {
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |release| {
             release.content_manifest = None;
         });
-        run_with_pubkey(&key, || {
-            assert_verify_err(&dir, &manifest, "content_manifest")
-        });
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "content_manifest");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_内容清单条目路径不是固定文件名拒绝() {
+    fn 三方解释器插件_内容清单条目路径不是固定文件名拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |release| {
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |release| {
             release.content_manifest.as_mut().unwrap().path = PathBuf::from("sidecar/main.mjs");
         });
-        run_with_pubkey(&key, || {
-            assert_verify_err(&dir, &manifest, "签名制品路径不一致")
-        });
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "签名制品路径不一致");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_篡改内容清单拒绝() {
+    fn 三方解释器插件_篡改内容清单拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |_| {});
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
         std::fs::write(dir.join(CONTENT_MANIFEST_FILE), "{}").unwrap();
-        run_with_pubkey(&key, || assert_verify_err(&dir, &manifest, "校验失败"));
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "校验失败");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_篡改sidecar入口拒绝() {
+    fn 三方解释器插件_篡改sidecar入口拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |_| {});
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
         std::fs::write(dir.join("sidecar/main.mjs"), "// tampered").unwrap();
-        run_with_pubkey(&key, || assert_verify_err(&dir, &manifest, "不一致"));
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "不一致");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_篡改模板资源拒绝() {
+    fn 三方解释器插件_篡改模板资源拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |_| {});
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
         std::fs::write(dir.join("templates/node-tool.txt"), "tampered").unwrap();
-        run_with_pubkey(&key, || assert_verify_err(&dir, &manifest, "不一致"));
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "不一致");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_添加未列出文件拒绝() {
+    fn 三方解释器插件_添加未列出文件拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |_| {});
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
         std::fs::write(dir.join("extra-payload.mjs"), "unknown file").unwrap();
-        run_with_pubkey(&key, || assert_verify_err(&dir, &manifest, "未覆盖"));
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "未覆盖");
     }
 
     #[test]
     #[serial_test::serial]
-    fn 官方解释器插件_签名携带sidecar二进制条目拒绝() {
+    fn 三方解释器插件_签名携带sidecar二进制条目拒绝() {
         let root = tempfile::tempdir().unwrap();
         let (dir, manifest) = setup_official_interpreter_plugin(root.path());
-        let key = sign_official_release(&dir, &manifest, |release| {
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |release| {
             release.sidecar = Some(artifact(&dir, "sidecar/main.mjs"));
         });
-        run_with_pubkey(&key, || assert_verify_err(&dir, &manifest, "二进制条目"));
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "二进制条目");
     }
 
     #[test]
@@ -598,12 +626,11 @@ mod tests {
         std::fs::write(dir.join("sidecar/demo-bin"), b"fake native binary").unwrap();
         write_content_manifest(&dir);
         let manifest = PluginManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
-        let key = sign_official_release(&dir, &manifest, |release| {
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |release| {
             release.sidecar = Some(artifact(&dir, "sidecar/demo-bin"));
         });
-        run_with_pubkey(&key, || {
-            assert_verify_err(&dir, &manifest, "content_manifest 条目")
-        });
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "content_manifest 条目");
     }
 
     #[test]
@@ -620,9 +647,8 @@ mod tests {
         std::fs::write(dir.join("dist/index.html"), "<html></html>").unwrap();
         write_content_manifest(&dir);
         let manifest = PluginManifest::load(&dir.join(MANIFEST_FILE)).unwrap();
-        let key = sign_official_release(&dir, &manifest, |_| {});
-        run_with_pubkey(&key, || {
-            assert_verify_err(&dir, &manifest, "仅允许解释器 sidecar 形态")
-        });
+        let key = sign_release_for_publisher(&dir, &manifest, "acme-dev", |_| {});
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &key).unwrap();
+        assert_verify_err(&dir, &manifest, "仅允许解释器 sidecar 形态");
     }
 }

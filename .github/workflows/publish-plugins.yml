@@ -248,6 +248,16 @@ jobs:
           fi
           cargo run -p xtask -- build-plugin "$PLUGIN_ID"
 
+      - name: Verify official signature (key must match built-in pubkey)
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          EXPECTED_PLATFORM: ${{ matrix.plugin_platform }}
+        run: |
+          release_json="$(compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json")"
+          if [ -n "$release_json" ]; then
+            cargo run -p xtask -- verify-official-release "$release_json"
+          fi
+
       - name: Verify platform output
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -340,6 +350,14 @@ jobs:
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo run -p xtask -- build-plugin "$PLUGIN_ID"
+
+      - name: Verify official signature (key must match built-in pubkey)
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: |
+          release_json="$(compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}"/*/release.json)"
+          test -n "$release_json"
+          cargo run -p xtask -- verify-official-release "$release_json"
 
       - name: Verify interpreter output
         env:

@@ -343,19 +343,20 @@ fn install(
     // 签名验证路径（内容清单全树校验）。原生安装确认随之退役（信任根
     // 从「确认动作」转移到「用户密钥」，构建 → 签名 → 验证 → 安装全程
     // 可自动化，远程 / Agent 创作闭环不再被弹窗阻塞）。
-    if manifest.sidecar.is_some() {
-        // 受信构建指纹核验：暂存副本的内容清单哈希必须与构建登记一致——
-        // 授权对象是「真实构建出的那份内容」，构建后替换 release/（哪怕
-        // 重算内容清单）都无法通过签名安装。直调（测试）传 None 跳过，
-        // 生产路径必经 call 层携带登记指纹。
-        if let Some((_installer, expected_fingerprint)) = trusted_build {
-            let actual_fingerprint = content_manifest_fingerprint(staged.path())?;
-            if !actual_fingerprint.eq_ignore_ascii_case(expected_fingerprint) {
-                bail!(
-                    "项目 {project_id} 构建产物与受信构建登记不一致（构建后产物被修改？），                     请重新构建后再安装"
-                );
-            }
+    // 受信构建指纹核验（全部模板产物，含纯 UI / 工具 / sidecar 形态）：
+    // 暂存副本的内容清单哈希必须与构建登记一致——授权对象是「真实构建
+    // 出的那份内容」，构建后替换 release/（哪怕重算内容清单）都无法安装。
+    // 直调（测试）传 None 跳过，生产路径必经 call 层携带登记指纹。
+    if let Some((_installer, expected_fingerprint)) = trusted_build {
+        let actual_fingerprint = content_manifest_fingerprint(staged.path())?;
+        if !actual_fingerprint.eq_ignore_ascii_case(expected_fingerprint) {
+            bail!(
+                "项目 {project_id} 构建产物与受信构建登记不一致（构建后产物被修改？），\
+                 请重新构建后再安装"
+            );
         }
+    }
+    if manifest.sidecar.is_some() {
         sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
     }
     // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化。
@@ -756,11 +757,12 @@ await runSidecar({
         );
     }
 
-    /// 安装授权四场景：fail-closed、非受信插件、缺构建登记、受信齐全。
+    /// 安装授权五场景：fail-closed、非受信插件、非官方签名的固定 ID、
+    /// 缺构建登记、受信齐全。
     /// 调用方插件为已安装的 node demo 插件（install 本体直调装好）。
     #[test]
     #[serial_test::serial]
-    fn 安装授权_四场景() {
+    fn 安装授权_五场景() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -808,7 +810,7 @@ await runSidecar({
             "{error:#}"
         );
 
-        // 4) 受信 + 已登记（指纹锚定构建产物）：完整签名安装链成功。
+        // 5) 受信 + 已登记（指纹锚定构建产物）：完整签名安装链成功。
         let target_fingerprint = {
             use sha2::Digest;
             let manifest_raw = std::fs::read(
@@ -1155,7 +1157,7 @@ await runSidecar({
             .unwrap();
         }
 
-        // 在已带遗留本地信任标记的安装目录上追加真实有效的官方签名
+        // 在已带遗留本地信任标记的安装目录上追加真实有效的签名
         // （解释器形态，内容清单哈希与目录一致）。
 
         let sha256_of = |path: std::path::PathBuf| {
@@ -1166,7 +1168,7 @@ await runSidecar({
             "schema_version": 1,
             "id": id,
             "version": "0.1.0",
-            "publisher": "tiangong-official",
+            "publisher": "acme-dev",
             "permissions": ["sidecar.invoke"],
             "manifest": {
                 "path": "plugin.json",
@@ -1199,20 +1201,12 @@ await runSidecar({
             base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
         )
         .unwrap();
+        // 三方发布者公钥经登记表导入（官方信任根不可配置，不适用于本测试）。
         let pubkey_b64 = base64::engine::general_purpose::STANDARD
             .encode(keypair.pk.to_box().unwrap().into_string());
-        let previous = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
-        unsafe {
-            std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &pubkey_b64);
-        }
+        crate::trust::import_trusted_publisher(root.path(), "acme-dev", &pubkey_b64).unwrap();
         let error = crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({}))
             .expect_err("混用信任来源应拒绝启动");
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
-                None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
-            }
-        }
         assert!(
             format!("{error:#}").contains("同时携带官方签名与本地信任标记"),
             "应报混用拒绝：{error:#}"
@@ -1271,7 +1265,7 @@ await runSidecar({
     }
     /// 完整用户旅程（显式运行：`cargo test -p tiangong-plugin-runtime --lib
     /// -- --ignored`）：经 creator 的按需 sidecar 从零创建 node-sidecar 插件
-    /// → 注入自定义操作 → devkit 真实构建（yarn 工程链）→ 原生确认安装 →
+    /// → 注入自定义操作 → devkit 真实构建（yarn 工程链）→ 自动签名安装 →
     /// 宿主连接新插件的 sidecar 真实调用。全程不经 GUI，等价于 Agent 操作序列。
     #[test]
     #[ignore = "真实 yarn 构建需数分钟与网络，按需显式运行"]
@@ -1353,6 +1347,56 @@ await runSidecar({
             "响应: {response}"
         );
     }
+    /// 与任何真实指纹都不可能相等的占位（拒绝路径用）。
+    fn unreachable_fingerprint() -> String {
+        "0".repeat(64)
+    }
+
+    /// 纯 UI 插件的构建指纹核验（无 sidecar 形态同样受登记约束）：构建后
+    /// 修改产物被拒，重新登记（等价重新构建）后放行。
+    #[test]
+    #[serial_test::serial]
+    fn 纯ui插件_构建指纹核验() {
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "ui-fp-demo";
+        make_project(root.path(), id);
+        // 纯 UI 产物：ui 贡献 + 内容清单，无 sidecar（devkit 全模板统一生成清单）。
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("app")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            format!(
+                r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","permissions":[],"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","entry":"app/index.html"}}]}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(release.join("app/index.html"), "<html></html>").unwrap();
+        write_content_manifest(&release);
+
+        // 受信调用方（模拟宿主判定）+ 指纹登记后经桥接安装成功。
+        let fingerprint = content_manifest_fingerprint(&release).unwrap();
+        note_trusted_build("plugin-creator", id, Some(fingerprint));
+        // 桥接调用要求调用方插件已加载——本测试聚焦指纹路径，直调 install
+        // 并显式传入登记期望（与 call 层同款核验分支）。
+        let install_result = install(
+            root.path(),
+            id,
+            Some(("plugin-creator", &unreachable_fingerprint())),
+        );
+        // 上面故意用失配指纹断言拒绝路径：
+        assert!(
+            install_result.is_err_and(|error| format!("{error:#}").contains("不一致")),
+            "纯 UI 产物同样受指纹核验约束"
+        );
+        // 正确指纹放行。
+        let release_dir = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        let fingerprint = content_manifest_fingerprint(&release_dir).unwrap();
+        let result = install(root.path(), id, Some(("plugin-creator", &fingerprint)))
+            .expect("纯 UI 指纹匹配应安装成功");
+        assert_eq!(result.plugin_id, id);
+    }
+
     /// 无界面纯工具插件（node-tool 形态）：无 ui 贡献即可安装（校验解耦），
     /// 工具契约（操作名=工具名、ToolOutcome 形状）经 sidecar 真实往返。
     #[test]

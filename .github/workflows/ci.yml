@@ -262,19 +262,13 @@ jobs:
           test -f target/plugin-dist/plugins-index/fragments/plugin-creator-any.json
           test -f "target/plugin-dist/plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst"
           test -f target/plugin-dist/plugins/plugin-creator/0.2.0/release.json.sig
-          # .pub 内容即 base64(minisign 公钥文本)，为运行时公钥环境变量格式。
-          pubkey="$(tr -d '\n' < "${key_path}.pub")"
-          {
-            echo "E2E_PUBKEY_B64=${pubkey}"
-            # 同步注入部署守卫公钥（xtask 部署验证与运行时同通道）。
-            echo "TIANGONG_PLUGIN_PUBKEY_B64=${pubkey}"
-          } >> "$GITHUB_ENV"
 
       - name: Run catalog install e2e
         env:
           TIANGONG_PLUGIN_E2E_DIST: ${{ github.workspace }}/target/plugin-dist
-          TIANGONG_PLUGIN_E2E_PUBKEY_B64: ${{ env.E2E_PUBKEY_B64 }}
-          # fail-closed：前置产物或公钥缺失时测试直接失败，不产生假绿灯。
+          # fail-closed：前置产物缺失时测试直接失败，不产生假绿灯。
+          # 官方信任根不可配置：测试密钥冒充官方必须被拒，三方链路经
+          # 测试存储的信任登记表导入公钥（不经环境变量）。
           TIANGONG_PLUGIN_E2E_REQUIRED: "1"
         run: >
           cargo test -p tiangong-plugin-runtime --test official_catalog_e2e

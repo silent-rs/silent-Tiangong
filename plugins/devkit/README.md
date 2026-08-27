@@ -25,7 +25,7 @@ npx -y @silent-ai/plugin-creator@1.0.2 logs dev:my-dashboard
 | `logs` | 读 `dev:<id>`（build.log/run.log）或 `plugin:<id>`（安装目录运行日志）尾部 |
 
 安装插件不走本 CLI——用 plugin-creator 天工插件的 `plugin_install` 工具
-（宿主原生确认 + 注册表加载）。
+（官方 Creator 自动签名安装 + 注册表加载）。
 
 ## 发布
 

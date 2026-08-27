@@ -434,6 +434,9 @@ fn main() {
         [command, key_path] if command == "generate-plugin-test-key" => {
             generate_plugin_test_key(Path::new(key_path))
         }
+        [command, release_path] if command == "verify-official-release" => {
+            verify_official_release(Path::new(release_path))
+        }
         [command, input, output] if command == "merge-plugin-dist" => {
             merge_plugin_distributions(Path::new(input), Path::new(output), None)
         }
@@ -487,6 +490,7 @@ fn print_help() {
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
     eprintln!("  cargo run -p xtask -- sign-plugin <插件包目录>");
     eprintln!("  cargo run -p xtask -- generate-plugin-test-key <私钥路径>");
+    eprintln!("  cargo run -p xtask -- verify-official-release <release.json路径>");
     eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
     eprintln!(
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
@@ -661,7 +665,8 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     // 部署守卫：仅官方签名形态部署到本机（官方开发者本地即官方形态，
     // App 端内置公钥可直接验证）。非官方密钥（测试密钥等）签名的 staging
     // 验签不过——产物照常生成，部署跳过并警告，避免本机出现必然无效
-    // 的插件目录。CI 端到端经 TIANGONG_PLUGIN_PUBKEY_B64 注入测试公钥。
+    // 的插件目录。发布 CI 以 verify-official-release 强制校验正式私钥
+    // 与内置公钥匹配。
     if staging_passes_official_verification(&staging)? {
         deploy_atomically(&staging, &destination, config)?;
         eprintln!(
@@ -872,7 +877,8 @@ fn normalize_signing_key_text(raw: &str) -> io::Result<String> {
 /// 生成插件签名测试密钥对（CI 端到端验证用）：`generate-plugin-test-key
 /// <私钥路径>`，公钥落在 `<路径>.pub`。密钥为 minisign 格式、无密码；
 /// `.pub` 内容为 base64(公钥文本)——与 tauri signer 公钥文件及运行时
-/// TIANGONG_PLUGIN_PUBKEY_B64 期望格式一致。
+/// 运行时公钥环境格式一致（运行时官方信任根为内置公钥，测试密钥仅用于
+/// 局部签名闭环与第三方信任链测试，不可被识别为官方密钥）。
 fn generate_plugin_test_key(key_path: &Path) -> io::Result<()> {
     let keypair = minisign::KeyPair::generate_unencrypted_keypair()
         .map_err(|error| invalid_data(format!("生成测试密钥失败: {error}")))?;
@@ -1658,11 +1664,9 @@ fn staging_passes_official_verification(staging: &Path) -> io::Result<bool> {
     if !release_path.is_file() || !signature_path.is_file() {
         return Ok(false);
     }
-    let public_b64 = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| OFFICIAL_PLUGIN_PUBKEY_B64.to_string());
-    let Some(public_text) = decode_base64_utf8(&public_b64) else {
+    // 官方信任根唯一且不可配置：不读环境变量（测试密钥无法绕过守卫）。
+    let public_b64 = OFFICIAL_PLUGIN_PUBKEY_B64;
+    let Some(public_text) = decode_base64_utf8(public_b64) else {
         return Ok(false);
     };
     let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
@@ -1681,6 +1685,61 @@ fn staging_passes_official_verification(staging: &Path) -> io::Result<bool> {
         return Ok(false);
     };
     let content = std::fs::read(&release_path)?;
+    let mut reader = std::io::Cursor::new(content);
+    Ok(minisign::verify(
+        &public_key,
+        &signature_box,
+        &mut reader,
+        false,
+        false,
+        false,
+    )
+    .is_ok())
+}
+
+/// 校验 release.json 与内置官方公钥匹配（发布 CI 强制步骤）：签名验证
+/// 失败即非零退出——正式私钥与内置公钥不匹配时发布中止，防止错误密钥
+/// 产物流入官方目录。
+fn verify_official_release(release_path: &Path) -> io::Result<()> {
+    let signature_path = release_path.with_extension("json.sig");
+    if !release_path.is_file() || !signature_path.is_file() {
+        return Err(invalid_input(format!(
+            "缺少签名清单或签名文件: {}",
+            release_path.display()
+        )));
+    }
+    let verified = verify_with_official_pubkey(release_path, &signature_path)?;
+    if verified {
+        eprintln!("[xtask] 官方公钥验签通过: {}", release_path.display());
+        Ok(())
+    } else {
+        Err(invalid_input(
+            "当前签名私钥与应用内置官方公钥不匹配，拒绝发布或部署",
+        ))
+    }
+}
+
+/// 以内置官方公钥验证签名文件（true = 匹配）。
+fn verify_with_official_pubkey(release_path: &Path, signature_path: &Path) -> io::Result<bool> {
+    let Some(public_text) = decode_base64_utf8(OFFICIAL_PLUGIN_PUBKEY_B64) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
+        return Ok(false);
+    };
+    let Ok(public_key) = public_key.into_public_key() else {
+        return Ok(false);
+    };
+    let Ok(signature_raw) = std::fs::read_to_string(signature_path) else {
+        return Ok(false);
+    };
+    let Some(signature_text) = decode_base64_utf8(signature_raw.trim()) else {
+        return Ok(false);
+    };
+    let Ok(signature_box) = minisign::SignatureBox::from_string(signature_text.trim()) else {
+        return Ok(false);
+    };
+    let content = std::fs::read(release_path)?;
     let mut reader = std::io::Cursor::new(content);
     Ok(minisign::verify(
         &public_key,
@@ -2291,10 +2350,10 @@ mod tests {
     use super::*;
 
     /// CI 同款链路：generate-plugin-test-key（未加密）→ 签名 → 公钥验证。
-    /// 部署守卫：官方公钥（或环境覆盖公钥）验签通过的 staging 才可部署；
-    /// 错误公钥签名（测试密钥未注入对应公钥）验签不过。
+    /// 部署守卫只认内置官方公钥：测试密钥签名（即使注入同名环境变量）
+    /// 验不过；无签名清单的纯 UI 插件不设门槛。
     #[test]
-    fn 部署守卫_官方与错误公钥验签() {
+    fn 部署守卫_只认内置官方公钥() {
         let root = std::env::temp_dir().join(format!("xtask-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -2302,7 +2361,8 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("plugin.json"), b"{}").unwrap();
 
-        // 测试密钥签名 + 环境注入对应公钥 → 守卫通过（CI 通道）。
+        // 测试密钥签名：内置官方公钥验不过 → 跳过部署（守卫只认内置公钥，
+        // 不读环境变量——环境注入测试公钥也无法绕过）。
         let key_path = root.join("test.key");
         generate_plugin_test_key(&key_path).unwrap();
         let release_path = staging.join("release.json");
@@ -2316,18 +2376,14 @@ mod tests {
         unsafe {
             std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", &public_b64);
         }
-        assert!(staging_passes_official_verification(&staging).unwrap());
-        // 换成内置官方公钥（未注入环境）→ 测试密钥签名验不过 → 跳过部署。
-        unsafe {
-            std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64");
-        }
-        assert!(!staging_passes_official_verification(&staging).unwrap());
+        let guarded = staging_passes_official_verification(&staging).unwrap();
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
                 None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
             }
         }
+        assert!(!guarded, "测试密钥（即使注入同名环境变量）不得通过部署守卫");
 
         // 无签名清单的插件（纯 UI）不设部署门槛。
         std::fs::remove_file(&release_path).unwrap();

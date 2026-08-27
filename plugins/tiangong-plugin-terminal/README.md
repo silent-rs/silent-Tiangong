@@ -31,7 +31,7 @@ yarn package   # 构建 + 组装 release/ + 官方签名（release.json/.sig）
 sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` 签名，
 需要本地安装 tauri-cli）。无官方私钥时可用自生成密钥调试：
 `tauri signer generate -w <key>` 打包签名后，启动应用时设置
-`TIANGONG_PLUGIN_PUBKEY_B64` 为对应公钥内容（base64）覆盖内置公钥。
+官方信任根为应用内置公钥，不接受环境变量或配置覆盖（历史测试通道已移除）。
 
 ## 与宿主的协议
 

@@ -305,18 +305,11 @@ fn save_trusted_publishers(storage_root: &Path, publishers: &[TrustedPublisher])
 /// 保留标识：`tiangong-official` 与 `local`；其余一律查第三方登记表，
 /// 未导入时返回带指引的错误。环境变量覆盖仅作用于官方形态（既有测试
 /// 通道，不改变多信任根路由）。
-/// 官方信任公钥（base64）：环境变量覆盖（CI/本地端到端验证通道）优先，
-/// 否则内置官方公钥。
-pub fn official_pubkey_b64() -> String {
-    std::env::var("TIANGONG_PLUGIN_PUBKEY_B64")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::signature::OFFICIAL_PUBKEY_B64.to_string())
-}
-
 pub fn resolve_publisher_pubkey(storage_root: &Path, publisher: &str) -> Result<String> {
     match publisher {
-        OFFICIAL_PUBLISHER => Ok(official_pubkey_b64()),
+        // 官方信任根唯一且不可配置：不接受环境变量、配置文件或启动参数
+        // 覆盖（测试密钥不可伪装官方身份）。
+        OFFICIAL_PUBLISHER => Ok(crate::signature::OFFICIAL_PUBKEY_B64.to_string()),
         LOCAL_PUBLISHER => user_public_key_b64(storage_root),
         other => {
             validate_publisher_id(other)?;

@@ -1,18 +1,15 @@
-//! 官方目录解释器插件安装全链路（显式环境门控）：目录发现 → 归档下载 →
-//! 安全解包（含归档内外 plugin.json 一致性比对）→ 官方签名验签（内容清单
-//! 全树校验）→ 原子安装 → 注册表加载 → sidecar 真实调用 → 卸载。
+//! 官方目录端到端（显式环境门控）：目录发现 → 归档下载 → 安全解包 →
+//! 签名验证 → 安装 → sidecar 真实调用 → 卸载。
 //!
-//! 触发条件（产物与公钥均就绪才运行；两者由环境提供）；设置
-//! `TIANGONG_PLUGIN_E2E_REQUIRED=1` 后进入 fail-closed 模式——缺产物或
-//! 公钥直接失败而非跳过（CI 使用，防止工作流前置断言缺失时假绿灯）：
-//! - `TIANGONG_PLUGIN_E2E_DIST`：发布产物目录（默认 workspace 的
-//!   `target/plugin-dist`，先经 `cargo run -p xtask -- build-plugin
-//!   plugin-creator` 生成）；
-//! - `TIANGONG_PLUGIN_E2E_PUBKEY_B64`：与签名私钥对应的测试公钥，
-//!   即 base64(minisign 公钥文本)——`generate-plugin-test-key` 产物的
-//!   `.pub` 文件内容（单行 base64，直接作为该环境变量的值）。
+//! 信任语义：官方信任根是应用内置公钥、不可配置——构建产物由测试密钥
+//! 签署 `publisher=tiangong-official`，必须被安装链拒绝（测试密钥不可
+//! 冒充官方）；同一产物改署第三方发布者并导入其公钥后，完整链路放行。
 //!
-//! CI 在运行前先断言两者存在（保证发布链每次必跑）；本地默认无产物时跳过。
+//! 触发条件：`TIANGONG_PLUGIN_E2E_DIST`（发布产物目录，默认 workspace 的
+//! `target/plugin-dist`，先经 `cargo run -p xtask -- build-plugin
+//! plugin-creator` 生成）；设置 `TIANGONG_PLUGIN_E2E_REQUIRED=1` 后进入
+//! fail-closed 模式——缺产物直接失败而非跳过（CI 使用，防止前置断言缺失
+//! 时假绿灯）。
 
 use std::path::{Path, PathBuf};
 
@@ -32,27 +29,21 @@ fn copy_tree(source: &Path, target: &Path) {
     }
 }
 
-/// 官方目录安装全链路：本地 http 目录服务承载真实发布产物，完整走
-/// 下载/解包/验签/安装/调用。产物目录复制到临时目录并重写 URL——不
-/// 改写共享构建产物，测试互不污染。
+/// 官方目录安装链：本地 http 目录服务承载真实发布产物。产物目录复制到
+/// 临时目录并重写 URL——不改写共享构建产物，测试互不污染。
 #[test]
 #[serial_test::serial]
-fn 官方目录_解释器插件安装全链路() {
+fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载() {
     let dist = std::env::var_os("TIANGONG_PLUGIN_E2E_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(workspace_target_dist);
-    let pubkey_b64 = std::env::var("TIANGONG_PLUGIN_E2E_PUBKEY_B64")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let fragment = dist.join("plugins-index/fragments/plugin-creator-any.json");
     let archive = dist.join("plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst");
-    if !fragment.is_file() || !archive.is_file() || pubkey_b64.is_none() {
+    let release_json = dist.join("plugins/plugin-creator/0.2.0/release.json");
+    if !archive.is_file() || !release_json.is_file() {
         let reason = format!(
-            "缺少发布产物（fragment={} archive={}）或测试公钥（pubkey={}）",
-            fragment.display(),
+            "缺少发布产物（archive={} release.json={}）",
             archive.display(),
-            pubkey_b64.is_some()
+            release_json.display()
         );
         assert!(
             std::env::var_os("TIANGONG_PLUGIN_E2E_REQUIRED").is_none(),
@@ -65,10 +56,17 @@ fn 官方目录_解释器插件安装全链路() {
     // 产物副本（重写 catalog/fragment 中的 OSS URL 到本地服务）。
     let dist_copy = tempfile::tempdir().unwrap();
     copy_tree(&dist, dist_copy.path());
-    let fragment = dist_copy
-        .path()
-        .join("plugins-index/fragments/plugin-creator-any.json");
-    let catalog_path = dist_copy.path().join("plugins-index/catalog.json");
+    let rewrite_oss_urls = |path: &Path, port: u16| {
+        let raw = std::fs::read_to_string(path).unwrap();
+        std::fs::write(
+            path,
+            raw.replace(
+                "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com",
+                &format!("http://127.0.0.1:{port}"),
+            ),
+        )
+        .unwrap();
+    };
 
     // 本地目录服务（随机端口）。
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -82,34 +80,24 @@ fn 官方目录_解释器插件安装全链路() {
         .spawn()
         .expect("启动本地目录服务失败");
     std::thread::sleep(std::time::Duration::from_millis(500));
-
-    let previous_catalog = std::env::var("TIANGONG_PLUGIN_CATALOG_URL").ok();
-    let previous_pubkey = std::env::var("TIANGONG_PLUGIN_PUBKEY_B64").ok();
-    let catalog_url = format!("http://127.0.0.1:{port}/plugins-index/catalog.json");
-    unsafe {
-        std::env::set_var("TIANGONG_PLUGIN_CATALOG_URL", &catalog_url);
-        std::env::set_var(
-            "TIANGONG_PLUGIN_PUBKEY_B64",
-            pubkey_b64.expect("上方已校验非空"),
-        );
-    }
-    let rewrite_oss_urls = |path: &Path| {
-        let raw = std::fs::read_to_string(path).unwrap();
-        std::fs::write(
-            path,
-            raw.replace(
-                "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com",
-                &format!("http://127.0.0.1:{port}"),
-            ),
-        )
-        .unwrap();
-    };
-    rewrite_oss_urls(&fragment);
-    rewrite_oss_urls(&catalog_path);
+    rewrite_oss_urls(
+        &dist_copy
+            .path()
+            .join("plugins-index/fragments/plugin-creator-any.json"),
+        port,
+    );
+    rewrite_oss_urls(&dist_copy.path().join("plugins-index/catalog.json"), port);
 
     let storage = tempfile::tempdir().unwrap();
     tiangong_config::registry::init_from_dir(&storage.path().join("config"));
 
+    let previous_catalog = std::env::var("TIANGONG_PLUGIN_CATALOG_URL").ok();
+    unsafe {
+        std::env::set_var(
+            "TIANGONG_PLUGIN_CATALOG_URL",
+            format!("http://127.0.0.1:{port}/plugins-index/catalog.json"),
+        );
+    }
     let result = std::panic::catch_unwind(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -118,17 +106,71 @@ fn 官方目录_解释器插件安装全链路() {
             .block_on(async {
                 let repository =
                     tiangong_plugin_runtime::artifacts::PluginRepository::new().expect("构造下载器");
+
+                // ── ① 官方形态产物（测试密钥签署 publisher=tiangong-official）：
+                //    下载与解包正常，安装链验签必须拒绝——官方信任根是内置
+                //    公钥，测试密钥不可冒充官方。
                 let staged = repository
                     .download(storage.path(), "plugin-creator", None)
                     .await
                     .expect("目录发现与归档下载解包");
+                let error = tiangong_plugin_runtime::registry::install_staged_plugin(
+                    storage.path(),
+                    staged.path(),
+                )
+                .expect_err("测试密钥冒充官方形态必须被拒绝");
+                assert!(
+                    format!("{error:#}").contains("签名验证不通过"),
+                    "应报官方验签失败：{error:#}"
+                );
+
+                // ── ② 同一产物改署第三方发布者（acme-dev）并以测试密钥重签，
+                //    公钥导入测试存储的信任登记表后完整放行。
+                let third_party_key =
+                    minisign::KeyPair::generate_unencrypted_keypair().expect("生成三方密钥");
+                let release_path = dist_copy
+                    .path()
+                    .join("plugins/plugin-creator/0.2.0/release.json");
+                let mut release: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&release_path).unwrap()).unwrap();
+                release["publisher"] = serde_json::Value::String("acme-dev".to_string());
+                let release_raw = serde_json::to_vec_pretty(&release).unwrap();
+                std::fs::write(&release_path, &release_raw).unwrap();
+                let signature = minisign::sign(
+                    Some(&third_party_key.pk),
+                    &third_party_key.sk,
+                    release_raw.as_slice(),
+                    None,
+                    None,
+                )
+                .unwrap();
+                use base64::Engine;
+                std::fs::write(
+                    dist_copy
+                        .path()
+                        .join("plugins/plugin-creator/0.2.0/release.json.sig"),
+                    base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
+                )
+                .unwrap();
+                let public_b64 = base64::engine::general_purpose::STANDARD
+                    .encode(third_party_key.pk.to_box().unwrap().into_string());
+                tiangong_plugin_runtime::import_trusted_publisher(
+                    storage.path(),
+                    "acme-dev",
+                    &public_b64,
+                )
+                .expect("导入三方公钥");
+
+                let staged = repository
+                    .download(storage.path(), "plugin-creator", None)
+                    .await
+                    .expect("三方形态目录发现与下载");
                 let status = tiangong_plugin_runtime::registry::install_staged_plugin(
                     storage.path(),
                     staged.path(),
                 )
-                .expect("官方签名验签与安装");
+                .expect("三方签名插件安装");
                 assert_eq!(status.manifest_version, "0.2.0");
-                // 正式发现 + sidecar 真实调用（官方签名解释器放行路径）。
                 tiangong_plugin_runtime::registry::preload_installed_plugins(storage.path());
                 let response = tiangong_plugin_runtime::registry::invoke_sidecar(
                     storage.path(),
@@ -136,11 +178,33 @@ fn 官方目录_解释器插件安装全链路() {
                     "devkit.validate",
                     serde_json::json!({"args": ["nonexistent"], "root": "/tmp/catalog-install-dev"}),
                 )
-                .expect("官方签名解释器 sidecar 调用");
+                .expect("三方签名插件 sidecar 调用");
                 assert_eq!(
                     response["ok"],
                     serde_json::json!(false),
                     "探针项目应校验失败（证明真实执行）"
+                );
+
+                // ── ③ 正规卸载：目录移除 + 注册表清理；重新预加载不自动恢复
+                //    （无内置部署通道是结构性保证）。
+                tiangong_plugin_runtime::registry::uninstall_plugin(
+                    storage.path(),
+                    "plugin-creator",
+                    false,
+                )
+                .expect("卸载");
+                assert!(
+                    !storage
+                        .path()
+                        .join("plugins/plugin-creator/plugin.json")
+                        .is_file(),
+                    "卸载后插件目录应移除"
+                );
+                tiangong_plugin_runtime::registry::preload_installed_plugins(storage.path());
+                assert!(
+                    tiangong_plugin_runtime::registry::plugin_install_directory("plugin-creator")
+                        .is_none(),
+                    "卸载后重新预加载不得自动恢复"
                 );
             });
     });
@@ -150,83 +214,10 @@ fn 官方目录_解释器插件安装全链路() {
             Some(value) => std::env::set_var("TIANGONG_PLUGIN_CATALOG_URL", value),
             None => std::env::remove_var("TIANGONG_PLUGIN_CATALOG_URL"),
         }
-        match previous_pubkey {
-            Some(value) => std::env::set_var("TIANGONG_PLUGIN_PUBKEY_B64", value),
-            None => std::env::remove_var("TIANGONG_PLUGIN_PUBKEY_B64"),
-        }
     }
     let _ = server.kill();
     let _ = server.wait();
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
-}
-
-/// 卸载语义：目录安装 → 卸载 → 目录移除且无可选插件被强制装回的通道
-/// （无内置部署是结构性保证，本测试固化该语义）。
-///
-/// 安装源优先取发布归档（解包出受管文件树，CI 与全链路测试同源）；本地
-/// 开发目录存在 yarn package 产物时亦可作为源（两者皆缺则跳过）。
-#[test]
-#[serial_test::serial]
-fn 官方目录_卸载后不自动恢复() {
-    let storage = tempfile::tempdir().unwrap();
-    tiangong_config::registry::init_from_dir(&storage.path().join("config"));
-
-    // 安装源：优先发布归档，其次本地 yarn package 产物。
-    let dist = std::env::var_os("TIANGONG_PLUGIN_E2E_DIST")
-        .map(PathBuf::from)
-        .unwrap_or_else(workspace_target_dist);
-    let release_copy = storage.path().join("plugins-dev/plugin-creator/release");
-    let archive = dist.join("plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst");
-    let local_release = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../plugins/tiangong-plugin-creator/release");
-    if archive.is_file() {
-        std::fs::create_dir_all(&release_copy).unwrap();
-        tiangong_plugin_runtime::artifacts::extract_plugin_archive(&archive, &release_copy)
-            .expect("解包发布归档");
-    } else if local_release.join("plugin.json").is_file() {
-        copy_tree(&local_release, &release_copy);
-    } else {
-        assert!(
-            std::env::var_os("TIANGONG_PLUGIN_E2E_REQUIRED").is_none(),
-            "E2E fail-closed 模式下不得跳过：缺少发布归档与 creator release 产物"
-        );
-        eprintln!("跳过：缺少发布归档或 creator release 产物");
-        return;
-    }
-    let staged =
-        tiangong_plugin_runtime::artifacts::stage_local_plugin(storage.path(), &release_copy)
-            .expect("暂存");
-    let manifest_raw = std::fs::read(staged.path().join("content-manifest.json")).unwrap();
-    use sha2::Digest;
-    let anchor = hex::encode(sha2::Sha256::digest(&manifest_raw));
-    std::fs::write(
-        staged.path().join("local-trust.json"),
-        format!(r#"{{"kind":"local-confirm","content_sha256":"{anchor}"}}"#),
-    )
-    .unwrap();
-    let status =
-        tiangong_plugin_runtime::registry::import_staged_plugin(storage.path(), staged.path())
-            .expect("安装");
-    assert!(
-        storage
-            .path()
-            .join("plugins/plugin-creator/plugin.json")
-            .is_file()
-    );
-
-    // 正规卸载 API：目录移除 + 注册表清理。
-    tiangong_plugin_runtime::registry::uninstall_plugin(storage.path(), "plugin-creator", false)
-        .expect("卸载");
-    assert!(
-        !storage
-            .path()
-            .join("plugins/plugin-creator/plugin.json")
-            .is_file(),
-        "卸载后插件目录应移除"
-    );
-    // 全新进程的发现语义：插件目录不存在则不会被发现；本应用无内置部署
-    // 通道（结构性保证），不存在卸载后自动恢复的路径。
-    assert_eq!(status.manifest_version, "0.2.0");
 }
