@@ -560,8 +560,10 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
         // 进程组 ID 在 spawn 前固定为直接子进程 PID；即使组长先退出，仍可清理后代。
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
+    // Windows 侧 Job Object 整组终止（KILL_ON_JOB_CLOSE + 显式 Terminate），
+    // 不需要子进程句柄；随后的 child.kill/wait 对已死进程为 no-op。
     #[cfg(windows)]
-    process.lifecycle.terminate(child);
+    process.lifecycle.terminate();
     #[cfg(not(windows))]
     let _ = process;
     let _ = child.kill();
