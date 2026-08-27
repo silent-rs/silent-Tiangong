@@ -674,6 +674,9 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
              发布产物不受影响；如需本机部署请以官方私钥（TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH）运行"
         );
     }
+    // 部署成功时 staging 已被原子改名带走（此处 no-op）；守卫跳过或任意
+    // 失败路径统一收尾清理，不在插件目录残留暂存。
+    remove_dir_if_exists(&staging)?;
     Ok(())
 }
 

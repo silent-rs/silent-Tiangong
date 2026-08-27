@@ -1890,9 +1890,12 @@ fn install_new_plugin(
                 return replace_installed_plugin(storage_root, staged_path, &existing, manifest);
             }
             Err(_) => {
-                // 无法解析的坏残留：挪进事务目录丢弃后全新安装
+                // 无法解析的坏残留：经事务目录中转后删除，再全新安装。
                 let discard = transaction_directory(storage_root, "discard-stale")?;
                 std::fs::rename(&destination, &discard)?;
+                if let Err(error) = remove_directory_if_exists(&discard) {
+                    tracing::warn!(path = %discard.display(), %error, "清理坏残留目录失败");
+                }
             }
         }
     }
@@ -1915,6 +1918,12 @@ fn install_new_plugin(
             let _ = std::fs::rename(retained, &destination);
         }
         return Err(error).with_context(|| format!("安装插件 {} 失败", manifest.id));
+    }
+    // 安装成功：数据保留壳（data 已挪入新目录）随即清理，不在事务目录累积。
+    if let Some(retained) = &retained
+        && let Err(error) = remove_directory_if_exists(retained)
+    {
+        tracing::warn!(path = %retained.display(), %error, "清理数据保留目录失败");
     }
 
     let installed = InstalledPlugin {

@@ -1086,6 +1086,9 @@ await runSidecar({
             format!("{error:#}").contains("未导入"),
             "应给出公钥导入指引：{error:#}"
         );
+        // 显式释放失败暂存（shadowing 的旧绑定活到作用域结束才 Drop，
+        // 会干扰下方事务目录断言；生产路径失败返回即释放）。
+        drop(staged);
 
         // 导入公钥后：安装 → 真实调用成功。
         let public_b64 = base64::engine::general_purpose::STANDARD
@@ -1099,6 +1102,18 @@ await runSidecar({
             crate::registry::invoke_sidecar(root.path(), id, "demo.echo", json!({"text": "三方"}))
                 .expect("三方插件 sidecar 调用");
         assert_eq!(response["text"], "三方");
+        // 安装成功后事务目录不应累积残留（数据保留壳/坏残留即清）。
+        let transactions = root.path().join("plugins").join(".transactions");
+        let leftovers: Vec<_> = std::fs::read_dir(&transactions)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "事务目录残留：{:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
 
         // 移除公钥：下次启动即失效（重新发现验证时公钥缺失）。
         crate::trust::remove_trusted_publisher(root.path(), "acme-dev").unwrap();
