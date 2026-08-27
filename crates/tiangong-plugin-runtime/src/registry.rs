@@ -275,7 +275,7 @@ pub(crate) struct InstalledPlugin {
     directory: PathBuf,
     pub(crate) manifest: PluginManifest,
     enabled: bool,
-    signed_release: Option<SignedPluginRelease>,
+    pub(crate) signed_release: Option<SignedPluginRelease>,
 }
 
 struct LoadedPlugin {

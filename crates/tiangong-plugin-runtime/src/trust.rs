@@ -28,6 +28,24 @@ pub const LOCAL_PUBLISHER: &str = "local";
 const USER_SIGNING_KEY_FILE: &str = "user-signing.key";
 const TRUSTED_PUBLISHERS_FILE: &str = "trusted-publishers.json";
 
+/// 信任存储串行锁：用户密钥生成与登记表读写共用——防并发导入/移除丢失
+/// 更新、防密钥对双生成竞态（私钥 A 与公钥 B 混搭）。
+static TRUST_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 临时文件 + 原子改名落盘：写一半崩溃不会留下半截密钥/登记表。
+fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+    }
+    let temporary = path.with_extension(format!("tmp-{}", scru128::new()));
+    std::fs::write(&temporary, content)
+        .with_context(|| format!("写入临时文件失败: {}", temporary.display()))?;
+    std::fs::rename(&temporary, path)
+        .with_context(|| format!("原子落盘失败: {}", path.display()))?;
+    Ok(())
+}
+
 /// 已导入的第三方信任根条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPublisher {
@@ -103,6 +121,12 @@ pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
     if key_path.is_file() {
         return Ok(key_path);
     }
+    let _guard = TRUST_STORE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("信任存储锁已损坏"))?;
+    if key_path.is_file() {
+        return Ok(key_path);
+    }
     std::fs::create_dir_all(keys_root(storage_root))
         .with_context(|| format!("创建密钥目录失败: {}", keys_root(storage_root).display()))?;
     let keypair = minisign::KeyPair::generate_unencrypted_keypair().context("生成用户密钥失败")?;
@@ -111,7 +135,13 @@ pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
         .to_box(None)
         .context("序列化用户私钥失败")?
         .into_string();
-    write_private_file(&key_path, secret_text.as_bytes())?;
+    atomic_write(&key_path, secret_text.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("收紧私钥权限失败: {}", key_path.display()))?;
+    }
     let public_b64 = base64::engine::general_purpose::STANDARD.encode(
         keypair
             .pk
@@ -119,8 +149,10 @@ pub fn ensure_user_signing_key(storage_root: &Path) -> Result<PathBuf> {
             .context("序列化用户公钥失败")?
             .into_string(),
     );
-    std::fs::write(public_key_path(storage_root), format!("{public_b64}\n"))
-        .context("写入用户公钥失败")?;
+    atomic_write(
+        &public_key_path(storage_root),
+        format!("{public_b64}\n").as_bytes(),
+    )?;
     tracing::info!(key = %key_path.display(), "已生成插件用户签名密钥");
     Ok(key_path)
 }
@@ -130,32 +162,6 @@ pub fn public_key_path(storage_root: &Path) -> PathBuf {
     let mut path = user_key_path(storage_root).into_os_string();
     path.push(".pub");
     PathBuf::from(path)
-}
-
-fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, content))
-            .with_context(|| format!("写入用户私钥失败: {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        use std::io::Write;
-        if path.exists() {
-            bail!("用户私钥已存在: {}", path.display());
-        }
-        let mut file = std::fs::File::create(path)
-            .with_context(|| format!("写入用户私钥失败: {}", path.display()))?;
-        file.write_all(content)
-            .with_context(|| format!("写入用户私钥失败: {}", path.display()))?;
-    }
-    Ok(())
 }
 
 /// 读取用户公钥（base64 格式）。密钥未生成时返回错误（调用方先 ensure）。
@@ -174,6 +180,9 @@ pub fn import_trusted_publisher(
 ) -> Result<TrustedPublisher> {
     validate_publisher_id(publisher)?;
     let public_key_b64 = normalize_public_key_b64(public_key_b64)?;
+    let _guard = TRUST_STORE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("信任存储锁已损坏"))?;
     let mut publishers = load_trusted_publishers(storage_root)?;
     if publishers.iter().any(|entry| entry.publisher == publisher) {
         bail!("发布者 {publisher} 已存在；如需更换请先移除旧公钥");
@@ -193,6 +202,9 @@ pub fn import_trusted_publisher(
 
 /// 移除第三方公钥；返回是否确实移除。
 pub fn remove_trusted_publisher(storage_root: &Path, publisher: &str) -> Result<bool> {
+    let _guard = TRUST_STORE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("信任存储锁已损坏"))?;
     let mut publishers = load_trusted_publishers(storage_root)?;
     let before = publishers.len();
     publishers.retain(|entry| entry.publisher != publisher);
@@ -226,7 +238,7 @@ fn save_trusted_publishers(storage_root: &Path, publishers: &[TrustedPublisher])
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(publishers)?)
+    atomic_write(&path, &serde_json::to_vec_pretty(publishers)?)
         .with_context(|| format!("写入第三方公钥登记表失败: {}", path.display()))?;
     Ok(())
 }

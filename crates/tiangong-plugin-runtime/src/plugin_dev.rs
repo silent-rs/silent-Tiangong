@@ -14,6 +14,7 @@
 //! 均可复用本通道。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,88 @@ pub const PLUGIN_DEV_DIR: &str = "plugins-dev";
 const PROJECT_META_FILE: &str = ".plugin-dev.json";
 
 /// 处理一次 `plugin-dev.*` 桥接调用（权限校验由 bridge 层完成）。
+/// 自动签名安装的调用方身份（判定依据由宿主注入的策略消费）。
+pub struct InstallerIdentity {
+    pub plugin_id: String,
+    /// 调用方插件当前持有官方签名（发布者为官方保留标识，来自宿主侧
+    /// 注册表数据，不由前端传入）。
+    pub official_signed: bool,
+}
+
+/// 受信安装方判定：返回 true 才允许经桥接触发用户密钥自动签名安装。
+/// 由宿主启动时注入（策略含具体插件身份，runtime 保持插件中立）。
+pub type TrustedInstallerHandler = Arc<dyn Fn(&InstallerIdentity) -> bool + Send + Sync>;
+
+static TRUSTED_INSTALLER: std::sync::RwLock<Option<TrustedInstallerHandler>> =
+    std::sync::RwLock::new(None);
+
+/// 注入受信安装方判定（覆盖语义；缺失时 install fail-closed）。
+pub fn set_plugin_dev_trusted_installer(handler: TrustedInstallerHandler) {
+    if let Ok(mut current) = TRUSTED_INSTALLER.write() {
+        *current = Some(handler);
+    }
+}
+
+/// 清除受信安装方判定（测试隔离用：恢复 fail-closed 初始态）。
+#[cfg(test)]
+pub(crate) fn clear_plugin_dev_trusted_installer_for_test() {
+    if let Ok(mut current) = TRUSTED_INSTALLER.write() {
+        *current = None;
+    }
+}
+
+/// 受信构建登记：宿主观察者登记「受信插件的 sidecar 真实构建产出」的
+/// 项目。install 只接受有登记的项目——自动签名的授权对象是「使用 Creator
+/// 开发的产物」，产物必须经宿主进程内发起的真实构建，堵住前端自报身份
+/// 冒充安装任意目录内容的通道。
+static TRUSTED_BUILDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::OnceLock::new();
+
+fn trusted_builds() -> &'static std::sync::Mutex<std::collections::HashSet<(String, String)>> {
+    TRUSTED_BUILDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 登记一个受信构建（插件 × 项目）。仅宿主观察者调用。
+pub fn note_trusted_build(plugin_id: &str, project_id: &str) {
+    if let Ok(mut builds) = trusted_builds().lock() {
+        builds.insert((plugin_id.to_string(), project_id.to_string()));
+    }
+}
+
+/// 项目是否存在受信构建登记。
+pub fn has_trusted_build(plugin_id: &str, project_id: &str) -> bool {
+    trusted_builds()
+        .lock()
+        .map(|builds| builds.contains(&(plugin_id.to_string(), project_id.to_string())))
+        .unwrap_or(false)
+}
+
+/// install 桥接入口的授权检查：调用方是宿主判定的受信创作插件，且目标
+/// 项目存在受信构建登记。任一不满足即拒绝（fail-closed）。
+fn ensure_install_authorized(storage_root: &Path, plugin_id: &str, project_id: &str) -> Result<()> {
+    let official_signed = crate::registry::find_installed_plugin(storage_root, plugin_id)
+        .ok()
+        .and_then(|installed| installed.signed_release)
+        .is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
+    let handler = TRUSTED_INSTALLER
+        .read()
+        .ok()
+        .and_then(|current| current.clone())
+        .ok_or_else(|| anyhow::anyhow!("宿主未接入受信安装方判定，拒绝签名安装（fail-closed）"))?;
+    let identity = InstallerIdentity {
+        plugin_id: plugin_id.to_string(),
+        official_signed,
+    };
+    if !handler(&identity) {
+        bail!("插件 {plugin_id} 无自动签名安装资格（用户密钥签名安装仅限受信创作插件）");
+    }
+    if !has_trusted_build(plugin_id, project_id) {
+        bail!("项目 {project_id} 缺少受信构建登记（先经该插件的 sidecar 完成构建，再安装）");
+    }
+    Ok(())
+}
+
 pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     let install_dir = crate::registry::plugin_install_directory(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("plugin-dev 调用方插件 {plugin_id} 未加载"))?;
@@ -34,6 +117,7 @@ pub fn call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
     let result = match operation {
         "install" => {
             let request: IdRequest = parse_payload(payload)?;
+            ensure_install_authorized(&storage_root, plugin_id, &request.id)?;
             serde_json::to_value(install(&storage_root, &request.id)?)?
         }
         "list" => serde_json::to_value(list(&storage_root)?)?,
@@ -603,6 +687,110 @@ await runSidecar({
         assert!(
             format!("{error:#}").contains("需签名安装"),
             "应提示签名安装路径：{error:#}"
+        );
+    }
+
+    /// 安装授权四场景：fail-closed、非受信插件、缺构建登记、受信齐全。
+    /// 调用方插件为已安装的 node demo 插件（install 本体直调装好）。
+    #[test]
+    #[serial_test::serial]
+    fn 安装授权_四场景() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let caller = "node-sc-auth-caller";
+        make_project(root.path(), caller);
+        make_node_sidecar_release(root.path(), caller);
+        // 待安装的项目产物。
+        let target = "node-sc-auth-target";
+        make_project(root.path(), target);
+        make_node_sidecar_release(root.path(), target);
+        // 调用方插件本体先经 install 直调装好（其自身安装不经桥接授权）。
+        install(root.path(), caller).expect("调用方插件安装");
+
+        let payload = |id: &str| serde_json::json!({ "id": id }).to_string();
+
+        // 1) 未注入受信判定：fail-closed。
+        clear_plugin_dev_trusted_installer_for_test();
+        let error = call(caller, "plugin-dev.install", &payload(target))
+            .expect_err("未注入受信判定应 fail-closed");
+        assert!(format!("{error:#}").contains("fail-closed"), "{error:#}");
+
+        // 2) 非受信插件（判定只认别的插件）。
+        set_plugin_dev_trusted_installer(Arc::new(|identity: &InstallerIdentity| {
+            identity.plugin_id == "someone-else"
+        }));
+        let error =
+            call(caller, "plugin-dev.install", &payload(target)).expect_err("非受信插件应拒绝");
+        assert!(
+            format!("{error:#}").contains("无自动签名安装资格"),
+            "{error:#}"
+        );
+
+        // 3) 受信但缺构建登记。
+        let expected_caller = caller.to_string();
+        set_plugin_dev_trusted_installer(Arc::new(move |identity: &InstallerIdentity| {
+            identity.plugin_id == expected_caller
+        }));
+        let error =
+            call(caller, "plugin-dev.install", &payload(target)).expect_err("缺构建登记应拒绝");
+        assert!(
+            format!("{error:#}").contains("缺少受信构建登记"),
+            "{error:#}"
+        );
+
+        // 4) 受信 + 已登记：完整签名安装链成功。
+        note_trusted_build(caller, target);
+        let result =
+            call(caller, "plugin-dev.install", &payload(target)).expect("受信且已登记应安装成功");
+        assert!(result.contains(target), "{result}");
+        // 清理全局态，避免污染其他测试。
+        clear_plugin_dev_trusted_installer_for_test();
+    }
+
+    /// sidecar 结果观察者：bridge 的 sidecar.* 成功调用触发（宿主溯源登记
+    /// 的机制基础）。
+    #[test]
+    #[serial_test::serial]
+    fn sidecar观察者_成功调用触发() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        let id = "node-sc-observer";
+        make_project(root.path(), id);
+        make_node_sidecar_release(root.path(), id);
+        install(root.path(), id).expect("安装");
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let sink = Arc::clone(&observed);
+        crate::bridge::set_sidecar_result_observer(Arc::new(
+            move |plugin_id: &str, operation: &str, payload: &str, result: &str| {
+                let mut records = sink.lock().unwrap();
+                records.push((
+                    format!("{plugin_id}|{operation}|{payload}|{result}"),
+                    String::new(),
+                ));
+            },
+        ));
+        let response = crate::bridge_call(
+            id,
+            "sidecar.demo.echo",
+            &serde_json::json!({"text": "obs"}).to_string(),
+        )
+        .expect("sidecar 桥接调用");
+        assert!(response.contains("obs"), "{response}");
+        let records = observed.lock().unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|(record, _)| record.contains(&format!("{id}|demo.echo|"))),
+            "观察者应收到成功调用记录：{records:?}"
         );
     }
 

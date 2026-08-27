@@ -447,6 +447,50 @@ fn run_gui() {
                 ));
             }
 
+            // 统一签名信任的授权注入（runtime 保持插件中立，策略在宿主层）：
+            //
+            // 1) 受信安装方 = 官方签名的固定 Plugin Creator。自动签名安装
+            //    （用户密钥）只对该插件放行，其他插件（哪怕声明 plugin-dev.use）
+            //    不可触发；宿主未注入时 runtime fail-closed。
+            // 2) sidecar 结果观察者：官方 Creator 的 devkit.build 在默认开发根
+            //    下真实执行成功时登记「受信构建」。install 只接受有登记的
+            //    项目——签名授权的是「使用 Creator 开发的产物」，产物必须经
+            //    宿主进程内发起的真实构建，堵住前端自报身份冒装任意目录
+            //    内容的通道。
+            tiangong_plugin_runtime::set_plugin_dev_trusted_installer(Arc::new(
+                |identity: &tiangong_plugin_runtime::InstallerIdentity| {
+                    identity.plugin_id == "plugin-creator" && identity.official_signed
+                },
+            ));
+            tiangong_plugin_runtime::set_sidecar_result_observer(Arc::new(
+                |plugin_id: &str, operation: &str, payload: &str, _result: &str| {
+                    if plugin_id != "plugin-creator" || operation != "devkit.build" {
+                        return;
+                    }
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                        return;
+                    };
+                    // 非默认根（root 覆盖，测试/CI 用）不产生安装资格。
+                    if value
+                        .get("root")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|root| !root.trim().is_empty())
+                    {
+                        return;
+                    }
+                    let Some(project) = value
+                        .get("args")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|args| args.first())
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|project| !project.trim().is_empty())
+                    else {
+                        return;
+                    };
+                    tiangong_plugin_runtime::note_trusted_build(plugin_id, project);
+                },
+            ));
+
             // sidecar 主动通知（如终端 PTY 输出流）统一包装成 sidecar.event，
             // 经订阅表定向转发给已订阅的插件 UI；未注入时通知会被静默丢弃，
             // 终端等流式界面将收不到任何输出。

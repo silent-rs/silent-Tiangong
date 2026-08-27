@@ -37,10 +37,15 @@ pub use bridge::{
     set_browser_handler, set_dialog_handler, set_event_emitter, set_session_input_handler,
     set_terminal_handler, set_webview_handler,
 };
+pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,
+};
+pub use plugin_dev::{
+    InstallerIdentity, TrustedInstallerHandler, has_trusted_build, note_trusted_build,
+    set_plugin_dev_trusted_installer,
 };
 pub use seams::{SeamHub, SeamKind, SeamRegistration};
 pub use sidecar::{
