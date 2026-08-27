@@ -1,8 +1,16 @@
 # Silent-Tiangong（天工）
 
+[![License](https://img.shields.io/github/license/silent-rs/silent-Tiangong)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/silent-rs/silent-Tiangong)](https://github.com/silent-rs/silent-Tiangong/releases)
+[![CI](https://github.com/silent-rs/silent-Tiangong/actions/workflows/ci.yml/badge.svg)](https://github.com/silent-rs/silent-Tiangong/actions/workflows/ci.yml)
+
 > 面向个人工作流的桌面级 AI 自动化中枢：对话、规划、执行、记忆、工具调用、嵌入式浏览器、多智能体协作、移动端控制和定时任务。
 
-天工是一个基于 Rust、Tauri 和 silent 构建的个人智能终端。它既可以作为桌面 AI 助手使用，也可以通过 CLI 和 Server API 接入脚本、服务或外部消息通道。核心目标不是只回答问题，而是让 Agent 能围绕真实工作区读取资料、拆解任务、调用工具、执行命令、保存长期记忆，并在你主动要求分工时招募 Sub Agent 协作。天工内置嵌入式浏览器，Agent 可自主打开网页、读取页面内容、点击元素和填写表单，同时感知用户在浏览器中的操作行为，实现人机协同浏览；通过飞书、微信、QQ 等 IM 平台接入移动端控制，可随时随地远程驱动 Agent，配合定时任务和 Webhook 实现按计划或按事件自动执行。项目完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度。DeepSeek 适配已跟进 V4 新版接口（`deepseek-v4-pro` / `deepseek-v4-flash`），支持思考模式（`reasoning_effort` 分档控制）、结构化与文本协议双通道工具调用解析，以及流式 KV cache 命中率统计。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 的 kimi-k3 和 [智谱](https://www.bigmodel.cn/) 的 GLM5.2，其他模型可以通过自定义供应商接入。
+天工是一个基于 Rust、Tauri 和 silent 构建的个人智能终端，提供桌面 GUI、CLI 和 Server API 三种入口：既可作为桌面 AI 助手日常使用，也能接入脚本、服务或外部消息通道。核心目标不是只回答问题，而是让 Agent 能围绕真实工作区读取资料、拆解任务、调用工具、执行命令、保存长期记忆，并在你主动要求分工时招募 Sub Agent 协作。
+
+天工内置嵌入式浏览器，Agent 可自主打开网页、读取页面内容、点击元素和填写表单，同时感知用户在浏览器中的操作行为，实现人机协同浏览；通过飞书、微信、QQ 等 IM 平台接入移动端控制，可随时随地远程驱动 Agent，配合定时任务和 Webhook 实现按计划或按事件自动执行。
+
+模型方面，天工完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度；DeepSeek 适配已跟进 V4 新版接口（`deepseek-v4-pro` / `deepseek-v4-flash`），支持思考模式（`reasoning_effort` 分档控制）、结构化与文本协议双通道工具调用解析，以及流式 KV cache 命中率统计。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 的 kimi-k3 和 [智谱](https://www.bigmodel.cn/) 的 GLM5.2，其他模型可以通过自定义供应商接入。
 
 > 安全提示：天工当前未使用沙箱技术隔离工具执行环境。如果你对本地文件访问、命令执行或自动化操作的隔离要求较高，建议暂时考虑其他软件。
 
@@ -10,7 +18,13 @@
 
 ## 项目起源
 
-天工的出发点很简单：让 AI 不只是聊天，而是能真正帮你干活。遇到需要读文件、跑命令、查资料、操作网页这类实际工作，当前体验最好的是 Claude、Codex、OpenCode 这类 CLI 终端工具，但它们受限于终端环境，无法提供可视化的操作界面和交互反馈。主流大厂的产品则集中在两个方向：Claude 桌面端资源消耗巨大，ChatGPT 桌面端只有搜索能力，而且它们的核心场景都是 coding。对于普通用户来说，这些产品对接其他平台模型也不够直观，需要一定的折腾能力。更重要的是，现有工具在浏览网页等交互式场景中人的参与度过低——提交任务后只能等待结果，或者直接打断再继续和 Agent 沟通，缺乏实时协同的能力。天工内置嵌入式浏览器，用户和 Agent 可以同时操作同一个页面，Agent 自主完成任务的同时能感知用户的操作行为，实现真正的人机协同。再加上多智能体协作、长期记忆、多媒体生成等能力，以及桌面 GUI、CLI 和 Server 三种入口，不限于写代码，而是覆盖日常工作全场景的个人智能终端。整个项目用 Rust 构建，单机运行，数据本地存储，不依赖云服务。
+天工的出发点很简单：让 AI 不只是聊天，而是能真正帮你干活。遇到需要读文件、跑命令、查资料、操作网页这类实际工作，当前体验最好的是 Claude、Codex、OpenCode 这类 CLI 终端工具，但它们受限于终端环境，无法提供可视化的操作界面和交互反馈。
+
+主流大厂的产品则集中在两个方向：Claude 桌面端资源消耗巨大，ChatGPT 桌面端只有搜索能力，而且它们的核心场景都是 coding。对于普通用户来说，这些产品对接其他平台模型也不够直观，需要一定的折腾能力。更重要的是，现有工具在浏览网页等交互式场景中人的参与度过低——提交任务后只能等待结果，或者直接打断再继续和 Agent 沟通，缺乏实时协同的能力。
+
+天工的答案是内置嵌入式浏览器：用户和 Agent 可以同时操作同一个页面，Agent 自主完成任务的同时能感知用户的操作行为，实现真正的人机协同。再加上多智能体协作、长期记忆、多媒体生成等能力，以及桌面 GUI、CLI 和 Server 三种入口，不限于写代码，而是覆盖日常工作全场景的个人智能终端。
+
+整个项目用 Rust 构建，单机运行，数据本地存储，不依赖云服务。
 
 ## 核心能力
 
@@ -294,4 +308,4 @@ yarn --cwd frontend dev
 
 ## 许可证
 
-Apache License 2.0
+[Apache License 2.0](LICENSE)
