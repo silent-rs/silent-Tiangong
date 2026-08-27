@@ -233,9 +233,11 @@ fn configure_command_lifecycle(command: &mut Command) -> Result<()> {
             use std::os::unix::process::CommandExt;
             command.pre_exec(move || {
                 if let Some(limit) = cpu_limit {
+                    // 硬限略高于软限：软限 SIGXCPU 先行可归因，硬限 SIGKILL
+                    // 兜底（软硬同值时 Linux 直接 SIGKILL，Launcher 层同理）。
                     let limit = libc::rlimit {
                         rlim_cur: limit as libc::rlim_t,
-                        rlim_max: limit as libc::rlim_t,
+                        rlim_max: limit.saturating_add(1) as libc::rlim_t,
                     };
                     if libc::setrlimit(libc::RLIMIT_CPU, &limit) != 0 {
                         return Err(std::io::Error::last_os_error());

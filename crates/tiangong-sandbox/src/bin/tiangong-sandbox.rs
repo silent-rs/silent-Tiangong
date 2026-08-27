@@ -235,9 +235,12 @@ fn apply_unix_resource_limits(
             // 以宏在调用点展开让 libc 常量类型自然匹配。
             macro_rules! apply {
                 ($resource:expr, $value:expr) => {{
+                    // 硬限略高于软限：软限到期发 SIGXCPU（默认终止，可归因），
+                    // 无视它的进程由硬限 SIGKILL 兜底；软硬同值时 Linux 会
+                    // 直接 SIGKILL，终止原因无法与外部强杀区分。
                     let wanted = libc::rlimit {
                         rlim_cur: ($value) as libc::rlim_t,
-                        rlim_max: ($value) as libc::rlim_t,
+                        rlim_max: ($value).saturating_add(1) as libc::rlim_t,
                     };
                     if libc::setrlimit($resource, &wanted) == 0 {
                         Ok(())
