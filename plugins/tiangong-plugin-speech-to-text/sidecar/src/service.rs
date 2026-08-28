@@ -11,8 +11,9 @@ use tiangong_plugin_runtime::protocol::{
 use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
 use tiangong_plugin_speech_to_text_protocol::{
     Empty, PLUGIN_ID, PLUGIN_VERSION, RECORD_CANCEL_OPERATION, RECORD_START_OPERATION,
-    RECORD_STOP_OPERATION, RecordStartRequest, RecordStartResponse, RecordStopResponse,
-    STT_PROTOCOL_VERSION, TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse,
+    RECORD_STOP_OPERATION, RecordControlRequest, RecordStartRequest, RecordStartResponse,
+    RecordStopResponse, STT_PROTOCOL_VERSION, TRANSCRIBE_OPERATION, TranscribeRequest,
+    TranscribeResponse,
 };
 
 pub struct SttService;
@@ -80,14 +81,16 @@ async fn dispatch_operation(
         }
 
         RECORD_STOP_OPERATION => {
-            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
-            let result = record_stop()?;
+            let req: RecordControlRequest =
+                serde_json::from_value(payload).context("解析 record_stop 请求失败")?;
+            let result = record_stop(req)?;
             serde_json::to_value(result).context("序列化 record_stop 响应失败")
         }
 
         RECORD_CANCEL_OPERATION => {
-            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
-            record_cancel()?;
+            let req: RecordControlRequest =
+                serde_json::from_value(payload).context("解析 record_cancel 请求失败")?;
+            record_cancel(req)?;
             serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
         }
 
@@ -161,11 +164,13 @@ async fn transcribe(req: TranscribeRequest) -> Result<TranscribeResponse> {
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
-/// 一次录音会话：录音进程 + 本次的输出文件与采样率。
+/// 一次录音会话：录音进程 + 本次的输出文件、采样率与会话 ID。
 struct RecordSession {
     child: std::process::Child,
     file_path: std::path::PathBuf,
     sample_rate: u32,
+    /// 会话 ID：停止/取消请求必须携带且匹配，防止迟到的旧请求误杀新录音。
+    session_id: String,
 }
 
 static RECORDING: Mutex<Option<RecordSession>> = Mutex::new(None);
@@ -247,6 +252,7 @@ fn record_start(req: RecordStartRequest) -> Result<RecordStartResponse> {
         child,
         file_path,
         sample_rate,
+        session_id: session_id.clone(),
     });
     Ok(RecordStartResponse { session_id })
 }
@@ -333,14 +339,12 @@ fn stop_recording_child(session: &mut RecordSession) {
     let _ = session.child.wait();
 }
 
-/// 停止录音：优雅终止进程 → 校验/修复 WAV 头 → 返回音频文件路径与时长。
-fn record_stop() -> Result<RecordStopResponse> {
+/// 停止录音：会话匹配校验 → 优雅终止进程 → 校验/修复 WAV 头 → 返回文件路径与时长。
+fn record_stop(req: RecordControlRequest) -> Result<RecordStopResponse> {
     let mut guard = RECORDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut session = guard
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("当前没有录音在进行中"))?;
+    let mut session = take_matching_session(&mut guard, &req)?;
 
     stop_recording_child(&mut session);
 
@@ -356,16 +360,41 @@ fn record_stop() -> Result<RecordStopResponse> {
     })
 }
 
-/// 取消录音：终止进程并删除录音文件（用户放弃，不保留产物）。
-fn record_cancel() -> Result<()> {
+/// 取消录音：会话匹配校验 → 终止进程并删除录音文件（用户放弃，不保留产物）。
+///
+/// 没有录音或会话不匹配时静默成功：取消是幂等操作，迟到的旧取消请求
+/// 不应向用户报错。
+fn record_cancel(req: RecordControlRequest) -> Result<()> {
     let mut guard = RECORDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(mut session) = guard.take() {
+    if let Ok(mut session) = take_matching_session(&mut guard, &req) {
         stop_recording_child(&mut session);
         let _ = std::fs::remove_file(&session.file_path);
     }
     Ok(())
+}
+
+/// 取出与请求会话 ID 匹配的录音会话；不匹配时**不动现有录音**并返回错误。
+///
+/// 防竞态核心：迟到的旧取消/停止请求（session_id 是旧录音的）不能终止
+/// 已经开始的新录音——会话 ID 不匹配直接报错，RECORDING 槽位保持原样。
+fn take_matching_session(
+    guard: &mut Option<RecordSession>,
+    req: &RecordControlRequest,
+) -> Result<RecordSession> {
+    let session = guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("当前没有录音在进行中"))?;
+    if session.session_id != req.session_id {
+        // 放回新录音，拒绝旧会话的请求。
+        *guard = Some(session);
+        anyhow::bail!(
+            "录音会话不匹配（请求 {}，当前为其他会话），已忽略",
+            req.session_id
+        );
+    }
+    Ok(session)
 }
 
 /// 校验并重写 WAV 头部长度字段。

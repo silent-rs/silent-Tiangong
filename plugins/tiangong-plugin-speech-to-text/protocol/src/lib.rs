@@ -39,13 +39,13 @@ impl SttOperation for RecordStart {
 
 impl SttOperation for RecordStop {
     const NAME: &'static str = RECORD_STOP_OPERATION;
-    type Request = Empty;
+    type Request = RecordControlRequest;
     type Response = RecordStopResponse;
 }
 
 impl SttOperation for RecordCancel {
     const NAME: &'static str = RECORD_CANCEL_OPERATION;
-    type Request = Empty;
+    type Request = RecordControlRequest;
     type Response = Empty;
 }
 
@@ -84,6 +84,16 @@ pub struct RecordStartRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordStartResponse {
     /// 录音会话 ID（用于停止录音）。
+    pub session_id: String,
+}
+
+/// 停止/取消录音请求：只作用于 `session_id` 匹配的录音会话。
+///
+/// 防竞态：取消是异步落地的前端请求，若不校验身份，快速"取消 → 再录"时
+/// 迟到的旧取消请求会终止新录音。会话 ID 由 record_start 返回，前端保存
+/// 并随停止/取消请求带回。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordControlRequest {
     pub session_id: String,
 }
 

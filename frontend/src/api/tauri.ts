@@ -1071,14 +1071,14 @@ export const api = {
     api.bridgeCall('speech-to-text', 'plugin.record_start', '{}')
       .then((raw) => JSON.parse(raw)),
 
-  /** 停止录音（经 stt 插件）。返回音频文件路径。 */
-  stopRecording: (): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_stop', '{}')
+  /** 停止录音（经 stt 插件）。返回音频文件路径。session_id 为开始录音返回的会话 ID。 */
+  stopRecording: (sessionId: string): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_stop', JSON.stringify({ session_id: sessionId }))
       .then((raw) => JSON.parse(raw)),
 
-  /** 取消录音（经 stt 插件）：终止录音进程并丢弃录音文件。 */
-  cancelRecording: (): Promise<void> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_cancel', '{}')
+  /** 取消录音（经 stt 插件）：终止录音进程并丢弃录音文件（带会话 ID 校验）。 */
+  cancelRecording: (sessionId: string): Promise<void> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_cancel', JSON.stringify({ session_id: sessionId }))
       .then(() => undefined),
 
   // ----------------------------------------------------------------

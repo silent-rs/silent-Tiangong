@@ -12,8 +12,9 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_speech_to_text_protocol::{
-    Empty, RecordCancel, RecordStart, RecordStartRequest, RecordStartResponse, RecordStop,
-    RecordStopResponse, TOOL_SPEECH_TO_TEXT, Transcribe, TranscribeRequest, TranscribeResponse,
+    Empty, RecordCancel, RecordControlRequest, RecordStart, RecordStartRequest,
+    RecordStartResponse, RecordStop, RecordStopResponse, TOOL_SPEECH_TO_TEXT, Transcribe,
+    TranscribeRequest, TranscribeResponse,
 };
 
 mod descriptor {
@@ -167,15 +168,17 @@ impl UiGuest for Component {
                     .map_err(|e| plugin_err(format!("序列化 record_start 响应失败: {e}")))?
             }
             "record_stop" => {
-                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
-                let response: RecordStopResponse = sidecar_client::invoke::<RecordStop>(&Empty {})
+                let req: RecordControlRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 record_stop 请求失败: {e}")))?;
+                let response: RecordStopResponse = sidecar_client::invoke::<RecordStop>(&req)
                     .map_err(|e| plugin_err(format!("停止录音失败: {e}")))?;
                 serde_json::to_string(&response)
                     .map_err(|e| plugin_err(format!("序列化 record_stop 响应失败: {e}")))?
             }
             "record_cancel" => {
-                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
-                let _: Empty = sidecar_client::invoke::<RecordCancel>(&Empty {})
+                let req: RecordControlRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 record_cancel 请求失败: {e}")))?;
+                let _: Empty = sidecar_client::invoke::<RecordCancel>(&req)
                     .map_err(|e| plugin_err(format!("取消录音失败: {e}")))?;
                 "{}".to_string()
             }
