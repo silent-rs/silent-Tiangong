@@ -136,15 +136,59 @@ function squeezeToSingleLine(text: string): string {
     .join(" ");
 }
 
+/**
+ * terminal 调用参数组合为完整命令文本：摘要与终端展开卡共用同一来源。
+ * 兼容三种形态：位置数组 [cmd, ...args]、对象 {cmd, args}（run_command 当前 schema）、
+ * 对象 {script | command}（run_shell 等）。shell 脚本保留多行原文；
+ * exec 形态空格连接全部部分，与后端 formatting.rs 的命令行对齐。
+ */
+function terminalCommandFromArgs(args: unknown): string | null {
+  if (args === undefined || args === null) return null;
+
+  if (Array.isArray(args)) {
+    const visible = filterCwdArgs(args);
+    if (visible.length === 0) return null;
+    if (visible[0] === SHELL_SENTINEL) {
+      const script = visible[1];
+      return typeof script === "string" && script ? script : null;
+    }
+    const parts = visible
+      .filter((item): item is string => typeof item === "string" && item !== SHELL_SENTINEL)
+      .map((item) => squeezeToSingleLine(item))
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join(" ") : null;
+  }
+
+  if (typeof args === "object") {
+    const record = args as Record<string, unknown>;
+    // exec 对象形态：cmd 与参数列表拼接为完整命令，缺省 args 时命令即 cmd 本身。
+    if (typeof record.cmd === "string" && record.cmd) {
+      const parts = Array.isArray(record.args)
+        ? record.args
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => squeezeToSingleLine(item))
+            .filter(Boolean)
+        : [];
+      return parts.length > 0 ? [record.cmd, ...parts].join(" ") : record.cmd;
+    }
+    const script = record.script ?? record.command;
+    if (typeof script === "string" && script) return script;
+    return null;
+  }
+
+  if (typeof args === "string" && args) return args;
+  return null;
+}
+
 /** 从调用参数提取单行摘要（多行命令压缩去换行）；参数兼容位置数组与对象。 */
 function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
   if (args === undefined || args === null) return null;
 
   if (Array.isArray(args)) {
     const visible = filterCwdArgs(args);
-    if (variant === "terminal" && visible[0] === SHELL_SENTINEL) {
-      const script = typeof visible[1] === "string" ? visible[1] : "";
-      if (script) return clamp(squeezeToSingleLine(script), SUMMARY_MAX_CHARS);
+    if (variant === "terminal") {
+      const command = terminalCommandFromArgs(visible);
+      if (command) return clamp(squeezeToSingleLine(command), SUMMARY_MAX_CHARS);
       return null;
     }
     const first = visible.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
@@ -154,6 +198,10 @@ function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
 
   if (typeof args === "object") {
     const record = args as Record<string, unknown>;
+    if (variant === "terminal") {
+      const command = terminalCommandFromArgs(record);
+      if (command) return clamp(squeezeToSingleLine(command), SUMMARY_MAX_CHARS);
+    }
     const keyPreference: Record<ToolVariant, readonly string[]> = {
       terminal: ["script", "cmd", "command", "description"],
       "file-read": ["path", "file_path", "url"],
@@ -364,19 +412,8 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   let terminal: TerminalMaterial | null = null;
   if (variant === "terminal") {
-    const visibleArgs = Array.isArray(args) ? filterCwdArgs(args) : [];
-    const command = (() => {
-      if (visibleArgs[0] === SHELL_SENTINEL && typeof visibleArgs[1] === "string") {
-        return visibleArgs[1];
-      }
-      // 对象参数（run_shell {script} / run_command {cmd}）：取完整命令文本。
-      if (args && typeof args === "object" && !Array.isArray(args)) {
-        const record = args as Record<string, unknown>;
-        const script = record.script ?? record.cmd ?? record.command;
-        if (typeof script === "string" && script) return script;
-      }
-      return argSummary;
-    })();
+    // 展开卡命令与摘要共用 terminalCommandFromArgs，保证两处显示一致。
+    const command = terminalCommandFromArgs(args) ?? argSummary;
     terminal = { command: command ?? null, stdout: outputText, stderr: null };
   }
 
