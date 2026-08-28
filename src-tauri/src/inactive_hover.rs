@@ -71,39 +71,42 @@ pub fn spawn(app: AppHandle) {
 }
 
 /// 轮询线程只负责节奏与决策；AppKit 访问（NSEvent/NSWindow/NSView/坐标
-/// 转换/窗口状态）经 `run_on_main_thread` 在主线程执行，上轮未完成时不
-/// 再提交，避免任务在主线程堆积。
+/// 转换/窗口状态）经 `run_on_main_thread` 在主线程执行。`in_flight` 仅由
+/// 主线程闭包在完成时复位：主线程持续繁忙时旧任务始终占位，后续轮询一律
+/// 跳过、不再提交，队列中至多积压一个任务；每轮使用独立的一次性通道，
+/// 超时轮的接收端丢弃后，迟到结果发送失败自然作废，不会串轮消费。
 fn poll_loop(app: AppHandle) {
     // 上次下发的页面坐标；None 表示当前不在「未激活且鼠标在页面内」状态
     let mut last: Option<InactiveCursorPoint> = None;
     // 最近一次确认鼠标在页面内的时刻（含静止未下发坐标的轮次）
     let mut in_page_at: Option<Instant> = None;
-    let (tx, rx) = mpsc::channel::<Sample>();
     let in_flight = Arc::new(AtomicBool::new(false));
 
     loop {
         std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
 
         if in_flight.swap(true, Ordering::AcqRel) {
-            // 上一轮主线程采样未返回，跳过本轮
+            // 上一轮主线程采样未返回（含超时后仍在排队的旧任务），跳过本轮
             continue;
         }
+        let (tx, rx) = mpsc::channel::<Sample>();
         let app_handle = app.clone();
-        let sender = tx.clone();
         let done = Arc::clone(&in_flight);
         let submit = app.run_on_main_thread(move || {
             let sample = sample_on_main_thread(&app_handle);
-            let _ = sender.send(sample);
+            let _ = tx.send(sample);
             done.store(false, Ordering::Release);
         });
         if submit.is_err() {
+            // 任务未提交（app 退出），由本线程复位并结束轮询
+            in_flight.store(false, Ordering::Release);
             break;
         }
         let sample = match rx.recv_timeout(Duration::from_millis(SAMPLE_TIMEOUT_MS)) {
             Ok(sample) => sample,
             Err(_) => {
-                // 主线程繁忙未按时返回，放弃本轮结果
-                in_flight.store(false, Ordering::Release);
+                // 主线程繁忙未按时返回：不消费结果也不复位 in_flight，
+                // 后续轮询持续跳过，直到旧任务在主线程完成并复位
                 continue;
             }
         };
