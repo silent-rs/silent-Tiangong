@@ -21,7 +21,7 @@
         "properties": {
           "cmd": {
             "type": "string",
-            "description": "命令名"
+            "description": "命令名（可含参数，自动拆分）"
           },
           "args": {
             "type": "array",

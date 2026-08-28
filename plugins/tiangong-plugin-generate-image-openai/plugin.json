@@ -26,5 +26,8 @@
       "kind": "chat",
       "required": false
     }
-  ]
+  ],
+  "mention": {
+    "hint": "根据文字描述生成图片（OpenAI）"
+  }
 }

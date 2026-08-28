@@ -27,5 +27,8 @@
       "kind": "stt",
       "required": true
     }
-  ]
+  ],
+  "mention": {
+    "hint": "将语音转写为文本（录音或音频文件）"
+  }
 }

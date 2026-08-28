@@ -1037,7 +1037,9 @@ export const api = {
     invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>
-    api.hasModelCapability('tts'),
+    api.listPlugins().then((plugins) =>
+      plugins.some((p) => p.id === 'text-to-speech' && p.enabled),
+    ),
 
   listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
     api.bridgeCall('text-to-speech', 'plugin.list_models', '{}')
@@ -1054,7 +1056,9 @@ export const api = {
   // 语音识别（经 stt 插件，前端经 bridge.call 调用插件 handle_view_message）
   // ----------------------------------------------------------------
   hasSttCapability: (): Promise<boolean> =>
-    api.hasModelCapability('stt'),
+    api.listPlugins().then((plugins) =>
+      plugins.some((p) => p.id === 'speech-to-text' && p.enabled),
+    ),
 
   /** 转录音频文件（经 stt 插件）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
   transcribeSpeech: (filePath: string): Promise<{ text: string; audio_path: string; duration?: number }> =>

@@ -26,5 +26,8 @@
       "kind": "video_generation",
       "required": true
     }
-  ]
+  ],
+  "mention": {
+    "hint": "根据文字描述生成视频"
+  }
 }

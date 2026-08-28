@@ -15,5 +15,6 @@
   "permissions": [
     "model-config.read",
     "sidecar.invoke"
-  ]
+  ],
+  "entrypoints": ["desktop", "cli", "server"]
 }

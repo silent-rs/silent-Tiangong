@@ -27,5 +27,8 @@
       "kind": "tts",
       "required": true
     }
-  ]
+  ],
+  "mention": {
+    "hint": "将文本合成为语音并播放"
+  }
 }

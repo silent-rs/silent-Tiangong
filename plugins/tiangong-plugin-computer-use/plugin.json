@@ -13,5 +13,8 @@
     "request_timeout_ms": 60000
   },
   "permissions": ["sidecar.invoke"],
-  "entrypoints": ["desktop", "cli", "server"]
+  "entrypoints": ["desktop", "cli", "server"],
+  "mention": {
+    "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入"
+  }
 }

@@ -6,5 +6,6 @@
     "binary": "tiangong_plugin_prompt_wasm.wasm"
   },
   "permissions": [],
-  "storage_access": true
+  "storage_access": true,
+  "entrypoints": ["desktop", "cli", "server"]
 }

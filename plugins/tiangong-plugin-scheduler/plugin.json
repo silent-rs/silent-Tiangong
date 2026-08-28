@@ -12,5 +12,9 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"]
+  "permissions": ["app-storage.read", "sidecar.invoke"],
+  "entrypoints": ["desktop", "cli", "server"],
+  "mention": {
+    "hint": "创建、管理定时任务（Cron 调度）"
+  }
 }
