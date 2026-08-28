@@ -3,7 +3,7 @@ import { useSearchStore } from "@/store/useSearchStore";
 import { findSearchMatches } from "@/utils/search";
 import { SearchBar } from "./SearchBar";
 import { ScrollArea } from "./ui/scroll-area";
-import { RulerScrollbar, TurnPreviewCard } from "./ui/ruler-scrollbar";
+import { RulerScrollbar, TurnPreviewCard, type RulerScrollbarHandle } from "./ui/ruler-scrollbar";
 import {
   Loader2,
   Cpu,
@@ -99,23 +99,48 @@ export function MessageList() {
   // 由宿主轮询全局鼠标并经 window:inactive_cursor 下发窗口内坐标，
   // 坐标命中导航热区时以 inactiveHover 替代 :hover 唤出导航。
   const navigationRef = useRef<HTMLDivElement>(null);
+  const rulerNavRef = useRef<RulerScrollbarHandle>(null);
   const [inactiveHover, setInactiveHover] = useState(false);
+  // 监听回调读取当前预览卡位置（卡片区桥接判定），避免重订阅
+  const railHoverInfoRef = useRef(railHoverInfo);
+  railHoverInfoRef.current = railHoverInfo;
 
   useEffect(() => {
     const unlisten = listen<{ x: number; y: number } | null>('window:inactive_cursor', (event) => {
       const point = event.payload;
-      if (!point) {
+      const rect = navigationRef.current?.getBoundingClientRect();
+      if (!point || !rect) {
         setInactiveHover(false);
+        rulerNavRef.current?.externalPointer(null);
         return;
       }
-      const rect = navigationRef.current?.getBoundingClientRect();
-      setInactiveHover(
-        !!rect &&
-          point.x >= rect.left &&
-          point.x <= rect.right &&
-          point.y >= rect.top &&
-          point.y <= rect.bottom,
-      );
+      const inNavZone =
+        point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+      if (inNavZone) {
+        setInactiveHover(true);
+        // 坐标转发进刻度尺：驱动横条变宽/高亮与预览卡（等同真实 pointermove）
+        rulerNavRef.current?.externalPointer(point.y);
+        return;
+      }
+      // 预览卡桥接：卡片位于导航条左侧，后台窗口收不到卡片自身的 mouseenter，
+      // 鼠标位于卡片估计矩形内时保持导航与卡片显示，给后台点击留出停留时间。
+      const hover = railHoverInfoRef.current;
+      if (hover) {
+        const cardHalf = 88;
+        const cardTop =
+          rect.top + Math.min(Math.max(hover.y, cardHalf), Math.max(cardHalf, hover.trackH - cardHalf)) - cardHalf;
+        const inCardZone =
+          point.x >= rect.right - 56 - 320 &&
+          point.x <= rect.right - 56 &&
+          point.y >= cardTop - 12 &&
+          point.y <= cardTop + cardHalf * 2 + 12;
+        if (inCardZone) {
+          setInactiveHover(true);
+          return;
+        }
+      }
+      setInactiveHover(false);
+      rulerNavRef.current?.externalPointer(null);
     });
     // 窗口激活后交还给 CSS :hover（鼠标仍在热区时 hover 即时接管）
     const handleWindowFocus = () => setInactiveHover(false);
@@ -926,6 +951,7 @@ export function MessageList() {
     {userCount > 0 && (
     <div ref={navigationRef} className="group/navigation absolute inset-y-0 right-0 z-20 w-[54px]">
     <RulerScrollbar
+      ref={rulerNavRef}
       markerCount={turnNodes.length}
       bottomInset={152}
       className={`transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100' : ' opacity-0'}`}
