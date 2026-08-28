@@ -2772,13 +2772,14 @@ fn search_interpreter_program(runtime: SidecarRuntime) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// 进程入口最早调用（任何后台线程启动前）：探测缺失的解释器并注入进程
-/// 环境变量，使插件 sidecar 与命令通道整棵子进程树可见。
+/// 进程入口最早调用（任何后台线程启动前）：探测解释器并注入进程环境，
+/// 使插件 sidecar 与命令通道整棵子进程树可见。
 ///
-/// - 仅当 `TIANGONG_NODE_PATH` / `TIANGONG_PYTHON_PATH` 未设置时写入，
-///   外部显式指定（开发调试、CI）优先，不覆盖；
-/// - 同时把解释器所在目录前置进 PATH（已包含则跳过），命令通道可直接
-///   调用 node/yarn/npx 等；
+/// - `TIANGONG_NODE_PATH` / `TIANGONG_PYTHON_PATH` 未设置时写入探测结果；
+///   外部显式指定（开发调试、CI）不覆盖，路径无效时跳过留待运行时
+///   fail-loud 报错；
+/// - 无论显式还是探测所得，均把解释器所在目录前置进 PATH（已包含则
+///   跳过），sidecar 派生的 node/yarn/npx 等命令通道子进程直接可用；
 /// - 未探测到时不做任何改动，留待运行时报错引导安装；
 /// - `std::env::set_var` 与并发读存在数据竞争，本函数只允许在 main
 ///   最开头、线程池启动前调用。
@@ -2787,14 +2788,20 @@ pub fn ensure_interpreter_env() {
         (SidecarRuntime::Node, "TIANGONG_NODE_PATH"),
         (SidecarRuntime::Python, "TIANGONG_PYTHON_PATH"),
     ] {
-        let externally_set = std::env::var_os(env_key).is_some_and(|value| !value.is_empty());
-        if externally_set {
-            continue;
-        }
-        let Some(program) = search_interpreter_program(runtime) else {
-            continue;
+        let explicit = std::env::var_os(env_key)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let program = match explicit {
+            Some(path) if path.is_file() => path,
+            Some(_) => continue,
+            None => match search_interpreter_program(runtime) {
+                Some(discovered) => {
+                    unsafe { std::env::set_var(env_key, &discovered) };
+                    discovered
+                }
+                None => continue,
+            },
         };
-        unsafe { std::env::set_var(env_key, &program) };
         if let Some(bin_dir) = program.parent()
             && let Some(value) =
                 prepend_dir_to_path_value(&std::env::var_os("PATH").unwrap_or_default(), bin_dir)
@@ -2821,23 +2828,54 @@ fn prepend_dir_to_path_value(
 
 /// PATH 未命中时的常见安装位置：版本管理器目录从新到旧，系统级位置殿后。
 fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
+    let home = user_home_dir();
     let mut locations = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let versioned: &[(&str, &str)] = match runtime {
-            SidecarRuntime::Node => &[
-                (".nvm/versions/node", "bin/node"),
-                (".asdf/installs/nodejs", "bin/node"),
-            ],
-            SidecarRuntime::Python => &[(".pyenv/versions", "bin/python3")],
-            SidecarRuntime::Native => &[],
-        };
-        for (root, leaf) in versioned {
-            locations.extend(versioned_bin_candidates(&home.join(root), leaf));
+    let versioned: Vec<(PathBuf, &str)> = match runtime {
+        SidecarRuntime::Native => Vec::new(),
+        SidecarRuntime::Node => {
+            if cfg!(windows) {
+                // nvm-windows：%APPDATA%\nvm\v<ver>\node.exe
+                std::env::var_os("APPDATA")
+                    .map(|appdata| vec![(PathBuf::from(appdata).join("nvm"), "node.exe")])
+                    .unwrap_or_default()
+            } else {
+                home.as_ref()
+                    .map(|home| {
+                        vec![
+                            (home.join(".nvm/versions/node"), "bin/node"),
+                            (home.join(".asdf/installs/nodejs"), "bin/node"),
+                        ]
+                    })
+                    .unwrap_or_default()
+            }
         }
-        if matches!(runtime, SidecarRuntime::Node) {
-            locations.push(home.join(".volta/bin/node"));
+        SidecarRuntime::Python => {
+            if cfg!(windows) {
+                // 官方安装器默认位置：用户级 %LOCALAPPDATA%\Programs\Python\Python3xx\、
+                // 系统级 C:\Program Files\Python3xx\
+                let mut roots = Vec::new();
+                if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                    roots.push((
+                        PathBuf::from(local).join("Programs").join("Python"),
+                        "python.exe",
+                    ));
+                }
+                roots.push((
+                    PathBuf::from(r"C:\Program Files").join("Python"),
+                    "python.exe",
+                ));
+                roots
+            } else {
+                home.as_ref()
+                    .map(|home| vec![(home.join(".pyenv/versions"), "bin/python3")])
+                    .unwrap_or_default()
+            }
         }
+    };
+    for (root, leaf) in versioned {
+        locations.extend(versioned_bin_candidates(&root, leaf));
     }
+    let home = home.as_ref();
     match runtime {
         SidecarRuntime::Node => {
             if cfg!(target_os = "macos") {
@@ -2846,8 +2884,18 @@ fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
                     PathBuf::from("/usr/local/bin/node"),
                 ]);
             } else if cfg!(windows) {
+                if let Some(home) = home {
+                    locations.extend([
+                        home.join(".volta").join("bin").join("node.exe"),
+                        home.join("scoop").join("shims").join("node.exe"),
+                    ]);
+                }
+                // nvm-windows 启用时此路径为指向当前版本的 symlink
                 locations.push(PathBuf::from(r"C:\Program Files\nodejs\node.exe"));
             } else {
+                if let Some(home) = home {
+                    locations.push(home.join(".volta/bin/node"));
+                }
                 locations.extend([
                     PathBuf::from("/usr/local/bin/node"),
                     PathBuf::from("/usr/bin/node"),
@@ -2891,15 +2939,17 @@ fn versioned_bin_candidates(root: &Path, leaf: &str) -> Vec<PathBuf> {
 }
 
 /// 版本目录名（`v22.16.0` / `22.16.0`）转数字段序列供排序；带后缀
-/// （如 pyenv 的 `3.11.0-env`）只取主版本段，无法解析的段按 0 计。
+/// （如 pyenv 的 `3.11.0-env`）只取主版本段；混合段（如 Windows Python
+/// 的 `Python312`）取段内数字拼接比较；无法解析的段按 0 计。
 fn version_sort_key(name: &str) -> Vec<u64> {
     name.trim_start_matches(['v', 'V'])
         .split('.')
         .map(|part| {
-            part.split_once('-')
-                .map_or(part, |(major, _)| major)
-                .parse()
-                .unwrap_or(0)
+            let part = part.split_once('-').map_or(part, |(major, _)| major);
+            part.parse().unwrap_or_else(|_| {
+                let digits: String = part.chars().filter(|c| c.is_ascii_digit()).collect();
+                digits.parse().unwrap_or(0)
+            })
         })
         .collect()
 }
@@ -2964,6 +3014,32 @@ fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
 mod interpreter_discovery_tests {
     use super::*;
 
+    /// 测试内临时覆盖环境变量并在退出（含 panic）时恢复原值。同 crate 中
+    /// 仅本模块使用，且同一变量同一时刻只有一个测试覆盖，无并行冲突。
+    struct EnvRestore {
+        key: &'static str,
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn overlay(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let saved = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, saved }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn version_sort_key_orders_segments_numerically() {
         let mut names = vec!["v9.11.2", "v22.16.0", "v10.24.1"];
@@ -2975,22 +3051,20 @@ mod interpreter_discovery_tests {
     fn version_sort_key_tolerates_prefix_and_suffix() {
         assert_eq!(version_sort_key("v22.16.0"), version_sort_key("22.16.0"));
         assert!(version_sort_key("3.11.0-env") > version_sort_key("3.10.9"));
+        assert!(version_sort_key("Python312") > version_sort_key("Python39"));
         assert_eq!(version_sort_key("not-a-version"), vec![0]);
     }
 
     #[test]
     fn prepend_dir_to_path_value_prepends_and_deduplicates() {
         let directory = PathBuf::from("/opt/homebrew/bin");
-        let value =
-            prepend_dir_to_path_value(std::ffi::OsStr::new("/usr/bin:/bin"), &directory).unwrap();
-        assert_eq!(
-            std::env::split_paths(&value).collect::<Vec<_>>(),
-            [
-                PathBuf::from("/opt/homebrew/bin"),
-                PathBuf::from("/usr/bin"),
-                PathBuf::from("/bin"),
-            ]
-        );
+        let tail = [PathBuf::from("/usr/bin"), PathBuf::from("/bin")];
+        // 用 join/split 按平台分隔符构造与校验，输入输出均不写死格式
+        let existing = std::env::join_paths(&tail).unwrap();
+        let value = prepend_dir_to_path_value(&existing, &directory).unwrap();
+        let mut expected = vec![directory.clone()];
+        expected.extend(tail);
+        assert_eq!(std::env::split_paths(&value).collect::<Vec<_>>(), expected);
         // 目录已存在时保持原值（返回 None）
         assert!(prepend_dir_to_path_value(&value, &directory).is_none());
     }
@@ -3023,10 +3097,9 @@ mod interpreter_discovery_tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".nvm/versions/node/v22.16.0/bin")).unwrap();
         std::fs::create_dir_all(home.path().join(".nvm/versions/node/v18.20.0/bin")).unwrap();
-        // 用伪造 HOME 替代真实环境验证组合逻辑。
-        unsafe { std::env::set_var("HOME", home.path()) };
+        // 用伪造 HOME 替代真实环境验证组合逻辑，退出时恢复原值。
+        let _restore = EnvRestore::overlay("HOME", home.path());
         let locations = common_interpreter_locations(SidecarRuntime::Node);
-        unsafe { std::env::remove_var("HOME") };
         assert_eq!(
             locations[0],
             home.path().join(".nvm/versions/node/v22.16.0/bin/node")
@@ -3037,5 +3110,20 @@ mod interpreter_discovery_tests {
             "/usr/local/bin/node"
         };
         assert!(locations.contains(&PathBuf::from(expected)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn common_interpreter_locations_covers_windows_user_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let volta_node = home.path().join(".volta").join("bin").join("node.exe");
+        std::fs::create_dir_all(volta_node.parent().unwrap()).unwrap();
+        std::fs::write(&volta_node, b"").unwrap();
+        // user_home_dir 中 HOME 优先于 USERPROFILE，两处都罩住
+        let _restore_home = unsafe { EnvRestore::overlay("HOME", home.path().join("empty-home")) };
+        let _restore_profile = unsafe { EnvRestore::overlay("USERPROFILE", home.path()) };
+        let locations = common_interpreter_locations(SidecarRuntime::Node);
+        assert!(locations.contains(&volta_node));
+        assert!(locations.contains(&PathBuf::from(r"C:\Program Files\nodejs\node.exe")));
     }
 }
