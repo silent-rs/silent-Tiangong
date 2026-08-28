@@ -2692,8 +2692,11 @@ fn resolve_interpreter_launch(
 }
 
 /// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
+///
+/// GUI 进程（launchd/Finder 启动）不执行 shell 初始化，nvm/Homebrew 等
+/// 安装位置不在其 PATH 中，PATH 未命中后继续探测常见安装位置。
 fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
-    let (override_env, candidates): (&str, &[&str]) = match runtime {
+    let (override_env, candidates, install_hint): (&str, &[&str], &str) = match runtime {
         SidecarRuntime::Native => bail!("native sidecar 无解释器"),
         SidecarRuntime::Node => (
             "TIANGONG_NODE_PATH",
@@ -2702,6 +2705,7 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
             } else {
                 &["node"]
             },
+            "帮我安装 Node.js",
         ),
         SidecarRuntime::Python => (
             "TIANGONG_PYTHON_PATH",
@@ -2710,6 +2714,7 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
             } else {
                 &["python3", "python"]
             },
+            "帮我安装 Python",
         ),
     };
     if let Some(path) = std::env::var_os(override_env)
@@ -2732,11 +2737,101 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
             }
         }
     }
+    for path in common_interpreter_locations(runtime) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
     bail!(
-        "未找到 {:?} sidecar 所需的解释器程序（{}）；请安装后重试，或以 {override_env} 指定路径",
+        "未找到 {:?} sidecar 所需的解释器程序（{}）；可在会话中对助手说「{install_hint}」快速安装，或以 {override_env} 指定路径",
         runtime,
         candidates.join(" / ")
     );
+}
+
+/// PATH 未命中时的常见安装位置：版本管理器目录从新到旧，系统级位置殿后。
+fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
+    let mut locations = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let versioned: &[(&str, &str)] = match runtime {
+            SidecarRuntime::Node => &[
+                (".nvm/versions/node", "bin/node"),
+                (".asdf/installs/nodejs", "bin/node"),
+            ],
+            SidecarRuntime::Python => &[(".pyenv/versions", "bin/python3")],
+            SidecarRuntime::Native => &[],
+        };
+        for (root, leaf) in versioned {
+            locations.extend(versioned_bin_candidates(&home.join(root), leaf));
+        }
+        if matches!(runtime, SidecarRuntime::Node) {
+            locations.push(home.join(".volta/bin/node"));
+        }
+    }
+    match runtime {
+        SidecarRuntime::Node => {
+            if cfg!(target_os = "macos") {
+                locations.extend([
+                    PathBuf::from("/opt/homebrew/bin/node"),
+                    PathBuf::from("/usr/local/bin/node"),
+                ]);
+            } else if cfg!(windows) {
+                locations.push(PathBuf::from(r"C:\Program Files\nodejs\node.exe"));
+            } else {
+                locations.extend([
+                    PathBuf::from("/usr/local/bin/node"),
+                    PathBuf::from("/usr/bin/node"),
+                ]);
+            }
+        }
+        SidecarRuntime::Python => {
+            if cfg!(target_os = "macos") {
+                locations.extend([
+                    PathBuf::from("/opt/homebrew/bin/python3"),
+                    PathBuf::from("/usr/local/bin/python3"),
+                    PathBuf::from("/usr/bin/python3"),
+                ]);
+            } else if !cfg!(windows) {
+                locations.extend([
+                    PathBuf::from("/usr/local/bin/python3"),
+                    PathBuf::from("/usr/bin/python3"),
+                ]);
+            }
+        }
+        SidecarRuntime::Native => {}
+    }
+    locations
+}
+
+/// 枚举版本管理器安装根目录（如 nvm 的 `versions/node/`）下的 bin 候选，
+/// 按版本号新到旧排序；目录不存在时返回空。
+fn versioned_bin_candidates(root: &Path, leaf: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort_by_key(|name| std::cmp::Reverse(version_sort_key(name)));
+    names
+        .into_iter()
+        .map(|name| root.join(name).join(leaf))
+        .collect()
+}
+
+/// 版本目录名（`v22.16.0` / `22.16.0`）转数字段序列供排序；带后缀
+/// （如 pyenv 的 `3.11.0-env`）只取主版本段，无法解析的段按 0 计。
+fn version_sort_key(name: &str) -> Vec<u64> {
+    name.trim_start_matches(['v', 'V'])
+        .split('.')
+        .map(|part| {
+            part.split_once('-')
+                .map_or(part, |(major, _)| major)
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 /// 本地信任校验：安装时落锚的标记与内容清单哈希一致，且清单内全部文件未被篡改。
@@ -2793,4 +2888,67 @@ fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
         && loaded.enabled == installed.enabled
         && manifest_match
         && bytes_match)
+}
+
+#[cfg(test)]
+mod interpreter_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn version_sort_key_orders_segments_numerically() {
+        let mut names = vec!["v9.11.2", "v22.16.0", "v10.24.1"];
+        names.sort_by_key(|name| std::cmp::Reverse(version_sort_key(name)));
+        assert_eq!(names, ["v22.16.0", "v10.24.1", "v9.11.2"]);
+    }
+
+    #[test]
+    fn version_sort_key_tolerates_prefix_and_suffix() {
+        assert_eq!(version_sort_key("v22.16.0"), version_sort_key("22.16.0"));
+        assert!(version_sort_key("3.11.0-env") > version_sort_key("3.10.9"));
+        assert_eq!(version_sort_key("not-a-version"), vec![0]);
+    }
+
+    #[test]
+    fn versioned_bin_candidates_newest_first_and_missing_root_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        for version in ["v18.20.0", "v22.16.0", "v9.11.2"] {
+            std::fs::create_dir_all(dir.path().join(version).join("bin")).unwrap();
+        }
+        let candidates = versioned_bin_candidates(dir.path(), "bin/node");
+        let versions: Vec<_> = candidates
+            .iter()
+            .map(|path| {
+                path.parent()
+                    .and_then(|parent| parent.parent())
+                    .and_then(|grandparent| grandparent.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(versions, ["v22.16.0", "v18.20.0", "v9.11.2"]);
+        assert!(candidates[0].ends_with("bin/node"));
+        assert!(versioned_bin_candidates(&dir.path().join("absent"), "bin/node").is_empty());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn common_interpreter_locations_covers_nvm_and_system_paths() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".nvm/versions/node/v22.16.0/bin")).unwrap();
+        std::fs::create_dir_all(home.path().join(".nvm/versions/node/v18.20.0/bin")).unwrap();
+        // 用伪造 HOME 替代真实环境验证组合逻辑。
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let locations = common_interpreter_locations(SidecarRuntime::Node);
+        unsafe { std::env::remove_var("HOME") };
+        assert_eq!(
+            locations[0],
+            home.path().join(".nvm/versions/node/v22.16.0/bin/node")
+        );
+        let expected = if cfg!(target_os = "macos") {
+            "/opt/homebrew/bin/node"
+        } else {
+            "/usr/local/bin/node"
+        };
+        assert!(locations.contains(&PathBuf::from(expected)));
+    }
 }
