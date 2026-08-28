@@ -1,0 +1,36 @@
+[package]
+name = "tiangong-sandbox"
+# Launcher 独立版本序列（不随 workspace/App 版本）：在线更新按此序列
+# 判定新旧与防降级，App 发版不要求 Launcher 同步改动。
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Command 工具的宿主强制操作系统沙箱套壳"
+
+[[bin]]
+name = "tiangong-sandbox"
+path = "src/bin/tiangong-sandbox.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+tempfile = { workspace = true }
+scru128 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+dunce = { workspace = true }
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }

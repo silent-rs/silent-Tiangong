@@ -1,0 +1,15 @@
+name: 'Prepare sandbox signing key'
+description: >-
+  生成 CI 测试签名密钥并注入 prepare-sandbox 所需的私钥环境变量。
+  Launcher 打包时必须签名（宿主启动前验签，缺失即拒）；CI 使用
+  临时测试密钥，官方发布仍走官方私钥 secret。
+runs:
+  using: composite
+  steps:
+    - name: Generate sandbox signing key
+      shell: bash
+      run: |
+        key="$RUNNER_TEMP/sandbox-signing.key"
+        cargo run --locked -p xtask -- generate-plugin-test-key "$key"
+        test -f "$key" && test -f "$key.pub"
+        echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=$key" >> "$GITHUB_ENV"

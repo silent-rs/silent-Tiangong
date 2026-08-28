@@ -1,0 +1,192 @@
+name: Publish Launcher
+
+# 沙箱 Launcher 在线更新发布：三平台矩阵构建+官方签名制品与平台片段，
+# 聚合生成 launcher/latest.json 并按"previous 备份 → next → 正式"三步写
+# 上传官方 OSS，回读校验失败回滚。宿主更新器按清单的版本/协议判定、
+# 下载 SHA-256 校验、官方公钥验签与真实自检门禁激活。
+#
+# 触发：launcher/v<版本> 标签或手动派发（版本取 tiangong-sandbox crate
+# 独立版本，与 App 版本无关）。
+
+on:
+  push:
+    tags:
+      - "launcher/v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OSS_BASE: https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - label: macOS aarch64
+            runner: macos-14
+            triple: aarch64-apple-darwin
+          - label: macOS x86_64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+          - label: Windows x86_64
+            runner: windows-2022
+            triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: launcher-${{ matrix.triple }}
+
+      - name: Verify signing key present
+        shell: bash
+        run: |
+          test -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" || \
+            { echo "::error::缺少官方签名私钥 secret"; exit 1; }
+          key="$RUNNER_TEMP/launcher-release.key"
+          printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "$key"
+          echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=$key" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and sign launcher artifact
+        shell: bash
+        run: |
+          TAURI_ENV_TARGET_TRIPLE=${{ matrix.triple }} \
+            cargo run --locked -p xtask -- prepare-launcher-release
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-dist-${{ matrix.triple }}
+          path: |
+            target/launcher-dist/launcher
+            target/launcher-dist/fragments
+          if-no-files-found: error
+
+  publish:
+    name: Publish to OSS
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Download all dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: target/launcher-dist
+          pattern: launcher-dist-*
+          merge-multiple: true
+
+      - name: Compose latest.json
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          test -n "$version"
+          # 聚合三平台片段为清单（协议常量取宿主唯一定义）。
+          protocol="$(grep 'pub const LAUNCHER_PROTOCOL_VERSION' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)"
+          schema="$(grep 'pub const LAUNCHER_POLICY_SCHEMA' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)"
+          python3 - "$version" "$protocol" "$schema" <<'PY'
+          import json, sys, pathlib
+          version, protocol, schema = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+          fragments = {}
+          for path in sorted(pathlib.Path("target/launcher-dist/fragments").glob("*.json")):
+              fragments[path.stem] = json.loads(path.read_text())
+          expected = {"linux-x86_64", "darwin-aarch64", "darwin-x86_64", "windows-x86_64"}
+          missing = expected - fragments.keys()
+          assert not missing, f"缺少平台片段: {missing}"
+          manifest = {
+              "version": version,
+              "protocol_version": protocol,
+              "policy_schema_max": schema,
+              "platforms": fragments,
+          }
+          out = pathlib.Path("target/launcher-dist/latest.json")
+          out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+          print(out.read_text())
+          PY
+          echo "LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install ossutil
+        run: |
+          curl --connect-timeout 10 --retry 3 -fsSL \
+            https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip \
+            -o /tmp/ossutil.zip
+          unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+          sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+
+      - name: Configure ossutil
+        run: |
+          ossutil config \
+            -e oss-cn-hangzhou.aliyuncs.com \
+            -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
+            -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: Upload immutable versioned artifacts
+        run: |
+          ossutil cp -r "target/launcher-dist/launcher/" "oss://silent-tiangong/launcher/" -f
+
+      - name: Publish manifest with backup and verify
+        run: |
+          manifest=target/launcher-dist/latest.json
+          # 三步写：previous 备份（可容忍不存在）→ next → 正式。
+          timeout 5m ossutil cp "$OSS_BASE/launcher/latest.json" \
+            oss://silent-tiangong/launcher/latest.json.previous -f \
+            || echo "无既有清单，跳过备份"
+          timeout 5m ossutil cp "$manifest" oss://silent-tiangong/launcher/latest.json.next -f
+          timeout 5m ossutil cp "$manifest" oss://silent-tiangong/launcher/latest.json -f
+
+      - name: Verify published manifest and artifacts
+        run: |
+          rollback() {
+            echo "清单校验失败，回滚 previous。"
+            timeout 5m ossutil cp \
+              oss://silent-tiangong/launcher/latest.json.previous \
+              oss://silent-tiangong/launcher/latest.json -f || true
+            exit 1
+          }
+          curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "$OSS_BASE/launcher/latest.json?run=$GITHUB_RUN_ID" -o /tmp/published.json || rollback
+          diff target/launcher-dist/latest.json /tmp/published.json || rollback
+          # 抽验每个平台制品与签名可回读且校验和一致。
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request
+          manifest = json.loads(pathlib.Path("/tmp/published.json").read_text())
+          for platform, artifact in manifest["platforms"].items():
+              data = urllib.request.urlopen(artifact["url"], timeout=60).read()
+              digest = "sha256:" + hashlib.sha256(data).hexdigest()
+              assert digest == artifact["checksum"], f"{platform} 校验和不一致"
+              sig = urllib.request.urlopen(artifact["signature_url"], timeout=60).read()
+              assert sig, f"{platform} 签名为空"
+              print(f"{platform}: {len(data)} bytes 校验通过")
+          PY
+          echo "Launcher ${LAUNCHER_VERSION} 发布完成。"

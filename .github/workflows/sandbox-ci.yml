@@ -1,0 +1,161 @@
+name: Sandbox CI
+
+# 沙箱独立组件 CI（不依赖 App 集成）：crates/tiangong-sandbox 的格式、
+# lint、单元与真实自检，以及 Launcher 发布制品（prepare-launcher-release
+# 产物 + 独立版本断言）。App 集成链路（ephemeral 路由、Tauri 打包）由
+# 集成分支的 CI 覆盖。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tiangong-sandbox/**"
+      - ".github/workflows/sandbox-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - "crates/tiangong-sandbox/**"
+      - ".github/workflows/sandbox-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: sandbox-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Sandbox (Linux x86_64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-linux
+      - name: Check formatting
+        run: cargo fmt -p tiangong-sandbox --all -- --check
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Build Launcher
+        run: cargo build --locked -p tiangong-sandbox --release
+      - name: Verify Launcher self-check (bwrap)
+        run: |
+          set +e
+          report="$(target/release/tiangong-sandbox --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+
+  macos:
+    name: Sandbox (macOS x86_64 native)
+    # macOS latest 当前为受限的 ARM 运行器，无法嵌套 Seatbelt。
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-macos
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Verify Launcher self-check (Seatbelt)
+        run: |
+          set +e
+          report="$(cargo run --locked -p tiangong-sandbox -- --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+
+  windows:
+    name: Sandbox (Windows x86_64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-windows
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Verify Launcher self-check (AppContainer)
+        shell: pwsh
+        run: |
+          cargo build --locked -p tiangong-sandbox --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $p = Start-Process -FilePath "target\release\tiangong-sandbox.exe" -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\self-check.json" `
+            -RedirectStandardError "$env:RUNNER_TEMP\self-check.stderr"
+          if (-not $p.WaitForExit(180000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw 'Launcher self-check timed out'
+          }
+          Get-Content "$env:RUNNER_TEMP\self-check.json"
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 79) {
+            throw "Launcher self-check exit code $($p.ExitCode)"
+          }
+
+  release-artifact:
+    name: Sandbox release artifact (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+          - label: macOS aarch64
+            runner: macos-14
+          - label: Windows x86_64
+            runner: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare sandbox signing key
+        uses: ./.github/actions/prepare-sandbox-key
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-release-${{ matrix.label }}
+      - name: Verify release artifact signs and self-checks
+        shell: bash
+        run: |
+          cargo run --locked -p xtask -- prepare-launcher-release
+          dist="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/launcher-dist"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
+          artifact="$dist/launcher/$version/tiangong-sandbox-$platform"
+          test -f "$artifact" && test -f "$artifact.sig" && test ! -L "$artifact"
+          set +e
+          report="$("$artifact" --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report" | tee "$RUNNER_TEMP/packaged-self-check.json"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+          [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
+          [[ "$(jq -r .protocol_version <<< "$report")" \
+             == "$(grep 'pub const LAUNCHER_PROTOCOL_VERSION' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)" ]]

@@ -11560,6 +11560,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dunce",
+ "hex",
+ "libc",
+ "scru128",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "tiangong-scheduler"
 version = "0.15.4"
 dependencies = [
