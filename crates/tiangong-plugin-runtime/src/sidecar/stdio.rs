@@ -417,7 +417,9 @@ impl StdioSidecarConnection {
             let _ = child.kill();
             let _ = child.wait();
             return Err(SpawnAttemptError::Preparation(
-                Err(error).context("将 sidecar 加入 Job Object 失败"),
+                Err(error)
+                    .context("将 sidecar 加入 Job Object 失败")
+                    .unwrap_err(),
             ));
         }
         let stdin = preparation(child.stdin.take().context("stdio sidecar 未提供 stdin"))?;
