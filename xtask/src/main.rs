@@ -458,6 +458,11 @@ fn main() {
         [command, plugin_id, output_dir] if command == "new-plugin" => {
             new_plugin(plugin_id, Some(output_dir))
         }
+        [command] if command == "sign-sandbox" => sign_sandbox_debug(),
+        [command] if command == "prepare-sandbox-release" => prepare_sandbox_release(),
+        [command, artifact, signature] if command == "verify-sandbox-artifact" => {
+            verify_sandbox_artifact(artifact, signature)
+        }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -496,6 +501,9 @@ fn print_help() {
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
     );
     eprintln!("  cargo run -p xtask -- validate-plugin-catalog <catalog或->");
+    eprintln!("  cargo run -p xtask -- prepare-sandbox-release");
+    eprintln!("  cargo run -p xtask -- verify-sandbox-artifact <制品> <签名>");
+    eprintln!("  cargo run -p xtask -- sign-sandbox");
 }
 
 fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
@@ -1813,6 +1821,224 @@ fn run_cargo(workspace_root: &Path, args: &[&str]) -> io::Result<()> {
             args.join(" ")
         )))
     }
+}
+
+fn prepare_sandbox_release() -> io::Result<()> {
+    let workspace_root = workspace_root();
+    let target = sandbox_target_triple()?;
+    let platform = launcher_platform_key(&target)?;
+    let version = launcher_crate_version(&workspace_root)?;
+    eprintln!("[xtask] 构建 Launcher 发布制品（{platform} {version}）...");
+    run_cargo(
+        &workspace_root,
+        &[
+            "build",
+            "-p",
+            "tiangong-sandbox",
+            "--release",
+            "--target",
+            &target,
+        ],
+    )?;
+
+    let executable_suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let target_root = non_empty_env_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    let built = target_root
+        .join(&target)
+        .join("release")
+        .join(format!("tiangong-sandbox{executable_suffix}"));
+    require_file(&built)?;
+
+    let dist = target_root.join("sandbox-dist");
+    // 清理旧发布目录：跨平台/缓存恢复的残留片段会混入本次发布
+    //（官方验签步骤也会因多平台名失败），生成前整体重建。
+    if dist.exists() {
+        std::fs::remove_dir_all(&dist)
+            .map_err(|error| invalid_data(format!("清理旧发布目录失败: {error}")))?;
+    }
+    let artifact_dir = dist.join("sandbox").join(&version);
+    std::fs::create_dir_all(&artifact_dir)?;
+    let artifact_name = format!("tiangong-sb-{platform}");
+    let artifact = artifact_dir.join(&artifact_name);
+    std::fs::copy(&built, &artifact)?;
+
+    let key_path = non_empty_env_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
+        .filter(|path| Path::new(&path).is_file())
+        .ok_or_else(|| {
+            invalid_input(
+                "缺少签名私钥（TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 未设置或文件不存在），\
+                 拒绝产出无签名的 Launcher 发布制品。",
+            )
+        })?;
+    let password =
+        std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
+    sign_file_minisign(Path::new(&key_path), &password, &artifact)?;
+
+    let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
+        .trim_end_matches('/')
+        .to_string();
+    let fragment = serde_json::json!({
+        "url": format!("{base_url}/sandbox/{version}/{artifact_name}"),
+        "checksum": format!("sha256:{}", sha256(&artifact)?),
+        "signature_url": format!("{base_url}/sandbox/{version}/{artifact_name}.sig"),
+    });
+    let fragments = dist.join("fragments");
+    std::fs::create_dir_all(&fragments)?;
+    std::fs::write(
+        fragments.join(format!("{platform}.json")),
+        serde_json::to_vec_pretty(&fragment)?,
+    )?;
+    // 结构化发布信息：协议/策略版本直接引用 crate 唯一常量定义，
+    // workflow 读取本文件组清单与断言，不做源码正则提取。
+    let release_info = serde_json::json!({
+        "version": version,
+        "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
+        "policy_schema_max": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+    });
+    std::fs::write(
+        dist.join("release-info.json"),
+        serde_json::to_vec_pretty(&release_info)?,
+    )?;
+    eprintln!(
+        "[xtask] Launcher 发布制品就绪: {}（片段 fragments/{platform}.json，release-info.json）",
+        artifact.display()
+    );
+    Ok(())
+}
+
+/// target triple → 发布平台键（与宿主 artifacts::current_platform_key 对齐）。
+fn launcher_platform_key(target: &str) -> io::Result<String> {
+    if target.contains("windows") {
+        Ok("windows-x86_64".to_string())
+    } else if target.contains("linux") {
+        Ok("linux-x86_64".to_string())
+    } else if target.contains("darwin") {
+        let arch = if target.contains("aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        Ok(format!("darwin-{arch}"))
+    } else {
+        Err(invalid_input(format!("不支持的目标平台: {target}")))
+    }
+}
+
+/// Launcher crate 独立版本（Cargo.toml，脱离 workspace 版本）。
+fn launcher_crate_version(workspace_root: &Path) -> io::Result<String> {
+    let manifest =
+        std::fs::read_to_string(workspace_root.join("crates/tiangong-sandbox/Cargo.toml"))
+            .map_err(|error| {
+                invalid_data(format!("读取 tiangong-sandbox/Cargo.toml 失败: {error}"))
+            })?;
+    for line in manifest.lines() {
+        if let Some(version) = line.trim().strip_prefix("version = ") {
+            return Ok(version.trim_matches('"').to_string());
+        }
+    }
+    Err(invalid_data(
+        "tiangong-sandbox/Cargo.toml 缺少独立 version 声明",
+    ))
+}
+
+/// 用内置官方公钥验证 Launcher 制品签名（发布守卫：私钥与内置公钥
+/// 不匹配时立即失败，防止把全部客户端都会拒绝的制品发布上线）。
+fn verify_sandbox_artifact(artifact: &str, signature: &str) -> io::Result<()> {
+    let artifact = Path::new(artifact);
+    let signature = Path::new(signature);
+    require_file(artifact)?;
+    require_file(signature)?;
+    match verify_with_official_pubkey(artifact, signature) {
+        Ok(true) => {
+            eprintln!("[xtask] 官方公钥验签通过: {}", artifact.display());
+            Ok(())
+        }
+        Ok(false) => Err(invalid_data(format!(
+            "官方公钥验签不通过（签名与内置公钥不匹配）: {}",
+            artifact.display()
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn sign_sandbox_debug() -> io::Result<()> {
+    let workspace_root = workspace_root();
+    let target_root = non_empty_env_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace_root.join("target"));
+    let executable_suffix = if cfg!(windows) { ".exe" } else { "" };
+    let launcher = target_root
+        .join("debug")
+        .join(format!("tiangong-sandbox{executable_suffix}"));
+    require_file(&launcher)?;
+    let key_path = non_empty_env_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
+        .filter(|path| Path::new(&path).is_file())
+        .ok_or_else(|| {
+            invalid_input(
+                "缺少签名私钥（TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH 未设置或文件不存在）。\
+                 本地开发请指向官方私钥或本机用户密钥（keys/user-signing.key）。",
+            )
+        })?;
+    let password =
+        std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
+    sign_file_minisign(Path::new(&key_path), &password, &launcher)?;
+    eprintln!("[xtask] debug Launcher 已签名: {}.sig", launcher.display());
+    Ok(())
+}
+
+fn sandbox_target_triple() -> io::Result<String> {
+    for key in ["TAURI_ENV_TARGET_TRIPLE", "CARGO_BUILD_TARGET"] {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty()
+        {
+            return validate_target_triple(value.trim());
+        }
+    }
+
+    let output = Command::new(env_var_or("RUSTC", "rustc"))
+        .arg("-vV")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("rustc -vV 执行失败"));
+    }
+    let version = String::from_utf8(output.stdout)
+        .map_err(|error| invalid_data(format!("rustc -vV 输出不是 UTF-8: {error}")))?;
+    let host = version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .ok_or_else(|| invalid_data("rustc -vV 输出缺少 host triple"))?;
+    validate_target_triple(host)
+}
+
+fn validate_target_triple(value: &str) -> io::Result<String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(invalid_input(format!("无效的 Rust target triple: {value}")));
+    }
+    Ok(value.to_string())
 }
 
 fn run_yarn(directory: &Path, args: &[&str]) -> io::Result<()> {

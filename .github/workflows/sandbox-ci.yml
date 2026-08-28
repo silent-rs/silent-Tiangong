@@ -1,0 +1,207 @@
+name: Sandbox CI
+
+# 沙箱独立组件 CI（不依赖 App 集成）：crates/tiangong-sandbox 的格式、
+# lint、单元与真实自检，以及 Launcher 发布制品（prepare-sandbox-release
+# 产物 + 独立版本断言）。App 集成链路（ephemeral 路由、Tauri 打包）由
+# 集成分支的 CI 覆盖。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/tiangong-sandbox/**"
+      - "xtask/Cargo.toml"
+      - "xtask/src/main.rs"
+      - ".github/actions/prepare-sandbox-key/**"
+      - ".github/workflows/sandbox-ci.yml"
+      - ".github/workflows/publish-sandbox.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    paths:
+      - "crates/tiangong-sandbox/**"
+      - "xtask/Cargo.toml"
+      - "xtask/src/main.rs"
+      - ".github/actions/prepare-sandbox-key/**"
+      - ".github/workflows/sandbox-ci.yml"
+      - ".github/workflows/publish-sandbox.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+concurrency:
+  group: sandbox-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Sandbox (Linux x86_64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-linux
+      - name: Check formatting
+        run: cargo fmt -p tiangong-sandbox --all -- --check
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Build Launcher
+        run: cargo build --locked -p tiangong-sandbox --release
+      - name: Verify Launcher self-check (bwrap)
+        run: |
+          # Linux 是核心原生验收环境：必须真实完成隔离验证（退出码 0
+          # 即必需拦截项全过），不接受"环境无法验证"（79）。
+          set +e
+          report="$(target/release/tiangong-sandbox --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report" | tee "$RUNNER_TEMP/self-check.json"
+          test "$status" -eq 0
+          for field in workspace_write outside_write_blocked outside_delete_blocked \
+            outside_config_write_blocked git_metadata_write_blocked network_blocked \
+            sensitive_read_blocked symlink_escape_blocked path_traversal_blocked; do
+            test "$(jq -r ".$field" <<< "$report")" == "true" \
+              || { echo "::error::自检字段 $field 未通过"; exit 1; }
+          done
+
+  macos:
+    name: Sandbox (macOS x86_64 native)
+    # macOS latest 当前为受限的 ARM 运行器，无法嵌套 Seatbelt。
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-macos
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Verify Launcher self-check (Seatbelt)
+        run: |
+          # macOS 托管环境可能无法嵌套 Seatbelt：0=真实验证通过，
+          # 79=环境无法验证（非制品缺陷），两者均可接受；真实拦截
+          # 由可嵌套环境与 bundle 任务补充。
+          set +e
+          report="$(cargo run --locked -p tiangong-sandbox -- --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+
+  windows:
+    name: Sandbox (Windows x86_64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-windows
+      - name: Lint sandbox crate
+        run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
+      - name: Test sandbox crate
+        run: cargo test --locked -p tiangong-sandbox
+      - name: Verify Launcher self-check (AppContainer)
+        shell: pwsh
+        run: |
+          cargo build --locked -p tiangong-sandbox --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $p = Start-Process -FilePath "target\release\tiangong-sandbox.exe" -ArgumentList '--self-check' `
+            -NoNewWindow -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\self-check.json" `
+            -RedirectStandardError "$env:RUNNER_TEMP\self-check.stderr"
+          if (-not $p.WaitForExit(180000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw 'Launcher self-check timed out'
+          }
+          Get-Content "$env:RUNNER_TEMP\self-check.json"
+          # Windows 是核心原生验收环境：AppContainer 隔离必须真实完成
+          # （退出码 0 即全部必需项通过），不接受"环境无法验证"。
+          if ($p.ExitCode -ne 0) {
+            throw "Launcher self-check exit code $($p.ExitCode)（要求 0）"
+          }
+          $report = Get-Content -Raw "$env:RUNNER_TEMP\self-check.json" | ConvertFrom-Json
+          foreach ($field in @(
+            'workspace_write','outside_write_blocked','outside_read_blocked',
+            'outside_delete_blocked','outside_config_write_blocked',
+            'git_metadata_write_blocked','network_blocked','sensitive_read_blocked',
+            'path_traversal_blocked','child_restrictions_inherited',
+            'resource_limits_applied','process_limit_enforced',
+            'memory_limit_enforced','cpu_limit_enforced',
+            'hardlink_escape_blocked','symlink_escape_blocked',
+            'temporary_acl_cleaned','temporary_identity_cleaned')) {
+            if ($report.$field -ne $true) {
+              throw "自检字段 $field 未通过"
+            }
+          }
+
+  release-artifact:
+    name: Sandbox release artifact (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+          - label: macOS aarch64
+            runner: macos-14
+          - label: Windows x86_64
+            runner: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare sandbox signing key
+        uses: ./.github/actions/prepare-sandbox-key
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sandbox-release-${{ matrix.label }}
+      - name: Verify release artifact signs and self-checks
+        shell: bash
+        run: |
+          cargo run --locked -p xtask -- prepare-sandbox-release
+          dist="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/sandbox-dist"
+          test -f "$dist/release-info.json"
+          version="$(jq -r .version "$dist/release-info.json")"
+          protocol="$(jq -r .protocol_version "$dist/release-info.json")"
+          platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
+          artifact="$dist/sandbox/$version/tiangong-sb-$platform"
+          test -f "$artifact" && test -f "$artifact.sig" && test ! -L "$artifact"
+          set +e
+          report="$("$artifact" --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report" | tee "$RUNNER_TEMP/packaged-self-check.json"
+          # 按平台分别判定：Linux/Windows 是核心原生验收环境，发布制品
+          # 必须真实完成隔离验证（0）；仅 macOS 托管环境允许 79（无法
+          # 嵌套 Seatbelt，非制品缺陷）。
+          case "${{ matrix.label }}" in
+            macOS*) [[ "$status" -eq 0 || "$status" -eq 79 ]] ;;
+            *) test "$status" -eq 0 ;;
+          esac
+          [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
+          # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
+          [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]

@@ -1,0 +1,260 @@
+name: Publish Sandbox
+
+# 沙箱独立组件在线发布（Launcher 制品 + 清单）：三平台矩阵构建+官方
+# 签名制品、平台片段与结构化 release-info（协议/策略版本直接引用 crate
+# 常量，杜绝源码正则提取）。写入顺序：版本制品上传 → 制品回读验证
+# → latest.json.next 上传 → next 回读验证 → 正式 latest.json 最后上传
+# （发布在此刻生效）。正式清单上传后只做只读回读确认：失败明确报错
+# 交由人工核对，不自动回滚、不再修改任何 OSS 对象。
+#
+# 发布守卫：
+# - 标签触发时强制校验标签版本 == crate 版本（防发布记录与内容错位）；
+# - 上传前对每个平台制品执行内置官方公钥验签（CI Secret 私钥配错即拦截）；
+# - 同一版本目录已存在时拒绝覆盖（发布制品不可变）。
+
+on:
+  push:
+    tags:
+      - "sandbox/v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OSS_BASE: https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve crate and tag versions
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          test -n "$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#sandbox/v}"
+            if [[ "$tag_version" != "$version" ]]; then
+              echo "::error::标签版本 $tag_version 与 crate 版本 $version 不一致，拒绝发布"
+              exit 1
+            fi
+          else
+            echo "::notice::手动触发，实际发布版本为 $version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.label }})
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86_64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - label: macOS aarch64
+            runner: macos-14
+            triple: aarch64-apple-darwin
+          - label: macOS x86_64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+          - label: Windows x86_64
+            runner: windows-2022
+            triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: launcher-${{ matrix.triple }}
+
+      - name: Verify signing key present
+        shell: bash
+        run: |
+          test -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" || \
+            { echo "::error::缺少官方签名私钥 secret"; exit 1; }
+          key="$RUNNER_TEMP/launcher-release.key"
+          printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "$key"
+          echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=$key" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and sign launcher artifact
+        shell: bash
+        run: |
+          TAURI_ENV_TARGET_TRIPLE=${{ matrix.triple }} \
+            cargo run --locked -p xtask -- prepare-sandbox-release
+
+      - name: "Guard: verify with built-in official pubkey"
+        shell: bash
+        run: |
+          dist="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.target_directory')/sandbox-dist"
+          platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
+          artifact="$dist/sandbox/${{ needs.resolve.outputs.version }}/tiangong-sb-$platform"
+          cargo run --locked -p xtask -- verify-sandbox-artifact "$artifact" "$artifact.sig"
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-dist-${{ matrix.triple }}
+          path: |
+            target/sandbox-dist/sandbox
+            target/sandbox-dist/fragments
+            target/sandbox-dist/release-info.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish to OSS
+    needs: [resolve, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Download all dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: target/sandbox-dist
+          pattern: sandbox-dist-*
+          merge-multiple: true
+
+      - name: Compose latest.json from structured release info
+        run: |
+          test -f target/sandbox-dist/release-info.json
+          python3 - <<'PY'
+          import json, pathlib
+          info = json.loads(pathlib.Path("target/sandbox-dist/release-info.json").read_text())
+          fragments = {}
+          for path in sorted(pathlib.Path("target/sandbox-dist/fragments").glob("*.json")):
+              fragments[path.stem] = json.loads(path.read_text())
+          expected = {"linux-x86_64", "darwin-aarch64", "darwin-x86_64", "windows-x86_64"}
+          missing = expected - fragments.keys()
+          assert not missing, f"缺少平台片段: {missing}"
+          manifest = {
+              "version": info["version"],
+              "protocol_version": info["protocol_version"],
+              "policy_schema_max": info["policy_schema_max"],
+              "platforms": fragments,
+          }
+          out = pathlib.Path("target/sandbox-dist/latest.json")
+          out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+          print(out.read_text())
+          PY
+          echo "SANDBOX_VERSION=${{ needs.resolve.outputs.version }}" >> "$GITHUB_ENV"
+
+      - name: Install ossutil
+        run: |
+          curl --connect-timeout 10 --retry 3 -fsSL \
+            https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip \
+            -o /tmp/ossutil.zip
+          unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+          sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+
+      - name: Configure ossutil
+        run: |
+          ossutil config \
+            -e oss-cn-hangzhou.aliyuncs.com \
+            -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
+            -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: "Guard: refuse to overwrite an existing version (per object)"
+        run: |
+          # OSS 无目录对象，前缀 stat 不可靠：逐个检查本版本将要发布的
+          # 每个对象，任一已存在即拒绝（发布制品不可变）。
+          shopt -s nullglob
+          artifacts=(target/sandbox-dist/sandbox/"${SANDBOX_VERSION}"/*)
+          test "${#artifacts[@]}" -gt 0
+          for artifact in "${artifacts[@]}"; do
+            object="oss://silent-tiangong/sandbox/${SANDBOX_VERSION}/$(basename "$artifact")"
+            if timeout 30s ossutil stat "$object" >/dev/null 2>&1; then
+              echo "::error::对象已存在，拒绝覆盖（发布不可变）: $object"
+              exit 1
+            fi
+          done
+          echo "版本 ${SANDBOX_VERSION} 的全部对象均不存在，允许发布。"
+
+      - name: "Upload immutable versioned artifacts (no overwrite)"
+        run: |
+          # 守卫已确认对象不存在；逐对象上传且不带强制覆盖参数，
+          # 出现任何已存在冲突立即失败。
+          shopt -s nullglob
+          for artifact in target/sandbox-dist/sandbox/"${SANDBOX_VERSION}"/*; do
+            object="oss://silent-tiangong/sandbox/${SANDBOX_VERSION}/$(basename "$artifact")"
+            ossutil cp "$artifact" "$object"
+          done
+
+      - name: Verify uploaded artifacts before manifest
+        run: |
+          # 正式清单写入前回读已上传制品并核对校验和：此阶段失败属于
+          # "未发布"——客户端仍读旧清单（或首次发布时无清单），已上传
+          # 但未被引用的制品保留不影响任何人。
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request
+          manifest = json.loads(pathlib.Path("target/sandbox-dist/latest.json").read_text())
+          for platform, artifact in manifest["platforms"].items():
+              data = urllib.request.urlopen(artifact["url"], timeout=60).read()
+              digest = "sha256:" + hashlib.sha256(data).hexdigest()
+              assert digest == artifact["checksum"], f"{platform} 校验和不一致"
+              sig = urllib.request.urlopen(artifact["signature_url"], timeout=60).read()
+              assert sig, f"{platform} 签名为空"
+              print(f"{platform}: {len(data)} bytes 回读校验通过")
+          PY
+
+      - name: "Stage manifest (next) and verify before final publish"
+        run: |
+          # 暂存清单：上传 latest.json.next 并从线上回读逐字节比较；
+          # 不一致立即终止——此时正式清单尚未上传，不影响线上版本。
+          manifest=target/sandbox-dist/latest.json
+          timeout 5m ossutil cp "$manifest" oss://silent-tiangong/sandbox/latest.json.next -f
+          curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "$OSS_BASE/sandbox/latest.json.next?run=$GITHUB_RUN_ID" -o /tmp/staged.json
+          diff "$manifest" /tmp/staged.json
+
+      - name: "Publish final manifest (last write to OSS)"
+        run: |
+          # 正式 latest.json 是最后一个写入 OSS 的对象，发布在此刻生效；
+          # 上传后不再写入任何 OSS 对象。
+          manifest=target/sandbox-dist/latest.json
+          timeout 5m ossutil cp "$manifest" oss://silent-tiangong/sandbox/latest.json -f
+
+      - name: "Read-only confirmation of published manifest"
+        run: |
+          # 只读确认：公开地址回读正式清单并与本地逐字节比较；失败仅
+          # 明确报错交由人工核对，不自动回滚、不再修改线上任何对象。
+          manifest=target/sandbox-dist/latest.json
+          if ! curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "$OSS_BASE/sandbox/latest.json?run=$GITHUB_RUN_ID-final" -o /tmp/published.json \
+            || ! diff "$manifest" /tmp/published.json; then
+            echo "::error::正式 latest.json 已上传，但线上回读确认失败，请人工核对发布状态。"
+            exit 1
+          fi
+          echo "Sandbox ${SANDBOX_VERSION} 发布完成（正式清单已生效并确认）。"
