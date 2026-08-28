@@ -323,6 +323,10 @@ where
 /// 解释器程序本身无法创建进程（文件被删、无执行权限、格式无效等）时
 /// 失效缓存；仅当缓存当前值仍等于失败路径时清除，避免并发任务误删
 /// 其他线程刚更新的新缓存。插件脚本错误、握手失败等不在本路径。
+pub(crate) fn invalidate_if_matches(kind: InterpreterKind, failed_path: &Path) -> bool {
+    invalidate_if_matches_in(global_cache(), kind, failed_path)
+}
+
 fn invalidate_if_matches_in(
     cache: &RwLock<InterpreterCache>,
     kind: InterpreterKind,
@@ -379,17 +383,18 @@ fn recover_via<F>(
 where
     F: FnOnce() -> Option<CachedInterpreter>,
 {
-    if !invalidate_if_matches_in(cache, kind, failed_path) {
-        return None;
+    // 先取探测锁再判断缓存：并发恢复完全串行化——后来者要么复用已
+    // 恢复的新路径，要么在锁内执行探测，不会因缓存暂时为空而放弃。
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = valid_cached_in(cache, kind)
+        && cached != failed_path
+    {
+        return Some(cached);
     }
+    invalidate_if_matches_in(cache, kind, failed_path);
     // 用户显式指定的路径无法启动：直接失败，不静默替换为其他解释器
     if explicit.is_some() && !injected_by_app {
         return None;
-    }
-    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    // 锁内双检：并发任务可能已完成恢复
-    if let Some(cached) = valid_cached_in(cache, kind) {
-        return (cached != failed_path).then_some(cached);
     }
     let discovered = probe_excluding_failed()?;
     let path = discovered.path.clone();
@@ -419,7 +424,7 @@ fn derive_child_env_overrides(
         };
         if let Some(bin_dir) = cached.parent() {
             let base = path_value.clone().unwrap_or_else(|| base_path.clone());
-            path_value = prepend_dir_to_path_value(&base, bin_dir).or(Some(base));
+            path_value = force_prepend_dir_to_path_value(&base, bin_dir).or(Some(base));
         }
         overrides.push((kind.env_key(), cached.into_os_string()));
     }
@@ -480,6 +485,19 @@ pub fn ensure_interpreter_env() {
             unsafe { std::env::set_var("PATH", value) };
         }
     }
+}
+
+/// 强制前置：把目录从 PATH 中移除后放到最前。恢复场景下旧解释器
+/// 目录可能仍排在前面，仅"不存在才前置"无法保证新目录的优先级。
+fn force_prepend_dir_to_path_value(
+    existing: &std::ffi::OsStr,
+    directory: &Path,
+) -> Option<std::ffi::OsString> {
+    std::env::join_paths(
+        std::iter::once(directory.to_path_buf())
+            .chain(std::env::split_paths(existing).filter(|path| path != directory)),
+    )
+    .ok()
 }
 
 /// 计算前置目录后的新 PATH；目录已在 PATH 中或拼接失败（路径含列表
@@ -1155,19 +1173,23 @@ mod interpreter_discovery_tests {
         );
     }
 
-    /// 恢复接口：缓存不匹配（他方已更新）时不动作。
+    /// 恢复接口：缓存已是其他有效路径（他方已完成恢复）时直接复用，
+    /// 不再探测——并发恢复经探测锁串行化，后来者拿到新路径即可重试。
     #[test]
-    fn recover_skips_when_cache_does_not_match() {
+    fn recover_reuses_completed_recovery_from_peer() {
+        let peer = tempfile::tempdir().unwrap();
+        let recovered_by_peer = peer.path().join("node");
+        std::fs::write(&recovered_by_peer, b"").unwrap();
         let cache = empty_cache();
         cache.write().unwrap().insert(
             InterpreterKind::Node,
             CachedInterpreter {
-                path: PathBuf::from("/opt/other/node"),
+                path: recovered_by_peer.clone(),
                 source: InterpreterSource::CommonLocation,
             },
         );
         let lock = std::sync::Mutex::new(());
-        assert!(
+        assert_eq!(
             recover_via(
                 InterpreterKind::Node,
                 Path::new("/opt/old/node"),
@@ -1175,9 +1197,9 @@ mod interpreter_discovery_tests {
                 true,
                 &cache,
                 &lock,
-                || panic!("缓存不匹配不应触发探测"),
-            )
-            .is_none()
+                || panic!("他方已恢复不应再次探测"),
+            ),
+            Some(recovered_by_peer)
         );
         assert!(cache.read().unwrap().contains_key(&InterpreterKind::Node));
     }
