@@ -18,10 +18,12 @@ pub trait SttOperation {
 pub const TRANSCRIBE_OPERATION: &str = "transcribe";
 pub const RECORD_START_OPERATION: &str = "record_start";
 pub const RECORD_STOP_OPERATION: &str = "record_stop";
+pub const RECORD_CANCEL_OPERATION: &str = "record_cancel";
 
 pub struct Transcribe;
 pub struct RecordStart;
 pub struct RecordStop;
+pub struct RecordCancel;
 
 impl SttOperation for Transcribe {
     const NAME: &'static str = TRANSCRIBE_OPERATION;
@@ -41,6 +43,12 @@ impl SttOperation for RecordStop {
     type Response = RecordStopResponse;
 }
 
+impl SttOperation for RecordCancel {
+    const NAME: &'static str = RECORD_CANCEL_OPERATION;
+    type Request = Empty;
+    type Response = Empty;
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TranscribeRequest {
     /// 音频文件路径（仅允许 ~/.tiangong/media/ 目录下）。
@@ -57,6 +65,8 @@ pub struct TranscribeResponse {
     #[serde(default)]
     pub duration: Option<f64>,
     pub model: String,
+    /// 转录音频文件路径（回传请求的 file_path，供前端关联语音消息回放）。
+    pub audio_path: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -1137,8 +1137,12 @@ fn command_from_request(request: &ExecRequest) -> Result<String> {
         if request.cmd.trim().is_empty() {
             bail!("cmd 不能为空");
         }
-        let mut command = shell_quote(request.cmd.trim());
-        for arg in &request.args {
+        // cmd 可含参数（与 command 插件的 run_command 语义一致）：先按引号
+        // 感知规则拆分成程序名 + 内联参数，再逐词 quote 拼接，避免
+        // "git status" 被整体 quote 成单个命令名导致找不到命令。
+        let (program, inline_args) = split_command(request.cmd.trim());
+        let mut command = shell_quote(&program);
+        for arg in inline_args.iter().chain(request.args.iter()) {
             command.push(' ');
             command.push_str(&shell_quote(arg));
         }
@@ -1157,6 +1161,44 @@ fn command_from_request(request: &ExecRequest) -> Result<String> {
     } else {
         Ok(format!("cd {} && {}", shell_quote(cwd), command))
     }
+}
+
+/// 按引号感知规则拆分命令字符串为（程序名, 参数列表）。
+///
+/// 与 command 插件 sidecar 的 `split_command` 语义一致：单双引号成组、
+/// 反斜杠转义，空白分隔；无引号的裸词按空白切分。
+fn split_command(raw: &str) -> (String, Vec<String>) {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    if parts.is_empty() {
+        return (raw.to_string(), Vec::new());
+    }
+    let cmd = parts.remove(0);
+    (cmd, parts)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1480,6 +1522,27 @@ fn _pty_system_type_check(_: &dyn PtySystem) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_command_拆分含参数的cmd() {
+        let (program, args) = split_command("git status --short");
+        assert_eq!(program, "git");
+        assert_eq!(args, vec!["status".to_string(), "--short".to_string()]);
+    }
+
+    #[test]
+    fn split_command_引号成组() {
+        let (program, args) = split_command("echo 'a b' \"c d\"");
+        assert_eq!(program, "echo");
+        assert_eq!(args, vec!["a b".to_string(), "c d".to_string()]);
+    }
+
+    #[test]
+    fn split_command_裸命令无参数() {
+        let (program, args) = split_command("ls");
+        assert_eq!(program, "ls");
+        assert!(args.is_empty());
+    }
 
     #[test]
     fn marker_filter_hides_wrapper_and_keeps_command_output() {

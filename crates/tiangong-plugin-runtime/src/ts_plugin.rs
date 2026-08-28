@@ -22,8 +22,9 @@ use crate::manifest::{PluginManifest, TsToolDecl};
 struct TsPluginState {
     tools: Vec<TsToolDecl>,
     prompts: Vec<String>,
-    /// @提及展示：候选 label（UI 贡献标题或插件 id）与副标题（mention.hint）。
-    mention: Option<(String, String)>,
+    /// @提及展示：候选 label（UI 贡献标题或插件 id）、副标题（mention.hint）
+    /// 与标记字符（mention.mark，可选）。
+    mention: Option<(String, String, String)>,
 }
 
 pub struct TsPluginAdapter {
@@ -134,6 +135,10 @@ impl ToolOverrideHandler for TsPluginAdapter {
                 Some(crate::ts_tools::execute(plugin_id, session_id, call, tool.timeout_ms).await)
             })
         }
+    }
+
+    fn default_timeout_ms(&self, tool_name: &str) -> Option<u64> {
+        self.tool(tool_name).map(|tool| tool.timeout_ms)
     }
 }
 
@@ -319,12 +324,13 @@ impl MentionCandidateProvider for TsPluginAdapter {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .mention
             .as_ref()
-            .map(|(label, hint)| {
+            .map(|(label, hint, mark)| {
                 vec![tiangong_core::MentionCandidate {
                     value: format!("@plugin:{}", self.id),
                     label: label.clone(),
                     kind: "plugin".to_string(),
                     hint: hint.clone(),
+                    mark: mark.clone(),
                 }]
             })
             .unwrap_or_default()
@@ -337,18 +343,20 @@ impl MentionCandidateProvider for TsPluginAdapter {
 pub(crate) fn mention_candidate_from_manifest(
     manifest: &PluginManifest,
 ) -> Option<tiangong_core::MentionCandidate> {
-    let (label, hint) = mention_candidate_parts(manifest)?;
+    let (label, hint, mark) = mention_candidate_parts(manifest)?;
     Some(tiangong_core::MentionCandidate {
         value: format!("@plugin:{}", manifest.id),
         label,
         kind: "plugin".to_string(),
         hint,
+        mark,
     })
 }
 
 /// 从清单推导 @提及候选的展示字段：label 取首个 UI 贡献标题（缺省插件 id），
-/// hint 取 mention.hint（未声明 mention 则无候选）。
-fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String)> {
+/// hint 取 mention.hint（未声明 mention 则无候选），mark 取 mention.mark
+///（可选，缺省空串由前端按 kind 回退默认标记）。
+fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String, String)> {
     let mention = manifest.mention.as_ref()?;
     let label = manifest
         .ui
@@ -362,7 +370,8 @@ fn mention_candidate_parts(manifest: &PluginManifest) -> Option<(String, String)
             }
         })
         .unwrap_or_else(|| manifest.id.clone());
-    Some((label, mention.hint.clone()))
+    let mark = mention.mark.clone().unwrap_or_default();
+    Some((label, mention.hint.clone(), mark))
 }
 
 #[cfg(test)]

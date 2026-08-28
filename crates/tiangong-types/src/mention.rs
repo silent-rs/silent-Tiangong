@@ -12,12 +12,16 @@ use serde::{Deserialize, Serialize};
 /// - `label`：展示名
 /// - `kind`：类型标签，如 `skill` / `mcp` / `agent`
 /// - `hint`：副标题（描述、工具数等）
+/// - `mark`：候选标记（chip 角标字符，如 `S` / `M`），由插件提供；
+///   为空时前端按 `kind` 回退默认标记
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MentionCandidate {
     pub value: String,
     pub label: String,
     pub kind: String,
     pub hint: String,
+    #[serde(default)]
+    pub mark: String,
 }
 
 /// @提及候选分组。

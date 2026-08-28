@@ -12,8 +12,8 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_speech_to_text_protocol::{
-    Empty, RecordStart, RecordStartRequest, RecordStartResponse, RecordStop, RecordStopResponse,
-    TOOL_SPEECH_TO_TEXT, Transcribe, TranscribeRequest, TranscribeResponse,
+    Empty, RecordCancel, RecordStart, RecordStartRequest, RecordStartResponse, RecordStop,
+    RecordStopResponse, TOOL_SPEECH_TO_TEXT, Transcribe, TranscribeRequest, TranscribeResponse,
 };
 
 mod descriptor {
@@ -159,11 +159,10 @@ impl UiGuest for Component {
                     .map_err(|e| plugin_err(format!("序列化 transcribe 响应失败: {e}")))?
             }
             "record_start" => {
-                let req: RecordStartRequest = serde_json::from_str(&request.payload)
-                    .unwrap_or_default();
-                let response: RecordStartResponse =
-                    sidecar_client::invoke::<RecordStart>(&req)
-                        .map_err(|e| plugin_err(format!("开始录音失败: {e}")))?;
+                let req: RecordStartRequest =
+                    serde_json::from_str(&request.payload).unwrap_or_default();
+                let response: RecordStartResponse = sidecar_client::invoke::<RecordStart>(&req)
+                    .map_err(|e| plugin_err(format!("开始录音失败: {e}")))?;
                 serde_json::to_string(&response)
                     .map_err(|e| plugin_err(format!("序列化 record_start 响应失败: {e}")))?
             }
@@ -173,6 +172,12 @@ impl UiGuest for Component {
                     .map_err(|e| plugin_err(format!("停止录音失败: {e}")))?;
                 serde_json::to_string(&response)
                     .map_err(|e| plugin_err(format!("序列化 record_stop 响应失败: {e}")))?
+            }
+            "record_cancel" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let _: Empty = sidecar_client::invoke::<RecordCancel>(&Empty {})
+                    .map_err(|e| plugin_err(format!("取消录音失败: {e}")))?;
+                "{}".to_string()
             }
             other => return Err(plugin_err(format!("未知的 STT 消息: {other}"))),
         };

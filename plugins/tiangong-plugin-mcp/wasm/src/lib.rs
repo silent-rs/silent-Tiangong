@@ -367,6 +367,7 @@ fn mcp_mention_candidates() -> Result<String, PluginError> {
                 "label": server.name,
                 "kind": "mcp",
                 "hint": format!("{} 工具", tool_counts.get(&server.name).copied().unwrap_or(0)),
+                "mark": "M",
             })
         })
         .collect::<Vec<_>>();

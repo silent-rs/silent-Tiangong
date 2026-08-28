@@ -10,9 +10,9 @@ use tiangong_plugin_runtime::protocol::{
 };
 use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
 use tiangong_plugin_speech_to_text_protocol::{
-    Empty, PLUGIN_ID, PLUGIN_VERSION, RECORD_START_OPERATION, RECORD_STOP_OPERATION,
-    RecordStartRequest, RecordStartResponse, RecordStopResponse, STT_PROTOCOL_VERSION,
-    TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse,
+    Empty, PLUGIN_ID, PLUGIN_VERSION, RECORD_CANCEL_OPERATION, RECORD_START_OPERATION,
+    RECORD_STOP_OPERATION, RecordStartRequest, RecordStartResponse, RecordStopResponse,
+    STT_PROTOCOL_VERSION, TRANSCRIBE_OPERATION, TranscribeRequest, TranscribeResponse,
 };
 
 pub struct SttService;
@@ -85,6 +85,12 @@ async fn dispatch_operation(
             serde_json::to_value(result).context("序列化 record_stop 响应失败")
         }
 
+        RECORD_CANCEL_OPERATION => {
+            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
+            record_cancel()?;
+            serde_json::to_value(Empty {}).context("序列化 record_cancel 响应失败")
+        }
+
         other => Err(anyhow::anyhow!("未知的 STT 操作: {other}")),
     }
 }
@@ -136,128 +142,272 @@ async fn transcribe(req: TranscribeRequest) -> Result<TranscribeResponse> {
         language: output.response.language,
         duration: output.response.duration,
         model: output.resolved.model,
+        audio_path: req.file_path,
     })
 }
 
-// ── 录音（record_start / record_stop）──
+// ── 录音（record_start / record_stop / record_cancel）──
 //
-// 用系统录音命令采集麦克风。录音进程由全局静态变量管理（sidecar 单进程）。
-// 跨平台：
-// - macOS：ffmpeg -f avfoundation -i ":0"（需安装 ffmpeg）
+// 用系统录音命令采集麦克风。录音会话（进程 + 文件路径 + 采样率）由全局
+// 静态变量管理（sidecar 单进程、同一时刻至多一路录音）。跨平台：
+// - macOS / Windows：ffmpeg（需用户自行安装，启动前检测并给出明确报错）
 // - Linux：arecord（ALSA 默认）
-// - Windows：powershell 录音（复杂，暂用 ffmpeg）
+//
+// 停止录音走「优雅终止」：录音进程被强杀（SIGKILL/TerminateProcess）时
+// WAV 头部的长度字段来不及回写，短录音会留下 0 字节或头部损坏的文件。
+// Unix 下发 SIGINT 让 ffmpeg/arecord 自行收尾；收尾后统一校验并重写 WAV
+// 头部长度，兜底任何残留的占位值。
 
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
-static RECORDING: Mutex<Option<std::process::Child>> = Mutex::new(None);
+/// 一次录音会话：录音进程 + 本次的输出文件与采样率。
+struct RecordSession {
+    child: std::process::Child,
+    file_path: std::path::PathBuf,
+    sample_rate: u32,
+}
+
+static RECORDING: Mutex<Option<RecordSession>> = Mutex::new(None);
+
+/// Windows 下抑制子进程控制台窗口（CREATE_NO_WINDOW），避免录音时闪黑窗。
+#[cfg(windows)]
+fn suppress_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut std::process::Command) {}
+
+/// 检测录音命令是否可用（ffmpeg/arecord 未安装时给出可操作的报错）。
+fn ensure_recording_tool_available() -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    let (program, version_flag, hint) = (
+        "ffmpeg",
+        "-version",
+        "brew install ffmpeg（或 choco install ffmpeg）",
+    );
+    #[cfg(target_os = "linux")]
+    let (program, version_flag, hint) = (
+        "arecord",
+        "--version",
+        "安装 alsa-utils（如 sudo apt install alsa-utils）",
+    );
+
+    let mut probe = std::process::Command::new(program);
+    probe.arg(version_flag);
+    suppress_console_window(&mut probe);
+    let available = probe
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok();
+    if !available {
+        anyhow::bail!("录音功能需要 {program}，当前系统未安装。请先安装：{hint}");
+    }
+    Ok(())
+}
 
 /// 开始录音：启动系统录音命令，返回会话 ID。
 fn record_start(req: RecordStartRequest) -> Result<RecordStartResponse> {
-    let mut guard = RECORDING.lock().map_err(|_| anyhow::anyhow!("录音锁获取失败"))?;
-    if guard.is_some() {
-        anyhow::bail!("已有录音在进行中");
+    let mut guard = RECORDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(session) = guard.as_mut() {
+        // 上一次录音进程可能已自行退出（如设备被占用），先收割再判定占用。
+        if session
+            .child
+            .try_wait()
+            .is_ok_and(|status| status.is_none())
+        {
+            anyhow::bail!("已有录音在进行中");
+        }
+        *guard = None;
     }
+
+    ensure_recording_tool_available()?;
 
     let sample_rate = req.sample_rate.unwrap_or(16000);
     let file_path = media_file_path("stt_rec", "wav")?;
 
-    #[cfg(target_os = "macos")]
-    let child = {
-        let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args([
-            "-y",
-            "-f", "avfoundation",
-            "-i", ":0",
-            "-ar", &sample_rate.to_string(),
-            "-ac", "1",
-            file_path.to_string_lossy().as_ref(),
-        ]);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("启动录音失败（需安装 ffmpeg）：{e}"))?
-    };
-
-    #[cfg(target_os = "linux")]
-    let child = {
-        let mut cmd = std::process::Command::new("arecord");
-        cmd.args([
-            "-f", "S16_LE",
-            "-r", &sample_rate.to_string(),
-            "-c", "1",
-            &file_path.to_string_lossy().to_string(),
-        ]);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("启动录音失败（需安装 arecord）：{e}"))?
-    };
-
-    #[cfg(target_os = "windows")]
-    let child = {
-        let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args([
-            "-y",
-            "-f", "dshow",
-            "-i", "audio=default",
-            "-ar", &sample_rate.to_string(),
-            "-ac", "1",
-            &file_path.to_string_lossy().to_string(),
-        ]);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("启动录音失败（需安装 ffmpeg）：{e}"))?
-    };
+    let mut command = recording_command(sample_rate, &file_path);
+    suppress_console_window(&mut command);
+    let child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("启动录音失败：{e}"))?;
 
     let session_id = format!("rec-{}", scru128::new());
-    *guard = Some(child);
+    *guard = Some(RecordSession {
+        child,
+        file_path,
+        sample_rate,
+    });
     Ok(RecordStartResponse { session_id })
 }
 
-/// 停止录音：终止录音进程，返回音频文件路径。
+/// 按平台构造录音命令（16bit 单声道 PCM WAV）。
+fn recording_command(sample_rate: u32, file_path: &std::path::Path) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("ffmpeg");
+        command.args([
+            "-y",
+            "-f",
+            "avfoundation",
+            "-i",
+            ":0",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            "1",
+        ]);
+        command.arg(file_path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("ffmpeg");
+        command.args([
+            "-y",
+            "-f",
+            "dshow",
+            "-i",
+            "audio=default",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            "1",
+        ]);
+        command.arg(file_path);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("arecord");
+        command.args(["-f", "S16_LE", "-r", &sample_rate.to_string(), "-c", "1"]);
+        command.arg(file_path);
+        command
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let mut command = {
+        let _ = (sample_rate, file_path);
+        std::process::Command::new("")
+    };
+
+    let _ = &mut command;
+    command
+}
+
+/// 优雅终止录音进程：Unix 发 SIGINT 让 ffmpeg/arecord 自行写完 WAV 头，
+/// 等待至多 3 秒；超时或 Windows 下退回强杀（由 WAV 头修复兜底）。
+fn stop_recording_child(session: &mut RecordSession) {
+    #[cfg(unix)]
+    {
+        // std::process::Child 只有强杀（kill = SIGKILL），SIGINT 需经 libc 发送。
+        let pid = session.child.id() as i32;
+        unsafe {
+            libc::kill(pid, libc::SIGINT);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if session
+                .child
+                .try_wait()
+                .is_ok_and(|status| status.is_some())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    let _ = session.child.kill();
+    let _ = session.child.wait();
+}
+
+/// 停止录音：优雅终止进程 → 校验/修复 WAV 头 → 返回音频文件路径与时长。
 fn record_stop() -> Result<RecordStopResponse> {
-    let mut guard = RECORDING.lock().map_err(|_| anyhow::anyhow!("录音锁获取失败"))?;
-    let child = guard.take().ok_or_else(|| anyhow::anyhow!("当前没有录音在进行中"))?;
+    let mut guard = RECORDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut session = guard
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("当前没有录音在进行中"))?;
 
-    // 终止录音进程。
-    let mut child = child;
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_recording_child(&mut session);
 
-    // 录音文件路径：record_start 时生成，这里需要恢复。
-    // 简化：从 media 目录找最新的 stt_rec_*.wav。
-    let storage_root = std::env::var(STORAGE_ROOT_ENV)
-        .context("TIANGONG_STORAGE_ROOT 未注入，无法定位媒体目录")?;
-    let media_dir = std::path::PathBuf::from(&storage_root).join("media");
-    let latest = std::fs::read_dir(&media_dir)
+    finalize_wav_header(&session.file_path)?;
+    let duration = std::fs::metadata(&session.file_path)
         .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.starts_with("stt_rec_") && n.ends_with(".wav"))
-                })
-                .max_by_key(|p| p.metadata().map(|m| m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)).unwrap_or(std::time::SystemTime::UNIX_EPOCH))
-        });
-
-    let file_path = latest.ok_or_else(|| anyhow::anyhow!("未找到录音文件"))?;
-    let duration = file_path
-        .metadata()
-        .ok()
-        .map(|m| m.len() as f64 / (16000.0 * 2.0));
+        .map(|m| (m.len().saturating_sub(44)) as f64 / (session.sample_rate as f64 * 2.0));
 
     Ok(RecordStopResponse {
-        file_path: file_path.to_string_lossy().to_string(),
+        file_path: session.file_path.to_string_lossy().to_string(),
         mime_type: "audio/wav".to_string(),
         duration,
     })
+}
+
+/// 取消录音：终止进程并删除录音文件（用户放弃，不保留产物）。
+fn record_cancel() -> Result<()> {
+    let mut guard = RECORDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut session) = guard.take() {
+        stop_recording_child(&mut session);
+        let _ = std::fs::remove_file(&session.file_path);
+    }
+    Ok(())
+}
+
+/// 校验并重写 WAV 头部长度字段。
+///
+/// 录音进程被强杀（或未正常收尾）时，RIFF/data 长度为占位值；本函数按
+/// 文件实际大小重写两处长度的 little-endian 值。文件不存在、过短（不足
+/// 一个 44 字节标准头）或非 RIFF/WAVE 时明确报错或跳过。
+fn finalize_wav_header(path: &std::path::Path) -> Result<()> {
+    let file_len = std::fs::metadata(path)
+        .with_context(|| format!("录音文件不存在：{}", path.display()))?
+        .len();
+    if file_len < 44 {
+        anyhow::bail!("录音文件只有 {file_len} 字节，录音可能失败（请检查麦克风权限与录音设备）");
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("打开录音文件失败：{}", path.display()))?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header).context("读取 WAV 头失败")?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        // 非 WAV 容器（fmt chunk 非标准布局）：无法安全重写，保留原样。
+        return Ok(());
+    }
+
+    let riff_size = u32::try_from(file_len.saturating_sub(8)).unwrap_or(u32::MAX);
+    header[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    // 解析 fmt chunk 实际大小后定位 data 长度字段（PCM 通常为 44 字节整头）。
+    let fmt_size = u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
+    let data_size_offset = 20 + fmt_size + 4;
+    if data_size_offset + 4 <= header.len() {
+        let data_size =
+            u32::try_from(file_len.saturating_sub(data_size_offset as u64 + 4)).unwrap_or(u32::MAX);
+        header[data_size_offset..data_size_offset + 4].copy_from_slice(&data_size.to_le_bytes());
+    }
+
+    file.seek(SeekFrom::Start(0)).context("回卷文件失败")?;
+    file.write_all(&header).context("重写 WAV 头失败")?;
+    file.flush().context("落盘 WAV 头失败")?;
+    Ok(())
 }
 
 /// 构造 `~/.tiangong/media/<prefix>_<scru128>.<ext>` 路径并确保目录存在。

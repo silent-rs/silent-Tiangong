@@ -24,6 +24,16 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         Box::pin(async { None })
     }
+
+    /// 工具执行默认超时（毫秒）。
+    ///
+    /// 注册方声明了工具级默认超时时返回（如 TS 插件清单的
+    /// `tools[].timeout_ms`），Core 层以其为准，避免长任务（如终端 300s）
+    /// 被 Core 兜底默认值提前截断。默认返回 `None`，表示使用 Core 兜底值。
+    /// Agent 在工具参数里指定的 `timeout_ms` 优先于本值。
+    fn default_timeout_ms(&self, _tool_name: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// 工具规格提供者。

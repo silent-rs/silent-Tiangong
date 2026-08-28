@@ -614,6 +614,7 @@ mod shared_runtime_tests {
             label: value.to_string(),
             kind: "test".to_string(),
             hint: String::new(),
+            mark: String::new(),
         };
         let core = TiangongCore::builder()
             .session_id("mention-test")

@@ -1,0 +1,51 @@
+//! 官方插件清单护栏：`plugins/` 下所有正式插件的 plugin.json 必须能通过
+//! 清单校验。
+//!
+//! 背景：schema v1 清单声明 `mention` 等字段会被校验拒绝（插件无法加载），
+//! 但清单校验工具只核对版本号，曾出现 v1+mention 组合溜进仓库直到 review
+//! 才发现。本测试遍历全部官方清单逐一 validate，防止同类问题复发。
+
+use std::path::PathBuf;
+
+fn repo_root() -> PathBuf {
+    // tests/ → tiangong-plugin-runtime/ → crates/ → 仓库根
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("定位仓库根失败")
+}
+
+#[test]
+fn official_plugin_manifests_all_validate() {
+    let plugins_dir = repo_root().join("plugins");
+    let mut checked = 0;
+    let mut failures = Vec::new();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&plugins_dir)
+        .expect("读取 plugins 目录失败")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join("plugin.json").is_file())
+        .collect();
+    entries.sort();
+
+    for plugin_dir in entries {
+        let manifest_path = plugin_dir.join("plugin.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("读取 plugin.json 失败");
+        let manifest: tiangong_plugin_runtime::manifest::PluginManifest =
+            serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{} 反序列化失败: {e}", manifest_path.display()));
+        if let Err(error) = manifest.validate() {
+            failures.push(format!("{}: {error:#}", manifest_path.display()));
+        }
+        checked += 1;
+    }
+
+    assert!(checked > 0, "未发现任何插件清单，测试目录定位可能错误");
+    assert!(
+        failures.is_empty(),
+        "{} 个官方插件清单校验失败：\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

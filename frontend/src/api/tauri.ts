@@ -999,14 +999,14 @@ export const api = {
   // ----------------------------------------------------------------
   // @提及补全
   // ----------------------------------------------------------------
-  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
+  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string; mark?: string }[]> =>
     invoke('get_mention_candidates'),
 
   /** 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。 */
   getMentionGroups: (
     allowedKinds?: string[],
     maxPerGroup?: number,
-  ): Promise<{ kind: string; label: string; candidates: { value: string; label: string; kind: string; hint: string }[] }[]> =>
+  ): Promise<{ kind: string; label: string; candidates: { value: string; label: string; kind: string; hint: string; mark?: string }[] }[]> =>
     invoke('get_mention_groups', { allowedKinds, maxPerGroup }),
 
   // ----------------------------------------------------------------
@@ -1025,9 +1025,17 @@ export const api = {
     api.bridgeCall('text-to-speech', 'plugin.synthesize', JSON.stringify({ text }))
       .then((raw) => JSON.parse(raw)),
 
-  playAudioFile: (filePath: string): Promise<void> =>
-    api.bridgeCall('text-to-speech', 'plugin.play', JSON.stringify({ file_path: filePath }))
-      .then(() => undefined),
+  /** 播放音频并等待播放完成（轮询 sidecar 播放状态；stopAudio 可中断等待）。 */
+  playAudioFile: async (filePath: string): Promise<void> => {
+    await api.bridgeCall('text-to-speech', 'plugin.play', JSON.stringify({ file_path: filePath }));
+    // 播放在 sidecar 后台执行（阻塞式播放会让 stop 请求永远排队），
+    // 这里轮询播放状态直到自然结束或被 stop 终止。
+    for (;;) {
+      const raw = await api.bridgeCall('text-to-speech', 'plugin.play_status', '{}');
+      if (!JSON.parse(raw).playing) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  },
 
   stopAudio: (): Promise<void> =>
     api.bridgeCall('text-to-speech', 'plugin.stop', '{}')
@@ -1042,15 +1050,8 @@ export const api = {
     ),
 
   listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
-    api.bridgeCall('text-to-speech', 'plugin.list_models', '{}')
-      .then((raw) => {
-        const data = JSON.parse(raw);
-        const models = data.models ?? [];
-        return models.map((m: { key: string; model: string }) => ({
-          id: m.key,
-          name: m.model,
-        }));
-      }),
+    api.bridgeCall('text-to-speech', 'plugin.list_voices', '{}')
+      .then((raw) => JSON.parse(raw).voices ?? []),
 
   // ----------------------------------------------------------------
   // 语音识别（经 stt 插件，前端经 bridge.call 调用插件 handle_view_message）
@@ -1074,6 +1075,11 @@ export const api = {
   stopRecording: (): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
     api.bridgeCall('speech-to-text', 'plugin.record_stop', '{}')
       .then((raw) => JSON.parse(raw)),
+
+  /** 取消录音（经 stt 插件）：终止录音进程并丢弃录音文件。 */
+  cancelRecording: (): Promise<void> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_cancel', '{}')
+      .then(() => undefined),
 
   // ----------------------------------------------------------------
   // 事件监听

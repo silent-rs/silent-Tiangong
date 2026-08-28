@@ -21,12 +21,16 @@ pub trait TtsOperation {
 
 pub const SYNTHESIZE_OPERATION: &str = "synthesize";
 pub const LIST_MODELS_OPERATION: &str = "list_models";
+pub const LIST_VOICES_OPERATION: &str = "list_voices";
 pub const PLAY_OPERATION: &str = "play";
+pub const PLAY_STATUS_OPERATION: &str = "play_status";
 pub const STOP_OPERATION: &str = "stop";
 
 pub struct Synthesize;
 pub struct ListModels;
+pub struct ListVoices;
 pub struct Play;
+pub struct PlayStatus;
 pub struct Stop;
 
 impl TtsOperation for Synthesize {
@@ -41,10 +45,22 @@ impl TtsOperation for ListModels {
     type Response = ListModelsResponse;
 }
 
+impl TtsOperation for ListVoices {
+    const NAME: &'static str = LIST_VOICES_OPERATION;
+    type Request = Empty;
+    type Response = ListVoicesResponse;
+}
+
 impl TtsOperation for Play {
     const NAME: &'static str = PLAY_OPERATION;
     type Request = PlayRequest;
     type Response = PlayResponse;
+}
+
+impl TtsOperation for PlayStatus {
+    const NAME: &'static str = PLAY_STATUS_OPERATION;
+    type Request = Empty;
+    type Response = PlayStatusResponse;
 }
 
 impl TtsOperation for Stop {
@@ -105,8 +121,33 @@ pub struct PlayRequest {
 }
 
 /// 播放音频响应。
+///
+/// 播放为后台执行：请求返回只表示「已启动」，完成状态经
+/// [`PLAY_STATUS_OPERATION`] 轮询获取。这样播放期间 sidecar 仍可响应
+/// stop 等其他请求（stdio 分发是串行的，阻塞式播放会让 stop 永远排队）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayResponse {
-    /// 是否播放完成（阻塞式播放返回 true）。
-    pub completed: bool,
+    /// 是否成功启动播放。
+    pub started: bool,
+}
+
+/// 播放状态响应。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlayStatusResponse {
+    /// 是否有音频正在播放。
+    pub playing: bool,
+}
+
+/// 音色信息（设置页选择用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VoiceInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListVoicesResponse {
+    pub voices: Vec<VoiceInfo>,
 }

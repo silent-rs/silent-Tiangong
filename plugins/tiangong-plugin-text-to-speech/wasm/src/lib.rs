@@ -14,8 +14,9 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_text_to_speech_protocol::{
-    Empty, ListModels, ListModelsResponse, Play, PlayRequest, PlayResponse, Stop, Synthesize,
-    SynthesizeRequest, SynthesizeResponse, TOOL_TEXT_TO_SPEECH,
+    Empty, ListModels, ListModelsResponse, ListVoices, ListVoicesResponse, Play, PlayRequest,
+    PlayResponse, PlayStatus, PlayStatusResponse, Stop, Synthesize, SynthesizeRequest,
+    SynthesizeResponse, TOOL_TEXT_TO_SPEECH,
 };
 
 mod descriptor {
@@ -163,12 +164,26 @@ impl UiGuest for Component {
                     .map_err(|e| plugin_err(format!("停止播放失败: {e}")))?;
                 "{}".to_string()
             }
+            "play_status" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let response: PlayStatusResponse = sidecar_client::invoke::<PlayStatus>(&Empty {})
+                    .map_err(|e| plugin_err(format!("查询播放状态失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 play_status 响应失败: {e}")))?
+            }
             "list_models" => {
                 let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
                 let response: ListModelsResponse = sidecar_client::invoke::<ListModels>(&Empty {})
                     .map_err(|e| plugin_err(format!("列出模型失败: {e}")))?;
                 serde_json::to_string(&response)
                     .map_err(|e| plugin_err(format!("序列化 list_models 响应失败: {e}")))?
+            }
+            "list_voices" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let response: ListVoicesResponse = sidecar_client::invoke::<ListVoices>(&Empty {})
+                    .map_err(|e| plugin_err(format!("列出音色失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 list_voices 响应失败: {e}")))?
             }
             other => return Err(plugin_err(format!("未知的 TTS 消息: {other}"))),
         };

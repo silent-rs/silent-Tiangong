@@ -788,7 +788,8 @@ fn group_mention_candidates(
 
     // 按 kind 分组，保持首次出现顺序；每组按数量上限截断。
     let mut groups: Vec<tiangong_core::MentionGroup> = Vec::new();
-    let mut index_by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut index_by_kind: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for candidate in out {
         let group_index = match index_by_kind.get(&candidate.kind) {
             Some(&index) => index,
@@ -828,6 +829,7 @@ mod tests {
             label: value.to_string(),
             kind: kind.to_string(),
             hint: String::new(),
+            mark: String::new(),
         }
     }
 
@@ -852,10 +854,7 @@ mod tests {
     #[test]
     fn group_白名单过滤() {
         let groups = group_mention_candidates(
-            vec![
-                candidate("skill", "@skill:a"),
-                candidate("mcp", "@mcp:x"),
-            ],
+            vec![candidate("skill", "@skill:a"), candidate("mcp", "@mcp:x")],
             &["skill".to_string()],
             usize::MAX,
         );

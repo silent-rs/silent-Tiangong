@@ -25,3 +25,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macr
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 scru128 = { workspace = true }
+
+# Unix 下向录音进程发 SIGINT 优雅终止（std::process::Child 仅支持强杀）。
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

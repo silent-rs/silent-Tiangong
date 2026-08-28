@@ -28,6 +28,14 @@ describe('classifyMention', () => {
     expect(classifyMention('@Reviewer_1')).toEqual({ kind: 'agent', label: 'Reviewer_1' });
   });
 
+  it('识别 @index 与 @plugin:<id>', () => {
+    expect(classifyMention('@index')).toEqual({ kind: 'index', label: '工作区搜索' });
+    expect(classifyMention('@plugin:text-to-speech')).toEqual({
+      kind: 'plugin',
+      label: 'text-to-speech',
+    });
+  });
+
   it('拒绝不合法 token', () => {
     expect(classifyMention('@')).toBeNull();
     expect(classifyMention('hello')).toBeNull();
@@ -36,6 +44,9 @@ describe('classifyMention', () => {
     expect(classifyMention('@all-dev')).toBeNull();
     // role 不允许非字母数字下划线
     expect(classifyMention('@dev-bot!')).toBeNull();
+    // plugin id 不允许点号等字符（带点的会被当成普通文本）
+    expect(classifyMention('@plugin:a.b')).toBeNull();
+    expect(classifyMention('@plugin:')).toBeNull();
   });
 });
 

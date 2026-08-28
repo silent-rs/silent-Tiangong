@@ -473,6 +473,7 @@ fn index_mention_candidates() -> Result<String, PluginError> {
         "label": "工作区搜索",
         "kind": "index",
         "hint": "搜索工作区文件与对话历史",
+        "mark": "I",
     })];
     serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
 }
