@@ -751,6 +751,42 @@ export function MessageList() {
 
   const railActiveNodeIdx = railHoverInfo?.markerIndex ?? -1;
 
+  // 后台首击补发：系统首击只激活了窗口（未到达页面），按宿主下发的
+  // 点击位置执行横条/预览卡跳转。置于 turnNodes 与跳转函数定义之后，
+  // 依赖数组保持最新引用。
+  useEffect(() => {
+    const unlistenClick = listen<{ x: number; y: number }>('window:inactive_click', (event) => {
+      const point = event.payload;
+      const rect = navigationRef.current?.getBoundingClientRect();
+      if (!point || !rect) return;
+      const inNavZone =
+        point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+      if (inNavZone) {
+        rulerNavRef.current?.externalClick(point.y);
+        return;
+      }
+      const hover = railHoverInfoRef.current;
+      if (hover) {
+        const cardHalf = 88;
+        const cardTop =
+          rect.top + Math.min(Math.max(hover.y, cardHalf), Math.max(cardHalf, hover.trackH - cardHalf)) - cardHalf;
+        const inCardZone =
+          point.x >= rect.right - 56 - 320 &&
+          point.x <= rect.right - 56 &&
+          point.y >= cardTop - 12 &&
+          point.y <= cardTop + cardHalf * 2 + 12;
+        const node = hover.markerIndex >= 0 ? turnNodes[hover.markerIndex] : undefined;
+        if (inCardZone && node) {
+          setRailHoverInfo(null);
+          scrollToUserGroupTop(node.groupIndex);
+        }
+      }
+    });
+    return () => {
+      void unlistenClick.then((fn) => fn());
+    };
+  }, [turnNodes, scrollToUserGroupTop]);
+
   return (
     <div className="relative h-full">
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

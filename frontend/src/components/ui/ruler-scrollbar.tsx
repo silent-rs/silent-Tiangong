@@ -15,10 +15,12 @@ interface RulerScrollbarProps {
   className?: string
 }
 
-/** 命令式接口：后台悬停时以宿主下发的坐标驱动与真实 pointermove 等同的效果 */
+/** 命令式接口：后台悬停时以宿主下发的坐标驱动与真实指针事件等同的效果 */
 export interface RulerScrollbarHandle {
   /** clientY 为视口 y 坐标（等同 onPointerMove 的 event.clientY）；null 等同 onPointerLeave */
   externalPointer: (clientY: number | null) => void
+  /** 后台首击补发：以视口 y 坐标命中的横条执行 onSelect（系统首击被窗口激活消费） */
+  externalClick: (clientY: number) => void
 }
 
 const ROW_HEIGHT = 12
@@ -86,8 +88,15 @@ export const RulerScrollbar = React.forwardRef<RulerScrollbarHandle, RulerScroll
     onHover?.(null)
   }, [onHover])
 
+  const scrollRailBy = React.useCallback((delta: number) => {
+    const rail = railRef.current
+    if (!rail) return
+    rail.scrollTop += delta
+    setRailScrollTop(rail.scrollTop)
+  }, [])
+
   // 后台悬停：宿主轮询下发的窗口内坐标经父层转发至此，驱动与真实
-  // pointermove 等同的横条变宽、高亮与预览卡（后台窗口收不到 DOM 指针事件）。
+  // 指针事件等同的横条变宽、高亮、预览卡与首击跳转（后台窗口收不到 DOM 指针事件）。
   React.useImperativeHandle(ref, () => ({
     externalPointer: (clientY: number | null) => {
       if (clientY == null) {
@@ -104,7 +113,18 @@ export const RulerScrollbar = React.forwardRef<RulerScrollbarHandle, RulerScroll
       }
       schedulePointerUpdate(clientY)
     },
-  }), [pointerLeave, schedulePointerUpdate])
+    externalClick: (clientY: number) => {
+      const root = rootRef.current
+      const rail = railRef.current
+      if (!root || !rail || markerCount === 0) return
+      const rect = root.getBoundingClientRect()
+      if (clientY < rect.top || clientY > rect.bottom) return
+      const y = Math.min(Math.max(clientY - rect.top, 0), rect.height)
+      const contentY = y + rail.scrollTop - centeredOffset
+      const markerIndex = Math.min(markerCount - 1, Math.max(0, Math.round((contentY - ROW_HEIGHT / 2) / ROW_HEIGHT)))
+      onSelect?.(markerIndex)
+    },
+  }), [centeredOffset, markerCount, onSelect, pointerLeave, schedulePointerUpdate])
 
   React.useEffect(() => {
     const rail = railRef.current
@@ -118,13 +138,6 @@ export const RulerScrollbar = React.forwardRef<RulerScrollbarHandle, RulerScroll
 
   React.useEffect(() => () => {
     if (frameRef.current != null) cancelAnimationFrame(frameRef.current)
-  }, [])
-
-  const scrollRailBy = React.useCallback((delta: number) => {
-    const rail = railRef.current
-    if (!rail) return
-    rail.scrollTop += delta
-    setRailScrollTop(rail.scrollTop)
   }, [])
 
   const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {

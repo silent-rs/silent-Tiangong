@@ -6,6 +6,11 @@
 //! 左上原点）经 `window:inactive_cursor` 事件下发给前端，由前端对照导航
 //! 热区矩形自行决定是否显示导航；payload 为 null 表示离开窗口或窗口
 //! 已激活（激活后由 CSS `:hover` 接管）。
+//! 窗口从未激活转入激活且鼠标刚在窗口内时，经 `window:inactive_click`
+//! 补发首击位置——系统首击被窗口激活消费、未到达页面（wry 的
+//! acceptsFirstMouse 挂在 WKWebView 上，实际接收点击的内部 WKContentView
+//! 不受其控制），前端据位置执行横条/预览卡跳转。
+
 //!
 //! 坐标一律在全局逻辑（点）坐标系比较：NSEvent::mouseLocation 与
 //! CGDisplayBounds 同系（左下原点），窗口物理位置按其所在屏缩放换算回
@@ -23,6 +28,10 @@ const POLL_INTERVAL_MS: u64 = 50;
 
 /// 位置变化超过该阈值（逻辑像素）才下发，避免静止时重复事件。
 const MOVE_THRESHOLD: f64 = 1.0;
+
+/// 窗口从未激活转入激活时，鼠标在窗口内的最近确认距今小于该值视为后台首击。
+/// 取两倍采样间隔，覆盖静止悬停后（无坐标下发）点击的情况。
+const CLICK_WINDOW_MS: u64 = 150;
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +67,8 @@ pub fn spawn(app: AppHandle) {
 fn poll_loop(app: AppHandle) {
     // 上次下发的窗口内坐标；None 表示当前不在「未激活且鼠标在窗口内」状态
     let mut last: Option<InactiveCursorPoint> = None;
+    // 最近一次确认鼠标在窗口内的时刻（含静止未下发坐标的轮次）
+    let mut in_window_at: Option<std::time::Instant> = None;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
 
@@ -67,11 +78,26 @@ fn poll_loop(app: AppHandle) {
         // 窗口隐藏（托盘）或最小化时不产生悬停信号
         if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
             last = emit_leave(&app, last);
+            in_window_at = None;
             continue;
         }
         // 激活时 CSS :hover 生效，前端也在 focus 时清状态；此处只补发一次离开
         if window.is_focused().unwrap_or(true) {
+            // 后台首击补发：窗口从未激活转入激活，且极短时间内仍确认过鼠标在窗口内，
+            // 视为后台点击（系统首击被窗口激活消费、未到达页面）。把点击位置下发给
+            // 前端执行命中判定；Cmd+Tab 等无点击激活因鼠标静止无近期确认而天然排除。
+            if let (Some(point), Some(at)) = (last, in_window_at) {
+                if at.elapsed() < std::time::Duration::from_millis(CLICK_WINDOW_MS) {
+                    tracing::debug!(
+                        point_x = point.x,
+                        point_y = point.y,
+                        "inactive-hover：补发后台首击位置"
+                    );
+                    let _ = app.emit("window:inactive_click", &point);
+                }
+            }
             last = emit_leave(&app, last);
+            in_window_at = None;
             continue;
         }
         let (Some((mouse_x, mouse_y)), Ok(pos), Ok(size), Ok(scale)) = (
@@ -92,8 +118,10 @@ fn poll_loop(app: AppHandle) {
         let inside = mouse_x >= wx && mouse_x < wx + ww && mouse_y >= wy && mouse_y < wy + wh;
         if !inside {
             last = emit_leave(&app, last);
+            in_window_at = None;
             continue;
         }
+        in_window_at = Some(std::time::Instant::now());
         let point = InactiveCursorPoint {
             x: mouse_x - wx,
             y: mouse_y - wy,
