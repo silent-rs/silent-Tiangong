@@ -1,4 +1,4 @@
-name: Publish Launcher
+name: Publish Sandbox
 
 # 沙箱独立组件在线发布（Launcher 制品 + 清单）：三平台矩阵构建+官方
 # 签名制品、平台片段与结构化 release-info（协议/策略版本直接引用 crate
@@ -117,7 +117,7 @@ jobs:
             | jq -r '.target_directory')/sandbox-dist"
           platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
           artifact="$dist/sandbox/${{ needs.resolve.outputs.version }}/tiangong-sb-$platform"
-          cargo run --locked -p xtask -- verify-launcher-official "$artifact" "$artifact.sig"
+          cargo run --locked -p xtask -- verify-sandbox-artifact "$artifact" "$artifact.sig"
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
@@ -168,7 +168,7 @@ jobs:
           out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
           print(out.read_text())
           PY
-          echo "LAUNCHER_VERSION=${{ needs.resolve.outputs.version }}" >> "$GITHUB_ENV"
+          echo "SANDBOX_VERSION=${{ needs.resolve.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Install ossutil
         run: |
@@ -190,24 +190,24 @@ jobs:
           # OSS 无目录对象，前缀 stat 不可靠：逐个检查本版本将要发布的
           # 每个对象，任一已存在即拒绝（发布制品不可变）。
           shopt -s nullglob
-          artifacts=(target/sandbox-dist/sandbox/"${LAUNCHER_VERSION}"/*)
+          artifacts=(target/sandbox-dist/sandbox/"${SANDBOX_VERSION}"/*)
           test "${#artifacts[@]}" -gt 0
           for artifact in "${artifacts[@]}"; do
-            object="oss://silent-tiangong/sandbox/${LAUNCHER_VERSION}/$(basename "$artifact")"
+            object="oss://silent-tiangong/sandbox/${SANDBOX_VERSION}/$(basename "$artifact")"
             if timeout 30s ossutil stat "$object" >/dev/null 2>&1; then
               echo "::error::对象已存在，拒绝覆盖（发布不可变）: $object"
               exit 1
             fi
           done
-          echo "版本 ${LAUNCHER_VERSION} 的全部对象均不存在，允许发布。"
+          echo "版本 ${SANDBOX_VERSION} 的全部对象均不存在，允许发布。"
 
       - name: "Upload immutable versioned artifacts (no overwrite)"
         run: |
           # 守卫已确认对象不存在；逐对象上传且不带强制覆盖参数，
           # 出现任何已存在冲突立即失败。
           shopt -s nullglob
-          for artifact in target/sandbox-dist/sandbox/"${LAUNCHER_VERSION}"/*; do
-            object="oss://silent-tiangong/sandbox/${LAUNCHER_VERSION}/$(basename "$artifact")"
+          for artifact in target/sandbox-dist/sandbox/"${SANDBOX_VERSION}"/*; do
+            object="oss://silent-tiangong/sandbox/${SANDBOX_VERSION}/$(basename "$artifact")"
             ossutil cp "$artifact" "$object"
           done
 
@@ -256,4 +256,4 @@ jobs:
               oss://silent-tiangong/sandbox/latest.json -f || true
             exit 1
           fi
-          echo "Sandbox ${LAUNCHER_VERSION} 发布完成（正式清单已生效）。"
+          echo "Sandbox ${SANDBOX_VERSION} 发布完成（正式清单已生效）。"

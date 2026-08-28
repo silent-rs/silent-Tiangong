@@ -501,8 +501,8 @@ fn print_help() {
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
     );
     eprintln!("  cargo run -p xtask -- validate-plugin-catalog <catalog或->");
-    eprintln!("  cargo run -p xtask -- prepare-launcher-release");
-    eprintln!("  cargo run -p xtask -- verify-launcher-official <制品> <签名>");
+    eprintln!("  cargo run -p xtask -- prepare-sandbox-release");
+    eprintln!("  cargo run -p xtask -- verify-sandbox-artifact <制品> <签名>");
     eprintln!("  cargo run -p xtask -- sign-sandbox");
 }
 
