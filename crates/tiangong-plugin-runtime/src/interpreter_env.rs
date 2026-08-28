@@ -1,17 +1,95 @@
-//! 解释器（node/python）运行环境探测与入口注入。
+//! 解释器（node/python）运行环境发现、缓存与入口注入。
 //!
 //! GUI 进程（launchd/Finder 启动）不执行 shell 初始化，nvm/Homebrew 等
-//! 安装位置不在其 PATH 中：本模块提供 PATH 之外的分层探测（安装工具
-//! 声明的根目录 → 版本管理器目录从新到旧 → 系统标准位置），以及进程
-//! 入口的 [`ensure_interpreter_env`] 环境注入，供插件 sidecar 与命令
-//! 通道整棵子进程树使用。
+//! 安装位置不在其 PATH 中。本模块的发现分两层：
+//!
+//! - **应用级缓存**：每种解释器正常只探测一次，后续使用前仅做
+//!   `is_file` 轻量校验；程序被删除等无法创建进程的情形经
+//!   [`invalidate_if_matches`] 失效后重新发现一次。
+//! - **平台探测策略**：Windows 只检查显式路径、PATH 与环境变量可直接
+//!   构造的固定路径（不枚举版本目录）；macOS/Linux 保留版本管理器
+//!   目录探测，仅在缓存未命中时作为慢路径执行。
 //!
 //! 探测结果只由传入的 [`InterpreterEnv`] 快照和文件系统状态决定：
 //! 某个来源缺失就跳过继续尝试后续层次，全部未命中才判定解释器不可用。
+//! 进程入口经 [`ensure_interpreter_env`] 把发现结果注入
+//! `TIANGONG_*_PATH` 与 PATH，供插件 sidecar 与命令通道整棵子进程树使用。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use crate::manifest::SidecarRuntime;
+
+/// 解释器种类（sidecar 清单声明的 runtime 去掉 native）。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InterpreterKind {
+    Node,
+    Python,
+}
+
+impl InterpreterKind {
+    fn env_key(self) -> &'static str {
+        match self {
+            InterpreterKind::Node => "TIANGONG_NODE_PATH",
+            InterpreterKind::Python => "TIANGONG_PYTHON_PATH",
+        }
+    }
+
+    fn install_hint(self) -> &'static str {
+        match self {
+            InterpreterKind::Node => "帮我安装 Node.js",
+            InterpreterKind::Python => "帮我安装 Python",
+        }
+    }
+
+    fn program_names(self) -> &'static [&'static str] {
+        match self {
+            InterpreterKind::Node => {
+                if cfg!(windows) {
+                    &["node.exe"]
+                } else {
+                    &["node"]
+                }
+            }
+            InterpreterKind::Python => {
+                if cfg!(windows) {
+                    &["python.exe", "python3.exe", "py.exe"]
+                } else {
+                    &["python3", "python"]
+                }
+            }
+        }
+    }
+}
+
+/// 解释器的发现来源；用户显式指定与应用自动注入必须可区分。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterpreterSource {
+    /// 用户经 `TIANGONG_*_PATH` 显式指定：路径无效时直接报错，不回退。
+    ExplicitOverride,
+    /// PATH 中直接命中。
+    Path,
+    /// 安装工具的环境变量直接构造出的固定路径（Windows 策略）。
+    Environment,
+    /// 版本管理器目录枚举或系统标准位置（macOS/Linux 慢路径）。
+    CommonLocation,
+}
+
+#[derive(Clone, Debug)]
+struct CachedInterpreter {
+    path: PathBuf,
+    source: InterpreterSource,
+}
+
+type InterpreterCache = HashMap<InterpreterKind, CachedInterpreter>;
+
+/// 应用级解释器缓存：只保存成功发现的程序，不缓存"未找到"（用户在
+/// 应用运行期间安装解释器后应能被发现）。
+fn global_cache() -> &'static RwLock<InterpreterCache> {
+    static CACHE: OnceLock<RwLock<InterpreterCache>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 /// 跨平台获取用户 home 目录（与 sidecar 框架 `endpoint::home_dir` 同源）。
 pub(crate) fn user_home_dir() -> Option<PathBuf> {
@@ -33,7 +111,7 @@ pub(crate) fn user_home_dir() -> Option<PathBuf> {
     }
 }
 
-/// 解释器探测所需的环境快照：生产路径经 [`InterpreterEnv::from_process`]
+/// 解释器发现所需的环境快照：生产路径经 [`InterpreterEnv::from_process`]
 /// 从进程环境读取一次，测试注入伪造值，不修改真实环境变量。
 #[derive(Default)]
 pub(crate) struct InterpreterEnv {
@@ -42,15 +120,12 @@ pub(crate) struct InterpreterEnv {
     home: Option<PathBuf>,
     /// 各安装工具声明的自定义根目录（未设置时按各工具默认位置推导）。
     nvm_dir: Option<PathBuf>,
-    nvm_home: Option<PathBuf>,
     nvm_symlink: Option<PathBuf>,
     volta_home: Option<PathBuf>,
     scoop: Option<PathBuf>,
     chocolatey_install: Option<PathBuf>,
     pyenv_root: Option<PathBuf>,
     asdf_data_dir: Option<PathBuf>,
-    appdata: Option<PathBuf>,
-    local_appdata: Option<PathBuf>,
     program_files: Option<PathBuf>,
     program_data: Option<PathBuf>,
     /// 各平台的解释器系统标准安装位置（Homebrew、系统包管理等）。
@@ -71,15 +146,12 @@ impl InterpreterEnv {
                 .unwrap_or_default(),
             home: user_home_dir(),
             nvm_dir: dir("NVM_DIR"),
-            nvm_home: dir("NVM_HOME"),
             nvm_symlink: dir("NVM_SYMLINK"),
             volta_home: dir("VOLTA_HOME"),
             scoop: dir("SCOOP"),
             chocolatey_install: dir("ChocolateyInstall"),
             pyenv_root: dir("PYENV_ROOT"),
             asdf_data_dir: dir("ASDF_DATA_DIR"),
-            appdata: dir("APPDATA"),
-            local_appdata: dir("LOCALAPPDATA"),
             program_files: dir("ProgramFiles"),
             program_data: dir("ProgramData"),
             node_system_locations: default_node_system_locations(),
@@ -100,47 +172,121 @@ fn explicit_or_default_root(
         .or_else(|| base.map(|base| base.join(default_suffix)))
 }
 
-/// PATH 及常见安装位置中查找解释器（不含环境变量覆盖分支）。
-pub(crate) fn search_interpreter_program(
-    runtime: SidecarRuntime,
-    env: &InterpreterEnv,
-) -> Option<PathBuf> {
-    let candidates: &[&str] = match runtime {
-        SidecarRuntime::Native => return None,
-        SidecarRuntime::Node => {
-            if cfg!(windows) {
-                &["node.exe"]
-            } else {
-                &["node"]
-            }
-        }
-        SidecarRuntime::Python => {
-            if cfg!(windows) {
-                &["python.exe", "py.exe"]
-            } else {
-                &["python3", "python"]
-            }
-        }
-    };
-    for directory in &env.search_paths {
-        for candidate in candidates {
-            let path = directory.join(candidate);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-    }
-    common_interpreter_locations(runtime, env)
-        .into_iter()
-        .find(|path| path.is_file())
+/// 统一的解释器解析入口：缓存命中（`is_file` 校验通过）直接返回，
+/// 失效或缺失时重新探测并写回缓存。registry 与入口注入共用本入口，
+/// 不各自独立探测。
+pub(crate) fn resolve_interpreter(kind: InterpreterKind) -> anyhow::Result<PathBuf> {
+    let explicit = std::env::var_os(kind.env_key())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    resolve_via(kind, explicit, global_cache(), || {
+        probe_interpreter(kind, &InterpreterEnv::from_process())
+    })
 }
 
-/// 进程入口最早调用（任何后台线程启动前）：探测解释器并注入进程环境，
+/// [`resolve_interpreter`] 的参数化核心，测试注入独立缓存、显式值与
+/// 探测闭包（兼作探测次数计数），不触碰全局状态。
+fn resolve_via<F>(
+    kind: InterpreterKind,
+    explicit: Option<PathBuf>,
+    cache: &RwLock<InterpreterCache>,
+    probe: F,
+) -> anyhow::Result<PathBuf>
+where
+    F: FnOnce() -> Option<CachedInterpreter>,
+{
+    let stale_source = {
+        let mut guard = cache
+            .write()
+            .map_err(|_| anyhow::anyhow!("解释器缓存锁已损坏"))?;
+        match guard.get(&kind) {
+            Some(cached) if cached.path.is_file() => return Ok(cached.path.clone()),
+            Some(cached) => {
+                let source = cached.source;
+                guard.remove(&kind);
+                Some(source)
+            }
+            None => None,
+        }
+    };
+    // 显式变量：仅当失效缓存不属于应用注入时视为用户显式——应用注入
+    // 成功必然伴随缓存记录，残留的失效值直接忽略并重新探测。
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+        let injected_by_app = matches!(
+            stale_source,
+            Some(
+                InterpreterSource::Path
+                    | InterpreterSource::Environment
+                    | InterpreterSource::CommonLocation
+            )
+        );
+        if !injected_by_app {
+            if explicit.is_file() {
+                if let Ok(mut guard) = cache.write() {
+                    guard.insert(
+                        kind,
+                        CachedInterpreter {
+                            path: explicit.clone(),
+                            source: InterpreterSource::ExplicitOverride,
+                        },
+                    );
+                }
+                return Ok(explicit);
+            }
+            anyhow::bail!(
+                "{} 指向的程序不存在: {}",
+                kind.env_key(),
+                explicit.display()
+            );
+        }
+    }
+    match probe() {
+        Some(discovered) => {
+            if let Ok(mut guard) = cache.write() {
+                guard.insert(kind, discovered.clone());
+            }
+            Ok(discovered.path)
+        }
+        None => anyhow::bail!(
+            "未找到 {:?} sidecar 所需的解释器程序（{}）；可在会话中对助手说「{}」快速安装，或以 {} 指定路径",
+            kind,
+            kind.program_names().join(" / "),
+            kind.install_hint(),
+            kind.env_key()
+        ),
+    }
+}
+
+/// 解释器程序本身无法创建进程（文件被删、无执行权限、格式无效等）时
+/// 失效缓存；仅当缓存当前值仍等于失败路径时清除，避免并发任务误删
+/// 其他线程刚更新的新缓存。插件脚本错误、握手失败等不在本路径。
+pub(crate) fn invalidate_if_matches(kind: InterpreterKind, failed_path: &Path) -> bool {
+    invalidate_if_matches_in(global_cache(), kind, failed_path)
+}
+
+fn invalidate_if_matches_in(
+    cache: &RwLock<InterpreterCache>,
+    kind: InterpreterKind,
+    failed_path: &Path,
+) -> bool {
+    let Ok(mut guard) = cache.write() else {
+        return false;
+    };
+    match guard.get(&kind) {
+        Some(cached) if cached.path == failed_path => {
+            guard.remove(&kind);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 进程入口最早调用（任何后台线程启动前）：发现解释器并注入进程环境，
 /// 使插件 sidecar 与命令通道整棵子进程树可见。
 ///
-/// - `TIANGONG_NODE_PATH` / `TIANGONG_PYTHON_PATH` 未设置时写入探测结果；
-///   外部显式指定（开发调试、CI）不覆盖，路径无效时跳过留待运行时
-///   fail-loud 报错；
+/// - `TIANGONG_NODE_PATH` / `TIANGONG_PYTHON_PATH` 未设置时写入探测结果
+///   并记录缓存来源；外部显式指定（开发调试、CI）不覆盖，路径无效时
+///   跳过留待运行时 fail-loud 报错；
 /// - 无论显式还是探测所得，均把解释器所在目录前置进 PATH（已包含则
 ///   跳过），sidecar 派生的 node/yarn/npx 等命令通道子进程直接可用；
 /// - 未探测到时不做任何改动，留待运行时报错引导安装；
@@ -148,20 +294,32 @@ pub(crate) fn search_interpreter_program(
 ///   最开头、线程池启动前调用。
 pub fn ensure_interpreter_env() {
     let snapshot = InterpreterEnv::from_process();
-    for (runtime, env_key) in [
-        (SidecarRuntime::Node, "TIANGONG_NODE_PATH"),
-        (SidecarRuntime::Python, "TIANGONG_PYTHON_PATH"),
-    ] {
-        let explicit = std::env::var_os(env_key)
+    for kind in [InterpreterKind::Node, InterpreterKind::Python] {
+        let explicit = std::env::var_os(kind.env_key())
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        let program = match explicit {
-            Some(path) if path.is_file() => path,
+        let program = match &explicit {
+            Some(path) if path.is_file() => {
+                if let Ok(mut guard) = global_cache().write() {
+                    guard.insert(
+                        kind,
+                        CachedInterpreter {
+                            path: path.clone(),
+                            source: InterpreterSource::ExplicitOverride,
+                        },
+                    );
+                }
+                path.clone()
+            }
             Some(_) => continue,
-            None => match search_interpreter_program(runtime, &snapshot) {
+            None => match probe_interpreter(kind, &snapshot) {
                 Some(discovered) => {
-                    unsafe { std::env::set_var(env_key, &discovered) };
-                    discovered
+                    let path = discovered.path.clone();
+                    unsafe { std::env::set_var(kind.env_key(), &path) };
+                    if let Ok(mut guard) = global_cache().write() {
+                        guard.insert(kind, discovered);
+                    }
+                    path
                 }
                 None => continue,
             },
@@ -190,22 +348,120 @@ fn prepend_dir_to_path_value(
     .ok()
 }
 
-/// PATH 未命中时的常见安装位置（分层回退）：安装工具声明的根目录 →
-/// 版本管理器目录（从新到旧）→ 系统标准位置。某工具变量缺失只说明未
-/// 使用该工具，继续尝试后续层次，不据此判定解释器不存在。
+/// 全量探测：PATH → 平台策略（Windows 固定环境路径 / Unix 常见位置）。
+fn probe_interpreter(kind: InterpreterKind, env: &InterpreterEnv) -> Option<CachedInterpreter> {
+    if let Some(found) = probe_from_path(kind, env) {
+        return Some(found);
+    }
+    if cfg!(windows) {
+        probe_windows_environment(kind, env)
+    } else {
+        probe_unix_common_locations(kind, env)
+    }
+}
+
+/// PATH 中按程序名直接查找。
+fn probe_from_path(kind: InterpreterKind, env: &InterpreterEnv) -> Option<CachedInterpreter> {
+    for directory in &env.search_paths {
+        for name in kind.program_names() {
+            let path = directory.join(name);
+            if path.is_file() {
+                return Some(CachedInterpreter {
+                    path,
+                    source: InterpreterSource::Path,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Windows 策略：只检查环境变量可直接构造的固定路径，不枚举任何版本
+/// 目录。`NVM_HOME` 是版本仓库，无法在不枚举的前提下得知当前版本，
+/// 因此不参与探测（当前版本经 `NVM_SYMLINK` 获取）。本函数不依赖
+/// 编译期平台开关，可在任意平台的测试中执行。
+fn probe_windows_environment(
+    kind: InterpreterKind,
+    env: &InterpreterEnv,
+) -> Option<CachedInterpreter> {
+    let home = env.home.as_deref();
+    let mut candidates = Vec::new();
+    match kind {
+        InterpreterKind::Node => {
+            if let Some(symlink) = &env.nvm_symlink {
+                candidates.push(symlink.join("node.exe"));
+            }
+            if let Some(volta) = explicit_or_default_root(env.volta_home.as_ref(), home, ".volta") {
+                candidates.push(volta.join("bin").join("node.exe"));
+            }
+            if let Some(scoop) = explicit_or_default_root(env.scoop.as_ref(), home, "scoop") {
+                candidates.push(scoop.join("shims").join("node.exe"));
+            }
+            if let Some(chocolatey) = explicit_or_default_root(
+                env.chocolatey_install.as_ref(),
+                env.program_data.as_deref(),
+                "chocolatey",
+            ) {
+                candidates.push(chocolatey.join("bin").join("node.exe"));
+            }
+            if let Some(program_files) = &env.program_files {
+                candidates.push(program_files.join("nodejs").join("node.exe"));
+            }
+        }
+        InterpreterKind::Python => {
+            if let Some(pyenv) = explicit_or_default_root(env.pyenv_root.as_ref(), home, ".pyenv") {
+                candidates.push(pyenv.join("shims").join("python.exe"));
+                candidates.push(pyenv.join("pyenv-win").join("shims").join("python.exe"));
+            }
+            if let Some(scoop) = explicit_or_default_root(env.scoop.as_ref(), home, "scoop") {
+                candidates.push(scoop.join("shims").join("python.exe"));
+            }
+            if let Some(chocolatey) = explicit_or_default_root(
+                env.chocolatey_install.as_ref(),
+                env.program_data.as_deref(),
+                "chocolatey",
+            ) {
+                candidates.push(chocolatey.join("bin").join("python.exe"));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .map(|path| CachedInterpreter {
+            path,
+            source: InterpreterSource::Environment,
+        })
+}
+
+/// macOS/Linux 慢路径：版本管理器目录（从新到旧）与系统标准位置。
+/// 仅在缓存未命中或失效时执行，正常调用不会重复枚举。
+fn probe_unix_common_locations(
+    kind: InterpreterKind,
+    env: &InterpreterEnv,
+) -> Option<CachedInterpreter> {
+    let runtime = match kind {
+        InterpreterKind::Node => SidecarRuntime::Node,
+        InterpreterKind::Python => SidecarRuntime::Python,
+    };
+    common_interpreter_locations(runtime, env)
+        .into_iter()
+        .find(|path| path.is_file())
+        .map(|path| CachedInterpreter {
+            path,
+            source: InterpreterSource::CommonLocation,
+        })
+}
+
+/// Unix 常见安装位置（分层回退）：安装工具声明的根目录 → 版本管理器
+/// 目录（从新到旧）→ 系统标准位置。某工具变量缺失只说明未使用该工具，
+/// 继续尝试后续层次，不据此判定解释器不存在。显式根各自独立生效，
+/// home 缺失不影响已显式声明的工具。
 fn common_interpreter_locations(runtime: SidecarRuntime, env: &InterpreterEnv) -> Vec<PathBuf> {
     let home = env.home.as_deref();
     let versioned: Vec<(PathBuf, &str)> = match runtime {
         SidecarRuntime::Native => Vec::new(),
-        SidecarRuntime::Node if cfg!(windows) => {
-            // nvm-windows：NVM_HOME（默认 %APPDATA%\nvm）下 v<ver>\node.exe
-            explicit_or_default_root(env.nvm_home.as_ref(), env.appdata.as_deref(), "nvm")
-                .map(|root| vec![(root, "node.exe")])
-                .unwrap_or_default()
-        }
         SidecarRuntime::Node => {
-            // nvm：NVM_DIR（默认 ~/.nvm）；asdf：ASDF_DATA_DIR（默认 ~/.asdf）。
-            // 显式根各自独立生效，home 缺失不影响已显式声明的工具。
             let mut roots = Vec::new();
             if let Some(nvm) = explicit_or_default_root(env.nvm_dir.as_ref(), home, ".nvm") {
                 roots.push((nvm.join("versions").join("node"), "bin/node"));
@@ -213,24 +469,6 @@ fn common_interpreter_locations(runtime: SidecarRuntime, env: &InterpreterEnv) -
             if let Some(asdf) = explicit_or_default_root(env.asdf_data_dir.as_ref(), home, ".asdf")
             {
                 roots.push((asdf.join("installs").join("nodejs"), "bin/node"));
-            }
-            roots
-        }
-        SidecarRuntime::Python if cfg!(windows) => {
-            // 官方安装器：用户级 %LOCALAPPDATA%\Programs\Python\Python3xx\、
-            // 系统级 %ProgramFiles%\Python3xx\（版本目录直接位于 Program Files 下）；
-            // pyenv-win 的 PYENV_ROOT 两种布局并存（根下直接 versions 或多一层
-            // pyenv-win），依次探测。
-            let mut roots = Vec::new();
-            if let Some(local) = &env.local_appdata {
-                roots.push((local.join("Programs").join("Python"), "python.exe"));
-            }
-            if let Some(program_files) = &env.program_files {
-                roots.push((program_files.clone(), "python.exe"));
-            }
-            if let Some(pyenv) = explicit_or_default_root(env.pyenv_root.as_ref(), home, ".pyenv") {
-                roots.push((pyenv.join("pyenv-win").join("versions"), "python.exe"));
-                roots.push((pyenv.join("versions"), "python.exe"));
             }
             roots
         }
@@ -242,45 +480,10 @@ fn common_interpreter_locations(runtime: SidecarRuntime, env: &InterpreterEnv) -
     for (root, leaf) in versioned {
         locations.extend(versioned_bin_candidates(&root, leaf));
     }
-    // Volta 三平台结构一致（VOLTA_HOME，默认 ~/.volta/bin），统一处理
     if matches!(runtime, SidecarRuntime::Node)
         && let Some(volta) = explicit_or_default_root(env.volta_home.as_ref(), home, ".volta")
     {
-        let executable = if cfg!(windows) { "node.exe" } else { "node" };
-        locations.push(volta.join("bin").join(executable));
-    }
-    if cfg!(windows) {
-        match runtime {
-            SidecarRuntime::Node => {
-                // nvm-windows 的当前版本 symlink（默认 %ProgramFiles%\nodejs）
-                if let Some(symlink) = &env.nvm_symlink {
-                    locations.push(symlink.join("node.exe"));
-                }
-                if let Some(scoop) = explicit_or_default_root(env.scoop.as_ref(), home, "scoop") {
-                    locations.push(scoop.join("shims").join("node.exe"));
-                }
-                if let Some(chocolatey) = explicit_or_default_root(
-                    env.chocolatey_install.as_ref(),
-                    env.program_data.as_deref(),
-                    "chocolatey",
-                ) {
-                    locations.push(chocolatey.join("bin").join("node.exe"));
-                }
-                if let Some(program_files) = &env.program_files {
-                    locations.push(program_files.join("nodejs").join("node.exe"));
-                }
-            }
-            SidecarRuntime::Python => {
-                if let Some(chocolatey) = explicit_or_default_root(
-                    env.chocolatey_install.as_ref(),
-                    env.program_data.as_deref(),
-                    "chocolatey",
-                ) {
-                    locations.push(chocolatey.join("bin").join("python.exe"));
-                }
-            }
-            SidecarRuntime::Native => {}
-        }
+        locations.push(volta.join("bin").join("node"));
     }
     locations.extend(match runtime {
         SidecarRuntime::Node => env.node_system_locations.iter().cloned(),
@@ -361,6 +564,11 @@ fn version_sort_key(name: &str) -> Vec<u64> {
 #[cfg(test)]
 mod interpreter_discovery_tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn empty_cache() -> RwLock<InterpreterCache> {
+        RwLock::new(HashMap::new())
+    }
 
     #[test]
     fn version_sort_key_orders_segments_numerically() {
@@ -482,7 +690,7 @@ mod interpreter_discovery_tests {
 
     /// PATH 命中优先于常见安装位置。
     #[test]
-    fn search_prefers_path_before_common_locations() {
+    fn probe_prefers_path_before_common_locations() {
         let path_dir = tempfile::tempdir().unwrap();
         let program = path_dir
             .path()
@@ -494,14 +702,18 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert_eq!(
-            search_interpreter_program(SidecarRuntime::Node, &env),
-            Some(program)
+            probe_interpreter(InterpreterKind::Node, &env).map(|found| (found.path, found.source)),
+            Some((program, InterpreterSource::Path))
         );
     }
 
-    /// 空 PATH 时回退版本管理器目录。
+    /// 空 PATH 时回退版本管理器目录（缓存未命中的慢路径）。
     #[test]
     fn empty_search_paths_fall_back_to_versioned_roots() {
+        if cfg!(windows) {
+            // Windows 策略不枚举版本目录，由固定路径测试覆盖
+            return;
+        }
         let nvm = tempfile::tempdir().unwrap();
         let program = nvm.path().join("versions/node/v22.16.0/bin/node");
         std::fs::create_dir_all(program.parent().unwrap()).unwrap();
@@ -511,7 +723,7 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert_eq!(
-            search_interpreter_program(SidecarRuntime::Node, &env),
+            probe_interpreter(InterpreterKind::Node, &env).map(|found| found.path),
             Some(program)
         );
     }
@@ -520,56 +732,196 @@ mod interpreter_discovery_tests {
     #[test]
     fn all_sources_empty_returns_none() {
         let env = InterpreterEnv::default();
-        assert_eq!(search_interpreter_program(SidecarRuntime::Node, &env), None);
+        assert!(
+            probe_interpreter(InterpreterKind::Node, &env).is_none(),
+            "全空快照不应发现解释器"
+        );
+        assert!(probe_interpreter(InterpreterKind::Python, &env).is_none());
+    }
+
+    /// Windows 策略命中环境变量直接构造的固定路径（本函数不依赖编译期
+    /// 平台开关，全平台可测）。
+    #[test]
+    fn windows_probe_uses_fixed_env_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let symlink_node = root.path().join("node-current").join("node.exe");
+        std::fs::create_dir_all(symlink_node.parent().unwrap()).unwrap();
+        std::fs::write(&symlink_node, b"").unwrap();
+        let pyenv_shim = root.path().join("pyenv").join("shims").join("python.exe");
+        std::fs::create_dir_all(pyenv_shim.parent().unwrap()).unwrap();
+        std::fs::write(&pyenv_shim, b"").unwrap();
+        let env = InterpreterEnv {
+            nvm_symlink: Some(root.path().join("node-current")),
+            pyenv_root: Some(root.path().join("pyenv")),
+            ..InterpreterEnv::default()
+        };
         assert_eq!(
-            search_interpreter_program(SidecarRuntime::Python, &env),
-            None
+            probe_windows_environment(InterpreterKind::Node, &env)
+                .map(|found| (found.path, found.source)),
+            Some((symlink_node, InterpreterSource::Environment))
+        );
+        assert_eq!(
+            probe_windows_environment(InterpreterKind::Python, &env).map(|found| found.path),
+            Some(pyenv_shim)
         );
     }
 
+    /// Windows 策略不枚举版本目录：Program Files 下存在 Python312 也不
+    /// 会被扫描（NVM_HOME 根本不进入快照，天然不可能被枚举）。
     #[test]
-    #[cfg(windows)]
-    fn common_interpreter_locations_covers_windows_user_paths() {
-        let home = tempfile::tempdir().unwrap();
+    fn windows_probe_never_scans_version_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let python = root
+            .path()
+            .join("program-files")
+            .join("Python312")
+            .join("python.exe");
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(&python, b"").unwrap();
         let env = InterpreterEnv {
-            home: Some(home.path().to_path_buf()),
-            nvm_symlink: Some(home.path().join("node-current")),
-            program_files: Some(PathBuf::from(r"C:\Program Files")),
+            program_files: Some(root.path().join("program-files")),
             ..InterpreterEnv::default()
         };
-        let locations = common_interpreter_locations(SidecarRuntime::Node, &env);
-        assert!(locations.contains(&home.path().join(".volta").join("bin").join("node.exe")));
-        assert!(locations.contains(&home.path().join("node-current").join("node.exe")));
-        assert!(locations.contains(&PathBuf::from(r"C:\Program Files\nodejs\node.exe")));
+        assert!(
+            probe_windows_environment(InterpreterKind::Python, &env).is_none(),
+            "Program Files 的 Python3xx 不应被枚举"
+        );
     }
 
-    /// Windows 系统级 Python 版本目录直接位于 Program Files 下，且新
-    /// 版本排在旧版本前面（Python312 先于 Python39）。
+    /// 首次解析写入缓存，第二次直接使用缓存且不再探测。
     #[test]
-    #[cfg(windows)]
-    fn common_interpreter_locations_covers_windows_system_python() {
-        let program_files = tempfile::tempdir().unwrap();
-        for version in ["Python39", "Python312"] {
-            std::fs::create_dir_all(program_files.path().join(version)).unwrap();
-        }
-        let python312 = program_files.path().join("Python312").join("python.exe");
-        std::fs::write(&python312, b"").unwrap();
-        let env = InterpreterEnv {
-            program_files: Some(program_files.path().to_path_buf()),
-            ..InterpreterEnv::default()
+    fn first_resolve_caches_and_second_uses_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("node");
+        std::fs::write(&program, b"").unwrap();
+        let cache = empty_cache();
+        let probes = Cell::new(0u32);
+        let discovered = CachedInterpreter {
+            path: program.clone(),
+            source: InterpreterSource::CommonLocation,
         };
-        let locations = common_interpreter_locations(SidecarRuntime::Python, &env);
-        let position312 = locations
-            .iter()
-            .position(|path| path == &python312)
-            .unwrap();
-        let position39 = locations
-            .iter()
-            .position(|path| *path == program_files.path().join("Python39").join("python.exe"))
-            .unwrap();
-        assert!(
-            position312 < position39,
-            "Python312 应排在 Python39 前：{locations:?}"
+        assert_eq!(
+            resolve_via(InterpreterKind::Node, None, &cache, || {
+                probes.set(probes.get() + 1);
+                Some(discovered.clone())
+            })
+            .unwrap(),
+            program
+        );
+        assert_eq!(
+            resolve_via(InterpreterKind::Node, None, &cache, || {
+                panic!("缓存命中不应再次探测")
+            })
+            .unwrap(),
+            program
+        );
+        assert_eq!(probes.get(), 1, "探测应只执行一次");
+    }
+
+    /// 缓存文件被删除后自动重新探测。
+    #[test]
+    fn cache_reprobes_when_file_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("v22").join("node");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"").unwrap();
+        let cache = empty_cache();
+        assert_eq!(
+            resolve_via(InterpreterKind::Node, None, &cache, || Some(
+                CachedInterpreter {
+                    path: first.clone(),
+                    source: InterpreterSource::CommonLocation,
+                }
+            ))
+            .unwrap(),
+            first
+        );
+        std::fs::remove_file(&first).unwrap();
+        let second = dir.path().join("v24").join("node");
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&second, b"").unwrap();
+        assert_eq!(
+            resolve_via(InterpreterKind::Node, None, &cache, || Some(
+                CachedInterpreter {
+                    path: second.clone(),
+                    source: InterpreterSource::CommonLocation,
+                }
+            ))
+            .unwrap(),
+            second,
+            "缓存失效后应重新探测"
+        );
+    }
+
+    /// 失效接口只清除与失败路径匹配的缓存，不误删其他条目。
+    #[test]
+    fn invalidate_only_clears_matching_path() {
+        let cache = empty_cache();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: PathBuf::from("/opt/old/node"),
+                source: InterpreterSource::CommonLocation,
+            },
+        );
+        assert!(!invalidate_if_matches_in(
+            &cache,
+            InterpreterKind::Node,
+            Path::new("/opt/other/node")
+        ));
+        assert!(cache.read().unwrap().contains_key(&InterpreterKind::Node));
+        assert!(invalidate_if_matches_in(
+            &cache,
+            InterpreterKind::Node,
+            Path::new("/opt/old/node")
+        ));
+        assert!(!cache.read().unwrap().contains_key(&InterpreterKind::Node));
+    }
+
+    /// 用户显式路径无效时直接报错，不回退到其他解释器。
+    #[test]
+    fn explicit_invalid_path_errors_without_fallback() {
+        let cache = empty_cache();
+        let error = resolve_via(
+            InterpreterKind::Node,
+            Some(PathBuf::from("/nonexistent/node-20")),
+            &cache,
+            || panic!("显式无效时不应回退探测"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("TIANGONG_NODE_PATH"));
+        assert!(cache.read().unwrap().is_empty(), "失败状态不写入缓存");
+    }
+
+    /// 应用注入的值失效后（缓存曾记录非显式来源），残留的环境变量值
+    /// 不应被误认为用户显式配置，应继续重新探测。
+    #[test]
+    fn stale_injected_env_value_reprobes_instead_of_erroring() {
+        let dir = tempfile::tempdir().unwrap();
+        let removed = dir.path().join("old-node");
+        std::fs::write(&removed, b"").unwrap();
+        let cache = empty_cache();
+        // 模拟启动时应用注入成功
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: removed.clone(),
+                source: InterpreterSource::Environment,
+            },
+        );
+        std::fs::remove_file(&removed).unwrap();
+        let fresh = dir.path().join("fresh-node");
+        std::fs::write(&fresh, b"").unwrap();
+        assert_eq!(
+            resolve_via(InterpreterKind::Node, Some(removed), &cache, || {
+                Some(CachedInterpreter {
+                    path: fresh.clone(),
+                    source: InterpreterSource::CommonLocation,
+                })
+            })
+            .unwrap(),
+            fresh,
+            "应用注入值失效应重新探测而非报错"
         );
     }
 }

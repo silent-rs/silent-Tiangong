@@ -241,6 +241,26 @@ impl StdioSidecarConnection {
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
+        let error = match self.spawn_inner(None) {
+            Ok(process) => return Ok(process),
+            Err(error) => error,
+        };
+        // 解释器进程创建失败（文件被删、权限、格式无效等）：失效缓存并
+        // 重新发现，新路径不同于旧路径时重试一次；插件脚本错误、握手
+        // 失败等不会走到 command.spawn 的错误路径，不受影响。前置步骤
+        // （目录/日志）失败时重试幂等，同样只多一次。
+        if let Some(launch) = self.config.interpreter.as_ref()
+            && crate::interpreter_env::invalidate_if_matches(launch.kind, &launch.program)
+            && let Ok(retry) = crate::interpreter_env::resolve_interpreter(launch.kind)
+            && retry != launch.program
+        {
+            return self.spawn_inner(Some(&retry));
+        }
+        Err(error)
+    }
+
+    /// `interpreter_override` 为解释器形态提供重试时的新程序路径。
+    fn spawn_inner(&self, interpreter_override: Option<&std::path::Path>) -> Result<StdioProcess> {
         if !self.config.binary.is_file() {
             bail!("sidecar 二进制不存在: {}", self.config.binary.display());
         }
@@ -272,16 +292,17 @@ impl StdioSidecarConnection {
                         .ok_or_else(|| anyhow!("内容清单缺少父目录"))?;
                     SidecarConfig::verify_integrity_manifest(manifest_path, root)?;
                 }
-                if !launch.program.is_file() {
+                let program = interpreter_override.unwrap_or(&launch.program);
+                if !program.is_file() {
                     bail!(
                         "解释器程序不存在: {}（可用 TIANGONG_NODE_PATH/TIANGONG_PYTHON_PATH 指定）",
-                        launch.program.display()
+                        program.display()
                     );
                 }
                 if !launch.entry.is_file() {
                     bail!("sidecar 入口脚本不存在: {}", launch.entry.display());
                 }
-                let mut command = Command::new(&launch.program);
+                let mut command = Command::new(program);
                 command.arg(&launch.entry);
                 command.args(&launch.args);
                 command

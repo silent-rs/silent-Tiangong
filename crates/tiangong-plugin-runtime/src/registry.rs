@@ -13,7 +13,7 @@ use tiangong_core::core::Plugin;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
-use crate::interpreter_env::{self, InterpreterEnv, search_interpreter_program};
+use crate::interpreter_env::{self, InterpreterKind};
 use crate::loader::{
     Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
     instantiate_component,
@@ -2666,58 +2666,32 @@ fn resolve_interpreter_launch(
     }
     let program = resolve_interpreter_program(sidecar.runtime)?;
     Ok(InterpreterLaunch {
+        kind: match sidecar.runtime {
+            SidecarRuntime::Native => bail!("native sidecar 无解释器"),
+            SidecarRuntime::Node => InterpreterKind::Node,
+            SidecarRuntime::Python => InterpreterKind::Python,
+        },
         program,
         entry: entry_path,
         args: sidecar.args.clone(),
     })
 }
 
+/// 解析解释器程序：统一走应用级缓存入口（见 interpreter_env 模块），
+/// registry 不再自行读取环境变量或构造候选路径。
+fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
+    let kind = match runtime {
+        SidecarRuntime::Native => bail!("native sidecar 无解释器"),
+        SidecarRuntime::Node => InterpreterKind::Node,
+        SidecarRuntime::Python => InterpreterKind::Python,
+    };
+    interpreter_env::resolve_interpreter(kind)
+}
+
 /// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
 ///
 /// GUI 进程（launchd/Finder 启动）不执行 shell 初始化，nvm/Homebrew 等
 /// 安装位置不在其 PATH 中，PATH 未命中后继续探测常见安装位置；入口
-/// 注入见 [`ensure_interpreter_env`]。
-fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
-    let (override_env, candidates, install_hint): (&str, &[&str], &str) = match runtime {
-        SidecarRuntime::Native => bail!("native sidecar 无解释器"),
-        SidecarRuntime::Node => (
-            "TIANGONG_NODE_PATH",
-            if cfg!(windows) {
-                &["node.exe"]
-            } else {
-                &["node"]
-            },
-            "帮我安装 Node.js",
-        ),
-        SidecarRuntime::Python => (
-            "TIANGONG_PYTHON_PATH",
-            if cfg!(windows) {
-                &["python.exe", "py.exe"]
-            } else {
-                &["python3", "python"]
-            },
-            "帮我安装 Python",
-        ),
-    };
-    if let Some(path) = std::env::var_os(override_env)
-        && !path.is_empty()
-    {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!("{override_env} 指向的程序不存在: {}", path.display());
-    }
-    if let Some(path) = search_interpreter_program(runtime, &InterpreterEnv::from_process()) {
-        return Ok(path);
-    }
-    bail!(
-        "未找到 {:?} sidecar 所需的解释器程序（{}）；可在会话中对助手说「{install_hint}」快速安装，或以 {override_env} 指定路径",
-        runtime,
-        candidates.join(" / ")
-    );
-}
-
 /// 本地信任校验：安装时落锚的标记与内容清单哈希一致，且清单内全部文件未被篡改。
 fn verify_local_trust(directory: &Path) -> Result<bool> {
     #[derive(serde::Deserialize)]
