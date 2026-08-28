@@ -344,13 +344,14 @@ fn invalidate_if_matches_in(
     }
 }
 
-/// 解释器进程创建失败后的原子恢复接口：缓存匹配失效 → 排除失败路径
-/// 重新探测 → 写入新缓存 → 返回新路径。运行期不修改宿主进程环境——
-/// 缓存是运行期权威来源，新环境经 [`child_env_overrides`] 只注入到
-/// 之后新建的子进程。
+/// 解释器进程创建失败后的原子恢复接口（探测锁内串行执行）：缓存仍
+/// 为失败路径则失效并排除它重新探测 → 写入新缓存 → 返回新路径；若
+/// 并发调用已完成恢复（缓存为其他有效路径）则直接复用该路径。运行期
+/// 不修改宿主进程环境——缓存是运行期权威来源，新环境经
+/// [`child_env_overrides`] 只注入到之后新建的子进程。
 ///
-/// 返回 None 的情形：缓存与失败路径不匹配（他方已更新）、用户显式指定
-/// 的路径无法启动（不静默替换）、排除失败路径后无其他可用解释器。
+/// 返回 None 的情形：用户显式指定的路径无法启动（不静默替换）、排除
+/// 失败路径后无其他可用解释器。
 pub(crate) fn recover_interpreter_after_spawn_failure(
     kind: InterpreterKind,
     failed_path: &Path,
@@ -1202,6 +1203,107 @@ mod interpreter_discovery_tests {
             Some(recovered_by_peer)
         );
         assert!(cache.read().unwrap().contains_key(&InterpreterKind::Node));
+    }
+
+    /// 恢复接口：同一失败路径的第二次恢复复用第一次的结果，探测只
+    /// 执行一次。
+    #[test]
+    fn second_recovery_reuses_first_result_without_reprobing() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old-node");
+        std::fs::write(&old, b"").unwrap();
+        let fresh = dir.path().join("fresh-node");
+        std::fs::write(&fresh, b"").unwrap();
+        let cache = empty_cache();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: old.clone(),
+                source: InterpreterSource::Environment,
+            },
+        );
+        let lock = std::sync::Mutex::new(());
+        let probes = std::cell::Cell::new(0u32);
+        let probe_once = || {
+            probes.set(probes.get() + 1);
+            Some(CachedInterpreter {
+                path: fresh.clone(),
+                source: InterpreterSource::CommonLocation,
+            })
+        };
+        assert_eq!(
+            recover_via(
+                InterpreterKind::Node,
+                &old,
+                Some(old.as_path()),
+                true,
+                &cache,
+                &lock,
+                probe_once,
+            ),
+            Some(fresh.clone())
+        );
+        // 第二个 sidecar 因同一路径失败：复用缓存中的恢复结果
+        assert_eq!(
+            recover_via(
+                InterpreterKind::Node,
+                &old,
+                Some(old.as_path()),
+                true,
+                &cache,
+                &lock,
+                probe_once,
+            ),
+            Some(fresh)
+        );
+        assert_eq!(probes.get(), 1, "探测应只执行一次");
+    }
+
+    /// 强制前置：新解释器目录已在 PATH 中间时被移到最前，坏目录退后。
+    #[test]
+    fn force_prepend_moves_existing_directory_to_front() {
+        let bad = PathBuf::from("/bad-node/bin");
+        let good = PathBuf::from("/good-node/bin");
+        let system = PathBuf::from("/usr/bin");
+        let existing = std::env::join_paths([bad.clone(), good.clone(), system.clone()]).unwrap();
+        let value = force_prepend_dir_to_path_value(&existing, &good).unwrap();
+        assert_eq!(
+            std::env::split_paths(&value).collect::<Vec<_>>(),
+            [good, bad, system]
+        );
+    }
+
+    /// 强制前置的完整恢复场景：原 PATH 为坏目录、新目录、系统目录
+    /// （新目录已在中间），缓存指向新目录中的解释器，派生的子进程
+    /// PATH 必须是新目录居首、坏目录退后。
+    #[test]
+    fn derived_path_puts_cached_interpreter_dir_before_broken_dir() {
+        let bad = PathBuf::from("/bad-node/bin");
+        let good_root = tempfile::tempdir().unwrap();
+        let good = good_root.path().join("good-node").join("bin");
+        let system = PathBuf::from("/usr/bin");
+        let cache = empty_cache();
+        let good_node = good.join("node");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(&good_node, b"").unwrap();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: good_node,
+                source: InterpreterSource::CommonLocation,
+            },
+        );
+        let original = std::env::join_paths([bad.clone(), good.clone(), system.clone()]).unwrap();
+        let overrides = derive_child_env_overrides(&cache, original);
+        let path_override = overrides
+            .iter()
+            .find(|(key, _)| *key == "PATH")
+            .expect("应包含 PATH 覆盖");
+        assert_eq!(
+            std::env::split_paths(&path_override.1).collect::<Vec<_>>(),
+            [good, bad, system],
+            "缓存解释器目录必须排在坏目录之前"
+        );
     }
 
     /// 恢复接口：用户显式指定的路径无法启动时直接失败，不静默替换。
