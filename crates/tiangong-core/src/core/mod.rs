@@ -271,7 +271,6 @@ impl TiangongCore {
             .stream_tx(stream_tx)
             .plugins(plugins)
             .context_limit(config.context_limit)
-            .tool_timeout_ms(config.tool_timeout_ms)
             .agent_config(crate::agent_config::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,

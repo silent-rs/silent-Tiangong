@@ -178,7 +178,6 @@ impl TiangongConfig {
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
             context_limit,
-            tool_timeout_ms: tiangong_core::core_config::default_tool_timeout_ms(),
         }
     }
 

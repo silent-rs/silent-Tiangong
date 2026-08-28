@@ -136,10 +136,6 @@ impl ToolOverrideHandler for TsPluginAdapter {
             })
         }
     }
-
-    fn default_timeout_ms(&self, tool_name: &str) -> Option<u64> {
-        self.tool(tool_name).map(|tool| tool.timeout_ms)
-    }
 }
 
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {

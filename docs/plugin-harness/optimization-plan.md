@@ -56,46 +56,18 @@
 
 ---
 
-## 3. 优化方向一：工具超时统一到 Core 层
+## 3. 优化方向一：工具超时统一到 Core 层（已取消）
 
-### 3.1 现状问题
-
-当前工具超时**分散在插件侧**，且机制不统一：
-
-| 插件类型 | 超时机制 | 位置 |
-| --- | --- | --- |
-| TS 工具插件 | `tools[].timeout_ms` | ts_plugin.rs 用 `tokio::time::timeout` 包装 |
-| WASM 插件 | 无工具级超时 | 只有 wasmtime fuel + epoch_deadline（硬编码 10s） |
-| sidecar 调用 | `sidecar.request_timeout_ms` | registry.rs 配置 |
-
-关键问题：
-- **WASM 插件没有工具级超时**，只有 wasmtime 的 fuel/epoch 兜底（10s 硬编码）。
-- **Agent 无法自由指定超时**，只能依赖插件清单静态声明。
-- 超时处理逻辑分散，无法统一兜底。
-
-### 3.2 目标设计
-
-把工具超时统一到 Core 层，作为**统一超时包装 + Agent 可覆盖**：
-
-1. **Core 层统一超时包装**：在 `start_tool_call` 处用 `tokio::time::timeout` 包装所有插件工具执行（WASM + TS 统一）。
-2. **Agent 可指定超时**：Agent 在工具调用时可指定超时，覆盖插件默认值。
-3. **默认值来源**：保留插件清单的 `timeout_ms` 作为默认值，Core 超时作为**上限兜底**，Agent 指定时覆盖。
-
-### 3.3 关键设计点
-
-| 设计点 | 决策 |
-| --- | --- |
-| 超时层级 | Core 超时作为上限兜底，插件侧超时作为默认值，Agent 指定时覆盖 |
-| Agent 指定入口 | 工具调用参数加 `timeout` 字段，或经 tool_override 机制 |
-| 超时后清理 | 超时后 drop future，TS 插件终止 sidecar 进程（已有 SidecarProcessGuard），WASM 插件由 fuel/epoch 兜底 |
-| 默认值 | 保留插件清单 `timeout_ms`，Core 只做包装和覆盖 |
-
-### 3.4 涉及改动
-
-- `crates/tiangong-core/src/react/tool_call.rs`：`start_tool_call` 加超时包装。
-- `crates/tiangong-core/src/react/tools.rs`：`start_tool_execution` 传入超时。
-- `crates/tiangong-core/src/model.rs`：`ToolCall` 增加超时字段（或经 tool_override）。
-- 插件侧：保留 `timeout_ms` 作为默认值，不强制迁移。
+> **设计决定（2026-08-29）**：本方向取消，保持既有架构——Core 层不设置工具级
+> 超时，插件是否超时、超时多少由插件自行决定（TS 插件经清单 `tools[].timeout_ms`
+> 限时，WASM 插件依赖 wasmtime fuel/epoch 与 sidecar `request_timeout_ms` 兜底）。
+>
+> 曾实现过两版并最终回退：混合版（Core 兜底 + 插件默认值 + Agent 参数覆盖，
+> `timeout` 字段后改 `timeout_ms` 避免与业务参数撞名）与唯一权威版（插件侧
+> 超时全部删除、Core 注入并剥离 `timeout_ms`）。回退原因：用户确认原先
+> "Core 不设超时、插件自行决定"的分层即为目标设计；唯一权威版还会导致
+> 已安装旧插件清单解析失效、长任务默认超时从插件声明值缩到 Core 兜底值、
+> 等待类工具（desktop_wait/web_fetch）失去精细的时长控制。
 
 ---
 
@@ -222,7 +194,7 @@
 | --- | --- | --- |
 | 🔴 高 | 方向二：mention 统一由 App 分组/过滤/搜索 | 无 |
 | 🔴 高 | 方向三：前端 TTS/STT 能力插件化 | 无 |
-| 🟡 中 | 方向一：工具超时统一到 Core 层 | 需设计 Agent 指定超时入口 |
+| ~~方向一：工具超时统一到 Core 层~~（已取消，保持既有架构） | — |
 | 🟡 中 | 插件清单规范化（name/entrypoints/描述一致性） | 无 |
 | 🟢 低 | 能力型插件 mention 声明 | 依赖方向二 |
 
@@ -230,11 +202,9 @@
 
 ## 8. 完成标准
 
-### 方向一：工具超时统一到 Core 层
-- [ ] WASM 插件工具执行有 Core 层超时兜底（不再只依赖 fuel/epoch 10s）。
-- [ ] Agent 可在工具调用时指定超时，覆盖插件默认值。
-- [ ] 超时后正确清理（TS 终止 sidecar 进程，WASM 由 fuel/epoch 兜底），不留僵尸任务。
-- [ ] 插件清单 `timeout_ms` 保留为默认值，不强制迁移。
+### 方向一：工具超时统一到 Core 层（已取消）
+
+- [x] 按设计决定回退：Core 层不设工具超时，超时由插件自行决定（见第 3 节）。
 
 ### 方向二：mention 统一由 App 分组/过滤/搜索
 - [ ] `collect_mention_candidates` 按 kind 分组 + 白名单过滤 + 每组数量上限截断。
