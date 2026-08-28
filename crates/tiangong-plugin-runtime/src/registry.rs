@@ -2727,7 +2727,7 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
         }
         bail!("{override_env} 指向的程序不存在: {}", path.display());
     }
-    if let Some(path) = search_interpreter_program(runtime) {
+    if let Some(path) = search_interpreter_program(runtime, &InterpreterEnv::from_process()) {
         return Ok(path);
     }
     bail!(
@@ -2737,8 +2737,52 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
     );
 }
 
+/// 解释器探测所需的环境快照：生产路径经 [`InterpreterEnv::from_process`]
+/// 从进程环境读取一次，测试注入伪造值，不修改真实环境变量。
+#[derive(Default)]
+struct InterpreterEnv {
+    home: Option<PathBuf>,
+    /// 各安装工具声明的自定义根目录（未设置时按各工具默认位置推导）。
+    nvm_dir: Option<PathBuf>,
+    nvm_home: Option<PathBuf>,
+    nvm_symlink: Option<PathBuf>,
+    volta_home: Option<PathBuf>,
+    scoop: Option<PathBuf>,
+    chocolatey_install: Option<PathBuf>,
+    pyenv_root: Option<PathBuf>,
+    asdf_data_dir: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    local_appdata: Option<PathBuf>,
+    /// `ProgramFiles` 环境缺失时退回惯例位置（Windows 专用字段）。
+    program_files: Option<PathBuf>,
+}
+
+impl InterpreterEnv {
+    fn from_process() -> Self {
+        let dir = |key: &str| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            home: user_home_dir(),
+            nvm_dir: dir("NVM_DIR"),
+            nvm_home: dir("NVM_HOME"),
+            nvm_symlink: dir("NVM_SYMLINK"),
+            volta_home: dir("VOLTA_HOME"),
+            scoop: dir("SCOOP"),
+            chocolatey_install: dir("ChocolateyInstall"),
+            pyenv_root: dir("PYENV_ROOT"),
+            asdf_data_dir: dir("ASDF_DATA_DIR"),
+            appdata: dir("APPDATA"),
+            local_appdata: dir("LOCALAPPDATA"),
+            program_files: dir("ProgramFiles").or_else(|| Some(PathBuf::from(r"C:\Program Files"))),
+        }
+    }
+}
+
 /// PATH 及常见安装位置中查找解释器（不含环境变量覆盖分支）。
-fn search_interpreter_program(runtime: SidecarRuntime) -> Option<PathBuf> {
+fn search_interpreter_program(runtime: SidecarRuntime, env: &InterpreterEnv) -> Option<PathBuf> {
     let candidates: &[&str] = match runtime {
         SidecarRuntime::Native => return None,
         SidecarRuntime::Node => {
@@ -2767,7 +2811,7 @@ fn search_interpreter_program(runtime: SidecarRuntime) -> Option<PathBuf> {
             }
         }
     }
-    common_interpreter_locations(runtime)
+    common_interpreter_locations(runtime, env)
         .into_iter()
         .find(|path| path.is_file())
 }
@@ -2784,6 +2828,7 @@ fn search_interpreter_program(runtime: SidecarRuntime) -> Option<PathBuf> {
 /// - `std::env::set_var` 与并发读存在数据竞争，本函数只允许在 main
 ///   最开头、线程池启动前调用。
 pub fn ensure_interpreter_env() {
+    let snapshot = InterpreterEnv::from_process();
     for (runtime, env_key) in [
         (SidecarRuntime::Node, "TIANGONG_NODE_PATH"),
         (SidecarRuntime::Python, "TIANGONG_PYTHON_PATH"),
@@ -2794,7 +2839,7 @@ pub fn ensure_interpreter_env() {
         let program = match explicit {
             Some(path) if path.is_file() => path,
             Some(_) => continue,
-            None => match search_interpreter_program(runtime) {
+            None => match search_interpreter_program(runtime, &snapshot) {
                 Some(discovered) => {
                     unsafe { std::env::set_var(env_key, &discovered) };
                     discovered
@@ -2826,56 +2871,92 @@ fn prepend_dir_to_path_value(
     .ok()
 }
 
-/// PATH 未命中时的常见安装位置：版本管理器目录从新到旧，系统级位置殿后。
-fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
-    let home = user_home_dir();
-    let mut locations = Vec::new();
+/// PATH 未命中时的常见安装位置（分层回退）：安装工具声明的根目录 →
+/// 版本管理器目录（从新到旧）→ 系统标准位置。某工具变量缺失只说明未
+/// 使用该工具，继续尝试后续层次，不据此判定解释器不存在。
+fn common_interpreter_locations(runtime: SidecarRuntime, env: &InterpreterEnv) -> Vec<PathBuf> {
+    let home = env.home.as_deref();
     let versioned: Vec<(PathBuf, &str)> = match runtime {
         SidecarRuntime::Native => Vec::new(),
-        SidecarRuntime::Node => {
-            if cfg!(windows) {
-                // nvm-windows：%APPDATA%\nvm\v<ver>\node.exe
-                std::env::var_os("APPDATA")
-                    .map(|appdata| vec![(PathBuf::from(appdata).join("nvm"), "node.exe")])
-                    .unwrap_or_default()
-            } else {
-                home.as_ref()
-                    .map(|home| {
-                        vec![
-                            (home.join(".nvm/versions/node"), "bin/node"),
-                            (home.join(".asdf/installs/nodejs"), "bin/node"),
-                        ]
-                    })
-                    .unwrap_or_default()
-            }
+        SidecarRuntime::Node if cfg!(windows) => {
+            // nvm-windows：NVM_HOME（默认 %APPDATA%\nvm）下 v<ver>\node.exe
+            let root = env
+                .nvm_home
+                .clone()
+                .or_else(|| env.appdata.as_ref().map(|appdata| appdata.join("nvm")));
+            root.map(|root| vec![(root, "node.exe")])
+                .unwrap_or_default()
         }
-        SidecarRuntime::Python => {
-            if cfg!(windows) {
-                // 官方安装器默认位置：用户级 %LOCALAPPDATA%\Programs\Python\Python3xx\、
-                // 系统级 C:\Program Files\Python3xx\
-                let mut roots = Vec::new();
-                if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                    roots.push((
-                        PathBuf::from(local).join("Programs").join("Python"),
-                        "python.exe",
-                    ));
-                }
+        SidecarRuntime::Node => home
+            .map(|home| {
+                vec![
+                    (
+                        env.nvm_dir
+                            .clone()
+                            .unwrap_or_else(|| home.join(".nvm"))
+                            .join("versions/node"),
+                        "bin/node",
+                    ),
+                    (
+                        env.asdf_data_dir
+                            .clone()
+                            .unwrap_or_else(|| home.join(".asdf"))
+                            .join("installs/nodejs"),
+                        "bin/node",
+                    ),
+                ]
+            })
+            .unwrap_or_default(),
+        SidecarRuntime::Python if cfg!(windows) => {
+            // 官方安装器：用户级 %LOCALAPPDATA%\Programs\Python\Python3xx\、
+            // 系统级 %ProgramFiles%\Python3xx\（版本目录直接位于 Program Files 下）；
+            // pyenv-win：PYENV_ROOT（默认 ~\.pyenv）\pyenv-win\versions\<ver>\
+            let mut roots = Vec::new();
+            if let Some(local) = &env.local_appdata {
+                roots.push((local.join("Programs").join("Python"), "python.exe"));
+            }
+            if let Some(program_files) = &env.program_files {
+                roots.push((program_files.clone(), "python.exe"));
+            }
+            if let Some(home) = home {
                 roots.push((
-                    PathBuf::from(r"C:\Program Files").join("Python"),
+                    env.pyenv_root
+                        .clone()
+                        .unwrap_or_else(|| home.join(".pyenv"))
+                        .join("pyenv-win")
+                        .join("versions"),
                     "python.exe",
                 ));
-                roots
-            } else {
-                home.as_ref()
-                    .map(|home| vec![(home.join(".pyenv/versions"), "bin/python3")])
-                    .unwrap_or_default()
             }
+            roots
         }
+        SidecarRuntime::Python => home
+            .map(|home| {
+                vec![(
+                    env.pyenv_root
+                        .clone()
+                        .unwrap_or_else(|| home.join(".pyenv"))
+                        .join("versions"),
+                    "bin/python3",
+                )]
+            })
+            .unwrap_or_default(),
     };
+    let mut locations = Vec::new();
     for (root, leaf) in versioned {
         locations.extend(versioned_bin_candidates(&root, leaf));
     }
-    let home = home.as_ref();
+    // Volta 三平台结构一致（~/.volta/bin），统一处理
+    if matches!(runtime, SidecarRuntime::Node)
+        && let Some(home) = home
+    {
+        let volta = env
+            .volta_home
+            .clone()
+            .unwrap_or_else(|| home.join(".volta"));
+        let executable = if cfg!(windows) { "node.exe" } else { "node" };
+        locations.push(volta.join("bin").join(executable));
+    }
     match runtime {
         SidecarRuntime::Node => {
             if cfg!(target_os = "macos") {
@@ -2884,18 +2965,23 @@ fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
                     PathBuf::from("/usr/local/bin/node"),
                 ]);
             } else if cfg!(windows) {
-                if let Some(home) = home {
-                    locations.extend([
-                        home.join(".volta").join("bin").join("node.exe"),
-                        home.join("scoop").join("shims").join("node.exe"),
-                    ]);
+                // nvm-windows 的当前版本 symlink（默认 C:\Program Files\nodejs）
+                if let Some(symlink) = &env.nvm_symlink {
+                    locations.push(symlink.join("node.exe"));
                 }
-                // nvm-windows 启用时此路径为指向当前版本的 symlink
-                locations.push(PathBuf::from(r"C:\Program Files\nodejs\node.exe"));
+                if let Some(home) = home {
+                    let scoop = env.scoop.clone().unwrap_or_else(|| home.join("scoop"));
+                    locations.push(scoop.join("shims").join("node.exe"));
+                }
+                let chocolatey = env
+                    .chocolatey_install
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\chocolatey"));
+                locations.push(chocolatey.join("bin").join("node.exe"));
+                if let Some(program_files) = &env.program_files {
+                    locations.push(program_files.join("nodejs").join("node.exe"));
+                }
             } else {
-                if let Some(home) = home {
-                    locations.push(home.join(".volta/bin/node"));
-                }
                 locations.extend([
                     PathBuf::from("/usr/local/bin/node"),
                     PathBuf::from("/usr/bin/node"),
@@ -2914,6 +3000,8 @@ fn common_interpreter_locations(runtime: SidecarRuntime) -> Vec<PathBuf> {
                     PathBuf::from("/usr/local/bin/python3"),
                     PathBuf::from("/usr/bin/python3"),
                 ]);
+            } else if let Some(chocolatey) = &env.chocolatey_install {
+                locations.push(chocolatey.join("bin").join("python.exe"));
             }
         }
         SidecarRuntime::Native => {}
@@ -3011,34 +3099,9 @@ fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod interpreter_discovery_tests {
     use super::*;
-
-    /// 测试内临时覆盖环境变量并在退出（含 panic）时恢复原值。同 crate 中
-    /// 仅本模块使用，且同一变量同一时刻只有一个测试覆盖，无并行冲突。
-    struct EnvRestore {
-        key: &'static str,
-        saved: Option<std::ffi::OsString>,
-    }
-
-    impl EnvRestore {
-        fn overlay(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let saved = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, saved }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            unsafe {
-                match self.saved.take() {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
 
     #[test]
     fn version_sort_key_orders_segments_numerically() {
@@ -3091,15 +3154,19 @@ mod interpreter_discovery_tests {
         assert!(versioned_bin_candidates(&dir.path().join("absent"), "bin/node").is_empty());
     }
 
+    /// 探测函数经 InterpreterEnv 注入伪造环境，不读写真实环境变量，
+    /// 与其他并行测试互不干扰。
     #[test]
     #[cfg(not(windows))]
     fn common_interpreter_locations_covers_nvm_and_system_paths() {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".nvm/versions/node/v22.16.0/bin")).unwrap();
         std::fs::create_dir_all(home.path().join(".nvm/versions/node/v18.20.0/bin")).unwrap();
-        // 用伪造 HOME 替代真实环境验证组合逻辑，退出时恢复原值。
-        let _restore = EnvRestore::overlay("HOME", home.path());
-        let locations = common_interpreter_locations(SidecarRuntime::Node);
+        let env = InterpreterEnv {
+            home: Some(home.path().to_path_buf()),
+            ..InterpreterEnv::default()
+        };
+        let locations = common_interpreter_locations(SidecarRuntime::Node, &env);
         assert_eq!(
             locations[0],
             home.path().join(".nvm/versions/node/v22.16.0/bin/node")
@@ -3113,17 +3180,51 @@ mod interpreter_discovery_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
+    fn common_interpreter_locations_honors_tool_root_overrides() {
+        // NVM_DIR 自定义根优先于 home 默认位置；home 缺失仍可工作
+        let custom = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(custom.path().join("versions/node/v22.16.0/bin")).unwrap();
+        let env = InterpreterEnv {
+            home: Some(PathBuf::from("/nonexistent-home")),
+            nvm_dir: Some(custom.path().to_path_buf()),
+            volta_home: Some(PathBuf::from("/opt/volta")),
+            ..InterpreterEnv::default()
+        };
+        let locations = common_interpreter_locations(SidecarRuntime::Node, &env);
+        assert_eq!(
+            locations[0],
+            custom.path().join("versions/node/v22.16.0/bin/node")
+        );
+        assert!(locations.contains(&PathBuf::from("/opt/volta/bin/node")));
+    }
+
+    #[test]
     #[cfg(windows)]
     fn common_interpreter_locations_covers_windows_user_paths() {
         let home = tempfile::tempdir().unwrap();
-        let volta_node = home.path().join(".volta").join("bin").join("node.exe");
-        std::fs::create_dir_all(volta_node.parent().unwrap()).unwrap();
-        std::fs::write(&volta_node, b"").unwrap();
-        // user_home_dir 中 HOME 优先于 USERPROFILE，两处都罩住
-        let _restore_home = unsafe { EnvRestore::overlay("HOME", home.path().join("empty-home")) };
-        let _restore_profile = unsafe { EnvRestore::overlay("USERPROFILE", home.path()) };
-        let locations = common_interpreter_locations(SidecarRuntime::Node);
-        assert!(locations.contains(&volta_node));
+        let env = InterpreterEnv {
+            home: Some(home.path().to_path_buf()),
+            nvm_symlink: Some(home.path().join("node-current")),
+            program_files: Some(PathBuf::from(r"C:\Program Files")),
+            ..InterpreterEnv::default()
+        };
+        let locations = common_interpreter_locations(SidecarRuntime::Node, &env);
+        assert!(locations.contains(&home.path().join(".volta").join("bin").join("node.exe")));
+        assert!(locations.contains(&home.path().join("node-current").join("node.exe")));
         assert!(locations.contains(&PathBuf::from(r"C:\Program Files\nodejs\node.exe")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn common_interpreter_locations_covers_windows_system_python() {
+        // 系统级 Python 版本目录直接位于 Program Files 下（Python3xx），
+        // 经 ProgramFiles 变量推导而非写死盘符
+        let env = InterpreterEnv {
+            program_files: Some(PathBuf::from(r"D:\Program Files")),
+            ..InterpreterEnv::default()
+        };
+        let locations = common_interpreter_locations(SidecarRuntime::Python, &env);
+        assert!(locations.contains(&PathBuf::from(r"D:\Program Files\Python312\python.exe")));
     }
 }
