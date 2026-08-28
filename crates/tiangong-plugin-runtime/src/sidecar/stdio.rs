@@ -360,6 +360,12 @@ impl StdioSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(PROCESS_GROUP_ENV, "1");
+        // 运行期解释器环境的权威来源是缓存：不修改宿主全局环境，仅对
+        // 新建子进程注入覆盖（TIANGONG_*_PATH + 前置解释器目录的 PATH），
+        // 恢复后的新路径由此传导给 sidecar 及其派生的命令通道进程。
+        for (key, value) in crate::interpreter_env::child_env_overrides() {
+            command.env(key, value);
+        }
         if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
                 return Err(SpawnAttemptError::Preparation(anyhow!(

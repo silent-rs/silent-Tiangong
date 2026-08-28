@@ -340,16 +340,10 @@ fn invalidate_if_matches_in(
     }
 }
 
-/// 恢复结果：`sync_env` 标记新路径是否需要同步回进程环境（仅应用注入
-/// 场景；用户显式设置不被覆盖）。
-struct RecoveryOutcome {
-    path: PathBuf,
-    sync_env: bool,
-}
-
 /// 解释器进程创建失败后的原子恢复接口：缓存匹配失效 → 排除失败路径
-/// 重新探测 → 写入新缓存；应用注入场景同步 `TIANGONG_*_PATH` 与 PATH
-/// 前置，使 sidecar 派生进程与其他命令通道同步恢复。
+/// 重新探测 → 写入新缓存 → 返回新路径。运行期不修改宿主进程环境——
+/// 缓存是运行期权威来源，新环境经 [`child_env_overrides`] 只注入到
+/// 之后新建的子进程。
 ///
 /// 返回 None 的情形：缓存与失败路径不匹配（他方已更新）、用户显式指定
 /// 的路径无法启动（不静默替换）、排除失败路径后无其他可用解释器。
@@ -357,7 +351,7 @@ pub(crate) fn recover_interpreter_after_spawn_failure(
     kind: InterpreterKind,
     failed_path: &Path,
 ) -> Option<PathBuf> {
-    let outcome = recover_via(
+    recover_via(
         kind,
         failed_path,
         std::env::var_os(kind.env_key())
@@ -368,19 +362,7 @@ pub(crate) fn recover_interpreter_after_spawn_failure(
         global_cache(),
         probe_lock(kind),
         || probe_interpreter(kind, &InterpreterEnv::from_process(), Some(failed_path)),
-    )?;
-    // 运行时写进程环境偏离"仅入口注入"纪律：恢复是低频异常路径，且
-    // 不同步会让缓存与子进程环境长期不一致（旧 PATH 仍指向坏解释器）。
-    if outcome.sync_env {
-        unsafe { std::env::set_var(kind.env_key(), &outcome.path) };
-        if let Some(bin_dir) = outcome.path.parent()
-            && let Some(value) =
-                prepend_dir_to_path_value(&std::env::var_os("PATH").unwrap_or_default(), bin_dir)
-        {
-            unsafe { std::env::set_var("PATH", value) };
-        }
-    }
-    Some(outcome.path)
+    )
 }
 
 /// [`recover_interpreter_after_spawn_failure`] 的参数化核心，测试注入
@@ -393,7 +375,7 @@ fn recover_via<F>(
     cache: &RwLock<InterpreterCache>,
     lock: &Mutex<()>,
     probe_excluding_failed: F,
-) -> Option<RecoveryOutcome>
+) -> Option<PathBuf>
 where
     F: FnOnce() -> Option<CachedInterpreter>,
 {
@@ -407,19 +389,44 @@ where
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // 锁内双检：并发任务可能已完成恢复
     if let Some(cached) = valid_cached_in(cache, kind) {
-        return (cached != failed_path).then_some(RecoveryOutcome {
-            path: cached,
-            sync_env: injected_by_app,
-        });
+        return (cached != failed_path).then_some(cached);
     }
     let discovered = probe_excluding_failed()?;
+    let path = discovered.path.clone();
     if let Ok(mut guard) = cache.write() {
-        guard.insert(kind, discovered.clone());
+        guard.insert(kind, discovered);
     }
-    Some(RecoveryOutcome {
-        path: discovered.path,
-        sync_env: injected_by_app,
-    })
+    Some(path)
+}
+
+/// 宿主新建子进程的环境覆盖：缓存中各解释器的 `TIANGONG_*_PATH` 与
+/// 前置了各解释器目录的 PATH。启动注入之后的运行期环境权威来源是
+/// 缓存——宿主不再修改自身全局环境，只对新建子进程单独注入（恢复
+/// 后的新路径由此传导给 sidecar 及其派生的命令通道进程）。
+pub(crate) fn child_env_overrides() -> Vec<(&'static str, std::ffi::OsString)> {
+    derive_child_env_overrides(global_cache(), std::env::var_os("PATH").unwrap_or_default())
+}
+
+fn derive_child_env_overrides(
+    cache: &RwLock<InterpreterCache>,
+    base_path: std::ffi::OsString,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let mut overrides = Vec::new();
+    let mut path_value: Option<std::ffi::OsString> = None;
+    for kind in [InterpreterKind::Node, InterpreterKind::Python] {
+        let Some(cached) = valid_cached_in(cache, kind) else {
+            continue;
+        };
+        if let Some(bin_dir) = cached.parent() {
+            let base = path_value.clone().unwrap_or_else(|| base_path.clone());
+            path_value = prepend_dir_to_path_value(&base, bin_dir).or(Some(base));
+        }
+        overrides.push((kind.env_key(), cached.into_os_string()));
+    }
+    if let Some(path_value) = path_value {
+        overrides.push(("PATH", path_value));
+    }
+    overrides
 }
 
 /// 进程入口最早调用（任何后台线程启动前）：发现解释器并注入进程环境，
@@ -1206,9 +1213,9 @@ mod interpreter_discovery_tests {
         );
     }
 
-    /// 恢复接口：应用注入场景排除失败路径重探成功，标记需要同步环境。
+    /// 恢复接口：应用注入场景排除失败路径重探成功并更新缓存。
     #[test]
-    fn recover_reprobes_excluding_failed_and_marks_env_sync() {
+    fn recover_reprobes_excluding_failed_and_updates_cache() {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("old-node");
         std::fs::write(&old, b"").unwrap();
@@ -1238,8 +1245,7 @@ mod interpreter_discovery_tests {
             },
         )
         .expect("应用注入场景应恢复");
-        assert_eq!(outcome.path, fresh);
-        assert!(outcome.sync_env, "应用注入恢复需同步环境变量与 PATH");
+        assert_eq!(outcome, fresh);
         assert_eq!(
             cache
                 .read()
