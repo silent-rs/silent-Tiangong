@@ -21,9 +21,13 @@ pub trait TtsOperation {
 
 pub const SYNTHESIZE_OPERATION: &str = "synthesize";
 pub const LIST_MODELS_OPERATION: &str = "list_models";
+pub const PLAY_OPERATION: &str = "play";
+pub const STOP_OPERATION: &str = "stop";
 
 pub struct Synthesize;
 pub struct ListModels;
+pub struct Play;
+pub struct Stop;
 
 impl TtsOperation for Synthesize {
     const NAME: &'static str = SYNTHESIZE_OPERATION;
@@ -35,6 +39,18 @@ impl TtsOperation for ListModels {
     const NAME: &'static str = LIST_MODELS_OPERATION;
     type Request = Empty;
     type Response = ListModelsResponse;
+}
+
+impl TtsOperation for Play {
+    const NAME: &'static str = PLAY_OPERATION;
+    type Request = PlayRequest;
+    type Response = PlayResponse;
+}
+
+impl TtsOperation for Stop {
+    const NAME: &'static str = STOP_OPERATION;
+    type Request = Empty;
+    type Response = Empty;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,4 +95,18 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListModelsResponse {
     pub models: Vec<ModelInfo>,
+}
+
+/// 播放音频请求。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlayRequest {
+    /// 音频文件本地路径。
+    pub file_path: String,
+}
+
+/// 播放音频响应。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlayResponse {
+    /// 是否播放完成（阻塞式播放返回 true）。
+    pub completed: bool,
 }

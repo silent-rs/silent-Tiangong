@@ -778,16 +778,9 @@ export function MessageInput({
     const voiceDuration = Math.round(elapsedMs / 1000); // 录音时长（秒）
     recording.setState("transcribing");
     try {
-      const { blob, mimeType } = await recording.stopRecording();
-      const arrayBuffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-      const base64 = btoa(binary);
+      const { filePath } = await recording.stopRecording();
 
-      const result = await api.transcribeSpeech(base64, mimeType);
+      const result = await api.transcribeSpeech(filePath);
       const text = result.text.trim();
       if (text) {
         const audioPath = result.audio_path;

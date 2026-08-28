@@ -11,7 +11,8 @@ use tiangong_plugin_runtime::protocol::{
 use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
 use tiangong_plugin_text_to_speech_protocol::{
     Empty, LIST_MODELS_OPERATION, ListModelsResponse, ModelInfo, PLUGIN_ID, PLUGIN_VERSION,
-    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TTS_PROTOCOL_VERSION,
+    PLAY_OPERATION, PlayRequest, PlayResponse, STOP_OPERATION, SYNTHESIZE_OPERATION,
+    SynthesizeRequest, SynthesizeResponse, TTS_PROTOCOL_VERSION,
 };
 
 /// TTS sidecar 业务服务（无状态）。
@@ -78,6 +79,19 @@ async fn dispatch_operation(
             serde_json::to_value(response).context("序列化 list_models 响应失败")
         }
 
+        PLAY_OPERATION => {
+            let req: PlayRequest =
+                serde_json::from_value(payload).context("解析 play 请求失败")?;
+            let result = play(req)?;
+            serde_json::to_value(result).context("序列化 play 响应失败")
+        }
+
+        STOP_OPERATION => {
+            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
+            stop()?;
+            serde_json::to_value(Empty {}).context("序列化 stop 响应失败")
+        }
+
         other => Err(anyhow::anyhow!("未知的 TTS 操作: {other}")),
     }
 }
@@ -131,6 +145,78 @@ fn list_models() -> Result<ListModelsResponse> {
             })
             .collect(),
     })
+}
+
+/// 播放音频文件（阻塞式，播放完成后返回）。
+fn play(req: PlayRequest) -> Result<PlayResponse> {
+    let path = std::path::Path::new(&req.file_path);
+    if !path.exists() {
+        anyhow::bail!("音频文件不存在：{}", req.file_path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("afplay")
+            .arg(&req.file_path)
+            .status()
+            .map_err(|e| anyhow::anyhow!("播放失败：{e}"))?;
+        if !status.success() {
+            anyhow::bail!("播放失败，退出码：{:?}", status.code());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = std::process::Command::new("powershell")
+            .args([
+                "-c",
+                &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", req.file_path),
+            ])
+            .status()
+            .map_err(|e| anyhow::anyhow!("播放失败：{e}"))?;
+        if !status.success() {
+            anyhow::bail!("播放失败，退出码：{:?}", status.code());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::process::Command::new("aplay")
+            .arg(&req.file_path)
+            .status()
+            .map_err(|e| anyhow::anyhow!("播放失败：{e}"))?;
+        if !status.success() {
+            anyhow::bail!("播放失败，退出码：{:?}", status.code());
+        }
+    }
+
+    Ok(PlayResponse { completed: true })
+}
+
+/// 停止当前播放的音频。
+fn stop() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "afplay"])
+            .status();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args(["-c", "Stop-Process -Name powershell -ErrorAction SilentlyContinue"])
+            .status();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "aplay"])
+            .status();
+    }
+
+    Ok(())
 }
 
 /// 构造 `~/.tiangong/media/tts_<scru128>.<ext>` 路径并确保目录存在。

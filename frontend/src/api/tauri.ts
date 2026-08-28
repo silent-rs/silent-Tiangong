@@ -1019,16 +1019,19 @@ export const api = {
     invoke('reset_context'),
 
   // ----------------------------------------------------------------
-  // 语音合成
+  // 语音合成（经 tts 插件 sidecar）
   // ----------------------------------------------------------------
   synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
-    invoke('synthesize_speech', { text }),
+    api.bridgeCall('text-to-speech', 'sidecar.synthesize', JSON.stringify({ text }))
+      .then((raw) => JSON.parse(raw)),
 
   playAudioFile: (filePath: string): Promise<void> =>
-    invoke('play_audio_file', { filePath }),
+    api.bridgeCall('text-to-speech', 'sidecar.play', JSON.stringify({ file_path: filePath }))
+      .then(() => undefined),
 
   stopAudio: (): Promise<void> =>
-    invoke('stop_audio'),
+    api.bridgeCall('text-to-speech', 'sidecar.stop', '{}')
+      .then(() => undefined),
 
   getSessionCost: (sessionId?: string): Promise<SessionCost> =>
     invoke('get_session_cost', { sessionId }),
@@ -1040,13 +1043,25 @@ export const api = {
     invoke('list_tts_voices'),
 
   // ----------------------------------------------------------------
-  // 语音识别
+  // 语音识别（经 stt 插件 sidecar）
   // ----------------------------------------------------------------
   hasSttCapability: (): Promise<boolean> =>
     api.hasModelCapability('stt'),
 
-  transcribeSpeech: (audioBase64: string, mimeType: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
-    invoke('transcribe_speech', { audioBase64, mimeType }),
+  /** 转录音频文件（经 stt 插件 sidecar）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
+  transcribeSpeech: (filePath: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
+    api.bridgeCall('speech-to-text', 'sidecar.transcribe', JSON.stringify({ file_path: filePath }))
+      .then((raw) => JSON.parse(raw)),
+
+  /** 开始录音（经 stt 插件 sidecar）。返回录音会话 ID。 */
+  startRecording: (): Promise<{ session_id: string }> =>
+    api.bridgeCall('speech-to-text', 'sidecar.record_start', '{}')
+      .then((raw) => JSON.parse(raw)),
+
+  /** 停止录音（经 stt 插件 sidecar）。返回音频文件路径。 */
+  stopRecording: (): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
+    api.bridgeCall('speech-to-text', 'sidecar.record_stop', '{}')
+      .then((raw) => JSON.parse(raw)),
 
   // ----------------------------------------------------------------
   // 事件监听
