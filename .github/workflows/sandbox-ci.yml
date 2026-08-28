@@ -14,7 +14,7 @@ on:
       - "xtask/src/main.rs"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
-      - ".github/workflows/publish-launcher.yml"
+      - ".github/workflows/publish-sandbox.yml"
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
@@ -24,7 +24,7 @@ on:
       - "xtask/src/main.rs"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
-      - ".github/workflows/publish-launcher.yml"
+      - ".github/workflows/publish-sandbox.yml"
       - "Cargo.toml"
       - "Cargo.lock"
 
