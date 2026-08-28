@@ -417,7 +417,7 @@ impl StdioSidecarConnection {
             let _ = child.kill();
             let _ = child.wait();
             return Err(SpawnAttemptError::Preparation(
-                Err(error)
+                Err::<(), _>(error)
                     .context("将 sidecar 加入 Job Object 失败")
                     .unwrap_err(),
             ));
