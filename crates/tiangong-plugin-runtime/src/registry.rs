@@ -2664,14 +2664,15 @@ fn resolve_interpreter_launch(
     if !entry_path.is_file() {
         bail!("插件 sidecar 入口脚本不存在: {}", entry_path.display());
     }
-    let program = resolve_interpreter_program(sidecar.runtime)?;
+    // 加载期预解析一次：提前暴露"未找到解释器"（写入插件 last_error）
+    // 并预热缓存；运行期每次启动均经缓存入口取最新路径。
+    resolve_interpreter_program(sidecar.runtime)?;
     Ok(InterpreterLaunch {
         kind: match sidecar.runtime {
             SidecarRuntime::Native => bail!("native sidecar 无解释器"),
             SidecarRuntime::Node => InterpreterKind::Node,
             SidecarRuntime::Python => InterpreterKind::Python,
         },
-        program,
         entry: entry_path,
         args: sidecar.args.clone(),
     })

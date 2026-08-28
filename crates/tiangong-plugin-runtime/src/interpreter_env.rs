@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::manifest::SidecarRuntime;
 
@@ -89,6 +89,39 @@ type InterpreterCache = HashMap<InterpreterKind, CachedInterpreter>;
 fn global_cache() -> &'static RwLock<InterpreterCache> {
     static CACHE: OnceLock<RwLock<InterpreterCache>> = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// 记录 `TIANGONG_*_PATH` 当前值是否为应用注入（而非用户显式设置）。
+/// 该状态独立于缓存存活：缓存失效重建后残留的环境变量值仍能正确
+/// 归类，不会被误认为用户显式配置。
+fn mark_env_injected(kind: InterpreterKind) {
+    if let Ok(mut guard) = injected_flags().write() {
+        guard.insert(kind, true);
+    }
+}
+
+fn env_injected_by_app(kind: InterpreterKind) -> bool {
+    injected_flags()
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(&kind).copied())
+        .unwrap_or(false)
+}
+
+fn injected_flags() -> &'static RwLock<HashMap<InterpreterKind, bool>> {
+    static INJECTED: OnceLock<RwLock<HashMap<InterpreterKind, bool>>> = OnceLock::new();
+    INJECTED.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// 每种解释器一把探测锁：同一种解释器并发首次解析只探测一次，Node
+/// 与 Python 互不阻塞。
+fn probe_lock(kind: InterpreterKind) -> &'static Mutex<()> {
+    static NODE: Mutex<()> = Mutex::new(());
+    static PYTHON: Mutex<()> = Mutex::new(());
+    match kind {
+        InterpreterKind::Node => &NODE,
+        InterpreterKind::Python => &PYTHON,
+    }
 }
 
 /// 跨平台获取用户 home 目录（与 sidecar 框架 `endpoint::home_dir` 同源）。
@@ -179,69 +212,99 @@ pub(crate) fn resolve_interpreter(kind: InterpreterKind) -> anyhow::Result<PathB
     let explicit = std::env::var_os(kind.env_key())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    resolve_via(kind, explicit, global_cache(), || {
-        probe_interpreter(kind, &InterpreterEnv::from_process())
-    })
+    resolve_locked(
+        kind,
+        explicit,
+        env_injected_by_app(kind),
+        global_cache(),
+        probe_lock(kind),
+        || probe_interpreter(kind, &InterpreterEnv::from_process()),
+    )
 }
 
-/// [`resolve_interpreter`] 的参数化核心，测试注入独立缓存、显式值与
-/// 探测闭包（兼作探测次数计数），不触碰全局状态。
+/// 快路径直接读缓存；未命中取该解释器的探测锁后双检再解析。
+fn resolve_locked<F>(
+    kind: InterpreterKind,
+    explicit: Option<PathBuf>,
+    injected_by_app: bool,
+    cache: &RwLock<InterpreterCache>,
+    lock: &Mutex<()>,
+    probe: F,
+) -> anyhow::Result<PathBuf>
+where
+    F: FnOnce() -> Option<CachedInterpreter>,
+{
+    if let Some(path) = valid_cached_in(cache, kind) {
+        return Ok(path);
+    }
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    resolve_via(kind, explicit, injected_by_app, cache, probe)
+}
+
+fn valid_cached_in(cache: &RwLock<InterpreterCache>, kind: InterpreterKind) -> Option<PathBuf> {
+    cache
+        .read()
+        .ok()?
+        .get(&kind)
+        .filter(|cached| cached.path.is_file())
+        .map(|cached| cached.path.clone())
+}
+
+/// [`resolve_interpreter`] 的参数化核心，测试注入独立缓存、显式值、
+/// 注入标记与探测闭包（兼作探测次数计数），不触碰全局状态。
 fn resolve_via<F>(
     kind: InterpreterKind,
     explicit: Option<PathBuf>,
+    injected_by_app: bool,
     cache: &RwLock<InterpreterCache>,
     probe: F,
 ) -> anyhow::Result<PathBuf>
 where
     F: FnOnce() -> Option<CachedInterpreter>,
 {
-    let stale_source = {
+    {
         let mut guard = cache
             .write()
             .map_err(|_| anyhow::anyhow!("解释器缓存锁已损坏"))?;
         match guard.get(&kind) {
             Some(cached) if cached.path.is_file() => return Ok(cached.path.clone()),
-            Some(cached) => {
-                let source = cached.source;
+            Some(_) => {
                 guard.remove(&kind);
-                Some(source)
             }
-            None => None,
+            None => {}
         }
-    };
-    // 显式变量：仅当失效缓存不属于应用注入时视为用户显式——应用注入
-    // 成功必然伴随缓存记录，残留的失效值直接忽略并重新探测。
-    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
-        let injected_by_app = matches!(
-            stale_source,
-            Some(
-                InterpreterSource::Path
-                    | InterpreterSource::Environment
-                    | InterpreterSource::CommonLocation
-            )
+    }
+    // 环境变量为应用注入时（值可能已失效）直接忽略并重新探测；仅用户
+    // 显式设置才按显式语义处理（无效即报错，不回退）。
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty())
+        && !injected_by_app
+    {
+        if explicit.is_file() {
+            if let Ok(mut guard) = cache.write() {
+                guard.insert(
+                    kind,
+                    CachedInterpreter {
+                        path: explicit.clone(),
+                        source: InterpreterSource::ExplicitOverride,
+                    },
+                );
+            }
+            return Ok(explicit);
+        }
+        anyhow::bail!(
+            "{} 指向的程序不存在: {}",
+            kind.env_key(),
+            explicit.display()
         );
-        if !injected_by_app {
-            if explicit.is_file() {
-                if let Ok(mut guard) = cache.write() {
-                    guard.insert(
-                        kind,
-                        CachedInterpreter {
-                            path: explicit.clone(),
-                            source: InterpreterSource::ExplicitOverride,
-                        },
-                    );
-                }
-                return Ok(explicit);
-            }
-            anyhow::bail!(
-                "{} 指向的程序不存在: {}",
-                kind.env_key(),
-                explicit.display()
-            );
-        }
     }
     match probe() {
         Some(discovered) => {
+            tracing::debug!(
+                kind = ?kind,
+                source = ?discovered.source,
+                path = %discovered.path.display(),
+                "解释器发现结果已缓存"
+            );
             if let Ok(mut guard) = cache.write() {
                 guard.insert(kind, discovered.clone());
             }
@@ -316,6 +379,7 @@ pub fn ensure_interpreter_env() {
                 Some(discovered) => {
                     let path = discovered.path.clone();
                     unsafe { std::env::set_var(kind.env_key(), &path) };
+                    mark_env_injected(kind);
                     if let Ok(mut guard) = global_cache().write() {
                         guard.insert(kind, discovered);
                     }
@@ -801,7 +865,7 @@ mod interpreter_discovery_tests {
             source: InterpreterSource::CommonLocation,
         };
         assert_eq!(
-            resolve_via(InterpreterKind::Node, None, &cache, || {
+            resolve_via(InterpreterKind::Node, None, false, &cache, || {
                 probes.set(probes.get() + 1);
                 Some(discovered.clone())
             })
@@ -809,7 +873,7 @@ mod interpreter_discovery_tests {
             program
         );
         assert_eq!(
-            resolve_via(InterpreterKind::Node, None, &cache, || {
+            resolve_via(InterpreterKind::Node, None, false, &cache, || {
                 panic!("缓存命中不应再次探测")
             })
             .unwrap(),
@@ -827,7 +891,7 @@ mod interpreter_discovery_tests {
         std::fs::write(&first, b"").unwrap();
         let cache = empty_cache();
         assert_eq!(
-            resolve_via(InterpreterKind::Node, None, &cache, || Some(
+            resolve_via(InterpreterKind::Node, None, false, &cache, || Some(
                 CachedInterpreter {
                     path: first.clone(),
                     source: InterpreterSource::CommonLocation,
@@ -841,7 +905,7 @@ mod interpreter_discovery_tests {
         std::fs::create_dir_all(second.parent().unwrap()).unwrap();
         std::fs::write(&second, b"").unwrap();
         assert_eq!(
-            resolve_via(InterpreterKind::Node, None, &cache, || Some(
+            resolve_via(InterpreterKind::Node, None, false, &cache, || Some(
                 CachedInterpreter {
                     path: second.clone(),
                     source: InterpreterSource::CommonLocation,
@@ -885,6 +949,7 @@ mod interpreter_discovery_tests {
         let error = resolve_via(
             InterpreterKind::Node,
             Some(PathBuf::from("/nonexistent/node-20")),
+            false,
             &cache,
             || panic!("显式无效时不应回退探测"),
         )
@@ -893,27 +958,34 @@ mod interpreter_discovery_tests {
         assert!(cache.read().unwrap().is_empty(), "失败状态不写入缓存");
     }
 
-    /// 应用注入的值失效后（缓存曾记录非显式来源），残留的环境变量值
-    /// 不应被误认为用户显式配置，应继续重新探测。
+    /// 真实恢复链路：应用自动发现并写入缓存与环境变量 → 程序文件被删
+    /// → spawn 失败触发 invalidate_if_matches（缓存清空、环境变量残留）
+    /// → 重新解析（注入标记独立于缓存存活）→ 探测到新路径。
     #[test]
-    fn stale_injected_env_value_reprobes_instead_of_erroring() {
+    fn recovery_after_invalidate_ignores_stale_injected_env() {
         let dir = tempfile::tempdir().unwrap();
-        let removed = dir.path().join("old-node");
-        std::fs::write(&removed, b"").unwrap();
+        let old = dir.path().join("old-node");
+        std::fs::write(&old, b"").unwrap();
         let cache = empty_cache();
-        // 模拟启动时应用注入成功
+        // 启动时应用自动发现：写缓存（非显式来源）并注入环境变量
         cache.write().unwrap().insert(
             InterpreterKind::Node,
             CachedInterpreter {
-                path: removed.clone(),
+                path: old.clone(),
                 source: InterpreterSource::Environment,
             },
         );
-        std::fs::remove_file(&removed).unwrap();
+        std::fs::remove_file(&old).unwrap();
+        // spawn 失败后的真实顺序：先失效缓存，再重新解析
+        assert!(invalidate_if_matches_in(
+            &cache,
+            InterpreterKind::Node,
+            &old
+        ));
         let fresh = dir.path().join("fresh-node");
         std::fs::write(&fresh, b"").unwrap();
         assert_eq!(
-            resolve_via(InterpreterKind::Node, Some(removed), &cache, || {
+            resolve_via(InterpreterKind::Node, Some(old), true, &cache, || {
                 Some(CachedInterpreter {
                     path: fresh.clone(),
                     source: InterpreterSource::CommonLocation,
@@ -921,7 +993,75 @@ mod interpreter_discovery_tests {
             })
             .unwrap(),
             fresh,
-            "应用注入值失效应重新探测而非报错"
+            "失效后残留的应用注入值不应被误认为用户显式配置"
+        );
+    }
+
+    /// 应用注入标记下，环境变量中残留的旧路径即使文件仍然存在（权限/
+    /// 格式问题导致启动失败），重新解析也以重新探测的结果为准。
+    #[test]
+    fn injected_env_value_is_ignored_during_re_resolve() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stale-node");
+        std::fs::write(&stale, b"").unwrap();
+        let cache = empty_cache();
+        let fresh = dir.path().join("fresh-node");
+        std::fs::write(&fresh, b"").unwrap();
+        assert_eq!(
+            resolve_via(
+                InterpreterKind::Node,
+                Some(stale.clone()),
+                true,
+                &cache,
+                || {
+                    Some(CachedInterpreter {
+                        path: fresh.clone(),
+                        source: InterpreterSource::CommonLocation,
+                    })
+                }
+            )
+            .unwrap(),
+            fresh,
+            "应用注入值不应在重新解析时短路探测"
+        );
+        assert!(stale.is_file(), "测试前提：旧文件仍存在");
+    }
+
+    /// 并发首次解析同一种解释器只探测一次（per-kind 探测锁 + 双检）。
+    #[test]
+    fn concurrent_first_resolve_probes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("node");
+        std::fs::write(&program, b"").unwrap();
+        let cache = empty_cache();
+        let lock = std::sync::Mutex::new(());
+        let probes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let cache = std::sync::Arc::new(cache);
+        let lock = std::sync::Arc::new(lock);
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let cache = std::sync::Arc::clone(&cache);
+            let lock = std::sync::Arc::clone(&lock);
+            let probes = std::sync::Arc::clone(&probes);
+            let program = program.clone();
+            handles.push(std::thread::spawn(move || {
+                resolve_locked(InterpreterKind::Node, None, false, &cache, &lock, || {
+                    probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Some(CachedInterpreter {
+                        path: program,
+                        source: InterpreterSource::CommonLocation,
+                    })
+                })
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "并发首次解析应只探测一次"
         );
     }
 }

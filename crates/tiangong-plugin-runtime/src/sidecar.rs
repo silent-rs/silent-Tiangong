@@ -149,10 +149,9 @@ pub trait SidecarConnection: Send + Sync {
 /// 解释器形态 sidecar 的启动规格：宿主白名单程序 + 插件目录内入口脚本。
 #[derive(Debug, Clone)]
 pub struct InterpreterLaunch {
-    /// 解释器种类（进程创建失败时经缓存失效接口重新发现）。
+    /// 解释器种类；程序路径每次启动经缓存入口解析，不在配置中保存
+    /// 可能过期的副本。
     pub kind: crate::interpreter_env::InterpreterKind,
-    /// 解释器程序（node/python 等，宿主解析，不接受清单命令）。
-    pub program: PathBuf,
     /// 入口脚本绝对路径（插件目录内，参与内容哈希锁定）。
     pub entry: PathBuf,
     /// 清单声明的固定参数。

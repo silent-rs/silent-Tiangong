@@ -96,7 +96,6 @@ fn connection_with_lifecycle(
     .with_lifecycle(lifecycle)
     .with_interpreter(InterpreterLaunch {
         kind: tiangong_plugin_runtime::interpreter_env::InterpreterKind::Node,
-        program: node.to_path_buf(),
         entry,
         args: Vec::new(),
     });
