@@ -275,8 +275,10 @@ where
         }
     }
     // 环境变量为应用注入时（值可能已失效）直接忽略并重新探测；仅用户
-    // 显式设置才按显式语义处理（无效即报错，不回退）。
-    if let Some(explicit) = explicit.filter(|value| !value.is_empty())
+    // 显式设置才按显式语义处理（无效即报错，不回退）。经 as_os_str 显式
+    // 调用 OsStr::is_empty：Path::is_empty 是 unstable，nightly 工具链
+    // 下方法解析会命中它并要求 feature gate。
+    if let Some(explicit) = explicit.filter(|value| !value.as_os_str().is_empty())
         && !injected_by_app
     {
         if explicit.is_file() {
