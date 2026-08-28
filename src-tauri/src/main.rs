@@ -867,6 +867,7 @@ fn run_gui() {
             tiangong_app::commands::play_audio_file,
             tiangong_app::commands::stop_audio,
             tiangong_app::commands::get_mention_candidates,
+            tiangong_app::commands::get_mention_groups,
             tiangong_app::commands::compress_context,
             tiangong_app::commands::reset_context,
             tiangong_app::commands::webhook_list,

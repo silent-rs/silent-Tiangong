@@ -35,6 +35,12 @@ interface MentionCandidate {
   hint: string;
 }
 
+interface MentionGroup {
+  kind: string;
+  label: string;
+  candidates: MentionCandidate[];
+}
+
 const SLASH_COMMANDS: MentionCandidate[] = [
   {
     value: '/压缩对话',
@@ -97,7 +103,7 @@ export function MessageInput({
 
   // @提及补全状态
   const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+  const [mentionGroups, setMentionGroups] = useState<MentionGroup[]>([]);
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
@@ -241,21 +247,19 @@ export function MessageInput({
   // ===== 文字模式相关 =====
   const loadCandidates = useCallback(async () => {
     try {
-      const candidates = await api.getMentionCandidates();
-      setMentionCandidates(candidates);
+      const groups = await api.getMentionGroups();
+      setMentionGroups(groups);
     } catch (e) {
       console.error('加载提及候选失败:', e);
     }
   }, []);
 
-  const filteredCandidates = (() => {
+  const filteredGroups = (() => {
     if (completionMode === 'slash') {
-      const filter = mentionFilter.toLowerCase();
-      if (!filter) return SLASH_COMMANDS;
-      return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+      return [];
     }
 
-    // 合并 API 候选和 Agent 候选
+    // 合并 API 分组和 Agent 分组
     const aliveAgents = agents.filter(a => a.status !== 'terminated');
     const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
       value: `@${a.role}`,
@@ -272,15 +276,32 @@ export function MessageInput({
         hint: `广播给全部 ${aliveAgents.length} 个 Agent`,
       });
     }
-    const all = [...agentCandidates, ...mentionCandidates];
-    if (!mentionFilter) return all;
+    const groups: MentionGroup[] = agentCandidates.length > 0
+      ? [{ kind: 'agent', label: 'Agent', candidates: agentCandidates }, ...mentionGroups]
+      : mentionGroups;
+
+    if (!mentionFilter) return groups;
     const lower = mentionFilter.toLowerCase();
-    return all.filter(c =>
-      c.label.toLowerCase().includes(lower)
-      || c.value.toLowerCase().includes(lower)
-      || c.hint.toLowerCase().includes(lower)
-    );
+    return groups
+      .map(group => ({
+        ...group,
+        candidates: group.candidates.filter(c =>
+          c.label.toLowerCase().includes(lower)
+          || c.value.toLowerCase().includes(lower)
+          || c.hint.toLowerCase().includes(lower)
+        ),
+      }))
+      .filter(group => group.candidates.length > 0);
   })();
+
+  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
+  const filteredCandidates = completionMode === 'slash'
+    ? (() => {
+        const filter = mentionFilter.toLowerCase();
+        if (!filter) return SLASH_COMMANDS;
+        return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+      })()
+    : filteredGroups.flatMap(group => group.candidates);
 
   useEffect(() => {
     if (!mentionOpen) return;
@@ -1009,40 +1030,77 @@ export function MessageInput({
                   ref={mentionRef}
                   className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
-                  {filteredCandidates.map((c, i) => (
-                    <button
-                      key={c.value}
-                      ref={(el) => { candidateRefs.current[i] = el; }}
-                      className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
-                        i === mentionIndex ? 'bg-accent' : ''
-                      }`}
-                      onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
-                      onMouseEnter={() => setMentionIndex(i)}
-                    >
-                      {c.kind === 'skill' ? (
-                        <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : c.kind === 'agent' ? (
-                        <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : c.kind === 'command' ? (
+                  {completionMode === 'slash' ? (
+                    // slash 命令：平铺渲染
+                    filteredCandidates.map((c, i) => (
+                      <button
+                        key={c.value}
+                        ref={(el) => { candidateRefs.current[i] = el; }}
+                        className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                          i === mentionIndex ? 'bg-accent' : ''
+                        }`}
+                        onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
+                        onMouseEnter={() => setMentionIndex(i)}
+                      >
                         <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : (
-                        <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      )}
-                      <div className="min-w-0 flex-1 overflow-hidden">
-                        <div className="flex min-w-0 items-baseline gap-2">
-                          <span className="truncate font-medium">{c.label}</span>
-                          {c.kind === 'skill' && c.value.includes('@') && (
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              {c.value.replace(/^@/, '')}
-                            </span>
-                          )}
+                        <div className="min-w-0 flex-1 overflow-hidden">
+                          <div className="flex min-w-0 items-baseline gap-2">
+                            <span className="truncate font-medium">{c.label}</span>
+                          </div>
+                          <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                            {c.hint}
+                          </span>
                         </div>
-                        <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
-                          {c.hint}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
+                      </button>
+                    ))
+                  ) : (
+                    // mention：按组渲染（组标题 + 组内候选）
+                    (() => {
+                      let flatIndex = 0;
+                      return filteredGroups.map((group) => (
+                        <div key={group.kind}>
+                          <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            {group.label}
+                          </div>
+                          {group.candidates.map((c) => {
+                            const i = flatIndex++;
+                            return (
+                              <button
+                                key={c.value}
+                                ref={(el) => { candidateRefs.current[i] = el; }}
+                                className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                                  i === mentionIndex ? 'bg-accent' : ''
+                                }`}
+                                onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
+                                onMouseEnter={() => setMentionIndex(i)}
+                              >
+                                {c.kind === 'skill' ? (
+                                  <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                ) : c.kind === 'agent' ? (
+                                  <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                ) : (
+                                  <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                )}
+                                <div className="min-w-0 flex-1 overflow-hidden">
+                                  <div className="flex min-w-0 items-baseline gap-2">
+                                    <span className="truncate font-medium">{c.label}</span>
+                                    {c.kind === 'skill' && c.value.includes('@') && (
+                                      <span className="shrink-0 text-xs text-muted-foreground">
+                                        {c.value.replace(/^@/, '')}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                                    {c.hint}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ));
+                    })()
+                  )}
                 </div>
               )}
 

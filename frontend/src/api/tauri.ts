@@ -1002,6 +1002,13 @@ export const api = {
   getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
     invoke('get_mention_candidates'),
 
+  /** 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。 */
+  getMentionGroups: (
+    allowedKinds?: string[],
+    maxPerGroup?: number,
+  ): Promise<{ kind: string; label: string; candidates: { value: string; label: string; kind: string; hint: string }[] }[]> =>
+    invoke('get_mention_groups', { allowedKinds, maxPerGroup }),
+
   // ----------------------------------------------------------------
   // 上下文管理
   // ----------------------------------------------------------------

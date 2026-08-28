@@ -19,3 +19,16 @@ pub struct MentionCandidate {
     pub kind: String,
     pub hint: String,
 }
+
+/// @提及候选分组。
+///
+/// App 层按 `kind` 对插件提供的候选分组，供前端按组渲染（组标题 + 组内候选）。
+/// - `kind`：分组类型标签，如 `skill` / `mcp` / `agent`
+/// - `label`：组标题（展示用）
+/// - `candidates`：组内候选（已按数量上限截断）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MentionGroup {
+    pub kind: String,
+    pub label: String,
+    pub candidates: Vec<MentionCandidate>,
+}

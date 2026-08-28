@@ -101,6 +101,8 @@ pub struct TranscribeResult {
 
 /// @提及候选项（统一使用 tiangong_types::MentionCandidate，避免重复定义）。
 pub use tiangong_types::MentionCandidate;
+/// @提及候选分组（统一使用 tiangong_types::MentionGroup，避免重复定义）。
+pub use tiangong_types::MentionGroup;
 
 /// 会话列表项（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]

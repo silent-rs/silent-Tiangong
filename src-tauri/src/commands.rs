@@ -1865,6 +1865,23 @@ pub async fn get_mention_candidates() -> Result<Vec<MentionCandidate>, String> {
     Ok(tiangong_plugin_runtime::registry::collect_mention_candidates())
 }
 
+/// 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。
+///
+/// `allowed_kinds` 为空时不过滤（全部保留）；`max_per_group` 为每组候选数量上限。
+/// 前端按组渲染（组标题 + 组内候选），并做组内搜索。
+#[tauri::command]
+pub async fn get_mention_groups(
+    allowed_kinds: Option<Vec<String>>,
+    max_per_group: Option<usize>,
+) -> Result<Vec<MentionGroup>, String> {
+    let allowed_kinds = allowed_kinds.unwrap_or_default();
+    let max_per_group = max_per_group.unwrap_or(50);
+    Ok(tiangong_plugin_runtime::registry::collect_mention_groups(
+        &allowed_kinds,
+        max_per_group,
+    ))
+}
+
 /// 获取输入框缓存。
 #[tauri::command]
 pub async fn get_input_cache(
