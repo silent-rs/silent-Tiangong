@@ -68,16 +68,11 @@ await runSidecar({{
     entry
 }
 
-fn connection(
-    node: &std::path::Path,
-    entry: PathBuf,
-    integrity_manifest: Option<PathBuf>,
-) -> StdioSidecarConnection {
-    connection_with_lifecycle(node, entry, integrity_manifest, SidecarLifecycle::Resident)
+fn connection(entry: PathBuf, integrity_manifest: Option<PathBuf>) -> StdioSidecarConnection {
+    connection_with_lifecycle(entry, integrity_manifest, SidecarLifecycle::Resident)
 }
 
 fn connection_with_lifecycle(
-    node: &std::path::Path,
     entry: PathBuf,
     integrity_manifest: Option<PathBuf>,
     lifecycle: SidecarLifecycle,
@@ -95,7 +90,7 @@ fn connection_with_lifecycle(
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(15))
     .with_lifecycle(lifecycle)
     .with_interpreter(InterpreterLaunch {
-        program: node.to_path_buf(),
+        kind: tiangong_plugin_runtime::interpreter_env::InterpreterKind::Node,
         entry,
         args: Vec::new(),
     });
@@ -108,14 +103,15 @@ fn connection_with_lifecycle(
 
 #[test]
 fn node_interpreter_roundtrip_and_restart() {
-    let Some(node) = find_node() else {
+    // 运行期解释器由宿主缓存入口解析；此处仅确认环境可用，不可用即跳过
+    if find_node().is_none() {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
     let base = std::env::temp_dir().join(format!("tiangong-node-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&base).unwrap();
     let entry = write_sidecar_project(&base, "first");
-    let connection = connection(&node, entry, None);
+    let connection = connection(entry, None);
 
     // 握手 + 请求往返（含进度）。
     let raw = connection
@@ -140,7 +136,8 @@ fn node_interpreter_roundtrip_and_restart() {
 
 #[test]
 fn node_interpreter_lifecycle_on_demand_vs_resident() {
-    let Some(node) = find_node() else {
+    // 运行期解释器由宿主缓存入口解析；此处仅确认环境可用，不可用即跳过
+    if find_node().is_none() {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
@@ -152,7 +149,7 @@ fn node_interpreter_lifecycle_on_demand_vs_resident() {
         ));
         std::fs::create_dir_all(&base).unwrap();
         let entry = write_sidecar_project(&base, "lc");
-        let connection = connection_with_lifecycle(&node, entry, None, lifecycle);
+        let connection = connection_with_lifecycle(entry, None, lifecycle);
         let first: serde_json::Value =
             serde_json::from_str(&connection.invoke("demo.echo", r#"{"text":"a"}"#).unwrap())
                 .unwrap();
@@ -176,7 +173,8 @@ fn node_interpreter_lifecycle_on_demand_vs_resident() {
 
 #[test]
 fn node_interpreter_tampered_entry_rejected() {
-    let Some(node) = find_node() else {
+    // 运行期解释器由宿主缓存入口解析；此处仅确认环境可用，不可用即跳过
+    if find_node().is_none() {
         eprintln!("跳过：PATH 中未找到 node");
         return;
     };
@@ -211,7 +209,7 @@ fn node_interpreter_tampered_entry_rejected() {
     .unwrap();
     std::fs::write(&entry, "// tampered\n").unwrap();
 
-    let connection = connection(&node, entry, Some(manifest_path));
+    let connection = connection(entry, Some(manifest_path));
     let error = connection
         .invoke("demo.echo", r#"{"text":"x"}"#)
         .unwrap_err();

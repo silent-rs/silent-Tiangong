@@ -13,6 +13,7 @@ use tiangong_core::core::Plugin;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
+use crate::interpreter_env::{self, InterpreterKind};
 use crate::loader::{
     Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
     instantiate_component,
@@ -73,7 +74,7 @@ fn current_server_endpoint() -> Option<(String, Option<String>)> {
 /// Server 地址/令牌变化后，旧 sidecar 进程持有的 env 已过期，必须重启才能拿到新值。
 /// 停止后，下次 invoke 时运行时会自动用新配置重新拉起 sidecar。
 fn restart_server_dependent_sidecars() {
-    let Some(home) = user_home_dir() else {
+    let Some(home) = interpreter_env::user_home_dir() else {
         tracing::warn!("重启 server 依赖 sidecar 时无法确定 home 目录，跳过");
         return;
     };
@@ -82,26 +83,6 @@ fn restart_server_dependent_sidecars() {
         if let Err(error) = stop_installed_sidecar(&storage_root, plugin_id) {
             tracing::warn!(plugin_id, %error, "重启 server 依赖 sidecar 时停止失败");
         }
-    }
-}
-
-/// 跨平台获取用户 home 目录（与 sidecar 框架 `endpoint::home_dir` 同源）。
-fn user_home_dir() -> Option<std::path::PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(std::path::PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(std::path::PathBuf::from(profile));
-    }
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = std::path::PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
     }
 }
 
@@ -2683,62 +2664,35 @@ fn resolve_interpreter_launch(
     if !entry_path.is_file() {
         bail!("插件 sidecar 入口脚本不存在: {}", entry_path.display());
     }
-    let program = resolve_interpreter_program(sidecar.runtime)?;
+    // 加载期预解析一次：提前暴露"未找到解释器"（写入插件 last_error）
+    // 并预热缓存；运行期每次启动均经缓存入口取最新路径。
+    resolve_interpreter_program(sidecar.runtime)?;
     Ok(InterpreterLaunch {
-        program,
+        kind: match sidecar.runtime {
+            SidecarRuntime::Native => bail!("native sidecar 无解释器"),
+            SidecarRuntime::Node => InterpreterKind::Node,
+            SidecarRuntime::Python => InterpreterKind::Python,
+        },
         entry: entry_path,
         args: sidecar.args.clone(),
     })
 }
 
-/// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
+/// 解析解释器程序：统一走应用级缓存入口（见 interpreter_env 模块），
+/// registry 不再自行读取环境变量或构造候选路径。
 fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
-    let (override_env, candidates): (&str, &[&str]) = match runtime {
+    let kind = match runtime {
         SidecarRuntime::Native => bail!("native sidecar 无解释器"),
-        SidecarRuntime::Node => (
-            "TIANGONG_NODE_PATH",
-            if cfg!(windows) {
-                &["node.exe"]
-            } else {
-                &["node"]
-            },
-        ),
-        SidecarRuntime::Python => (
-            "TIANGONG_PYTHON_PATH",
-            if cfg!(windows) {
-                &["python.exe", "py.exe"]
-            } else {
-                &["python3", "python"]
-            },
-        ),
+        SidecarRuntime::Node => InterpreterKind::Node,
+        SidecarRuntime::Python => InterpreterKind::Python,
     };
-    if let Some(path) = std::env::var_os(override_env)
-        && !path.is_empty()
-    {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!("{override_env} 指向的程序不存在: {}", path.display());
-    }
-    let search_paths = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
-    for directory in search_paths {
-        for candidate in candidates {
-            let path = directory.join(candidate);
-            if path.is_file() {
-                return Ok(path);
-            }
-        }
-    }
-    bail!(
-        "未找到 {:?} sidecar 所需的解释器程序（{}）；请安装后重试，或以 {override_env} 指定路径",
-        runtime,
-        candidates.join(" / ")
-    );
+    interpreter_env::resolve_interpreter(kind)
 }
 
+/// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
+///
+/// GUI 进程（launchd/Finder 启动）不执行 shell 初始化，nvm/Homebrew 等
+/// 安装位置不在其 PATH 中，PATH 未命中后继续探测常见安装位置；入口
 /// 本地信任校验：安装时落锚的标记与内容清单哈希一致，且清单内全部文件未被篡改。
 fn verify_local_trust(directory: &Path) -> Result<bool> {
     #[derive(serde::Deserialize)]

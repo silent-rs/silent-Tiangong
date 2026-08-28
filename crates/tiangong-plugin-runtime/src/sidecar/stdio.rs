@@ -241,56 +241,125 @@ impl StdioSidecarConnection {
     }
 
     fn spawn(&self) -> Result<StdioProcess> {
+        match self.spawn_once() {
+            Ok(process) => Ok(process),
+            Err(SpawnAttemptError::Preparation(error)) => Err(error),
+            Err(SpawnAttemptError::ProcessCreation { program, source }) => {
+                // 仅进程创建失败（文件被删、无执行权限、格式无效等）才
+                // 走恢复接口：缓存匹配失效 → 排除失败路径重探；恢复出新
+                // 路径后重试一次。spawn_once 每次都经缓存入口取最新路径，
+                // 后续重启自然使用新路径。
+                if let Some(launch) = self.config.interpreter.as_ref()
+                    && crate::interpreter_env::recover_interpreter_after_spawn_failure(
+                        launch.kind,
+                        &program,
+                    )
+                    .is_some()
+                {
+                    // 第二次失败返回真实错误，不再第三次恢复；若仍是
+                    // 解释器创建失败，清掉刚恢复的新缓存（已知坏路径）。
+                    return match self.spawn_once() {
+                        Ok(process) => Ok(process),
+                        Err(SpawnAttemptError::Preparation(error)) => Err(error),
+                        Err(SpawnAttemptError::ProcessCreation {
+                            program: second_program,
+                            source: second_source,
+                        }) => {
+                            if let Some(launch) = self.config.interpreter.as_ref() {
+                                crate::interpreter_env::invalidate_if_matches(
+                                    launch.kind,
+                                    &second_program,
+                                );
+                            }
+                            Err(second_source)
+                        }
+                    };
+                }
+                Err(source)
+            }
+        }
+    }
+
+    /// 解释器形态每次启动都经缓存入口解析程序路径（命中只做一次
+    /// `is_file` 校验，不触发目录扫描），不在配置中保存可能过期的
+    /// 解释器路径副本。
+    fn spawn_once(&self) -> std::result::Result<StdioProcess, SpawnAttemptError> {
         if !self.config.binary.is_file() {
-            bail!("sidecar 二进制不存在: {}", self.config.binary.display());
+            return Err(SpawnAttemptError::Preparation(anyhow!(
+                "sidecar 二进制不存在: {}",
+                self.config.binary.display()
+            )));
         }
         if let Some(parent) = self.config.log.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("创建 sidecar 日志目录失败: {}", parent.display()))?;
+            preparation(
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建 sidecar 日志目录失败: {}", parent.display())),
+            )?;
         }
-        std::fs::create_dir_all(&self.config.data_dir).with_context(|| {
-            format!(
-                "创建 sidecar 数据目录失败: {}",
-                self.config.data_dir.display()
-            )
-        })?;
-        let stderr = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.config.log)
-            .with_context(|| format!("打开 sidecar 日志失败: {}", self.config.log.display()))?;
+        preparation(
+            std::fs::create_dir_all(&self.config.data_dir).with_context(|| {
+                format!(
+                    "创建 sidecar 数据目录失败: {}",
+                    self.config.data_dir.display()
+                )
+            }),
+        )?;
+        let stderr = preparation(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.config.log)
+                .with_context(|| format!("打开 sidecar 日志失败: {}", self.config.log.display())),
+        )?;
 
         let token = scru128::new().to_string();
         // OS 沙箱路径（经 tiangong-sandbox Launcher 启动）由沙箱覆盖分支
         // 在本传输层之上叠加；此处仅负责直接 spawn 与 stdio 管道接续。
-        // 解释器形态：以宿主解析的解释器程序运行 entry（本地信任时先复核内容清单）。
-        let mut command = match self.config.interpreter.as_ref() {
+        // 解释器形态：以宿主缓存解析的解释器程序运行 entry（本地信任时
+        // 先复核内容清单）。
+        let (program, mut command) = match self.config.interpreter.as_ref() {
             Some(launch) => {
                 if let Some(manifest_path) = &self.config.integrity_manifest {
-                    let root = manifest_path
-                        .parent()
-                        .ok_or_else(|| anyhow!("内容清单缺少父目录"))?;
-                    SidecarConfig::verify_integrity_manifest(manifest_path, root)?;
+                    let root = preparation(
+                        manifest_path
+                            .parent()
+                            .ok_or_else(|| anyhow!("内容清单缺少父目录")),
+                    )?;
+                    preparation(SidecarConfig::verify_integrity_manifest(
+                        manifest_path,
+                        root,
+                    ))?;
                 }
-                if !launch.program.is_file() {
-                    bail!(
+                let program =
+                    preparation(crate::interpreter_env::resolve_interpreter(launch.kind))?;
+                if !program.is_file() {
+                    return Err(SpawnAttemptError::Preparation(anyhow!(
                         "解释器程序不存在: {}（可用 TIANGONG_NODE_PATH/TIANGONG_PYTHON_PATH 指定）",
-                        launch.program.display()
-                    );
+                        program.display()
+                    )));
                 }
                 if !launch.entry.is_file() {
-                    bail!("sidecar 入口脚本不存在: {}", launch.entry.display());
+                    return Err(SpawnAttemptError::Preparation(anyhow!(
+                        "sidecar 入口脚本不存在: {}",
+                        launch.entry.display()
+                    )));
                 }
-                let mut command = Command::new(&launch.program);
+                let mut command = Command::new(&program);
                 command.arg(&launch.entry);
                 command.args(&launch.args);
-                command
+                (program, command)
             }
             None => {
                 if !self.config.binary.is_file() {
-                    bail!("sidecar 二进制不存在: {}", self.config.binary.display());
+                    return Err(SpawnAttemptError::Preparation(anyhow!(
+                        "sidecar 二进制不存在: {}",
+                        self.config.binary.display()
+                    )));
                 }
-                Command::new(&self.config.binary)
+                (
+                    self.config.binary.clone(),
+                    Command::new(&self.config.binary),
+                )
             }
         };
         sanitize_spawn_environment(&mut command);
@@ -307,9 +376,18 @@ impl StdioSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(PROCESS_GROUP_ENV, "1");
+        // 运行期解释器环境的权威来源是缓存：不修改宿主全局环境，仅对
+        // 新建子进程注入覆盖（TIANGONG_*_PATH + 前置解释器目录的 PATH），
+        // 恢复后的新路径由此传导给 sidecar 及其派生的命令通道进程。
+        for (key, value) in crate::interpreter_env::child_env_overrides() {
+            command.env(key, value);
+        }
         if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
-                bail!("sidecar 专用临时目录无效: {}", temp_dir.display());
+                return Err(SpawnAttemptError::Preparation(anyhow!(
+                    "sidecar 专用临时目录无效: {}",
+                    temp_dir.display()
+                )));
             }
             command
                 .env("TMPDIR", temp_dir)
@@ -324,20 +402,28 @@ impl StdioSidecarConnection {
         {
             command.env(EXEC_ENV_JSON_ENV, json);
         }
-        configure_process_lifecycle(&mut command)?;
+        preparation(configure_process_lifecycle(&mut command))?;
         #[cfg(windows)]
-        let lifecycle = WindowsJob::new().context("创建 sidecar Job Object 失败")?;
-        let mut child = command.spawn().with_context(|| {
-            format!("启动 stdio sidecar 失败: {}", self.config.binary.display())
+        let lifecycle = preparation(WindowsJob::new().context("创建 sidecar Job Object 失败"))?;
+        let mut child = command.spawn().map_err(|error| {
+            let context = format!("启动 stdio sidecar 失败: {}", program.display());
+            SpawnAttemptError::ProcessCreation {
+                program,
+                source: anyhow::Error::new(error).context(context),
+            }
         })?;
         #[cfg(windows)]
         if let Err(error) = lifecycle.assign(&child) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error).context("将 sidecar 加入 Job Object 失败");
+            return Err(SpawnAttemptError::Preparation(
+                Err::<(), _>(error)
+                    .context("将 sidecar 加入 Job Object 失败")
+                    .unwrap_err(),
+            ));
         }
-        let stdin = child.stdin.take().context("stdio sidecar 未提供 stdin")?;
-        let stdout = child.stdout.take().context("stdio sidecar 未提供 stdout")?;
+        let stdin = preparation(child.stdin.take().context("stdio sidecar 未提供 stdin"))?;
+        let stdout = preparation(child.stdout.take().context("stdio sidecar 未提供 stdout"))?;
         let pid = child.id();
         tracing::info!(
             plugin_id = %self.config.plugin_id,
@@ -505,6 +591,23 @@ fn child_status(process: &StdioProcess) -> String {
         Ok(None) => "子进程仍在运行但输出已关闭".to_string(),
         Err(error) => format!("读取子进程状态失败: {error}"),
     }
+}
+
+/// sidecar 启动尝试的错误分类：只有进程创建失败才允许失效解释器缓存
+/// 并重试，前置准备失败与解释器发现无关。
+enum SpawnAttemptError {
+    /// `Command::spawn()` 失败（文件被删、无执行权限、程序格式无效等），
+    /// 携带实际尝试的程序路径。
+    ProcessCreation {
+        program: std::path::PathBuf,
+        source: anyhow::Error,
+    },
+    /// 前置准备失败（目录/日志/清单校验/生命周期配置等）。
+    Preparation(anyhow::Error),
+}
+
+fn preparation<T>(result: anyhow::Result<T>) -> std::result::Result<T, SpawnAttemptError> {
+    result.map_err(SpawnAttemptError::Preparation)
 }
 
 fn sanitize_spawn_environment(command: &mut Command) {

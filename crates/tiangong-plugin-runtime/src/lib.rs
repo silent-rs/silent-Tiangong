@@ -17,6 +17,7 @@ pub mod bridge;
 pub mod config;
 mod execution;
 pub mod host_state;
+pub mod interpreter_env;
 pub mod loader;
 pub mod manifest;
 pub mod plugin_dev;
@@ -39,6 +40,7 @@ pub use bridge::{
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
+pub use interpreter_env::ensure_interpreter_env;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
     WasmPluginLoader,

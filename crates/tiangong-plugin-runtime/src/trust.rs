@@ -33,9 +33,9 @@ const TRUSTED_PUBLISHERS_FILE: &str = "trusted-publishers.json";
 static TRUST_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 临时文件 + 原子改名落盘：写一半崩溃不会留下半截密钥/登记表。
-/// `private` 为 true 时临时文件以 0600 创建（Unix）——私钥不存在短暂的
-/// 宽权限窗口，与永久存留同等危险。
-fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
+/// `_private` 为 true 时临时文件以 0600 创建（Unix）——私钥不存在短暂的
+/// 宽权限窗口，与永久存留同等危险；Windows 无此机制，仅 Unix 消费。
+fn atomic_write(path: &Path, content: &[u8], _private: bool) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建目录失败: {}", parent.display()))?;
@@ -47,7 +47,7 @@ fn atomic_write(path: &Path, content: &[u8], private: bool) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
-        if private {
+        if _private {
             options.mode(0o600);
         }
         let mut file = options
