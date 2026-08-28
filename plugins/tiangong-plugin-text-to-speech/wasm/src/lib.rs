@@ -14,7 +14,8 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_text_to_speech_protocol::{
-    Synthesize, SynthesizeRequest, SynthesizeResponse, TOOL_TEXT_TO_SPEECH,
+    Empty, ListModels, ListModelsResponse, Play, PlayRequest, PlayResponse, Stop, Synthesize,
+    SynthesizeRequest, SynthesizeResponse, TOOL_TEXT_TO_SPEECH,
 };
 
 mod descriptor {
@@ -121,7 +122,7 @@ fn handle_synthesize(call: &ToolCall) -> Result<ToolResult, PluginError> {
     })
 }
 
-// ── UI 能力（TTS 暂无设置页，返回空贡献）──
+// ── UI 能力（TTS 无设置页，但提供前端可经 bridge.call 调用的业务方法）──
 
 impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
@@ -137,9 +138,41 @@ impl UiGuest for Component {
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        Err(plugin_err("TTS 插件无设置页消息"))
+        let payload = match request.method.as_str() {
+            "synthesize" => {
+                let req: SynthesizeRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 synthesize 请求失败: {e}")))?;
+                let response: SynthesizeResponse = sidecar_client::invoke::<Synthesize>(&req)
+                    .map_err(|e| plugin_err(format!("语音合成失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 synthesize 响应失败: {e}")))?
+            }
+            "play" => {
+                let req: PlayRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 play 请求失败: {e}")))?;
+                let response: PlayResponse = sidecar_client::invoke::<Play>(&req)
+                    .map_err(|e| plugin_err(format!("播放失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 play 响应失败: {e}")))?
+            }
+            "stop" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let _: Empty = sidecar_client::invoke::<Stop>(&Empty {})
+                    .map_err(|e| plugin_err(format!("停止播放失败: {e}")))?;
+                "{}".to_string()
+            }
+            "list_models" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let response: ListModelsResponse = sidecar_client::invoke::<ListModels>(&Empty {})
+                    .map_err(|e| plugin_err(format!("列出模型失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 list_models 响应失败: {e}")))?
+            }
+            other => return Err(plugin_err(format!("未知的 TTS 消息: {other}"))),
+        };
+        Ok(ViewMessageResponse { payload })
     }
 }
 bindings::export!(Component with_types_in bindings);

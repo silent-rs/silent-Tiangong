@@ -2,13 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tiangong_plugin_mcp_protocol::config::ResolvedMcpTransport;
 
-/// 语音合成结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpeechResult {
-    pub file_path: String,
-    pub mime_type: String,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenStatsView {
     pub current_tokens: usize,
@@ -89,14 +82,6 @@ impl LoadedSessionView {
                 .to_string(),
         }
     }
-}
-
-/// 语音识别结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TranscribeResult {
-    pub text: String,
-    pub audio_path: String,
-    pub duration: Option<f64>,
 }
 
 /// @提及候选项（统一使用 tiangong_types::MentionCandidate，避免重复定义）。

@@ -1019,18 +1019,18 @@ export const api = {
     invoke('reset_context'),
 
   // ----------------------------------------------------------------
-  // 语音合成（经 tts 插件 sidecar）
+  // 语音合成（经 tts 插件，前端经 bridge.call 调用插件 handle_view_message）
   // ----------------------------------------------------------------
   synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
-    api.bridgeCall('text-to-speech', 'sidecar.synthesize', JSON.stringify({ text }))
+    api.bridgeCall('text-to-speech', 'plugin.synthesize', JSON.stringify({ text }))
       .then((raw) => JSON.parse(raw)),
 
   playAudioFile: (filePath: string): Promise<void> =>
-    api.bridgeCall('text-to-speech', 'sidecar.play', JSON.stringify({ file_path: filePath }))
+    api.bridgeCall('text-to-speech', 'plugin.play', JSON.stringify({ file_path: filePath }))
       .then(() => undefined),
 
   stopAudio: (): Promise<void> =>
-    api.bridgeCall('text-to-speech', 'sidecar.stop', '{}')
+    api.bridgeCall('text-to-speech', 'plugin.stop', '{}')
       .then(() => undefined),
 
   getSessionCost: (sessionId?: string): Promise<SessionCost> =>
@@ -1040,27 +1040,35 @@ export const api = {
     api.hasModelCapability('tts'),
 
   listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
-    invoke('list_tts_voices'),
+    api.bridgeCall('text-to-speech', 'plugin.list_models', '{}')
+      .then((raw) => {
+        const data = JSON.parse(raw);
+        const models = data.models ?? [];
+        return models.map((m: { key: string; model: string }) => ({
+          id: m.key,
+          name: m.model,
+        }));
+      }),
 
   // ----------------------------------------------------------------
-  // 语音识别（经 stt 插件 sidecar）
+  // 语音识别（经 stt 插件，前端经 bridge.call 调用插件 handle_view_message）
   // ----------------------------------------------------------------
   hasSttCapability: (): Promise<boolean> =>
     api.hasModelCapability('stt'),
 
-  /** 转录音频文件（经 stt 插件 sidecar）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
+  /** 转录音频文件（经 stt 插件）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
   transcribeSpeech: (filePath: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
-    api.bridgeCall('speech-to-text', 'sidecar.transcribe', JSON.stringify({ file_path: filePath }))
+    api.bridgeCall('speech-to-text', 'plugin.transcribe', JSON.stringify({ file_path: filePath }))
       .then((raw) => JSON.parse(raw)),
 
-  /** 开始录音（经 stt 插件 sidecar）。返回录音会话 ID。 */
+  /** 开始录音（经 stt 插件）。返回录音会话 ID。 */
   startRecording: (): Promise<{ session_id: string }> =>
-    api.bridgeCall('speech-to-text', 'sidecar.record_start', '{}')
+    api.bridgeCall('speech-to-text', 'plugin.record_start', '{}')
       .then((raw) => JSON.parse(raw)),
 
-  /** 停止录音（经 stt 插件 sidecar）。返回音频文件路径。 */
+  /** 停止录音（经 stt 插件）。返回音频文件路径。 */
   stopRecording: (): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
-    api.bridgeCall('speech-to-text', 'sidecar.record_stop', '{}')
+    api.bridgeCall('speech-to-text', 'plugin.record_stop', '{}')
       .then((raw) => JSON.parse(raw)),
 
   // ----------------------------------------------------------------

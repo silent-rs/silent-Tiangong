@@ -12,6 +12,7 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_speech_to_text_protocol::{
+    Empty, RecordStart, RecordStartRequest, RecordStartResponse, RecordStop, RecordStopResponse,
     TOOL_SPEECH_TO_TEXT, Transcribe, TranscribeRequest, TranscribeResponse,
 };
 
@@ -146,9 +147,36 @@ impl UiGuest for Component {
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        Err(plugin_err("STT 插件无设置页消息"))
+        let payload = match request.method.as_str() {
+            "transcribe" => {
+                let req: TranscribeRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 transcribe 请求失败: {e}")))?;
+                let response: TranscribeResponse = sidecar_client::invoke::<Transcribe>(&req)
+                    .map_err(|e| plugin_err(format!("语音识别失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 transcribe 响应失败: {e}")))?
+            }
+            "record_start" => {
+                let req: RecordStartRequest = serde_json::from_str(&request.payload)
+                    .unwrap_or_default();
+                let response: RecordStartResponse =
+                    sidecar_client::invoke::<RecordStart>(&req)
+                        .map_err(|e| plugin_err(format!("开始录音失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 record_start 响应失败: {e}")))?
+            }
+            "record_stop" => {
+                let _: Empty = serde_json::from_str(&request.payload).unwrap_or_default();
+                let response: RecordStopResponse = sidecar_client::invoke::<RecordStop>(&Empty {})
+                    .map_err(|e| plugin_err(format!("停止录音失败: {e}")))?;
+                serde_json::to_string(&response)
+                    .map_err(|e| plugin_err(format!("序列化 record_stop 响应失败: {e}")))?
+            }
+            other => return Err(plugin_err(format!("未知的 STT 消息: {other}"))),
+        };
+        Ok(ViewMessageResponse { payload })
     }
 }
 bindings::export!(Component with_types_in bindings);
