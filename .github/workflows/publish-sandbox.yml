@@ -2,9 +2,10 @@ name: Publish Sandbox
 
 # 沙箱独立组件在线发布（Launcher 制品 + 清单）：三平台矩阵构建+官方
 # 签名制品、平台片段与结构化 release-info（协议/策略版本直接引用 crate
-# 常量，杜绝源码正则提取）。发布顺序以正式 latest.json 为最后发布点：
-# 制品上传 → 制品回读校验 → next 暂存并回读校验 → 正式清单写入；
-# 正式写入前的任何失败都属于"未发布"（客户端仍读旧清单或无清单）。
+# 常量，杜绝源码正则提取）。写入顺序：版本制品上传 → 制品回读验证
+# → latest.json.next 上传 → next 回读验证 → 正式 latest.json 最后上传
+# （发布在此刻生效）。正式清单上传后只做只读回读确认：失败明确报错
+# 交由人工核对，不自动回滚、不再修改任何 OSS 对象。
 #
 # 发布守卫：
 # - 标签触发时强制校验标签版本 == crate 版本（防发布记录与内容错位）；
@@ -230,30 +231,30 @@ jobs:
 
       - name: "Stage manifest (next) and verify before final publish"
         run: |
-          # 正式 latest.json 是最后发布点：先备份 previous（首次发布可容忍
-          # 不存在），再写 next 并回读验证——next 验证失败属于"未发布"。
+          # 暂存清单：上传 latest.json.next 并从线上回读逐字节比较；
+          # 不一致立即终止——此时正式清单尚未上传，不影响线上版本。
           manifest=target/sandbox-dist/latest.json
-          timeout 5m ossutil cp "$OSS_BASE/sandbox/latest.json" \
-            oss://silent-tiangong/sandbox/latest.json.previous -f \
-            || echo "无既有清单，跳过备份（首次发布）"
           timeout 5m ossutil cp "$manifest" oss://silent-tiangong/sandbox/latest.json.next -f
           curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
             "$OSS_BASE/sandbox/latest.json.next?run=$GITHUB_RUN_ID" -o /tmp/staged.json
           diff "$manifest" /tmp/staged.json
 
-      - name: "Publish final manifest (last release point)"
+      - name: "Publish final manifest (last write to OSS)"
         run: |
-          # 正式清单写入成功即发布完成；写入后的最终回读失败才回滚
-          # previous（此时线上清单已被客户端可见，需恢复旧版本）。
+          # 正式 latest.json 是最后一个写入 OSS 的对象，发布在此刻生效；
+          # 上传后不再写入任何 OSS 对象。
           manifest=target/sandbox-dist/latest.json
           timeout 5m ossutil cp "$manifest" oss://silent-tiangong/sandbox/latest.json -f
+
+      - name: "Read-only confirmation of published manifest"
+        run: |
+          # 只读确认：公开地址回读正式清单并与本地逐字节比较；失败仅
+          # 明确报错交由人工核对，不自动回滚、不再修改线上任何对象。
+          manifest=target/sandbox-dist/latest.json
           if ! curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
             "$OSS_BASE/sandbox/latest.json?run=$GITHUB_RUN_ID-final" -o /tmp/published.json \
             || ! diff "$manifest" /tmp/published.json; then
-            echo "::warning::正式清单写入后回读异常，回滚 previous。"
-            timeout 5m ossutil cp \
-              oss://silent-tiangong/sandbox/latest.json.previous \
-              oss://silent-tiangong/sandbox/latest.json -f || true
+            echo "::error::正式 latest.json 已上传，但线上回读确认失败，请人工核对发布状态。"
             exit 1
           fi
-          echo "Sandbox ${SANDBOX_VERSION} 发布完成（正式清单已生效）。"
+          echo "Sandbox ${SANDBOX_VERSION} 发布完成（正式清单已生效并确认）。"
