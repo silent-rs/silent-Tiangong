@@ -7,9 +7,13 @@
 //! 热区矩形自行决定是否显示导航；payload 为 null 表示离开窗口或窗口
 //! 已激活（激活后由 CSS `:hover` 接管）。
 //!
-//! 已知边界：坐标转换沿用 tauri `cursor_position()`（按主屏 scale 换算），
-//! 混合 DPI 多屏下窗口位于非主屏时热区判定可能偏移；单屏或同缩放多屏不受影响。
+//! 坐标一律在全局逻辑（点）坐标系比较：NSEvent::mouseLocation 与
+//! CGDisplayBounds 同系（左下原点），窗口物理位置按其所在屏缩放换算回
+//! 逻辑后同系。不能用 tauri `cursor_position()`——它按主屏缩放统一换算，
+//! 混合 DPI 多屏（窗口在非主屏）时与窗口自身坐标系错位，命中判定恒假。
 
+use core_graphics::display::CGDisplay;
+use objc2_app_kit::NSEvent;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -25,6 +29,22 @@ const MOVE_THRESHOLD: f64 = 1.0;
 pub struct InactiveCursorPoint {
     pub x: f64,
     pub y: f64,
+}
+
+/// 全局鼠标位置（逻辑点，左上原点）。
+fn global_mouse_top_left() -> Option<(f64, f64)> {
+    // mouseLocation 为左下原点全局逻辑坐标；用所有活动显示器逻辑 bounds
+    // 的最大 y 翻转为左上原点（CGDisplayBounds 与 mouseLocation 同系）。
+    let loc = NSEvent::mouseLocation();
+    let displays = CGDisplay::active_displays().ok()?;
+    let max_y = displays
+        .iter()
+        .map(|&id| {
+            let bounds = CGDisplay::new(id).bounds();
+            bounds.origin.y + bounds.size.height
+        })
+        .fold(0.0_f64, f64::max);
+    Some((loc.x, max_y - loc.y))
 }
 
 /// 启动后台悬停轮询线程。窗口关闭（拿不到主窗口）即退出。
@@ -54,26 +74,29 @@ fn poll_loop(app: AppHandle) {
             last = emit_leave(&app, last);
             continue;
         }
-        let (Ok(cursor), Ok(pos), Ok(size)) = (
-            app.cursor_position(),
+        let (Some((mouse_x, mouse_y)), Ok(pos), Ok(size), Ok(scale)) = (
+            global_mouse_top_left(),
             window.outer_position(),
             window.outer_size(),
+            window.scale_factor(),
         ) else {
+            tracing::debug!("inactive-hover：鼠标/窗口几何查询失败，跳过本轮");
             continue;
         };
-        let (wx, wy) = (pos.x as f64, pos.y as f64);
-        let inside = cursor.x >= wx
-            && cursor.x < wx + size.width as f64
-            && cursor.y >= wy
-            && cursor.y < wy + size.height as f64;
+        if scale <= 0.0 {
+            continue;
+        }
+        // 窗口物理几何换算回全局逻辑坐标后与鼠标同系比较
+        let (wx, wy) = (pos.x as f64 / scale, pos.y as f64 / scale);
+        let (ww, wh) = (size.width as f64 / scale, size.height as f64 / scale);
+        let inside = mouse_x >= wx && mouse_x < wx + ww && mouse_y >= wy && mouse_y < wy + wh;
         if !inside {
             last = emit_leave(&app, last);
             continue;
         }
-        let scale = window.scale_factor().unwrap_or(1.0);
         let point = InactiveCursorPoint {
-            x: (cursor.x - wx) / scale,
-            y: (cursor.y - wy) / scale,
+            x: mouse_x - wx,
+            y: mouse_y - wy,
         };
         let moved = last
             .map(|p| {
@@ -81,6 +104,11 @@ fn poll_loop(app: AppHandle) {
             })
             .unwrap_or(true);
         if moved {
+            tracing::debug!(
+                point_x = point.x,
+                point_y = point.y,
+                "inactive-hover：下发窗口内鼠标坐标"
+            );
             let _ = app.emit("window:inactive_cursor", &point);
             last = Some(point);
         }
@@ -89,6 +117,7 @@ fn poll_loop(app: AppHandle) {
 
 fn emit_leave(app: &AppHandle, last: Option<InactiveCursorPoint>) -> Option<InactiveCursorPoint> {
     if last.is_some() {
+        tracing::debug!("inactive-hover：鼠标离开窗口或窗口已激活，下发 null");
         let _ = app.emit("window:inactive_cursor", serde_json::Value::Null);
     }
     None

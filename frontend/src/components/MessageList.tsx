@@ -928,7 +928,7 @@ export function MessageList() {
     <RulerScrollbar
       markerCount={turnNodes.length}
       bottomInset={152}
-      className={`opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100' : ''}`}
+      className={`transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100' : ' opacity-0'}`}
       currentMarker={activeUserPos >= 0 ? activeUserPos : null}
       onSelect={(markerIndex) => {
         const node = turnNodes[markerIndex];
@@ -988,8 +988,8 @@ export function MessageList() {
     })()}
 
     {/* 右下角导航按钮组：与横条边栏一起在鼠标进入右侧导航区时显示。 */}
-      <div className={`pointer-events-none absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100 pointer-events-auto' : ''}`}>
-        <div className="pointer-events-none flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur group-hover/navigation:pointer-events-auto group-focus-within/navigation:pointer-events-auto${inactiveHover ? ' pointer-events-auto' : ''}">
+      <div className={`absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100 pointer-events-auto' : ' opacity-0 pointer-events-none'}`}>
+        <div className={`flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur group-hover/navigation:pointer-events-auto group-focus-within/navigation:pointer-events-auto${inactiveHover ? ' pointer-events-auto' : ' pointer-events-none'}`}>
           <button
             type="button"
             onClick={scrollToPrevUserMessage}

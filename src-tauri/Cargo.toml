@@ -54,6 +54,11 @@ tauri-plugin-notification = { workspace = true }
 tauri-plugin-process = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 
+# 后台悬停监听（inactive_hover）：全局鼠标逻辑坐标与显示器逻辑边界
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent"] }
+core-graphics = "0.25"
+
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
