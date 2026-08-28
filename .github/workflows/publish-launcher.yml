@@ -184,18 +184,31 @@ jobs:
             -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
             -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
 
-      - name: "Guard: refuse to overwrite an existing version"
+      - name: "Guard: refuse to overwrite an existing version (per object)"
         run: |
-          if timeout 30s ossutil stat \
-            "oss://silent-tiangong/launcher/${LAUNCHER_VERSION}/" >/dev/null 2>&1; then
-            echo "::error::版本 ${LAUNCHER_VERSION} 的制品目录已存在（发布不可变），拒绝覆盖"
-            exit 1
-          fi
-          echo "版本 ${LAUNCHER_VERSION} 目录不存在，允许发布。"
+          # OSS 无目录对象，前缀 stat 不可靠：逐个检查本版本将要发布的
+          # 每个对象，任一已存在即拒绝（发布制品不可变）。
+          shopt -s nullglob
+          artifacts=(target/launcher-dist/launcher/"${LAUNCHER_VERSION}"/*)
+          test "${#artifacts[@]}" -gt 0
+          for artifact in "${artifacts[@]}"; do
+            object="oss://silent-tiangong/launcher/${LAUNCHER_VERSION}/$(basename "$artifact")"
+            if timeout 30s ossutil stat "$object" >/dev/null 2>&1; then
+              echo "::error::对象已存在，拒绝覆盖（发布不可变）: $object"
+              exit 1
+            fi
+          done
+          echo "版本 ${LAUNCHER_VERSION} 的全部对象均不存在，允许发布。"
 
-      - name: Upload immutable versioned artifacts
+      - name: "Upload immutable versioned artifacts (no overwrite)"
         run: |
-          ossutil cp -r "target/launcher-dist/launcher/" "oss://silent-tiangong/launcher/" -f
+          # 守卫已确认对象不存在；逐对象上传且不带强制覆盖参数，
+          # 出现任何已存在冲突立即失败。
+          shopt -s nullglob
+          for artifact in target/launcher-dist/launcher/"${LAUNCHER_VERSION}"/*; do
+            object="oss://silent-tiangong/launcher/${LAUNCHER_VERSION}/$(basename "$artifact")"
+            ossutil cp "$artifact" "$object"
+          done
 
       - name: Publish manifest with backup and verify
         run: |

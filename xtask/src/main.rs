@@ -1863,6 +1863,12 @@ fn prepare_launcher_release() -> io::Result<()> {
     require_file(&built)?;
 
     let dist = target_root.join("launcher-dist");
+    // 清理旧发布目录：跨平台/缓存恢复的残留片段会混入本次发布
+    //（官方验签步骤也会因多平台名失败），生成前整体重建。
+    if dist.exists() {
+        std::fs::remove_dir_all(&dist)
+            .map_err(|error| invalid_data(format!("清理旧发布目录失败: {error}")))?;
+    }
     let artifact_dir = dist.join("launcher").join(&version);
     std::fs::create_dir_all(&artifact_dir)?;
     let artifact_name = format!("tiangong-sandbox-{platform}");

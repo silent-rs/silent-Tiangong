@@ -61,12 +61,20 @@ jobs:
         run: cargo build --locked -p tiangong-sandbox --release
       - name: Verify Launcher self-check (bwrap)
         run: |
+          # Linux 是核心原生验收环境：必须真实完成隔离验证（退出码 0
+          # 即必需拦截项全过），不接受"环境无法验证"（79）。
           set +e
           report="$(target/release/tiangong-sandbox --self-check)"
           status=$?
           set -e
-          printf '%s\n' "$report"
-          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+          printf '%s\n' "$report" | tee "$RUNNER_TEMP/self-check.json"
+          test "$status" -eq 0
+          for field in workspace_write outside_write_blocked outside_delete_blocked \
+            outside_config_write_blocked git_metadata_write_blocked network_blocked \
+            sensitive_read_blocked symlink_escape_blocked path_traversal_blocked; do
+            test "$(jq -r ".$field" <<< "$report")" == "true" \
+              || { echo "::error::自检字段 $field 未通过"; exit 1; }
+          done
 
   macos:
     name: Sandbox (macOS x86_64 native)
@@ -87,6 +95,9 @@ jobs:
         run: cargo test --locked -p tiangong-sandbox
       - name: Verify Launcher self-check (Seatbelt)
         run: |
+          # macOS 托管环境可能无法嵌套 Seatbelt：0=真实验证通过，
+          # 79=环境无法验证（非制品缺陷），两者均可接受；真实拦截
+          # 由可嵌套环境与 bundle 任务补充。
           set +e
           report="$(cargo run --locked -p tiangong-sandbox -- --self-check)"
           status=$?
@@ -123,8 +134,24 @@ jobs:
             throw 'Launcher self-check timed out'
           }
           Get-Content "$env:RUNNER_TEMP\self-check.json"
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 79) {
-            throw "Launcher self-check exit code $($p.ExitCode)"
+          # Windows 是核心原生验收环境：AppContainer 隔离必须真实完成
+          # （退出码 0 即全部必需项通过），不接受"环境无法验证"。
+          if ($p.ExitCode -ne 0) {
+            throw "Launcher self-check exit code $($p.ExitCode)（要求 0）"
+          }
+          $report = Get-Content -Raw "$env:RUNNER_TEMP\self-check.json" | ConvertFrom-Json
+          foreach ($field in @(
+            'workspace_write','outside_write_blocked','outside_read_blocked',
+            'outside_delete_blocked','outside_config_write_blocked',
+            'git_metadata_write_blocked','network_blocked','sensitive_read_blocked',
+            'path_traversal_blocked','child_restrictions_inherited',
+            'resource_limits_applied','process_limit_enforced',
+            'memory_limit_enforced','cpu_limit_enforced',
+            'hardlink_escape_blocked','symlink_escape_blocked',
+            'temporary_acl_cleaned','temporary_identity_cleaned')) {
+            if ($report.$field -ne $true) {
+              throw "自检字段 $field 未通过"
+            }
           }
 
   release-artifact:
@@ -165,7 +192,13 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$report" | tee "$RUNNER_TEMP/packaged-self-check.json"
-          [[ "$status" -eq 0 || "$status" -eq 79 ]]
+          # 按平台分别判定：Linux/Windows 是核心原生验收环境，发布制品
+          # 必须真实完成隔离验证（0）；仅 macOS 托管环境允许 79（无法
+          # 嵌套 Seatbelt，非制品缺陷）。
+          case "${{ matrix.label }}" in
+            macOS*) [[ "$status" -eq 0 || "$status" -eq 79 ]] ;;
+            *) test "$status" -eq 0 ;;
+          esac
           [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
           # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
           [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
