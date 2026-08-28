@@ -246,13 +246,15 @@ impl StdioSidecarConnection {
             Err(SpawnAttemptError::Preparation(error)) => Err(error),
             Err(SpawnAttemptError::ProcessCreation { program, source }) => {
                 // 仅进程创建失败（文件被删、无执行权限、格式无效等）才
-                // 失效解释器缓存并重新解析；新路径不同于旧路径时重试
-                // 一次。spawn_once 每次都经缓存入口取最新路径，后续重启
-                // 自然使用新路径。
+                // 走恢复接口：缓存匹配失效 → 排除失败路径重探 → 同步应用
+                // 注入的环境；恢复出新路径后重试一次。spawn_once 每次都
+                // 经缓存入口取最新路径，后续重启自然使用新路径。
                 if let Some(launch) = self.config.interpreter.as_ref()
-                    && crate::interpreter_env::invalidate_if_matches(launch.kind, &program)
-                    && let Ok(retry) = crate::interpreter_env::resolve_interpreter(launch.kind)
-                    && retry != program
+                    && crate::interpreter_env::recover_interpreter_after_spawn_failure(
+                        launch.kind,
+                        &program,
+                    )
+                    .is_some()
                     && let Ok(process) = self.spawn_once()
                 {
                     return Ok(process);

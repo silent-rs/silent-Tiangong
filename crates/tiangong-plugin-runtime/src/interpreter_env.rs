@@ -218,7 +218,7 @@ pub(crate) fn resolve_interpreter(kind: InterpreterKind) -> anyhow::Result<PathB
         env_injected_by_app(kind),
         global_cache(),
         probe_lock(kind),
-        || probe_interpreter(kind, &InterpreterEnv::from_process()),
+        || probe_interpreter(kind, &InterpreterEnv::from_process(), None),
     )
 }
 
@@ -323,10 +323,6 @@ where
 /// 解释器程序本身无法创建进程（文件被删、无执行权限、格式无效等）时
 /// 失效缓存；仅当缓存当前值仍等于失败路径时清除，避免并发任务误删
 /// 其他线程刚更新的新缓存。插件脚本错误、握手失败等不在本路径。
-pub(crate) fn invalidate_if_matches(kind: InterpreterKind, failed_path: &Path) -> bool {
-    invalidate_if_matches_in(global_cache(), kind, failed_path)
-}
-
 fn invalidate_if_matches_in(
     cache: &RwLock<InterpreterCache>,
     kind: InterpreterKind,
@@ -342,6 +338,88 @@ fn invalidate_if_matches_in(
         }
         _ => false,
     }
+}
+
+/// 恢复结果：`sync_env` 标记新路径是否需要同步回进程环境（仅应用注入
+/// 场景；用户显式设置不被覆盖）。
+struct RecoveryOutcome {
+    path: PathBuf,
+    sync_env: bool,
+}
+
+/// 解释器进程创建失败后的原子恢复接口：缓存匹配失效 → 排除失败路径
+/// 重新探测 → 写入新缓存；应用注入场景同步 `TIANGONG_*_PATH` 与 PATH
+/// 前置，使 sidecar 派生进程与其他命令通道同步恢复。
+///
+/// 返回 None 的情形：缓存与失败路径不匹配（他方已更新）、用户显式指定
+/// 的路径无法启动（不静默替换）、排除失败路径后无其他可用解释器。
+pub(crate) fn recover_interpreter_after_spawn_failure(
+    kind: InterpreterKind,
+    failed_path: &Path,
+) -> Option<PathBuf> {
+    let outcome = recover_via(
+        kind,
+        failed_path,
+        std::env::var_os(kind.env_key())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .as_deref(),
+        env_injected_by_app(kind),
+        global_cache(),
+        probe_lock(kind),
+        || probe_interpreter(kind, &InterpreterEnv::from_process(), Some(failed_path)),
+    )?;
+    // 运行时写进程环境偏离"仅入口注入"纪律：恢复是低频异常路径，且
+    // 不同步会让缓存与子进程环境长期不一致（旧 PATH 仍指向坏解释器）。
+    if outcome.sync_env {
+        unsafe { std::env::set_var(kind.env_key(), &outcome.path) };
+        if let Some(bin_dir) = outcome.path.parent()
+            && let Some(value) =
+                prepend_dir_to_path_value(&std::env::var_os("PATH").unwrap_or_default(), bin_dir)
+        {
+            unsafe { std::env::set_var("PATH", value) };
+        }
+    }
+    Some(outcome.path)
+}
+
+/// [`recover_interpreter_after_spawn_failure`] 的参数化核心，测试注入
+/// 独立缓存、显式值与排除探测闭包，不触碰全局状态。
+fn recover_via<F>(
+    kind: InterpreterKind,
+    failed_path: &Path,
+    explicit: Option<&Path>,
+    injected_by_app: bool,
+    cache: &RwLock<InterpreterCache>,
+    lock: &Mutex<()>,
+    probe_excluding_failed: F,
+) -> Option<RecoveryOutcome>
+where
+    F: FnOnce() -> Option<CachedInterpreter>,
+{
+    if !invalidate_if_matches_in(cache, kind, failed_path) {
+        return None;
+    }
+    // 用户显式指定的路径无法启动：直接失败，不静默替换为其他解释器
+    if explicit.is_some() && !injected_by_app {
+        return None;
+    }
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 锁内双检：并发任务可能已完成恢复
+    if let Some(cached) = valid_cached_in(cache, kind) {
+        return (cached != failed_path).then_some(RecoveryOutcome {
+            path: cached,
+            sync_env: injected_by_app,
+        });
+    }
+    let discovered = probe_excluding_failed()?;
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(kind, discovered.clone());
+    }
+    Some(RecoveryOutcome {
+        path: discovered.path,
+        sync_env: injected_by_app,
+    })
 }
 
 /// 进程入口最早调用（任何后台线程启动前）：发现解释器并注入进程环境，
@@ -375,7 +453,7 @@ pub fn ensure_interpreter_env() {
                 path.clone()
             }
             Some(_) => continue,
-            None => match probe_interpreter(kind, &snapshot) {
+            None => match probe_interpreter(kind, &snapshot, None) {
                 Some(discovered) => {
                     let path = discovered.path.clone();
                     unsafe { std::env::set_var(kind.env_key(), &path) };
@@ -413,23 +491,33 @@ fn prepend_dir_to_path_value(
 }
 
 /// 全量探测：PATH → 平台策略（Windows 固定环境路径 / Unix 常见位置）。
-fn probe_interpreter(kind: InterpreterKind, env: &InterpreterEnv) -> Option<CachedInterpreter> {
-    if let Some(found) = probe_from_path(kind, env) {
+/// `exclude` 排除一个已知无法创建进程的路径（所有候选来源统一过滤），
+/// 供失败恢复时跳过"文件仍在但不可执行"的旧解释器。
+fn probe_interpreter(
+    kind: InterpreterKind,
+    env: &InterpreterEnv,
+    exclude: Option<&Path>,
+) -> Option<CachedInterpreter> {
+    if let Some(found) = probe_from_path(kind, env, exclude) {
         return Some(found);
     }
     if cfg!(windows) {
-        probe_windows_environment(kind, env)
+        probe_windows_environment(kind, env, exclude)
     } else {
-        probe_unix_common_locations(kind, env)
+        probe_unix_common_locations(kind, env, exclude)
     }
 }
 
 /// PATH 中按程序名直接查找。
-fn probe_from_path(kind: InterpreterKind, env: &InterpreterEnv) -> Option<CachedInterpreter> {
+fn probe_from_path(
+    kind: InterpreterKind,
+    env: &InterpreterEnv,
+    exclude: Option<&Path>,
+) -> Option<CachedInterpreter> {
     for directory in &env.search_paths {
         for name in kind.program_names() {
             let path = directory.join(name);
-            if path.is_file() {
+            if path.is_file() && Some(path.as_path()) != exclude {
                 return Some(CachedInterpreter {
                     path,
                     source: InterpreterSource::Path,
@@ -447,6 +535,7 @@ fn probe_from_path(kind: InterpreterKind, env: &InterpreterEnv) -> Option<Cached
 fn probe_windows_environment(
     kind: InterpreterKind,
     env: &InterpreterEnv,
+    exclude: Option<&Path>,
 ) -> Option<CachedInterpreter> {
     let home = env.home.as_deref();
     let mut candidates = Vec::new();
@@ -491,7 +580,7 @@ fn probe_windows_environment(
     }
     candidates
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() && Some(path.as_path()) != exclude)
         .map(|path| CachedInterpreter {
             path,
             source: InterpreterSource::Environment,
@@ -503,6 +592,7 @@ fn probe_windows_environment(
 fn probe_unix_common_locations(
     kind: InterpreterKind,
     env: &InterpreterEnv,
+    exclude: Option<&Path>,
 ) -> Option<CachedInterpreter> {
     let runtime = match kind {
         InterpreterKind::Node => SidecarRuntime::Node,
@@ -510,7 +600,7 @@ fn probe_unix_common_locations(
     };
     common_interpreter_locations(runtime, env)
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() && Some(path.as_path()) != exclude)
         .map(|path| CachedInterpreter {
             path,
             source: InterpreterSource::CommonLocation,
@@ -766,7 +856,8 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert_eq!(
-            probe_interpreter(InterpreterKind::Node, &env).map(|found| (found.path, found.source)),
+            probe_interpreter(InterpreterKind::Node, &env, None)
+                .map(|found| (found.path, found.source)),
             Some((program, InterpreterSource::Path))
         );
     }
@@ -787,7 +878,7 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert_eq!(
-            probe_interpreter(InterpreterKind::Node, &env).map(|found| found.path),
+            probe_interpreter(InterpreterKind::Node, &env, None).map(|found| found.path),
             Some(program)
         );
     }
@@ -797,10 +888,10 @@ mod interpreter_discovery_tests {
     fn all_sources_empty_returns_none() {
         let env = InterpreterEnv::default();
         assert!(
-            probe_interpreter(InterpreterKind::Node, &env).is_none(),
+            probe_interpreter(InterpreterKind::Node, &env, None).is_none(),
             "全空快照不应发现解释器"
         );
-        assert!(probe_interpreter(InterpreterKind::Python, &env).is_none());
+        assert!(probe_interpreter(InterpreterKind::Python, &env, None).is_none());
     }
 
     /// Windows 策略命中环境变量直接构造的固定路径（本函数不依赖编译期
@@ -820,12 +911,12 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert_eq!(
-            probe_windows_environment(InterpreterKind::Node, &env)
+            probe_windows_environment(InterpreterKind::Node, &env, None)
                 .map(|found| (found.path, found.source)),
             Some((symlink_node, InterpreterSource::Environment))
         );
         assert_eq!(
-            probe_windows_environment(InterpreterKind::Python, &env).map(|found| found.path),
+            probe_windows_environment(InterpreterKind::Python, &env, None).map(|found| found.path),
             Some(pyenv_shim)
         );
     }
@@ -847,7 +938,7 @@ mod interpreter_discovery_tests {
             ..InterpreterEnv::default()
         };
         assert!(
-            probe_windows_environment(InterpreterKind::Python, &env).is_none(),
+            probe_windows_environment(InterpreterKind::Python, &env, None).is_none(),
             "Program Files 的 Python3xx 不应被枚举"
         );
     }
@@ -1025,6 +1116,167 @@ mod interpreter_discovery_tests {
             "应用注入值不应在重新解析时短路探测"
         );
         assert!(stale.is_file(), "测试前提：旧文件仍存在");
+    }
+
+    /// 排除失败路径的探测：旧解释器文件仍然存在（权限/格式问题导致
+    /// 无法创建进程）时，重新探测跳过它并选中次优来源。
+    #[test]
+    fn probe_excluding_failed_path_falls_through_to_next_source() {
+        let path_dir = tempfile::tempdir().unwrap();
+        let broken = path_dir
+            .path()
+            .join(if cfg!(windows) { "node.exe" } else { "node" });
+        std::fs::write(&broken, b"").unwrap();
+        let nvm = tempfile::tempdir().unwrap();
+        let good = nvm.path().join("versions/node/v22.16.0/bin/node");
+        std::fs::create_dir_all(good.parent().unwrap()).unwrap();
+        std::fs::write(&good, b"").unwrap();
+        let env = InterpreterEnv {
+            search_paths: vec![path_dir.path().to_path_buf()],
+            nvm_dir: Some(nvm.path().to_path_buf()),
+            ..InterpreterEnv::default()
+        };
+        // 不排除：PATH 命中坏文件
+        assert_eq!(
+            probe_interpreter(InterpreterKind::Node, &env, None).map(|found| found.path),
+            Some(broken.clone())
+        );
+        // 排除坏路径：PATH 过滤后落到版本管理器目录
+        assert_eq!(
+            probe_interpreter(InterpreterKind::Node, &env, Some(&broken)).map(|found| found.path),
+            Some(good)
+        );
+    }
+
+    /// 恢复接口：缓存不匹配（他方已更新）时不动作。
+    #[test]
+    fn recover_skips_when_cache_does_not_match() {
+        let cache = empty_cache();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: PathBuf::from("/opt/other/node"),
+                source: InterpreterSource::CommonLocation,
+            },
+        );
+        let lock = std::sync::Mutex::new(());
+        assert!(
+            recover_via(
+                InterpreterKind::Node,
+                Path::new("/opt/old/node"),
+                None,
+                true,
+                &cache,
+                &lock,
+                || panic!("缓存不匹配不应触发探测"),
+            )
+            .is_none()
+        );
+        assert!(cache.read().unwrap().contains_key(&InterpreterKind::Node));
+    }
+
+    /// 恢复接口：用户显式指定的路径无法启动时直接失败，不静默替换。
+    #[test]
+    fn recover_refuses_to_replace_user_explicit_path() {
+        let cache = empty_cache();
+        let explicit = PathBuf::from("/opt/explicit/node");
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: explicit.clone(),
+                source: InterpreterSource::ExplicitOverride,
+            },
+        );
+        let lock = std::sync::Mutex::new(());
+        assert!(
+            recover_via(
+                InterpreterKind::Node,
+                &explicit,
+                Some(&explicit),
+                false,
+                &cache,
+                &lock,
+                || panic!("用户显式失败不应触发替换探测"),
+            )
+            .is_none()
+        );
+        assert!(
+            !cache.read().unwrap().contains_key(&InterpreterKind::Node),
+            "显式失败仍应清除缓存，让错误语义回到 resolve 的 fail-loud"
+        );
+    }
+
+    /// 恢复接口：应用注入场景排除失败路径重探成功，标记需要同步环境。
+    #[test]
+    fn recover_reprobes_excluding_failed_and_marks_env_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old-node");
+        std::fs::write(&old, b"").unwrap();
+        let fresh = dir.path().join("fresh-node");
+        std::fs::write(&fresh, b"").unwrap();
+        let cache = empty_cache();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: old.clone(),
+                source: InterpreterSource::Environment,
+            },
+        );
+        let lock = std::sync::Mutex::new(());
+        let outcome = recover_via(
+            InterpreterKind::Node,
+            &old,
+            Some(old.as_path()),
+            true,
+            &cache,
+            &lock,
+            || {
+                Some(CachedInterpreter {
+                    path: fresh.clone(),
+                    source: InterpreterSource::CommonLocation,
+                })
+            },
+        )
+        .expect("应用注入场景应恢复");
+        assert_eq!(outcome.path, fresh);
+        assert!(outcome.sync_env, "应用注入恢复需同步环境变量与 PATH");
+        assert_eq!(
+            cache
+                .read()
+                .unwrap()
+                .get(&InterpreterKind::Node)
+                .map(|c| c.path.clone()),
+            Some(fresh)
+        );
+    }
+
+    /// 恢复接口：排除失败路径后无其他可用解释器时返回 None。
+    #[test]
+    fn recover_returns_none_without_alternative() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("only-node");
+        std::fs::write(&old, b"").unwrap();
+        let cache = empty_cache();
+        cache.write().unwrap().insert(
+            InterpreterKind::Node,
+            CachedInterpreter {
+                path: old.clone(),
+                source: InterpreterSource::Environment,
+            },
+        );
+        let lock = std::sync::Mutex::new(());
+        assert!(
+            recover_via(
+                InterpreterKind::Node,
+                &old,
+                Some(old.as_path()),
+                true,
+                &cache,
+                &lock,
+                || None,
+            )
+            .is_none()
+        );
     }
 
     /// 并发首次解析同一种解释器只探测一次（per-kind 探测锁 + 双检）。
