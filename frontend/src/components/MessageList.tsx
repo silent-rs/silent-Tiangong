@@ -3,7 +3,7 @@ import { useSearchStore } from "@/store/useSearchStore";
 import { findSearchMatches } from "@/utils/search";
 import { SearchBar } from "./SearchBar";
 import { ScrollArea } from "./ui/scroll-area";
-import { RulerScrollbar, TurnPreviewCard } from "./ui/ruler-scrollbar";
+import { RulerScrollbar, TurnPreviewCard, type RulerScrollbarHandle } from "./ui/ruler-scrollbar";
 import {
   Loader2,
   Cpu,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import { AgentPanel } from "./AgentPanel";
 import { api, hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
 import {
@@ -94,6 +95,61 @@ export function MessageList() {
   // 用户消息边栏 hover：命中的用户消息序号及预览卡片位置
   const [railHoverInfo, setRailHoverInfo] = useState<{ markerIndex: number; y: number; trackH: number } | null>(null);
   const railPreviewHideTimerRef = useRef<number | null>(null);
+  // 窗口未激活时的后台悬停：macOS 不给后台窗口派发 hover 事件，
+  // 由宿主轮询全局鼠标并经 window:inactive_cursor 下发窗口内坐标，
+  // 坐标命中导航热区时以 inactiveHover 替代 :hover 唤出导航。
+  const navigationRef = useRef<HTMLDivElement>(null);
+  const rulerNavRef = useRef<RulerScrollbarHandle>(null);
+  const [inactiveHover, setInactiveHover] = useState(false);
+  // 监听回调读取当前预览卡位置（卡片区桥接判定），避免重订阅
+  const railHoverInfoRef = useRef(railHoverInfo);
+  railHoverInfoRef.current = railHoverInfo;
+
+  useEffect(() => {
+    const unlisten = listen<{ x: number; y: number } | null>('window:inactive_cursor', (event) => {
+      const point = event.payload;
+      const rect = navigationRef.current?.getBoundingClientRect();
+      if (!point || !rect) {
+        setInactiveHover(false);
+        rulerNavRef.current?.externalPointer(null);
+        return;
+      }
+      const inNavZone =
+        point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+      if (inNavZone) {
+        setInactiveHover(true);
+        // 坐标转发进刻度尺：驱动横条变宽/高亮与预览卡（等同真实 pointermove）
+        rulerNavRef.current?.externalPointer(point.y);
+        return;
+      }
+      // 预览卡桥接：卡片位于导航条左侧，后台窗口收不到卡片自身的 mouseenter，
+      // 鼠标位于卡片估计矩形内时保持导航与卡片显示，给后台点击留出停留时间。
+      const hover = railHoverInfoRef.current;
+      if (hover) {
+        const cardHalf = 88;
+        const cardTop =
+          rect.top + Math.min(Math.max(hover.y, cardHalf), Math.max(cardHalf, hover.trackH - cardHalf)) - cardHalf;
+        const inCardZone =
+          point.x >= rect.right - 56 - 320 &&
+          point.x <= rect.right - 56 &&
+          point.y >= cardTop - 12 &&
+          point.y <= cardTop + cardHalf * 2 + 12;
+        if (inCardZone) {
+          setInactiveHover(true);
+          return;
+        }
+      }
+      setInactiveHover(false);
+      rulerNavRef.current?.externalPointer(null);
+    });
+    // 窗口激活后交还给 CSS :hover（鼠标仍在热区时 hover 即时接管）
+    const handleWindowFocus = () => setInactiveHover(false);
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      void unlisten.then((fn) => fn());
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, []);
 
   // 检查 TTS 能力
   useEffect(() => {
@@ -695,6 +751,42 @@ export function MessageList() {
 
   const railActiveNodeIdx = railHoverInfo?.markerIndex ?? -1;
 
+  // 后台首击补发：系统首击只激活了窗口（未到达页面），按宿主下发的
+  // 点击位置执行横条/预览卡跳转。置于 turnNodes 与跳转函数定义之后，
+  // 依赖数组保持最新引用。
+  useEffect(() => {
+    const unlistenClick = listen<{ x: number; y: number }>('window:inactive_click', (event) => {
+      const point = event.payload;
+      const rect = navigationRef.current?.getBoundingClientRect();
+      if (!point || !rect) return;
+      const inNavZone =
+        point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+      if (inNavZone) {
+        rulerNavRef.current?.externalClick(point.y);
+        return;
+      }
+      const hover = railHoverInfoRef.current;
+      if (hover) {
+        const cardHalf = 88;
+        const cardTop =
+          rect.top + Math.min(Math.max(hover.y, cardHalf), Math.max(cardHalf, hover.trackH - cardHalf)) - cardHalf;
+        const inCardZone =
+          point.x >= rect.right - 56 - 320 &&
+          point.x <= rect.right - 56 &&
+          point.y >= cardTop - 12 &&
+          point.y <= cardTop + cardHalf * 2 + 12;
+        const node = hover.markerIndex >= 0 ? turnNodes[hover.markerIndex] : undefined;
+        if (inCardZone && node) {
+          setRailHoverInfo(null);
+          scrollToUserGroupTop(node.groupIndex);
+        }
+      }
+    });
+    return () => {
+      void unlistenClick.then((fn) => fn());
+    };
+  }, [turnNodes, scrollToUserGroupTop]);
+
   return (
     <div className="relative h-full">
     <ScrollArea className="h-full" viewportRef={viewportRef} viewportClassName="[scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -893,11 +985,12 @@ export function MessageList() {
     {/* 右侧导航区：横条边栏与三个导航按钮共用鼠标移入显示逻辑。
         边栏始终为按钮组预留底部空间，避免最后几根横条被遮挡。 */}
     {userCount > 0 && (
-    <div className="group/navigation absolute inset-y-0 right-0 z-20 w-[54px]">
+    <div ref={navigationRef} className="group/navigation absolute inset-y-0 right-0 z-20 w-[54px]">
     <RulerScrollbar
+      ref={rulerNavRef}
       markerCount={turnNodes.length}
       bottomInset={152}
-      className="opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100"
+      className={`transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100' : ' opacity-0'}`}
       currentMarker={activeUserPos >= 0 ? activeUserPos : null}
       onSelect={(markerIndex) => {
         const node = turnNodes[markerIndex];
@@ -957,8 +1050,8 @@ export function MessageList() {
     })()}
 
     {/* 右下角导航按钮组：与横条边栏一起在鼠标进入右侧导航区时显示。 */}
-      <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 opacity-0 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100">
-        <div className="pointer-events-none flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur group-hover/navigation:pointer-events-auto group-focus-within/navigation:pointer-events-auto">
+      <div className={`absolute inset-y-0 right-0 z-30 flex items-end pb-2 pr-1 transition-opacity duration-200 group-hover/navigation:opacity-100 group-focus-within/navigation:opacity-100${inactiveHover ? ' opacity-100 pointer-events-auto' : ' opacity-0 pointer-events-none'}`}>
+        <div className={`flex flex-col items-center gap-2 rounded-lg bg-background/80 p-1 shadow-md backdrop-blur group-hover/navigation:pointer-events-auto group-focus-within/navigation:pointer-events-auto${inactiveHover ? ' pointer-events-auto' : ' pointer-events-none'}`}>
           <button
             type="button"
             onClick={scrollToPrevUserMessage}

@@ -54,6 +54,11 @@ tauri-plugin-notification = { workspace = true }
 tauri-plugin-process = { workspace = true }
 tauri-plugin-updater = { workspace = true }
 
+# 后台悬停监听（inactive_hover）：原生窗口/视图坐标转换
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent", "NSView", "NSWindow"] }
+objc2 = "0.6"
+
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }

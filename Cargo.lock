@@ -10515,6 +10515,8 @@ dependencies = [
  "futures-util",
  "hex",
  "http",
+ "objc2",
+ "objc2-app-kit",
  "psl",
  "reqwest 0.13.4",
  "rmcp",

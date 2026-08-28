@@ -15,6 +15,14 @@ interface RulerScrollbarProps {
   className?: string
 }
 
+/** 命令式接口：后台悬停时以宿主下发的坐标驱动与真实指针事件等同的效果 */
+export interface RulerScrollbarHandle {
+  /** clientY 为视口 y 坐标（等同 onPointerMove 的 event.clientY）；null 等同 onPointerLeave */
+  externalPointer: (clientY: number | null) => void
+  /** 后台首击补发：以视口 y 坐标命中的横条执行 onSelect（系统首击被窗口激活消费） */
+  externalClick: (clientY: number) => void
+}
+
 const ROW_HEIGHT = 12
 const TRACK_PADDING = 10
 const BASE_WIDTH = 11
@@ -27,14 +35,15 @@ const GAUSS_EXTRA_WIDTH = 34
  * 它不是消息正文的第二根滚动条：边栏中每根横条只对应一条用户消息，横条较多时
  * 边栏拥有独立滚动位置。鼠标滚轮、方向键和翻页键只移动边栏；点击横条才跳转正文。
  */
-export function RulerScrollbar({
-  markerCount,
-  currentMarker = null,
-  onHover,
-  onSelect,
-  bottomInset = 0,
-  className,
-}: RulerScrollbarProps) {
+export const RulerScrollbar = React.forwardRef<RulerScrollbarHandle, RulerScrollbarProps>(
+  function RulerScrollbar({
+    markerCount,
+    currentMarker = null,
+    onHover,
+    onSelect,
+    bottomInset = 0,
+    className,
+  }, ref) {
   const rootRef = React.useRef<HTMLDivElement>(null)
   const railRef = React.useRef<HTMLDivElement>(null)
   const frameRef = React.useRef<number | null>(null)
@@ -63,14 +72,59 @@ export function RulerScrollbar({
     onHover?.({ markerIndex, y, trackH: rect.height })
   }, [centeredOffset, markerCount, onHover])
 
-  const schedulePointerUpdate = (clientY: number) => {
+  const schedulePointerUpdate = React.useCallback((clientY: number) => {
     pendingPointerRef.current = clientY
     if (frameRef.current != null) return
     frameRef.current = requestAnimationFrame(() => {
       frameRef.current = null
       if (pendingPointerRef.current != null) updatePointer(pendingPointerRef.current)
     })
-  }
+  }, [updatePointer])
+
+  const pointerLeave = React.useCallback(() => {
+    pendingPointerRef.current = null
+    setPointerY(null)
+    setHoveredMarker(null)
+    onHover?.(null)
+  }, [onHover])
+
+  const scrollRailBy = React.useCallback((delta: number) => {
+    const rail = railRef.current
+    if (!rail) return
+    rail.scrollTop += delta
+    setRailScrollTop(rail.scrollTop)
+  }, [])
+
+  // 后台悬停：宿主轮询下发的窗口内坐标经父层转发至此，驱动与真实
+  // 指针事件等同的横条变宽、高亮、预览卡与首击跳转（后台窗口收不到 DOM 指针事件）。
+  React.useImperativeHandle(ref, () => ({
+    externalPointer: (clientY: number | null) => {
+      if (clientY == null) {
+        pointerLeave()
+        return
+      }
+      const root = rootRef.current
+      if (!root) return
+      const rect = root.getBoundingClientRect()
+      // 越过刻度尺上下沿（含底部按钮避让区）不产生悬停，与真实命中一致
+      if (clientY < rect.top || clientY > rect.bottom) {
+        pointerLeave()
+        return
+      }
+      schedulePointerUpdate(clientY)
+    },
+    externalClick: (clientY: number) => {
+      const root = rootRef.current
+      const rail = railRef.current
+      if (!root || !rail || markerCount === 0) return
+      const rect = root.getBoundingClientRect()
+      if (clientY < rect.top || clientY > rect.bottom) return
+      const y = Math.min(Math.max(clientY - rect.top, 0), rect.height)
+      const contentY = y + rail.scrollTop - centeredOffset
+      const markerIndex = Math.min(markerCount - 1, Math.max(0, Math.round((contentY - ROW_HEIGHT / 2) / ROW_HEIGHT)))
+      onSelect?.(markerIndex)
+    },
+  }), [centeredOffset, markerCount, onSelect, pointerLeave, schedulePointerUpdate])
 
   React.useEffect(() => {
     const rail = railRef.current
@@ -84,13 +138,6 @@ export function RulerScrollbar({
 
   React.useEffect(() => () => {
     if (frameRef.current != null) cancelAnimationFrame(frameRef.current)
-  }, [])
-
-  const scrollRailBy = React.useCallback((delta: number) => {
-    const rail = railRef.current
-    if (!rail) return
-    rail.scrollTop += delta
-    setRailScrollTop(rail.scrollTop)
   }, [])
 
   const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -142,12 +189,7 @@ export function RulerScrollbar({
       )}
       style={{ bottom: bottomInset }}
       onPointerMove={(event) => schedulePointerUpdate(event.clientY)}
-      onPointerLeave={() => {
-        pendingPointerRef.current = null
-        setPointerY(null)
-        setHoveredMarker(null)
-        onHover?.(null)
-      }}
+      onPointerLeave={pointerLeave}
       onWheel={onWheel}
       onKeyDown={onKeyDown}
     >
@@ -199,7 +241,8 @@ export function RulerScrollbar({
       </div>
     </div>
   )
-}
+  }
+)
 
 export function TurnPreviewCard({
   question,

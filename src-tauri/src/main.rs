@@ -140,6 +140,12 @@ fn run_gui() {
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
 
+            // macOS 后台悬停监听：窗口未激活时向前端下发鼠标位置与后台首击
+            // 位置，供消息列表右侧导航唤出与点击定位（macOS 不给后台窗口派发
+            // hover 事件，系统首击只激活窗口）。
+            #[cfg(target_os = "macos")]
+            tiangong_app::inactive_hover::spawn(app.handle().clone());
+
             // 注入 app_handle（builder 链构造时尚无 handle，setup 阶段补入）。
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
