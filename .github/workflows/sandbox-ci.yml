@@ -10,13 +10,21 @@ on:
     branches: [main]
     paths:
       - "crates/tiangong-sandbox/**"
+      - "xtask/Cargo.toml"
+      - "xtask/src/main.rs"
+      - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
+      - ".github/workflows/publish-launcher.yml"
       - "Cargo.toml"
       - "Cargo.lock"
   pull_request:
     paths:
       - "crates/tiangong-sandbox/**"
+      - "xtask/Cargo.toml"
+      - "xtask/src/main.rs"
+      - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
+      - ".github/workflows/publish-launcher.yml"
       - "Cargo.toml"
       - "Cargo.lock"
 
@@ -146,7 +154,9 @@ jobs:
         run: |
           cargo run --locked -p xtask -- prepare-launcher-release
           dist="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/launcher-dist"
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          test -f "$dist/release-info.json"
+          version="$(jq -r .version "$dist/release-info.json")"
+          protocol="$(jq -r .protocol_version "$dist/release-info.json")"
           platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
           artifact="$dist/launcher/$version/tiangong-sandbox-$platform"
           test -f "$artifact" && test -f "$artifact.sig" && test ! -L "$artifact"
@@ -157,5 +167,5 @@ jobs:
           printf '%s\n' "$report" | tee "$RUNNER_TEMP/packaged-self-check.json"
           [[ "$status" -eq 0 || "$status" -eq 79 ]]
           [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
-          [[ "$(jq -r .protocol_version <<< "$report")" \
-             == "$(grep 'pub const LAUNCHER_PROTOCOL_VERSION' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)" ]]
+          # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
+          [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]

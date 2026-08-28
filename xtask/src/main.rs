@@ -460,6 +460,9 @@ fn main() {
         }
         [command] if command == "sign-sandbox" => sign_sandbox_debug(),
         [command] if command == "prepare-launcher-release" => prepare_launcher_release(),
+        [command, artifact, signature] if command == "verify-launcher-official" => {
+            verify_launcher_official(artifact, signature)
+        }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -499,6 +502,7 @@ fn print_help() {
     );
     eprintln!("  cargo run -p xtask -- validate-plugin-catalog <catalog或->");
     eprintln!("  cargo run -p xtask -- prepare-launcher-release");
+    eprintln!("  cargo run -p xtask -- verify-launcher-official <制品> <签名>");
     eprintln!("  cargo run -p xtask -- sign-sandbox");
 }
 
@@ -1891,8 +1895,19 @@ fn prepare_launcher_release() -> io::Result<()> {
         fragments.join(format!("{platform}.json")),
         serde_json::to_vec_pretty(&fragment)?,
     )?;
+    // 结构化发布信息：协议/策略版本直接引用 crate 唯一常量定义，
+    // workflow 读取本文件组清单与断言，不做源码正则提取。
+    let release_info = serde_json::json!({
+        "version": version,
+        "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
+        "policy_schema_max": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+    });
+    std::fs::write(
+        dist.join("release-info.json"),
+        serde_json::to_vec_pretty(&release_info)?,
+    )?;
     eprintln!(
-        "[xtask] Launcher 发布制品就绪: {}（片段 fragments/{platform}.json）",
+        "[xtask] Launcher 发布制品就绪: {}（片段 fragments/{platform}.json，release-info.json）",
         artifact.display()
     );
     Ok(())
@@ -1931,6 +1946,26 @@ fn launcher_crate_version(workspace_root: &Path) -> io::Result<String> {
     Err(invalid_data(
         "tiangong-sandbox/Cargo.toml 缺少独立 version 声明",
     ))
+}
+
+/// 用内置官方公钥验证 Launcher 制品签名（发布守卫：私钥与内置公钥
+/// 不匹配时立即失败，防止把全部客户端都会拒绝的制品发布上线）。
+fn verify_launcher_official(artifact: &str, signature: &str) -> io::Result<()> {
+    let artifact = Path::new(artifact);
+    let signature = Path::new(signature);
+    require_file(artifact)?;
+    require_file(signature)?;
+    match verify_with_official_pubkey(artifact, signature) {
+        Ok(true) => {
+            eprintln!("[xtask] 官方公钥验签通过: {}", artifact.display());
+            Ok(())
+        }
+        Ok(false) => Err(invalid_data(format!(
+            "官方公钥验签不通过（签名与内置公钥不匹配）: {}",
+            artifact.display()
+        ))),
+        Err(error) => Err(error),
+    }
 }
 
 fn sign_sandbox_debug() -> io::Result<()> {

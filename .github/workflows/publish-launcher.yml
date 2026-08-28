@@ -1,12 +1,14 @@
 name: Publish Launcher
 
-# 沙箱 Launcher 在线更新发布：三平台矩阵构建+官方签名制品与平台片段，
-# 聚合生成 launcher/latest.json 并按"previous 备份 → next → 正式"三步写
-# 上传官方 OSS，回读校验失败回滚。宿主更新器按清单的版本/协议判定、
-# 下载 SHA-256 校验、官方公钥验签与真实自检门禁激活。
+# 沙箱 Launcher 在线更新发布：三平台矩阵构建+官方签名制品、平台片段与
+# 结构化 release-info（协议/策略版本直接引用 crate 常量，杜绝源码正则
+# 提取），聚合生成 launcher/latest.json 按"previous 备份 → next → 正式"
+# 三步写上传官方 OSS 并回读校验。
 #
-# 触发：launcher/v<版本> 标签或手动派发（版本取 tiangong-sandbox crate
-# 独立版本，与 App 版本无关）。
+# 发布守卫：
+# - 标签触发时强制校验标签版本 == crate 版本（防发布记录与内容错位）；
+# - 上传前对每个平台制品执行内置官方公钥验签（CI Secret 私钥配错即拦截）；
+# - 同一版本目录已存在时拒绝覆盖（发布制品不可变）。
 
 on:
   push:
@@ -21,8 +23,33 @@ env:
   OSS_BASE: https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com
 
 jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve crate and tag versions
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
+          test -n "$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_version="${GITHUB_REF_NAME#launcher/v}"
+            if [[ "$tag_version" != "$version" ]]; then
+              echo "::error::标签版本 $tag_version 与 crate 版本 $version 不一致，拒绝发布"
+              exit 1
+            fi
+          else
+            echo "::notice::手动触发，实际发布版本为 $version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (${{ matrix.label }})
+    needs: resolve
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -82,6 +109,15 @@ jobs:
           TAURI_ENV_TARGET_TRIPLE=${{ matrix.triple }} \
             cargo run --locked -p xtask -- prepare-launcher-release
 
+      - name: "Guard: verify with built-in official pubkey"
+        shell: bash
+        run: |
+          dist="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.target_directory')/launcher-dist"
+          platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
+          artifact="$dist/launcher/${{ needs.resolve.outputs.version }}/tiangong-sandbox-$platform"
+          cargo run --locked -p xtask -- verify-launcher-official "$artifact" "$artifact.sig"
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -89,11 +125,12 @@ jobs:
           path: |
             target/launcher-dist/launcher
             target/launcher-dist/fragments
+            target/launcher-dist/release-info.json
           if-no-files-found: error
 
   publish:
     name: Publish to OSS
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -108,16 +145,12 @@ jobs:
           pattern: launcher-dist-*
           merge-multiple: true
 
-      - name: Compose latest.json
+      - name: Compose latest.json from structured release info
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
-          test -n "$version"
-          # 聚合三平台片段为清单（协议常量取宿主唯一定义）。
-          protocol="$(grep 'pub const LAUNCHER_PROTOCOL_VERSION' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)"
-          schema="$(grep 'pub const LAUNCHER_POLICY_SCHEMA' crates/tiangong-sandbox/src/lib.rs | grep -oE '[0-9]+' | head -1)"
-          python3 - "$version" "$protocol" "$schema" <<'PY'
-          import json, sys, pathlib
-          version, protocol, schema = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+          test -f target/launcher-dist/release-info.json
+          python3 - <<'PY'
+          import json, pathlib
+          info = json.loads(pathlib.Path("target/launcher-dist/release-info.json").read_text())
           fragments = {}
           for path in sorted(pathlib.Path("target/launcher-dist/fragments").glob("*.json")):
               fragments[path.stem] = json.loads(path.read_text())
@@ -125,16 +158,16 @@ jobs:
           missing = expected - fragments.keys()
           assert not missing, f"缺少平台片段: {missing}"
           manifest = {
-              "version": version,
-              "protocol_version": protocol,
-              "policy_schema_max": schema,
+              "version": info["version"],
+              "protocol_version": info["protocol_version"],
+              "policy_schema_max": info["policy_schema_max"],
               "platforms": fragments,
           }
           out = pathlib.Path("target/launcher-dist/latest.json")
           out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
           print(out.read_text())
           PY
-          echo "LAUNCHER_VERSION=$version" >> "$GITHUB_ENV"
+          echo "LAUNCHER_VERSION=${{ needs.resolve.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Install ossutil
         run: |
@@ -150,6 +183,15 @@ jobs:
             -e oss-cn-hangzhou.aliyuncs.com \
             -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
             -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: "Guard: refuse to overwrite an existing version"
+        run: |
+          if timeout 30s ossutil stat \
+            "oss://silent-tiangong/launcher/${LAUNCHER_VERSION}/" >/dev/null 2>&1; then
+            echo "::error::版本 ${LAUNCHER_VERSION} 的制品目录已存在（发布不可变），拒绝覆盖"
+            exit 1
+          fi
+          echo "版本 ${LAUNCHER_VERSION} 目录不存在，允许发布。"
 
       - name: Upload immutable versioned artifacts
         run: |

@@ -25,3 +25,4 @@ AGENTS.md
 .zcode
 plugins/*/build/
 release/
+src-tauri/binaries/
