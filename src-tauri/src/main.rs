@@ -102,6 +102,11 @@ fn init_logging(terminal_output: bool) -> anyhow::Result<tiangong_config::loggin
 }
 
 fn main() {
+    // 解释器环境注入须先于一切后台线程（std::env::set_var 非线程安全）：
+    // GUI/受限环境下探测 node/python 并注入 TIANGONG_*_PATH 与 PATH 前置，
+    // 供插件 sidecar 与命令通道子进程全树使用。
+    tiangong_plugin_runtime::registry::ensure_interpreter_env();
+
     // 无参数 → GUI
     if std::env::args().len() <= 1 {
         run_gui();

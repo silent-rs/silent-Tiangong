@@ -2694,7 +2694,8 @@ fn resolve_interpreter_launch(
 /// 在 PATH 中查找解释器程序（可经环境变量固定路径）。
 ///
 /// GUI 进程（launchd/Finder 启动）不执行 shell 初始化，nvm/Homebrew 等
-/// 安装位置不在其 PATH 中，PATH 未命中后继续探测常见安装位置。
+/// 安装位置不在其 PATH 中，PATH 未命中后继续探测常见安装位置；入口
+/// 注入见 [`ensure_interpreter_env`]。
 fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
     let (override_env, candidates, install_hint): (&str, &[&str], &str) = match runtime {
         SidecarRuntime::Native => bail!("native sidecar 无解释器"),
@@ -2726,6 +2727,35 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
         }
         bail!("{override_env} 指向的程序不存在: {}", path.display());
     }
+    if let Some(path) = search_interpreter_program(runtime) {
+        return Ok(path);
+    }
+    bail!(
+        "未找到 {:?} sidecar 所需的解释器程序（{}）；可在会话中对助手说「{install_hint}」快速安装，或以 {override_env} 指定路径",
+        runtime,
+        candidates.join(" / ")
+    );
+}
+
+/// PATH 及常见安装位置中查找解释器（不含环境变量覆盖分支）。
+fn search_interpreter_program(runtime: SidecarRuntime) -> Option<PathBuf> {
+    let candidates: &[&str] = match runtime {
+        SidecarRuntime::Native => return None,
+        SidecarRuntime::Node => {
+            if cfg!(windows) {
+                &["node.exe"]
+            } else {
+                &["node"]
+            }
+        }
+        SidecarRuntime::Python => {
+            if cfg!(windows) {
+                &["python.exe", "py.exe"]
+            } else {
+                &["python3", "python"]
+            }
+        }
+    };
     let search_paths = std::env::var_os("PATH")
         .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -2733,20 +2763,60 @@ fn resolve_interpreter_program(runtime: SidecarRuntime) -> Result<PathBuf> {
         for candidate in candidates {
             let path = directory.join(candidate);
             if path.is_file() {
-                return Ok(path);
+                return Some(path);
             }
         }
     }
-    for path in common_interpreter_locations(runtime) {
-        if path.is_file() {
-            return Ok(path);
+    common_interpreter_locations(runtime)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+/// 进程入口最早调用（任何后台线程启动前）：探测缺失的解释器并注入进程
+/// 环境变量，使插件 sidecar 与命令通道整棵子进程树可见。
+///
+/// - 仅当 `TIANGONG_NODE_PATH` / `TIANGONG_PYTHON_PATH` 未设置时写入，
+///   外部显式指定（开发调试、CI）优先，不覆盖；
+/// - 同时把解释器所在目录前置进 PATH（已包含则跳过），命令通道可直接
+///   调用 node/yarn/npx 等；
+/// - 未探测到时不做任何改动，留待运行时报错引导安装；
+/// - `std::env::set_var` 与并发读存在数据竞争，本函数只允许在 main
+///   最开头、线程池启动前调用。
+pub fn ensure_interpreter_env() {
+    for (runtime, env_key) in [
+        (SidecarRuntime::Node, "TIANGONG_NODE_PATH"),
+        (SidecarRuntime::Python, "TIANGONG_PYTHON_PATH"),
+    ] {
+        let externally_set = std::env::var_os(env_key).is_some_and(|value| !value.is_empty());
+        if externally_set {
+            continue;
+        }
+        let Some(program) = search_interpreter_program(runtime) else {
+            continue;
+        };
+        unsafe { std::env::set_var(env_key, &program) };
+        if let Some(bin_dir) = program.parent()
+            && let Some(value) =
+                prepend_dir_to_path_value(&std::env::var_os("PATH").unwrap_or_default(), bin_dir)
+        {
+            unsafe { std::env::set_var("PATH", value) };
         }
     }
-    bail!(
-        "未找到 {:?} sidecar 所需的解释器程序（{}）；可在会话中对助手说「{install_hint}」快速安装，或以 {override_env} 指定路径",
-        runtime,
-        candidates.join(" / ")
-    );
+}
+
+/// 计算前置目录后的新 PATH；目录已在 PATH 中或拼接失败（路径含列表
+/// 分隔符等极端情况）时返回 None（保持原值）。
+fn prepend_dir_to_path_value(
+    existing: &std::ffi::OsStr,
+    directory: &Path,
+) -> Option<std::ffi::OsString> {
+    if std::env::split_paths(existing).any(|dir| dir == directory) {
+        return None;
+    }
+    std::env::join_paths(
+        std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(existing)),
+    )
+    .ok()
 }
 
 /// PATH 未命中时的常见安装位置：版本管理器目录从新到旧，系统级位置殿后。
@@ -2906,6 +2976,23 @@ mod interpreter_discovery_tests {
         assert_eq!(version_sort_key("v22.16.0"), version_sort_key("22.16.0"));
         assert!(version_sort_key("3.11.0-env") > version_sort_key("3.10.9"));
         assert_eq!(version_sort_key("not-a-version"), vec![0]);
+    }
+
+    #[test]
+    fn prepend_dir_to_path_value_prepends_and_deduplicates() {
+        let directory = PathBuf::from("/opt/homebrew/bin");
+        let value =
+            prepend_dir_to_path_value(std::ffi::OsStr::new("/usr/bin:/bin"), &directory).unwrap();
+        assert_eq!(
+            std::env::split_paths(&value).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
+        // 目录已存在时保持原值（返回 None）
+        assert!(prepend_dir_to_path_value(&value, &directory).is_none());
     }
 
     #[test]
