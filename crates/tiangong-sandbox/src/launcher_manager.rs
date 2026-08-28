@@ -1,7 +1,7 @@
 //! 沙箱 Launcher 的解析与在线更新版本管理。
 //!
-//! 布局（storage_root 下）：`launcher/versions/<版本>/` 存放下载版制品与
-//! 伴生签名，`launcher/active` 是激活版本指针（内容为版本号）。
+//! 布局（storage_root 下）：`sandbox/versions/<版本>/` 存放下载版制品与
+//! 伴生签名，`sandbox/active` 是激活版本指针（内容为版本号）。
 //!
 //! 解析优先级：
 //! 1. active 指向的下载版（每次启动前仍由宿主逐次验签）——仅当版本
@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 /// storage_root 下的 Launcher 数据目录名（与更新器共用）。
-pub const LAUNCHER_DIR: &str = "launcher";
+pub const LAUNCHER_DIR: &str = "sandbox";
 /// 激活版本指针文件名（内容为版本号文本）。
 pub const LAUNCHER_ACTIVE_FILE: &str = "active";
 

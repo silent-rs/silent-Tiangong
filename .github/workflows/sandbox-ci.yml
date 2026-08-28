@@ -1,7 +1,7 @@
 name: Sandbox CI
 
 # 沙箱独立组件 CI（不依赖 App 集成）：crates/tiangong-sandbox 的格式、
-# lint、单元与真实自检，以及 Launcher 发布制品（prepare-launcher-release
+# lint、单元与真实自检，以及 Launcher 发布制品（prepare-sandbox-release
 # 产物 + 独立版本断言）。App 集成链路（ephemeral 路由、Tauri 打包）由
 # 集成分支的 CI 覆盖。
 
@@ -179,13 +179,13 @@ jobs:
       - name: Verify release artifact signs and self-checks
         shell: bash
         run: |
-          cargo run --locked -p xtask -- prepare-launcher-release
-          dist="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/launcher-dist"
+          cargo run --locked -p xtask -- prepare-sandbox-release
+          dist="$(cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')/sandbox-dist"
           test -f "$dist/release-info.json"
           version="$(jq -r .version "$dist/release-info.json")"
           protocol="$(jq -r .protocol_version "$dist/release-info.json")"
           platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
-          artifact="$dist/launcher/$version/tiangong-sandbox-$platform"
+          artifact="$dist/sandbox/$version/tiangong-sb-$platform"
           test -f "$artifact" && test -f "$artifact.sig" && test ! -L "$artifact"
           set +e
           report="$("$artifact" --self-check)"

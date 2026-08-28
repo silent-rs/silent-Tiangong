@@ -459,9 +459,9 @@ fn main() {
             new_plugin(plugin_id, Some(output_dir))
         }
         [command] if command == "sign-sandbox" => sign_sandbox_debug(),
-        [command] if command == "prepare-launcher-release" => prepare_launcher_release(),
-        [command, artifact, signature] if command == "verify-launcher-official" => {
-            verify_launcher_official(artifact, signature)
+        [command] if command == "prepare-sandbox-release" => prepare_sandbox_release(),
+        [command, artifact, signature] if command == "verify-sandbox-artifact" => {
+            verify_sandbox_artifact(artifact, signature)
         }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
@@ -1823,7 +1823,7 @@ fn run_cargo(workspace_root: &Path, args: &[&str]) -> io::Result<()> {
     }
 }
 
-fn prepare_launcher_release() -> io::Result<()> {
+fn prepare_sandbox_release() -> io::Result<()> {
     let workspace_root = workspace_root();
     let target = sandbox_target_triple()?;
     let platform = launcher_platform_key(&target)?;
@@ -1862,16 +1862,16 @@ fn prepare_launcher_release() -> io::Result<()> {
         .join(format!("tiangong-sandbox{executable_suffix}"));
     require_file(&built)?;
 
-    let dist = target_root.join("launcher-dist");
+    let dist = target_root.join("sandbox-dist");
     // 清理旧发布目录：跨平台/缓存恢复的残留片段会混入本次发布
     //（官方验签步骤也会因多平台名失败），生成前整体重建。
     if dist.exists() {
         std::fs::remove_dir_all(&dist)
             .map_err(|error| invalid_data(format!("清理旧发布目录失败: {error}")))?;
     }
-    let artifact_dir = dist.join("launcher").join(&version);
+    let artifact_dir = dist.join("sandbox").join(&version);
     std::fs::create_dir_all(&artifact_dir)?;
-    let artifact_name = format!("tiangong-sandbox-{platform}");
+    let artifact_name = format!("tiangong-sb-{platform}");
     let artifact = artifact_dir.join(&artifact_name);
     std::fs::copy(&built, &artifact)?;
 
@@ -1891,9 +1891,9 @@ fn prepare_launcher_release() -> io::Result<()> {
         .trim_end_matches('/')
         .to_string();
     let fragment = serde_json::json!({
-        "url": format!("{base_url}/launcher/{version}/{artifact_name}"),
+        "url": format!("{base_url}/sandbox/{version}/{artifact_name}"),
         "checksum": format!("sha256:{}", sha256(&artifact)?),
-        "signature_url": format!("{base_url}/launcher/{version}/{artifact_name}.sig"),
+        "signature_url": format!("{base_url}/sandbox/{version}/{artifact_name}.sig"),
     });
     let fragments = dist.join("fragments");
     std::fs::create_dir_all(&fragments)?;
@@ -1956,7 +1956,7 @@ fn launcher_crate_version(workspace_root: &Path) -> io::Result<String> {
 
 /// 用内置官方公钥验证 Launcher 制品签名（发布守卫：私钥与内置公钥
 /// 不匹配时立即失败，防止把全部客户端都会拒绝的制品发布上线）。
-fn verify_launcher_official(artifact: &str, signature: &str) -> io::Result<()> {
+fn verify_sandbox_artifact(artifact: &str, signature: &str) -> io::Result<()> {
     let artifact = Path::new(artifact);
     let signature = Path::new(signature);
     require_file(artifact)?;
