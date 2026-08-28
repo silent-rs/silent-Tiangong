@@ -88,6 +88,14 @@ pub struct CoreConfig {
     pub reasoning_effort: crate::model::ReasoningEffort,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
+    /// 工具执行默认超时（毫秒）。Agent 可在工具参数里用 `timeout` 字段覆盖。
+    #[serde(default = "default_tool_timeout_ms")]
+    pub tool_timeout_ms: u64,
+}
+
+/// 工具执行默认超时（毫秒）。
+pub fn default_tool_timeout_ms() -> u64 {
+    120_000
 }
 
 impl Default for CoreConfig {
@@ -99,6 +107,7 @@ impl Default for CoreConfig {
             custom_system_prompt: String::new(),
             reasoning_effort: crate::model::ReasoningEffort::Medium,
             context_limit: DEFAULT_CONTEXT_LIMIT,
+            tool_timeout_ms: default_tool_timeout_ms(),
         }
     }
 }

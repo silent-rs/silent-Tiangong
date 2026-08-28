@@ -43,6 +43,9 @@ pub struct TurnContext {
     pub plugins: Vec<Arc<dyn Plugin>>,
     /// 上下文 token 上限
     pub context_limit: usize,
+    /// 工具执行默认超时（毫秒）。Agent 可在工具参数里用 `timeout` 字段覆盖。
+    #[builder(default = crate::core_config::default_tool_timeout_ms())]
+    pub tool_timeout_ms: u64,
     /// Agent 配置（reasoning_effort 等）
     pub agent_config: AgentConfig,
     /// 会话信任模式（供插件按自身策略使用）。
