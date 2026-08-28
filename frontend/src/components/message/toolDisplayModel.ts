@@ -136,15 +136,32 @@ function squeezeToSingleLine(text: string): string {
     .join(" ");
 }
 
+/**
+ * terminal 数组参数组合为完整命令文本：shell 哨兵取脚本原文，
+ * exec 形态（[cmd, ...args]）空格连接全部部分，与后端 formatting.rs 的命令行对齐。
+ */
+function commandFromTerminalArgs(visible: unknown[]): string | null {
+  if (visible.length === 0) return null;
+  if (visible[0] === SHELL_SENTINEL) {
+    const script = visible[1];
+    return typeof script === "string" && script ? script : null;
+  }
+  const parts = visible
+    .filter((item): item is string => typeof item === "string" && item !== SHELL_SENTINEL)
+    .map((item) => squeezeToSingleLine(item))
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 /** 从调用参数提取单行摘要（多行命令压缩去换行）；参数兼容位置数组与对象。 */
 function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
   if (args === undefined || args === null) return null;
 
   if (Array.isArray(args)) {
     const visible = filterCwdArgs(args);
-    if (variant === "terminal" && visible[0] === SHELL_SENTINEL) {
-      const script = typeof visible[1] === "string" ? visible[1] : "";
-      if (script) return clamp(squeezeToSingleLine(script), SUMMARY_MAX_CHARS);
+    if (variant === "terminal") {
+      const command = commandFromTerminalArgs(visible);
+      if (command) return clamp(squeezeToSingleLine(command), SUMMARY_MAX_CHARS);
       return null;
     }
     const first = visible.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
@@ -366,11 +383,11 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   if (variant === "terminal") {
     const visibleArgs = Array.isArray(args) ? filterCwdArgs(args) : [];
     const command = (() => {
-      if (visibleArgs[0] === SHELL_SENTINEL && typeof visibleArgs[1] === "string") {
-        return visibleArgs[1];
+      if (Array.isArray(args)) {
+        return commandFromTerminalArgs(visibleArgs);
       }
       // 对象参数（run_shell {script} / run_command {cmd}）：取完整命令文本。
-      if (args && typeof args === "object" && !Array.isArray(args)) {
+      if (args && typeof args === "object") {
         const record = args as Record<string, unknown>;
         const script = record.script ?? record.cmd ?? record.command;
         if (typeof script === "string" && script) return script;
