@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "speech-to-text",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "wasm": {
     "binary": "tiangong_plugin_speech_to_text_wasm.wasm"
   },
@@ -14,7 +14,8 @@
   },
   "permissions": [
     "model-config.read",
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "bridge.call"
   ],
   "entrypoints": [
     "desktop",
@@ -26,5 +27,9 @@
       "kind": "stt",
       "required": true
     }
-  ]
+  ],
+  "mention": {
+    "hint": "将语音转写为文本（录音或音频文件）",
+    "mark": "STT"
+  }
 }

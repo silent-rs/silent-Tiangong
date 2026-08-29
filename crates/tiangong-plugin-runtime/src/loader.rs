@@ -511,6 +511,9 @@ pub struct MentionCandidate {
     pub label: String,
     pub kind: String,
     pub hint: String,
+    /// 候选标记（chip 角标字符），插件可选提供；旧插件不带时回退空。
+    #[serde(default)]
+    pub mark: String,
 }
 
 /// 把 WIT 层的 `plugin-error` 转为 anyhow。

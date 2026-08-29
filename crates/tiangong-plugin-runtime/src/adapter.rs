@@ -498,6 +498,7 @@ impl MentionCandidateProvider for WasmPluginAdapter {
                     label: c.label,
                     kind: c.kind,
                     hint: c.hint,
+                    mark: c.mark,
                 })
                 .collect(),
             Err(e) => {

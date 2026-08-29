@@ -999,8 +999,15 @@ export const api = {
   // ----------------------------------------------------------------
   // @提及补全
   // ----------------------------------------------------------------
-  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string }[]> =>
+  getMentionCandidates: (): Promise<{ value: string; label: string; kind: string; hint: string; mark?: string }[]> =>
     invoke('get_mention_candidates'),
+
+  /** 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。 */
+  getMentionGroups: (
+    allowedKinds?: string[],
+    maxPerGroup?: number,
+  ): Promise<{ kind: string; label: string; candidates: { value: string; label: string; kind: string; hint: string; mark?: string }[] }[]> =>
+    invoke('get_mention_groups', { allowedKinds, maxPerGroup }),
 
   // ----------------------------------------------------------------
   // 上下文管理
@@ -1012,34 +1019,67 @@ export const api = {
     invoke('reset_context'),
 
   // ----------------------------------------------------------------
-  // 语音合成
+  // 语音合成（经 tts 插件，前端经 bridge.call 调用插件 handle_view_message）
   // ----------------------------------------------------------------
   synthesizeSpeech: (text: string): Promise<{ file_path: string; mime_type: string }> =>
-    invoke('synthesize_speech', { text }),
+    api.bridgeCall('text-to-speech', 'plugin.synthesize', JSON.stringify({ text }))
+      .then((raw) => JSON.parse(raw)),
 
-  playAudioFile: (filePath: string): Promise<void> =>
-    invoke('play_audio_file', { filePath }),
+  /** 播放音频并等待播放完成（轮询 sidecar 播放状态；stopAudio 可中断等待）。 */
+  playAudioFile: async (filePath: string): Promise<void> => {
+    await api.bridgeCall('text-to-speech', 'plugin.play', JSON.stringify({ file_path: filePath }));
+    // 播放在 sidecar 后台执行（阻塞式播放会让 stop 请求永远排队），
+    // 这里轮询播放状态直到自然结束或被 stop 终止。
+    for (;;) {
+      const raw = await api.bridgeCall('text-to-speech', 'plugin.play_status', '{}');
+      if (!JSON.parse(raw).playing) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  },
 
   stopAudio: (): Promise<void> =>
-    invoke('stop_audio'),
+    api.bridgeCall('text-to-speech', 'plugin.stop', '{}')
+      .then(() => undefined),
 
   getSessionCost: (sessionId?: string): Promise<SessionCost> =>
     invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>
-    api.hasModelCapability('tts'),
+    api.listPlugins().then((plugins) =>
+      plugins.some((p) => p.id === 'text-to-speech' && p.enabled),
+    ),
 
   listTtsVoices: (): Promise<{ id: string; name: string; gender?: string }[]> =>
-    invoke('list_tts_voices'),
+    api.bridgeCall('text-to-speech', 'plugin.list_voices', '{}')
+      .then((raw) => JSON.parse(raw).voices ?? []),
 
   // ----------------------------------------------------------------
-  // 语音识别
+  // 语音识别（经 stt 插件，前端经 bridge.call 调用插件 handle_view_message）
   // ----------------------------------------------------------------
   hasSttCapability: (): Promise<boolean> =>
-    api.hasModelCapability('stt'),
+    api.listPlugins().then((plugins) =>
+      plugins.some((p) => p.id === 'speech-to-text' && p.enabled),
+    ),
 
-  transcribeSpeech: (audioBase64: string, mimeType: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
-    invoke('transcribe_speech', { audioBase64, mimeType }),
+  /** 转录音频文件（经 stt 插件）。filePath 为 ~/.tiangong/media 下的音频文件路径。 */
+  transcribeSpeech: (filePath: string): Promise<{ text: string; audio_path: string; duration?: number }> =>
+    api.bridgeCall('speech-to-text', 'plugin.transcribe', JSON.stringify({ file_path: filePath }))
+      .then((raw) => JSON.parse(raw)),
+
+  /** 开始录音（经 stt 插件）。session_id 由调用方生成传入，后续停止/取消携带同一编号。 */
+  startRecording: (sessionId: string): Promise<{ session_id: string }> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_start', JSON.stringify({ session_id: sessionId }))
+      .then((raw) => JSON.parse(raw)),
+
+  /** 停止录音（经 stt 插件）。返回音频文件路径。session_id 为开始录音返回的会话 ID。 */
+  stopRecording: (sessionId: string): Promise<{ file_path: string; mime_type: string; duration?: number }> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_stop', JSON.stringify({ session_id: sessionId }))
+      .then((raw) => JSON.parse(raw)),
+
+  /** 取消录音（经 stt 插件）：终止录音进程并丢弃录音文件（带会话 ID 校验）。 */
+  cancelRecording: (sessionId: string): Promise<void> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_cancel', JSON.stringify({ session_id: sessionId }))
+      .then(() => undefined),
 
   // ----------------------------------------------------------------
   // 事件监听

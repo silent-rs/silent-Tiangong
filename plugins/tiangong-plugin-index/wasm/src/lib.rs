@@ -442,6 +442,7 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
+            "__tiangong.mention_candidates.v1" => index_mention_candidates()?,
             "list" => {
                 invoke_for_ui::<ListWorkspaceIndexes>(&tiangong_plugin_index_protocol::Empty {})?
             }
@@ -459,6 +460,22 @@ impl UiGuest for Component {
         };
         Ok(ViewMessageResponse { payload })
     }
+}
+
+/// 生成 @提及候选：返回 index 插件本身（`@index` 点名触发工作区文件搜索）。
+///
+/// 与 mcp/skill 的 mention 机制一致（`__tiangong.mention_candidates.v1`）。
+/// 候选内容控制规模——只返回 index 插件一个候选，不返回全量文件列表，
+/// 避免撑爆 mention 补全 UI。用户 `@index:关键词` 后由 Agent 调用 index_search。
+fn index_mention_candidates() -> Result<String, PluginError> {
+    let candidates = vec![serde_json::json!({
+        "value": "@index",
+        "label": "工作区搜索",
+        "kind": "index",
+        "hint": "搜索工作区文件与对话历史",
+        "mark": "I",
+    })];
+    serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
 }
 
 /// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。

@@ -1,5 +1,7 @@
 /// @提及候选（见 [`tiangong_types::MentionCandidate`]）。
 pub use tiangong_types::MentionCandidate;
+/// @提及候选分组（见 [`tiangong_types::MentionGroup`]）。
+pub use tiangong_types::MentionGroup;
 
 pub mod agent_config;
 pub mod agent_input;

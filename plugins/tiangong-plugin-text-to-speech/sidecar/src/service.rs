@@ -10,9 +10,59 @@ use tiangong_plugin_runtime::protocol::{
 };
 use tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV;
 use tiangong_plugin_text_to_speech_protocol::{
-    Empty, LIST_MODELS_OPERATION, ListModelsResponse, ModelInfo, PLUGIN_ID, PLUGIN_VERSION,
-    SYNTHESIZE_OPERATION, SynthesizeRequest, SynthesizeResponse, TTS_PROTOCOL_VERSION,
+    Empty, LIST_MODELS_OPERATION, LIST_VOICES_OPERATION, ListModelsResponse, ListVoicesResponse,
+    ModelInfo, PLAY_OPERATION, PLAY_STATUS_OPERATION, PLUGIN_ID, PLUGIN_VERSION, PlayRequest,
+    PlayResponse, PlayStatusResponse, STOP_OPERATION, SYNTHESIZE_OPERATION, SynthesizeRequest,
+    SynthesizeResponse, TTS_PROTOCOL_VERSION, VoiceInfo,
 };
+
+/// Windows 下抑制子进程控制台窗口（CREATE_NO_WINDOW），避免播放时闪黑窗。
+#[cfg(windows)]
+fn suppress_console_window(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut std::process::Command) {}
+
+/// 后台播放进程状态（sidecar 单进程，全局唯一一路播放）。
+struct PlayState {
+    child: std::process::Child,
+}
+
+static PLAYING: std::sync::Mutex<Option<PlayState>> = std::sync::Mutex::new(None);
+
+/// 收割已退出的播放进程；仍在播放时返回 `true`。
+///
+/// 锁中毒时按「无播放」处理，避免播放状态异常卡死 stop/play。
+fn play_running() -> bool {
+    let Ok(mut guard) = PLAYING.lock() else {
+        return false;
+    };
+    match guard.as_mut() {
+        None => false,
+        Some(state) => match state.child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                *guard = None;
+                false
+            }
+            Ok(None) => true,
+        },
+    }
+}
+
+/// 终止当前播放进程（仅终止本 sidecar 自己启动的进程，不按进程名全局匹配）。
+fn stop_playback() {
+    let Ok(mut guard) = PLAYING.lock() else {
+        return;
+    };
+    if let Some(mut state) = guard.take() {
+        let _ = state.child.kill();
+        let _ = state.child.wait();
+    }
+}
 
 /// TTS sidecar 业务服务（无状态）。
 pub struct TtsService;
@@ -78,6 +128,32 @@ async fn dispatch_operation(
             serde_json::to_value(response).context("序列化 list_models 响应失败")
         }
 
+        LIST_VOICES_OPERATION => {
+            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
+            let response = list_voices().await?;
+            serde_json::to_value(response).context("序列化 list_voices 响应失败")
+        }
+
+        PLAY_OPERATION => {
+            let req: PlayRequest = serde_json::from_value(payload).context("解析 play 请求失败")?;
+            let result = play(req)?;
+            serde_json::to_value(result).context("序列化 play 响应失败")
+        }
+
+        PLAY_STATUS_OPERATION => {
+            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
+            let response = PlayStatusResponse {
+                playing: play_running(),
+            };
+            serde_json::to_value(response).context("序列化 play_status 响应失败")
+        }
+
+        STOP_OPERATION => {
+            let _payload: Empty = serde_json::from_value(payload).unwrap_or_default();
+            stop_playback();
+            serde_json::to_value(Empty {}).context("序列化 stop 响应失败")
+        }
+
         other => Err(anyhow::anyhow!("未知的 TTS 操作: {other}")),
     }
 }
@@ -131,6 +207,87 @@ fn list_models() -> Result<ListModelsResponse> {
             })
             .collect(),
     })
+}
+
+/// 返回供应商音色列表（设置页选择用，调供应商 voices 接口）。
+async fn list_voices() -> Result<ListVoicesResponse> {
+    let models_config = tiangong_plugin_sidecar::model::load_models_config()?;
+    let voices = tiangong_core::media::list_tts_voices(&models_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("获取音色列表失败：{e}"))?;
+    Ok(ListVoicesResponse {
+        voices: voices
+            .into_iter()
+            .map(|v| VoiceInfo {
+                id: v.id,
+                name: v.name,
+                gender: v.gender,
+            })
+            .collect(),
+    })
+}
+
+/// 启动后台播放：立即返回，不等待播放完成。
+///
+/// stdio 分发是串行的，若本函数阻塞到播完，播放期间的 stop 请求会永远
+/// 排在后面（停止按钮失效）、synthesize 也会被卡住。因此播放进程后台执行，
+/// 完成状态经 `play_status` 轮询、经 `stop` 终止。已有播放未结束时先停旧的。
+fn play(req: PlayRequest) -> Result<PlayResponse> {
+    let path = std::path::Path::new(&req.file_path);
+    if !path.exists() {
+        anyhow::bail!("音频文件不存在：{}", req.file_path);
+    }
+
+    stop_playback();
+
+    let mut command = play_command(&req.file_path);
+    suppress_console_window(&mut command);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("播放失败：{e}"))
+        .map(|child| {
+            let mut guard = PLAYING
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = Some(PlayState { child });
+            PlayResponse { started: true }
+        })
+}
+
+/// 按平台构造播放命令。
+fn play_command(file_path: &str) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("afplay");
+        command.arg(file_path);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("powershell");
+        command.args([
+            "-c",
+            &format!("(New-Object Media.SoundPlayer '{file_path}').PlaySync()"),
+        ]);
+        command
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut command = {
+        let mut command = std::process::Command::new("aplay");
+        command.arg(file_path);
+        command
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let mut command = std::process::Command::new("");
+
+    let _ = &mut command;
+    command
 }
 
 /// 构造 `~/.tiangong/media/tts_<scru128>.<ext>` 路径并确保目录存在。

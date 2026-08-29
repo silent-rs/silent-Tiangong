@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "generate-image",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "wasm": {
     "binary": "tiangong_plugin_generate_image_wasm.wasm"
   },
@@ -26,5 +26,8 @@
       "kind": "image_generation",
       "required": true
     }
-  ]
+  ],
+  "mention": {
+    "hint": "根据文字描述生成图片"
+  }
 }

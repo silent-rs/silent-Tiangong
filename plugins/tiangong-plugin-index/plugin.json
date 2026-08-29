@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "index",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "wasm": {
     "binary": "tiangong_plugin_index_wasm.wasm"
   },
@@ -12,5 +12,6 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"]
+  "permissions": ["app-storage.read", "sidecar.invoke"],
+  "entrypoints": ["desktop", "cli", "server"]
 }

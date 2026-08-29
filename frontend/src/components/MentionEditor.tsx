@@ -20,11 +20,11 @@ import {
 } from '@/utils/mentionEditorModel';
 import {
   MENTION_LABEL_CLASS,
-  MENTION_MARK,
   mentionChipClass,
   mentionMarkClass,
 } from './MentionChip';
 import { parseBlocks, type Block } from '@/utils/mentionBlocks';
+import { mentionMarkFor } from '@/utils/mentionMarks';
 import { cn } from '@/lib/utils';
 
 // 零宽空格：作为 mention chip 两侧的光标哨兵。
@@ -123,7 +123,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           span.setAttribute('aria-label', b.token);
           const icon = document.createElement('span');
           icon.className = mentionMarkClass(b.kind);
-          icon.textContent = MENTION_MARK[b.kind];
+          icon.textContent = mentionMarkFor(b.kind, b.token);
           icon.setAttribute('aria-hidden', 'true');
           span.appendChild(icon);
           const label = document.createElement('span');

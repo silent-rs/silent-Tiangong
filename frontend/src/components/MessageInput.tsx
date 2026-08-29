@@ -3,7 +3,7 @@ import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
+import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -22,6 +22,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
+import { registerMentionMark, registerMentionMarks, mentionMarkFor } from '@/utils/mentionMarks';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -33,7 +34,35 @@ interface MentionCandidate {
   label: string;
   kind: string;
   hint: string;
+  /** 标记字符（chip 角标），由插件提供；为空时按 kind 回退默认。 */
+  mark?: string;
 }
+
+interface MentionGroup {
+  kind: string;
+  label: string;
+  candidates: MentionCandidate[];
+}
+
+/** mention 分组标题（后端 label 缺省是 kind 原文，这里映射为展示名）。 */
+const MENTION_GROUP_TITLES: Record<string, string> = {
+  skill: '技能',
+  mcp: 'MCP 工具',
+  agent: 'Agent',
+  index: '工作区搜索',
+  plugin: '插件',
+  command: '命令',
+};
+
+/** mention 候选标记字符的底色（与气泡 chip 的 kind 色系一致）。 */
+const MENTION_KIND_BADGE_CLASS: Record<string, string> = {
+  skill: 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+  mcp: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
+  agent: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
+  all: 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+  index: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+  plugin: 'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+};
 
 const SLASH_COMMANDS: MentionCandidate[] = [
   {
@@ -97,7 +126,7 @@ export function MessageInput({
 
   // @提及补全状态
   const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionCandidates, setMentionCandidates] = useState<MentionCandidate[]>([]);
+  const [mentionGroups, setMentionGroups] = useState<MentionGroup[]>([]);
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
@@ -198,7 +227,27 @@ export function MessageInput({
   const isRecordingRef = useRef(false);
 
   useEffect(() => {
-    api.hasSttCapability().then(setHasStt).catch(() => setHasStt(false));
+    const refresh = () =>
+      api
+        .hasSttCapability()
+        .then((available) => {
+          setHasStt(available);
+          // STT 插件被禁用/卸载时终止进行中的录音，麦克风不再被占用。
+          if (!available && isRecordingRef.current) cancelVoiceRecordingRef.current();
+        })
+        .catch(() => setHasStt(false));
+    refresh();
+    // 插件安装/启用/禁用后录音入口即时刷新，而不是只在挂载时检查一次。
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    api.onPluginsChanged(refresh).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // 当前会话是否空闲
@@ -241,27 +290,31 @@ export function MessageInput({
   // ===== 文字模式相关 =====
   const loadCandidates = useCallback(async () => {
     try {
-      const candidates = await api.getMentionCandidates();
-      setMentionCandidates(candidates);
+      // 接口定义每组候选上限为 1000（防止单个插件撑爆传输与渲染）；后端
+      // 截断发生在前端搜索之前，超过上限的候选不可搜。搜索在全量已收候选
+      // 上进行，渲染时每组再截断展示。
+      const groups = await api.getMentionGroups(undefined, 1000);
+      setMentionGroups(groups);
+      // 注册插件提供的标记字符：编辑器 chip 与消息气泡从 token 重建时查表。
+      registerMentionMarks(groups.flatMap(group => group.candidates));
     } catch (e) {
       console.error('加载提及候选失败:', e);
     }
   }, []);
 
-  const filteredCandidates = (() => {
+  const filteredGroups = (() => {
     if (completionMode === 'slash') {
-      const filter = mentionFilter.toLowerCase();
-      if (!filter) return SLASH_COMMANDS;
-      return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+      return [];
     }
 
-    // 合并 API 候选和 Agent 候选
+    // 合并 API 分组和 Agent 分组
     const aliveAgents = agents.filter(a => a.status !== 'terminated');
     const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
       value: `@${a.role}`,
       label: a.label,
       kind: 'agent',
       hint: `Agent · ${a.status === 'running' ? '执行中' : a.status === 'idle' ? '空闲' : a.status === 'waiting_for_lock' ? '等待文件锁' : a.status === 'waiting_for_user' ? '等待用户' : '错误'}`,
+      mark: '@',
     }));
     // 当存在活跃 Agent 时添加 @all 广播选项
     if (aliveAgents.length > 0) {
@@ -270,17 +323,45 @@ export function MessageInput({
         label: 'All',
         kind: 'agent',
         hint: `广播给全部 ${aliveAgents.length} 个 Agent`,
+        mark: '*',
       });
     }
-    const all = [...agentCandidates, ...mentionCandidates];
-    if (!mentionFilter) return all;
-    const lower = mentionFilter.toLowerCase();
-    return all.filter(c =>
-      c.label.toLowerCase().includes(lower)
-      || c.value.toLowerCase().includes(lower)
-      || c.hint.toLowerCase().includes(lower)
-    );
+    const groups: MentionGroup[] = agentCandidates.length > 0
+      ? [{ kind: 'agent', label: 'Agent', candidates: agentCandidates }, ...mentionGroups]
+      : mentionGroups;
+
+    const filtered = mentionFilter
+      ? (() => {
+          const lower = mentionFilter.toLowerCase();
+          return groups
+            .map(group => ({
+              ...group,
+              candidates: group.candidates.filter(c =>
+                c.label.toLowerCase().includes(lower)
+                || c.value.toLowerCase().includes(lower)
+                || c.hint.toLowerCase().includes(lower)
+              ),
+            }))
+            .filter(group => group.candidates.length > 0);
+        })()
+      : groups;
+
+    // 渲染层截断：搜索在全量候选上进行，每组最多展示 50 条防大列表撑爆 UI。
+    // 键盘导航的平铺数组基于截断后的结果，保证索引与可见项对齐。
+    return filtered.map(group => ({
+      ...group,
+      candidates: group.candidates.slice(0, 50),
+    }));
   })();
+
+  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
+  const filteredCandidates = completionMode === 'slash'
+    ? (() => {
+        const filter = mentionFilter.toLowerCase();
+        if (!filter) return SLASH_COMMANDS;
+        return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
+      })()
+    : filteredGroups.flatMap(group => group.candidates);
 
   useEffect(() => {
     if (!mentionOpen) return;
@@ -288,6 +369,21 @@ export function MessageInput({
       block: 'nearest',
     });
   }, [mentionIndex, mentionOpen, filteredCandidates.length]);
+
+  // 挂载即预热候选：消息气泡与编辑器从 token 重建 chip 时需要查插件提供
+  // 的标记字符，注册表不能等到 @ 菜单第一次打开才填充。
+  useEffect(() => {
+    loadCandidates();
+  }, [loadCandidates]);
+
+  // 前端本地的 agent 候选自带标记（其余 kind 的标记全部由插件提供）。
+  useEffect(() => {
+    const alive = agents.filter(a => a.status !== 'terminated');
+    if (alive.length > 0) {
+      registerMentionMark(`@${alive[0].role}`, 'agent', '@');
+    }
+    registerMentionMark('@all', 'agent', '*');
+  }, [agents]);
 
   const executeSlashCommand = useCallback(async (command: string) => {
     const trimmed = command.trim();
@@ -757,16 +853,9 @@ export function MessageInput({
     const voiceDuration = Math.round(elapsedMs / 1000); // 录音时长（秒）
     recording.setState("transcribing");
     try {
-      const { blob, mimeType } = await recording.stopRecording();
-      const arrayBuffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-      const base64 = btoa(binary);
+      const { filePath } = await recording.stopRecording();
 
-      const result = await api.transcribeSpeech(base64, mimeType);
+      const result = await api.transcribeSpeech(filePath);
       const text = result.text.trim();
       if (text) {
         const audioPath = result.audio_path;
@@ -808,6 +897,10 @@ export function MessageInput({
     setVoiceCancelled(true);
     setTimeout(() => setVoiceCancelled(false), 1500);
   }, [recording]);
+
+  // 能力检测 effect 定义在本函数之前，经 ref 桥接取用最新实现。
+  const cancelVoiceRecordingRef = useRef(cancelVoiceRecording);
+  cancelVoiceRecordingRef.current = cancelVoiceRecording;
 
   useEffect(() => {
     if (interactionVisible && isRecordingRef.current) cancelVoiceRecording();
@@ -1009,40 +1102,77 @@ export function MessageInput({
                   ref={mentionRef}
                   className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
-                  {filteredCandidates.map((c, i) => (
-                    <button
-                      key={c.value}
-                      ref={(el) => { candidateRefs.current[i] = el; }}
-                      className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
-                        i === mentionIndex ? 'bg-accent' : ''
-                      }`}
-                      onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
-                      onMouseEnter={() => setMentionIndex(i)}
-                    >
-                      {c.kind === 'skill' ? (
-                        <Wrench className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : c.kind === 'agent' ? (
-                        <Users className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : c.kind === 'command' ? (
+                  {completionMode === 'slash' ? (
+                    // slash 命令：平铺渲染
+                    filteredCandidates.map((c, i) => (
+                      <button
+                        key={c.value}
+                        ref={(el) => { candidateRefs.current[i] = el; }}
+                        className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                          i === mentionIndex ? 'bg-accent' : ''
+                        }`}
+                        onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
+                        onMouseEnter={() => setMentionIndex(i)}
+                      >
                         <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      ) : (
-                        <Cpu className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                      )}
-                      <div className="min-w-0 flex-1 overflow-hidden">
-                        <div className="flex min-w-0 items-baseline gap-2">
-                          <span className="truncate font-medium">{c.label}</span>
-                          {c.kind === 'skill' && c.value.includes('@') && (
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              {c.value.replace(/^@/, '')}
-                            </span>
-                          )}
+                        <div className="min-w-0 flex-1 overflow-hidden">
+                          <div className="flex min-w-0 items-baseline gap-2">
+                            <span className="truncate font-medium">{c.label}</span>
+                          </div>
+                          <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                            {c.hint}
+                          </span>
                         </div>
-                        <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
-                          {c.hint}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
+                      </button>
+                    ))
+                  ) : (
+                    // mention：按组渲染（组标题 + 组内候选）
+                    (() => {
+                      let flatIndex = 0;
+                      return filteredGroups.map((group) => (
+                        <div key={group.kind}>
+                          <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            {MENTION_GROUP_TITLES[group.kind] ?? group.label}
+                          </div>
+                          {group.candidates.map((c) => {
+                            const i = flatIndex++;
+                            return (
+                              <button
+                                key={c.value}
+                                ref={(el) => { candidateRefs.current[i] = el; }}
+                                className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                                  i === mentionIndex ? 'bg-accent' : ''
+                                }`}
+                                onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
+                                onMouseEnter={() => setMentionIndex(i)}
+                              >
+                                {/* 标记字符与气泡 chip 同源（插件提供，缺省按 kind 回退） */}
+                                <span
+                                  className={`inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border text-[11px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
+                                  aria-hidden="true"
+                                >
+                                  {c.mark?.trim() || mentionMarkFor(c.kind, c.value)}
+                                </span>
+                                <div className="min-w-0 flex-1 overflow-hidden">
+                                  <div className="flex min-w-0 items-baseline gap-2">
+                                    <span className="truncate font-medium">{c.label}</span>
+                                    {c.kind === 'skill' && c.value.includes('@') && (
+                                      <span className="shrink-0 text-xs text-muted-foreground">
+                                        {c.value.replace(/^@/, '')}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                                    {c.hint}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ));
+                    })()
+                  )}
                 </div>
               )}
 

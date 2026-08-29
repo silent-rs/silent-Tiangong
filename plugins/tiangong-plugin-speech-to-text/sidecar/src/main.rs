@@ -1,5 +1,6 @@
 //! Speech-To-Text 独立 sidecar 进程。
 
+mod record_session;
 mod service;
 
 #[tokio::main]

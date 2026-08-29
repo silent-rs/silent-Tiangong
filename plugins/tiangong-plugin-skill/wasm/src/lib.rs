@@ -353,6 +353,7 @@ fn skill_mention_candidates() -> Result<String, PluginError> {
                 } else {
                     skill.description
                 },
+                "mark": "S",
             })
         })
         .collect::<Vec<_>>();

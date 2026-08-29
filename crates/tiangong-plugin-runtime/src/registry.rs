@@ -708,6 +708,25 @@ pub fn invoke_sidecar(
 /// 新装插件的适配器不会进入已有 Core；经注册表聚合则安装/卸载/启停立即
 /// 反映（与 `get_mentions` 对各 Core 的遍历结果一致，因为 adapter 同源）。
 pub fn collect_mention_candidates() -> Vec<tiangong_core::MentionCandidate> {
+    collect_mention_groups(&[], usize::MAX)
+        .into_iter()
+        .flat_map(|group| group.candidates)
+        .collect()
+}
+
+/// 实时聚合全部已加载插件（WASM 与 TS）的 @提及候选，并按 `kind` 分组。
+///
+/// App 层统一对插件提供的候选做分组、白名单过滤与每组数量截断，前端只负责
+/// 按组渲染与组内搜索。插件侧只负责「提供候选」，不实现分组/过滤策略。
+///
+/// 分组规则：
+/// - 按 `kind` 字段分组（skill/mcp/agent/index/tts/stt 等）；
+/// - 按 `kind` 白名单过滤（`allowed_kinds` 为空时不过滤，全部保留）；
+/// - 每组最多 `max_per_group` 个候选（防止 index 文件候选等大列表撑爆 UI）。
+pub fn collect_mention_groups(
+    allowed_kinds: &[String],
+    max_per_group: usize,
+) -> Vec<tiangong_core::MentionGroup> {
     use std::collections::HashSet;
     use tiangong_core::tool_override::MentionCandidateProvider;
 
@@ -745,13 +764,127 @@ pub fn collect_mention_candidates() -> Vec<tiangong_core::MentionCandidate> {
     // 持有（instances 逐次追加），按 (kind, value) 保留首个。
     let mut seen: HashSet<(String, String)> = HashSet::new();
     out.retain(|candidate| seen.insert((candidate.kind.clone(), candidate.value.clone())));
-    out
+
+    group_mention_candidates(out, allowed_kinds, max_per_group)
+}
+
+/// 对候选做「kind 白名单过滤 + 按 kind 分组 + 每组数量截断」的纯函数。
+///
+/// 抽成独立函数便于单元测试；`collect_mention_groups` 只负责从插件收集候选，
+/// 本函数负责展示策略（分组/过滤/截断）。
+fn group_mention_candidates(
+    candidates: Vec<tiangong_core::MentionCandidate>,
+    allowed_kinds: &[String],
+    max_per_group: usize,
+) -> Vec<tiangong_core::MentionGroup> {
+    use std::collections::HashSet;
+
+    let mut out = candidates;
+    // kind 白名单过滤。
+    if !allowed_kinds.is_empty() {
+        let allowed: HashSet<&str> = allowed_kinds.iter().map(String::as_str).collect();
+        out.retain(|candidate| allowed.contains(candidate.kind.as_str()));
+    }
+
+    // 按 kind 分组，保持首次出现顺序；每组按数量上限截断。
+    let mut groups: Vec<tiangong_core::MentionGroup> = Vec::new();
+    let mut index_by_kind: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for candidate in out {
+        let group_index = match index_by_kind.get(&candidate.kind) {
+            Some(&index) => index,
+            None => {
+                let index = groups.len();
+                groups.push(tiangong_core::MentionGroup {
+                    kind: candidate.kind.clone(),
+                    label: candidate.kind.clone(),
+                    candidates: Vec::new(),
+                });
+                index_by_kind.insert(candidate.kind.clone(), index);
+                index
+            }
+        };
+        let group = &mut groups[group_index];
+        if group.candidates.len() < max_per_group {
+            group.candidates.push(candidate);
+        }
+    }
+    groups
 }
 
 pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     let plugins = loaded_plugins().lock().ok()?;
     let loaded = plugins.get(plugin_id)?;
     loaded.enabled.then(|| loaded.directory.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_core::MentionCandidate;
+
+    fn candidate(kind: &str, value: &str) -> MentionCandidate {
+        MentionCandidate {
+            value: value.to_string(),
+            label: value.to_string(),
+            kind: kind.to_string(),
+            hint: String::new(),
+            mark: String::new(),
+        }
+    }
+
+    #[test]
+    fn group_按kind分组保持顺序() {
+        let groups = group_mention_candidates(
+            vec![
+                candidate("skill", "@skill:a"),
+                candidate("mcp", "@mcp:x"),
+                candidate("skill", "@skill:b"),
+            ],
+            &[],
+            usize::MAX,
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].kind, "skill");
+        assert_eq!(groups[0].candidates.len(), 2);
+        assert_eq!(groups[1].kind, "mcp");
+        assert_eq!(groups[1].candidates.len(), 1);
+    }
+
+    #[test]
+    fn group_白名单过滤() {
+        let groups = group_mention_candidates(
+            vec![candidate("skill", "@skill:a"), candidate("mcp", "@mcp:x")],
+            &["skill".to_string()],
+            usize::MAX,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].kind, "skill");
+        assert_eq!(groups[0].candidates.len(), 1);
+    }
+
+    #[test]
+    fn group_每组数量截断() {
+        let groups = group_mention_candidates(
+            vec![
+                candidate("skill", "@skill:a"),
+                candidate("skill", "@skill:b"),
+                candidate("skill", "@skill:c"),
+            ],
+            &[],
+            2,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].candidates.len(), 2);
+        assert_eq!(groups[0].candidates[0].value, "@skill:a");
+        assert_eq!(groups[0].candidates[1].value, "@skill:b");
+    }
+
+    #[test]
+    fn group_空候选返回空() {
+        let groups = group_mention_candidates(Vec::new(), &[], usize::MAX);
+        assert!(groups.is_empty());
+    }
 }
 
 /// 取已启用插件的 manifest 快照（供桥接层做权限校验）。

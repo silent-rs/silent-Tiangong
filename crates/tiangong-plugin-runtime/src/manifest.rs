@@ -66,13 +66,16 @@ pub struct PluginManifest {
 /// @提及声明（`mention` 字段）。
 ///
 /// 候选 value/label 由宿主从插件 id 与 UI 贡献标题推导，插件只声明展示
-/// 副标题（hint）——@skill / @mcp 同款交互，用户点名后 Agent 按插件
-/// 说明（prompt）使用能力。
+/// 副标题（hint）与可选标记（mark）——@skill / @mcp 同款交互，用户点名后
+/// Agent 按插件说明（prompt）使用能力。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MentionManifest {
     /// 候选副标题（一句话能力描述）。
     pub hint: String,
+    /// 候选标记（chip 角标字符，如 `T`）。缺省时前端按 kind 用默认标记。
+    #[serde(default)]
+    pub mark: Option<String>,
 }
 
 /// 能力声明（schema v2 的 `capabilities` 字段）。
@@ -384,6 +387,17 @@ impl PluginManifest {
             && mention.hint.trim().is_empty()
         {
             bail!("插件 {} mention.hint 不能为空", self.id);
+        }
+        if let Some(mention) = &self.mention
+            && let Some(mark) = &mention.mark
+        {
+            let char_count = mark.trim().chars().count();
+            if char_count == 0 || char_count > 4 {
+                bail!(
+                    "插件 {} mention.mark 必须是 1-4 个字符（当前：{mark:?}）",
+                    self.id
+                );
+            }
         }
         if let Some(resources) = &self.resources {
             for directory in resources {
@@ -826,6 +840,21 @@ mod tests {
         // v1 清单拒绝
         let legacy = json.replace("\"schema_version\":2", "\"schema_version\":1");
         let manifest: PluginManifest = serde_json::from_str(&legacy).unwrap();
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn mention_mark_校验() {
+        let json = r#"{"schema_version":2,"id":"m-demo","version":"0.1.0","permissions":[],"mention":{"hint":"问候能力","mark":"TTS"},"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}}"#;
+        // 1-4 字符的 mark 合法
+        parse(json).expect("短 mark 应通过校验");
+        // 超过 4 字符拒绝
+        let bad = json.replace("\"mark\":\"TTS\"", "\"mark\":\"SPEECH\"");
+        let manifest: PluginManifest = serde_json::from_str(&bad).unwrap();
+        assert!(manifest.validate().is_err());
+        // 空白 mark 拒绝
+        let blank = json.replace("\"mark\":\"TTS\"", "\"mark\":\"  \"");
+        let manifest: PluginManifest = serde_json::from_str(&blank).unwrap();
         assert!(manifest.validate().is_err());
     }
 

@@ -1,124 +1,104 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { api } from "@/api/tauri";
 
 export type RecordingState = "idle" | "recording" | "transcribing";
 
-const TARGET_SAMPLE_RATE = 16000;
-
-/** 降采样：从原始采样率降到目标采样率 */
-function downsample(samples: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate) return samples;
-  const ratio = fromRate / toRate;
-  const newLength = Math.round(samples.length / ratio);
-  const result = new Float32Array(newLength);
-  for (let i = 0; i < newLength; i++) {
-    const srcIndex = i * ratio;
-    const low = Math.floor(srcIndex);
-    const high = Math.min(low + 1, samples.length - 1);
-    const frac = srcIndex - low;
-    result[i] = samples[low] * (1 - frac) + samples[high] * frac;
-  }
-  return result;
-}
-
-/** 将 Float32Array PCM 数据编码为 WAV Blob */
-function encodeWav(samples: Float32Array, sampleRate: number): Blob {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  const writeString = (offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
 /**
- * 录音 Hook：使用 AudioContext 录制麦克风音频，编码为 WAV
- * 使用设备默认采样率录制，停止时降采样到 16kHz
+ * 录音 Hook：经 stt 插件 sidecar 录制麦克风音频。
+ *
+ * 录音由 stt 插件 sidecar 负责（record_start / record_stop / record_cancel），
+ * 前端只负责状态编排与计时。停止录音后返回音频文件路径（~/.tiangong/media 下）。
+ *
+ * 防竞态与会话生命周期：
+ * - 会话 ID 由本端生成，**请求发出前**即保存：开始录音的响应若在途中丢失，
+ *   sidecar 可能已实际开始录音——此时用同一 ID 补发取消，不遗留失控进程；
+ * - 停止/取消请求携带会话 ID，sidecar 只对匹配会话生效，快速"取消 → 再录"
+ *   时迟到的旧取消不会误杀新录音；
+ * - 新录音开始前等待上一次取消落地（双保险）；
+ * - 组件卸载时清理计时器并取消进行中的录音，释放麦克风。
  */
 export function useAudioRecording() {
   const [state, setState] = useState<RecordingState>("idle");
   const [duration, setDuration] = useState(0);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const chunksRef = useRef<Float32Array[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const startTimeRef = useRef<number>(0);
+  // 当前录音会话 ID（本端生成），停止/取消请求携带。
+  const sessionIdRef = useRef<string | null>(null);
+  // 上一次取消的落地 Promise：新录音开始前等待它完成。
+  const pendingCancelRef = useRef<Promise<void> | null>(null);
+  // 卸载标记：卸载后不再更新 React 状态。
+  const mountedRef = useRef(true);
+
+  const safeSetState = useCallback((next: RecordingState) => {
+    if (mountedRef.current) setState(next);
+  }, []);
 
   const cleanup = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
-    if (processorRef.current) {
-      processorRef.current.onaudioprocess = null;
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (sourceRef.current) {
-      sourceRef.current.disconnect();
-      sourceRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close().catch(() => {});
-      audioCtxRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    chunksRef.current = [];
   }, []);
+
+  const trackCancel = useCallback((pending: Promise<void>) => {
+    pendingCancelRef.current = pending;
+  }, []);
+
+  // 发送取消请求并登记落地 Promise（幂等：无会话/会话不匹配由 sidecar 静默处理）。
+  const requestCancel = useCallback(
+    (sessionId: string | null) => {
+      const pending = api
+        .cancelRecording(sessionId ?? "")
+        .catch((e) => console.error("取消录音失败:", e))
+        .finally(() => {
+          if (pendingCancelRef.current === pending) pendingCancelRef.current = null;
+        });
+      trackCancel(pending);
+    },
+    [trackCancel],
+  );
+
+  // 卸载清理：清计时器 + 取消进行中的录音，麦克风不因组件卸载而被占用。
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+      const sessionId = sessionIdRef.current;
+      if (sessionId) {
+        sessionIdRef.current = null;
+        requestCancel(sessionId);
+      }
+    };
+  }, [cleanup, requestCancel]);
 
   const startRecording = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      // 使用设备默认采样率，避免初始化延迟
-      const audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      sourceRef.current = source;
-
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-      chunksRef.current = [];
-
-      processor.onaudioprocess = (e) => {
-        const data = e.inputBuffer.getChannelData(0);
-        chunksRef.current.push(new Float32Array(data));
-      };
-
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-
-      setState("recording");
+      // 等待上一次取消落地后再开始新录音，避免旧取消请求迟到误杀新录音。
+      if (pendingCancelRef.current) {
+        await pendingCancelRef.current;
+        pendingCancelRef.current = null;
+      }
+      // 会话 ID 在请求发出前保存：即使响应丢失，也能用同一 ID 补发取消。
+      const sessionId = crypto.randomUUID();
+      sessionIdRef.current = sessionId;
+      try {
+        await api.startRecording(sessionId);
+      } catch (startError) {
+        // sidecar 可能已实际开始录音（响应在返回途中失败）：
+        // 用同一会话 ID 补发取消并等待落地，再清除本地会话。
+        sessionIdRef.current = null;
+        const pending = api
+          .cancelRecording(sessionId)
+          .catch((e) => console.error("启动失败后补发取消失败:", e))
+          .then(() => {
+            if (pendingCancelRef.current === pending) pendingCancelRef.current = null;
+          });
+        trackCancel(pending);
+        throw startError;
+      }
+      safeSetState("recording");
       setDuration(0);
       startTimeRef.current = Date.now();
 
@@ -126,45 +106,39 @@ export function useAudioRecording() {
       timerRef.current = setInterval(() => {
         setDuration(Math.floor((Date.now() - startTime) / 1000));
       }, 200);
-    } catch (e) {
-      console.error("获取麦克风失败:", e);
-      throw new Error("无法访问麦克风，请检查权限设置");
+    } catch (e: any) {
+      console.error("启动录音失败:", e);
+      // 透传 sidecar 的具体原因（如无麦克风设备、已有录音占用），避免统一
+      // 误导为权限问题。
+      throw new Error(e?.message || "无法访问麦克风，请检查权限设置");
     }
-  }, []);
+  }, [safeSetState, trackCancel]);
 
-  const stopRecording = useCallback((): Promise<{ blob: Blob; mimeType: string }> => {
-    return new Promise((resolve, reject) => {
-      const audioCtx = audioCtxRef.current;
-      if (!audioCtx || chunksRef.current.length === 0) {
-        cleanup();
-        reject(new Error("未在录音中"));
-        return;
-      }
-
-      const nativeSampleRate = audioCtx.sampleRate;
-      const totalLength = chunksRef.current.reduce((acc, c) => acc + c.length, 0);
-      const merged = new Float32Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunksRef.current) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      // 降采样到 16kHz
-      const resampled = downsample(merged, nativeSampleRate, TARGET_SAMPLE_RATE);
-      const blob = encodeWav(resampled, TARGET_SAMPLE_RATE);
-
+  const stopRecording = useCallback(async (): Promise<{ filePath: string; mimeType: string }> => {
+    const sessionId = sessionIdRef.current;
+    try {
+      const result = await api.stopRecording(sessionId ?? "");
+      sessionIdRef.current = null;
       cleanup();
-      setState("idle");
-      resolve({ blob, mimeType: "audio/wav" });
-    });
-  }, [cleanup]);
+      safeSetState("idle");
+      return { filePath: result.file_path, mimeType: result.mime_type };
+    } catch (e) {
+      cleanup();
+      safeSetState("idle");
+      throw e;
+    }
+  }, [cleanup, safeSetState]);
 
   const cancelRecording = useCallback(() => {
     cleanup();
-    setState("idle");
+    safeSetState("idle");
     setDuration(0);
-  }, [cleanup]);
+    // 通知 sidecar 终止本次会话（带 ID 校验）并丢弃文件；否则录音进程会一直
+    // 占用麦克风，且下一次录音会报"已有录音在进行中"。失败只记录，不打断取消。
+    const sessionId = sessionIdRef.current;
+    sessionIdRef.current = null;
+    requestCancel(sessionId);
+  }, [cleanup, requestCancel, safeSetState]);
 
   /** 获取从开始录音到现在的精确毫秒数 */
   const getElapsedMs = useCallback(() => {

@@ -16,8 +16,6 @@ use crate::workspace_tabs::WorkspaceTabState as TabState;
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
-use tiangong_toolkit::configure_tokio_no_window;
-
 #[allow(dead_code)]
 fn done_event_keeps_turn_running(
     event: &tiangong_types::StreamEvent,
@@ -1634,48 +1632,6 @@ pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_jso
     state.with_state_read(|_core_state| Ok(Vec::new())).await
 }
 
-/// 语音合成：将文本转换为音频，返回 base64 编码的音频数据
-#[tauri::command]
-pub async fn synthesize_speech(
-    text: String,
-    state: State<'_, TiangongApp>,
-) -> Result<SpeechResult, String> {
-    let models_config = state
-        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
-        .await?;
-    let output = tiangong_core::media::synthesize_speech(
-        &models_config,
-        text,
-        None,
-        None,
-        Some("mp3".to_string()),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let resp = output.response;
-
-    // 将音频保存到临时文件，通过 asset 协议播放
-    let media_dir = tiangong_config::io::storage_root().join("media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
-
-    let ext = match resp.mime_type.as_str() {
-        "audio/mpeg" => "mp3",
-        "audio/wav" => "wav",
-        "audio/opus" => "opus",
-        "audio/aac" => "aac",
-        "audio/flac" => "flac",
-        _ => "mp3",
-    };
-    let file_name = format!("tts_{}.{}", scru128::new(), ext);
-    let file_path = media_dir.join(&file_name);
-    std::fs::write(&file_path, &resp.audio).map_err(|e| format!("音频文件写入失败：{e}"))?;
-
-    Ok(SpeechResult {
-        file_path: file_path.to_string_lossy().to_string(),
-        mime_type: resp.mime_type,
-    })
-}
-
 /// 检查 TTS 能力是否已配置
 #[tauri::command]
 pub async fn has_tts_capability(state: State<'_, TiangongApp>) -> Result<bool, String> {
@@ -1726,134 +1682,6 @@ pub async fn get_available_capabilities(
         .await
 }
 
-/// 语音识别：将音频数据转录为文本，同时保存音频文件
-#[tauri::command]
-pub async fn transcribe_speech(
-    audio_base64: String,
-    mime_type: String,
-    state: State<'_, TiangongApp>,
-) -> Result<TranscribeResult, String> {
-    let models_config = state
-        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
-        .await?;
-
-    // 解码 base64 音频数据
-    use base64::Engine;
-    let audio = base64::engine::general_purpose::STANDARD
-        .decode(&audio_base64)
-        .map_err(|e| format!("音频数据解码失败：{e}"))?;
-
-    // 保存音频文件
-    let media_dir = tiangong_config::io::storage_root().join("media");
-    std::fs::create_dir_all(&media_dir).map_err(|e| format!("创建媒体目录失败：{e}"))?;
-
-    let ext = match mime_type.as_str() {
-        "audio/wav" | "audio/x-wav" => "wav",
-        "audio/mp3" | "audio/mpeg" => "mp3",
-        "audio/ogg" => "ogg",
-        "audio/webm" => "webm",
-        _ => "wav",
-    };
-    let file_name = format!("stt_{}.{}", scru128::new(), ext);
-    let file_path = media_dir.join(&file_name);
-    std::fs::write(&file_path, &audio).map_err(|e| format!("音频文件保存失败：{e}"))?;
-
-    let audio_path = file_path.to_string_lossy().to_string();
-    let output = tiangong_core::media::transcribe_audio(&models_config, audio, mime_type, None)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(TranscribeResult {
-        text: output.response.text,
-        audio_path,
-        duration: output.response.duration,
-    })
-}
-
-/// 获取 TTS 可用音色列表
-#[tauri::command]
-pub async fn list_tts_voices(
-    state: State<'_, TiangongApp>,
-) -> Result<Vec<serde_json::Value>, String> {
-    let models_config = state
-        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
-        .await?;
-    let voices = tiangong_core::media::list_tts_voices(&models_config)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(voices
-        .into_iter()
-        .map(|v| {
-            serde_json::json!({
-                "id": v.id,
-                "name": v.name,
-                "gender": v.gender,
-            })
-        })
-        .collect())
-}
-
-/// 播放本地音频文件（使用系统原生播放器）
-#[tauri::command]
-pub async fn play_audio_file(file_path: String) -> Result<(), String> {
-    let path = std::path::Path::new(&file_path);
-    if !path.exists() {
-        return Err(format!("音频文件不存在：{file_path}"));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = tokio::process::Command::new("afplay");
-        command.arg(&file_path);
-        configure_tokio_no_window(&mut command);
-        command
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = tokio::process::Command::new("powershell");
-        command.args([
-            "-c",
-            &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
-        ]);
-        configure_tokio_no_window(&mut command);
-        command
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let mut command = tokio::process::Command::new("aplay");
-        command.arg(&file_path);
-        configure_tokio_no_window(&mut command);
-        command
-            .output()
-            .await
-            .map_err(|e| format!("播放失败：{e}"))?;
-    }
-
-    Ok(())
-}
-
-/// 停止当前正在播放的音频
-#[tauri::command]
-pub async fn stop_audio() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = tokio::process::Command::new("killall")
-            .arg("afplay")
-            .output()
-            .await;
-    }
-    Ok(())
-}
-
 /// 获取 @提及补全候选列表。
 ///
 /// 经插件注册表实时聚合（WASM 与 TS 插件的 mention 候选）。原取活跃 Core
@@ -1863,6 +1691,23 @@ pub async fn stop_audio() -> Result<(), String> {
 #[tauri::command]
 pub async fn get_mention_candidates() -> Result<Vec<MentionCandidate>, String> {
     Ok(tiangong_plugin_runtime::registry::collect_mention_candidates())
+}
+
+/// 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。
+///
+/// `allowed_kinds` 为空时不过滤（全部保留）；`max_per_group` 为每组候选数量上限。
+/// 前端按组渲染（组标题 + 组内候选），并做组内搜索。
+#[tauri::command]
+pub async fn get_mention_groups(
+    allowed_kinds: Option<Vec<String>>,
+    max_per_group: Option<usize>,
+) -> Result<Vec<MentionGroup>, String> {
+    let allowed_kinds = allowed_kinds.unwrap_or_default();
+    let max_per_group = max_per_group.unwrap_or(50);
+    Ok(tiangong_plugin_runtime::registry::collect_mention_groups(
+        &allowed_kinds,
+        max_per_group,
+    ))
 }
 
 /// 获取输入框缓存。
