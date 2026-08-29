@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-speech-to-text-sidecar"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Speech-To-Text 独立 sidecar（读取模型配置、读取音频、调用 STT 供应商）"
