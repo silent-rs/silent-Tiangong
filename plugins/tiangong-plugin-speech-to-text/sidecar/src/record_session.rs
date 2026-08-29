@@ -234,7 +234,8 @@ fn open_input_stream() -> Result<OpenedStream> {
             mix_to_mono(data, ch, |s: &i16| s.to_sample::<f32>())
         }),
         cpal::SampleFormat::U16 => spawn_stream!(&[u16], |data: &[u16], ch: usize| {
-            mix_to_mono(data, ch, |s: &u16| (s.to_sample::<f32>() - 0.5) * 2.0)
+            // to_sample 的 u16→f32 已是居中映射（32768→0.0），不得再偏移缩放。
+            mix_to_mono(data, ch, |s: &u16| s.to_sample::<f32>())
         }),
         cpal::SampleFormat::I32 => spawn_stream!(&[i32], |data: &[i32], ch: usize| {
             mix_to_mono(data, ch, |s: &i32| s.to_sample::<f32>())
@@ -407,6 +408,43 @@ mod tests {
         std::thread::sleep(Duration::from_millis(800));
         session.cancel();
         assert!(!path.exists(), "取消后录音文件应被删除");
+    }
+
+    /// cpal 的整数样本转换必须是居中映射：静音（中点）为 0，两端 ±1。
+    /// 一旦转换语义变化（如变成 [0,1]），录音将整体失真，此测试守住该契约。
+    #[test]
+    fn 样本转换为居中浮点() {
+        let min = i16::MIN.to_sample::<f32>();
+        let mid = 0i16.to_sample::<f32>();
+        let max = i16::MAX.to_sample::<f32>();
+        assert!((min - (-1.0)).abs() < 1e-6, "i16::MIN -> {min}");
+        assert!(mid.abs() < 1e-6, "i16 0 -> {mid}");
+        assert!((max - 1.0).abs() < 1e-3, "i16::MAX -> {max}");
+
+        let umin = u16::MIN.to_sample::<f32>();
+        let umid = 32768u16.to_sample::<f32>();
+        let umax = u16::MAX.to_sample::<f32>();
+        assert!((umin - (-1.0)).abs() < 1e-6, "u16::MIN -> {umin}");
+        assert!(umid.abs() < 1e-6, "u16 32768 -> {umid}");
+        assert!((umax - 1.0).abs() < 1e-3, "u16::MAX -> {umax}");
+
+        let i32min = i32::MIN.to_sample::<f32>();
+        let i32mid = 0i32.to_sample::<f32>();
+        let i32max = i32::MAX.to_sample::<f32>();
+        assert!((i32min - (-1.0)).abs() < 1e-6, "i32::MIN -> {i32min}");
+        assert!(i32mid.abs() < 1e-6, "i32 0 -> {i32mid}");
+        assert!((i32max - 1.0).abs() < 1e-3, "i32::MAX -> {i32max}");
+    }
+
+    /// u16 设备路径的混音转换：静音样本应转换为 0（不产生直流偏移）。
+    #[test]
+    fn u16静音样本混音为零() {
+        let silence = vec![32768u16; 64];
+        let mono = mix_to_mono(&silence, 2, |s: &u16| s.to_sample::<f32>());
+        assert_eq!(mono.len(), 32);
+        for value in mono {
+            assert!(value.abs() < 1e-6, "静音样本被转为 {value}");
+        }
     }
 
     #[test]
