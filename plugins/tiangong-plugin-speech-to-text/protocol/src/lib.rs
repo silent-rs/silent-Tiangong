@@ -78,12 +78,17 @@ pub struct RecordStartRequest {
     /// 目标采样率（Hz），默认 16000。
     #[serde(default)]
     pub sample_rate: Option<u32>,
+    /// 录音会话 ID：由调用方生成并传入（非空）。
+    ///
+    /// 编号在请求发出前就已确定，停止/取消随后携带同一编号即可校验身份，
+    /// 不依赖本请求的返回时序——即使响应丢失或延迟，控制请求的语义依然明确。
+    pub session_id: String,
 }
 
 /// 开始录音响应。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordStartResponse {
-    /// 录音会话 ID（用于停止录音）。
+    /// 录音会话 ID（回显请求传入的值，确认 sidecar 已接受）。
     pub session_id: String,
 }
 

@@ -1066,9 +1066,9 @@ export const api = {
     api.bridgeCall('speech-to-text', 'plugin.transcribe', JSON.stringify({ file_path: filePath }))
       .then((raw) => JSON.parse(raw)),
 
-  /** 开始录音（经 stt 插件）。返回录音会话 ID。 */
-  startRecording: (): Promise<{ session_id: string }> =>
-    api.bridgeCall('speech-to-text', 'plugin.record_start', '{}')
+  /** 开始录音（经 stt 插件）。session_id 由调用方生成传入，后续停止/取消携带同一编号。 */
+  startRecording: (sessionId: string): Promise<{ session_id: string }> =>
+    api.bridgeCall('speech-to-text', 'plugin.record_start', JSON.stringify({ session_id: sessionId }))
       .then((raw) => JSON.parse(raw)),
 
   /** 停止录音（经 stt 插件）。返回音频文件路径。session_id 为开始录音返回的会话 ID。 */

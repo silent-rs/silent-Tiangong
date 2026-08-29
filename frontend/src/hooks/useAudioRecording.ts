@@ -39,8 +39,11 @@ export function useAudioRecording() {
         await pendingCancelRef.current;
         pendingCancelRef.current = null;
       }
-      const { session_id } = await api.startRecording();
-      sessionIdRef.current = session_id;
+      // 会话 ID 由调用方生成：编号在请求发出前就已确定，停止/取消随后携带
+      // 同一编号即可校验身份，不依赖开始录音响应的返回时序。
+      const sessionId = crypto.randomUUID();
+      await api.startRecording(sessionId);
+      sessionIdRef.current = sessionId;
       setState("recording");
       setDuration(0);
       startTimeRef.current = Date.now();

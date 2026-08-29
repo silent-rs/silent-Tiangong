@@ -160,8 +160,8 @@ impl UiGuest for Component {
                     .map_err(|e| plugin_err(format!("序列化 transcribe 响应失败: {e}")))?
             }
             "record_start" => {
-                let req: RecordStartRequest =
-                    serde_json::from_str(&request.payload).unwrap_or_default();
+                let req: RecordStartRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析 record_start 请求失败: {e}")))?;
                 let response: RecordStartResponse = sidecar_client::invoke::<RecordStart>(&req)
                     .map_err(|e| plugin_err(format!("开始录音失败: {e}")))?;
                 serde_json::to_string(&response)

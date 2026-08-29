@@ -216,8 +216,13 @@ fn ensure_recording_tool_available() -> Result<()> {
     Ok(())
 }
 
-/// 开始录音：启动系统录音命令，返回会话 ID。
+/// 开始录音：使用调用方传入的会话 ID，启动系统录音命令。
 fn record_start(req: RecordStartRequest) -> Result<RecordStartResponse> {
+    let session_id = req.session_id.trim().to_string();
+    if session_id.is_empty() {
+        anyhow::bail!("record_start 缺少 session_id（由调用方生成并传入）");
+    }
+
     let mut guard = RECORDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -247,7 +252,6 @@ fn record_start(req: RecordStartRequest) -> Result<RecordStartResponse> {
         .spawn()
         .map_err(|e| anyhow::anyhow!("启动录音失败：{e}"))?;
 
-    let session_id = format!("rec-{}", scru128::new());
     *guard = Some(RecordSession {
         child,
         file_path,
