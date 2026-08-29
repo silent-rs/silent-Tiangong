@@ -3,13 +3,14 @@
 //! 布局（storage_root 下）：`sandbox/versions/<版本>/` 存放下载版制品与
 //! 伴生签名，`sandbox/active` 是激活版本指针（内容为版本号）。
 //!
-//! 解析优先级：
+//! 解析优先级：调试构建先使用宿主同目录的本地构建，确保源码改动不会
+//! 被旧 active 缓存遮蔽；正式构建仍按以下顺序解析：
 //! 1. active 指向的下载版（每次启动前仍由宿主逐次验签）——仅当版本
 //!    单调（≥ 内置基准版本）且制品与签名齐备时生效；active 是用户可写
 //!    文件，指向旧版或制品缺失时解析落空，防降级与指针篡改。
-//! 2. 宿主可执行文件同目录的同名程序（可选来源：开发环境构建产物，
-//!    或集成方选择随包分发时生效）；不随包分发时无此来源，Launcher
-//!    由在线更新链获取，未就绪前宿主按 fail-closed 拒绝沙箱执行。
+//! 2. 宿主可执行文件同目录的同名程序（仅开发环境：cargo build 产物
+//!    配 sign-sandbox 签名）。Launcher 不随 App 分发，正式环境纯在线
+//!    更新链获取；未就绪前宿主按 fail-closed 拒绝沙箱执行。
 //!
 //! 版本单调的基准是编译期 crate 版本（builtin_version）：它是宿主
 //! 进程内策略编译器所配套的最低 Launcher 版本，与磁盘上是否存在
@@ -32,13 +33,21 @@ pub fn builtin_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// 解析当前应使用的 Launcher。优先在线更新激活的下载版（版本单调且
-/// 制品齐备），否则内置版。
+/// 解析当前应使用的 Launcher。调试构建优先同目录本地版，正式构建优先
+/// 在线更新激活的下载版；候选仍需由调用方在每次启动前验签。
 pub fn resolve_sandbox_binary(storage_root: &Path) -> Option<PathBuf> {
-    if let Some(downloaded) = resolve_downloaded(storage_root) {
-        return Some(downloaded);
+    select_sandbox_binary(resolve_downloaded(storage_root), builtin_sandbox())
+}
+
+fn select_sandbox_binary(downloaded: Option<PathBuf>, local: Option<PathBuf>) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        local.or(downloaded)
     }
-    builtin_sandbox()
+    #[cfg(not(debug_assertions))]
+    {
+        downloaded.or(local)
+    }
 }
 
 /// 解析在线更新激活的下载版；任何不满足（无指针、版本旧、制品缺、
@@ -170,16 +179,16 @@ mod tests {
         std::fs::write(signature_path(&binary), b"sig").unwrap();
         std::fs::create_dir_all(&launcher_dir).unwrap();
         std::fs::write(launcher_dir.join(LAUNCHER_ACTIVE_FILE), "999.0.0").unwrap();
-        assert_eq!(resolve_sandbox_binary(root.path()), Some(binary.clone()));
+        assert_eq!(resolve_downloaded(root.path()), Some(binary.clone()));
 
         // 指向低于内置版本的旧版（防降级）：回退内置。
         std::fs::write(launcher_dir.join(LAUNCHER_ACTIVE_FILE), "0.0.1").unwrap();
-        assert_ne!(resolve_sandbox_binary(root.path()), Some(binary.clone()));
+        assert_ne!(resolve_downloaded(root.path()), Some(binary.clone()));
 
         // 制品缺失：回退内置。
         std::fs::write(launcher_dir.join(LAUNCHER_ACTIVE_FILE), "999.0.0").unwrap();
         std::fs::remove_file(&binary).unwrap();
-        assert_ne!(resolve_sandbox_binary(root.path()), Some(binary.clone()));
+        assert_ne!(resolve_downloaded(root.path()), Some(binary.clone()));
 
         // 版本串带路径注入字符：回退内置。
         std::fs::write(&binary, b"launcher").unwrap();
@@ -189,14 +198,25 @@ mod tests {
             "999.0.0/../../evil",
         )
         .unwrap();
-        assert_ne!(resolve_sandbox_binary(root.path()), Some(binary.clone()));
+        assert_ne!(resolve_downloaded(root.path()), Some(binary.clone()));
 
         // 符号链接制品：回退内置。
         std::fs::remove_file(&binary).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/passwd", &binary).unwrap();
         std::fs::write(launcher_dir.join(LAUNCHER_ACTIVE_FILE), "999.0.0").unwrap();
-        assert_ne!(resolve_sandbox_binary(root.path()), Some(binary.clone()));
+        assert_ne!(resolve_downloaded(root.path()), Some(binary.clone()));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_build_prefers_local_launcher_over_active_cache() {
+        let local = PathBuf::from("/debug/tiangong-sandbox");
+        let downloaded = PathBuf::from("/storage/sandbox/versions/999.0.0/tiangong-sandbox");
+        assert_eq!(
+            select_sandbox_binary(Some(downloaded), Some(local.clone())),
+            Some(local)
+        );
     }
 
     #[test]

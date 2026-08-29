@@ -25,14 +25,11 @@ pub enum SandboxAvailability {
 pub fn availability() -> SandboxAvailability {
     #[cfg(target_os = "macos")]
     {
-        if !std::path::Path::new("/usr/bin/sandbox-exec").is_file() {
-            SandboxAvailability::Unsupported("未找到 /usr/bin/sandbox-exec".into())
-        } else if seatbelt::seatbelt_available() {
-            SandboxAvailability::Available
-        } else {
-            SandboxAvailability::EnvironmentRestricted(
-                "当前宿主环境无法嵌套应用 macOS Seatbelt".into(),
-            )
+        match seatbelt::seatbelt_probe() {
+            Ok(()) => SandboxAvailability::Available,
+            Err(detail) => SandboxAvailability::EnvironmentRestricted(format!(
+                "当前宿主环境无法嵌套应用 macOS Seatbelt（{detail}）"
+            )),
         }
     }
     #[cfg(target_os = "linux")]
@@ -136,15 +133,13 @@ mod tests {
     /// （如受限 CI 外壳、嵌套终端），sandbox-exec 无法再次应用沙箱，
     /// 此时跳过真实拦截测试——逻辑由 profile 快照测试覆盖。
     fn can_apply_seatbelt() -> bool {
-        let ok = std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-p")
-            .arg("(version 1)")
-            .arg("/usr/bin/true")
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
+        let result = seatbelt::seatbelt_probe();
+        let ok = result.is_ok();
         if !ok {
-            eprintln!("跳过：当前环境已在沙箱内，无法嵌套应用 Seatbelt");
+            eprintln!(
+                "跳过：当前环境已在沙箱内，无法嵌套应用 Seatbelt：{}",
+                result.unwrap_err()
+            );
         }
         ok
     }

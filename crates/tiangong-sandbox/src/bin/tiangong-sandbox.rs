@@ -59,6 +59,11 @@ struct LaunchRequest {
     program_sha256: String,
     #[serde(default)]
     args: Vec<String>,
+    /// 解释器形态：目标程序是宿主白名单解析的解释器（node/python），
+    /// 入口脚本与参数在 args 中。此时目标不在插件目录内、无插件清单，
+    /// 校验退化为路径形态 + 摘要 + 权限。
+    #[serde(default)]
+    interpreter: bool,
 }
 
 fn main() {
@@ -333,9 +338,6 @@ fn validate_policy_paths(request: &LaunchRequest) -> Result<()> {
 }
 
 fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
-    if request.plugin_id != "command" {
-        bail!("Launcher 当前只允许启动 command 插件");
-    }
     let root = Path::new(&request.program_root);
     let program = Path::new(&request.program);
     if !root.is_absolute() || !program.is_absolute() {
@@ -356,7 +358,18 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
     let canonical_root = std::fs::canonicalize(root).context("规范化插件根目录失败")?;
     let canonical_program = std::fs::canonicalize(program).context("规范化目标程序失败")?;
     if canonical_program == canonical_root || !canonical_program.starts_with(&canonical_root) {
-        bail!("目标程序不在 command 插件权威目录内");
+        bail!("目标程序不在插件权威目录内");
+    }
+
+    // 解释器形态：目标是宿主白名单解析的解释器程序（入口脚本在 args），
+    // 无插件清单可比对；校验到路径形态与摘要即止。
+    if request.interpreter {
+        let actual_sha256 = sha256_file(&canonical_program)?;
+        if !request.program_sha256.eq_ignore_ascii_case(&actual_sha256) {
+            bail!("目标程序摘要不匹配");
+        }
+        validate_unix_permissions(&canonical_program, &program_metadata)?;
+        return Ok(canonical_program);
     }
 
     let manifest_path = canonical_root.join("plugin.json");
@@ -365,10 +378,9 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
     if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
         bail!("插件清单必须是实际普通文件");
     }
-    let manifest: TargetManifest = serde_json::from_slice(
-        &std::fs::read(&manifest_path).context("读取 command 插件清单失败")?,
-    )
-    .context("解析 command 插件清单失败")?;
+    let manifest: TargetManifest =
+        serde_json::from_slice(&std::fs::read(&manifest_path).context("读取插件清单失败")?)
+            .context("解析插件清单失败")?;
     if manifest.id != request.plugin_id {
         bail!("Launcher 请求与插件清单身份不一致");
     }
@@ -388,7 +400,7 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
     let expected_program =
         std::fs::canonicalize(expected_program).context("解析清单声明的 sidecar 失败")?;
     if canonical_program != expected_program {
-        bail!("目标程序与 command 插件清单声明不一致");
+        bail!("目标程序与插件清单声明不一致");
     }
 
     let actual_sha256 = sha256_file(&canonical_program)?;
@@ -1943,6 +1955,7 @@ mod tests {
             program_root: root.display().to_string(),
             program_sha256: String::new(),
             args: Vec::new(),
+            interpreter: false,
         }
     }
 
@@ -1955,7 +1968,55 @@ mod tests {
         std::fs::write(&outside, "not executable").unwrap();
 
         let error = validate_target(&request(&root, &root.join("../outside-sidecar"))).unwrap_err();
-        assert!(error.to_string().contains("不在 command 插件权威目录内"));
+        assert!(error.to_string().contains("不在插件权威目录内"));
+    }
+
+    /// 全量沙箱化：非 command 插件不再被白名单拒绝（错误面收敛到
+    /// 清单与摘要校验）；解释器形态走退化校验链。
+    #[test]
+    fn any_plugin_id_is_accepted_beyond_command() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("fs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("plugin.json"),
+            r#"{"id":"fs","sidecar":{"binary":"sidecar"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("sidecar"), "stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("sidecar"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let mut req = request(&root, &root.join("sidecar"));
+        req.plugin_id = "fs".to_string();
+        // 无清单比对所需的完整字段时，错误应指向清单链路而非白名单。
+        let error = validate_target(&req).unwrap_err();
+        assert!(!error.to_string().contains("只允许启动"));
+    }
+
+    #[test]
+    fn interpreter_target_bypasses_manifest_check() {
+        let fixture = tempfile::tempdir().unwrap();
+        let bin_dir = fixture.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let interpreter_bin = bin_dir.join("node");
+        std::fs::write(&interpreter_bin, "stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&interpreter_bin, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let mut req = request(&bin_dir, &interpreter_bin);
+        req.interpreter = true;
+        // 解释器形态没有 plugin.json，校验应走到摘要比对而非清单失败。
+        let error = validate_target(&req).unwrap_err();
+        assert!(error.to_string().contains("摘要不匹配"));
     }
 
     #[test]
