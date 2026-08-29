@@ -75,9 +75,6 @@ pub struct Empty {}
 /// 开始录音请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordStartRequest {
-    /// 目标采样率（Hz），默认 16000。
-    #[serde(default)]
-    pub sample_rate: Option<u32>,
     /// 录音会话 ID：由调用方生成并传入（非空）。
     ///
     /// 编号在请求发出前就已确定，停止/取消随后携带同一编号即可校验身份，

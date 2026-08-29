@@ -25,7 +25,6 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macr
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 scru128 = { workspace = true }
-
-# Unix 下向录音进程发 SIGINT 优雅终止（std::process::Child 仅支持强杀）。
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+# 原生录音：跨平台麦克风采集（CoreAudio/WASAPI/ALSA）与 WAV 落盘。
+cpal = { workspace = true }
+hound = { workspace = true }

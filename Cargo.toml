@@ -194,6 +194,10 @@ scru128 = "4"
 semver = "1"
 serde = "1"
 serde_json = "1"
+# 原生音频采集（STT 录音）：跨平台麦克风输入（CoreAudio/WASAPI/ALSA）。
+cpal = "0.15"
+# WAV 读写：录音落盘（正常收尾保证头部长度完整，无需手工修复）。
+hound = "3"
 serial_test = "4"
 tar = "0.4"
 zstd = "0.13"
