@@ -88,32 +88,14 @@ impl SandboxPolicy {
     /// 加入宿主权威的默认敏感读取拒绝项。
     ///
     /// 覆盖常见凭据位置：SSH/AWS/GPG/Kubernetes/Docker/Azure/GCP/GitHub CLI
-    /// 与 `.netrc`。天工数据根下的密钥、信任库与模型/MCP 凭据文件同样拒绝；
-    /// 工作区位于数据根之下，因此按敏感件精确拒绝而不是遮蔽整个数据根。
+    /// 与 `.netrc`。天工数据根下的配置、密钥与信任件同样拒绝读取。
     pub fn protect_user_credentials(&mut self, storage_root: &Path) {
         if let Some(home) = user_home_dir() {
-            for path in [
-                ".ssh",
-                ".aws",
-                ".gnupg",
-                ".kube",
-                ".docker",
-                ".azure",
-                ".config/gcloud",
-                ".config/gh",
-                ".netrc",
-            ] {
+            for path in home_credential_relative_paths() {
                 self.denied_read_paths.push(home.join(path));
             }
         }
-        for path in [
-            "keys",
-            "trust.db",
-            "mcp.json",
-            "models.json",
-            "server.json",
-            "app.json",
-        ] {
+        for path in protected_storage_relative_paths() {
             self.denied_read_paths.push(storage_root.join(path));
         }
     }
@@ -160,10 +142,10 @@ impl SandboxPolicy {
                     .any(|root| root != protected && root.starts_with(protected))
             })
             .collect::<Vec<_>>();
-        let git = canonical_or_keep(&self.workspace.join(".git"));
-        if git.exists() {
-            paths.push(git);
-        }
+        // 工作区的 .git 防篡改无条件声明：沙箱策略在进程启动时定死，
+        // 若按"存在才加"生成，连接先建立、.git 后出现的时序会整段失防
+        //（规则不存在 ≠ 拒绝）。路径可预知，无需存在性探测。
+        paths.push(canonical_or_keep(&self.workspace.join(".git")));
         paths.sort();
         paths.dedup();
         paths
@@ -183,7 +165,8 @@ impl SandboxPolicy {
     }
 }
 
-fn user_home_dir() -> Option<PathBuf> {
+/// 当前用户家目录（绝对路径，解析失败返回 None）。
+pub fn user_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     let value = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -195,6 +178,59 @@ fn user_home_dir() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let value = std::env::var_os("HOME").map(PathBuf::from);
     value.filter(|path| path.is_absolute())
+}
+
+/// 家目录下必须保持只读的凭据相对路径清单：沙箱禁读（deny-read）与
+/// 家目录作工作区时的写保护（protected）共用同一份权威清单。
+pub fn home_credential_relative_paths() -> [&'static str; 9] {
+    [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        ".azure",
+        ".config/gcloud",
+        ".config/gh",
+        ".netrc",
+    ]
+}
+
+/// 家目录下凭据路径的绝对形态（家目录不可解析时为空）。
+pub fn home_credential_paths() -> Vec<PathBuf> {
+    let Some(home) = user_home_dir() else {
+        return Vec::new();
+    };
+    home_credential_relative_paths()
+        .iter()
+        .map(|path| home.join(path))
+        .collect()
+}
+
+/// storage_root 下对 sidecar 读写双禁的配置与信任件（相对路径段）：
+/// 模型/服务/MCP/应用配置（app.json 含沙箱开关本身）、签名密钥与信任
+/// 库、以及 Launcher 目录（沙箱防"被约束者"的核心——沙箱内进程必须
+/// 够不到 Launcher 与信任锚，防替换逃逸）。其余存储目录整体开放可写。
+pub fn protected_storage_relative_paths() -> [&'static str; 7] {
+    [
+        "keys",
+        "trust.db",
+        "mcp.json",
+        "models.json",
+        "server.json",
+        "app.json",
+        "sandbox",
+    ]
+}
+
+/// protected_paths 用的绝对清单：存储配置件 + 家目录凭据（读写双禁）。
+pub fn protected_paths_for(storage_root: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = protected_storage_relative_paths()
+        .iter()
+        .map(|path| storage_root.join(path))
+        .collect();
+    paths.extend(home_credential_paths());
+    paths
 }
 
 /// 规范化路径：能解析则用真实路径（macOS 上 `/var` → `/private/var`），
