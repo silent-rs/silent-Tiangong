@@ -1,9 +1,9 @@
 //! macOS Seatbelt profile 编译器。
 //!
 //! 双语义适配：macOS 26（darwin 25）起未提及的操作类别不再默认放行，
-//! 且通配读放行会覆盖定点禁读；旧系统保持 allow-by-default。按内核版本
-//! 分别生成：新系统显式放行基础能力并以细分读类别保护敏感路径，旧系统
-//! 保持既有的通配规则。
+//! 且通配读放行会覆盖定点禁读；旧系统保持 allow-by-default。语义按
+//! 运行时实测判定（版本号不可靠）：新系统显式放行基础能力并以细分读
+//! 类别保护敏感路径，旧系统保持既有的通配规则。
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -57,28 +57,23 @@ pub fn seatbelt_probe() -> Result<(), String> {
         .clone()
 }
 
-/// 内核主版本（kern.osrelease 首段，如 "25.5.2" → 25）；读取失败按 0 处理。
-fn darwin_major() -> u64 {
-    std::process::Command::new("/usr/sbin/sysctl")
-        .arg("-n")
-        .arg("kern.osrelease")
-        .output()
-        .ok()
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .split('.')
-                .next()
-                .and_then(|major| major.parse().ok())
-        })
-        .unwrap_or(0)
-}
-
 /// macOS 26（darwin 25）起未提及的操作类别不再默认放行，必须显式列出
 /// sidecar 所需的基础能力，并避免通配读规则覆盖定点禁读。
+///
+/// 按内核版本判断不可靠：GitHub macos-15 runner（darwin 24）实测同样
+/// 未提及即拒（execvp EPERM，退出码 71），按版本走 legacy 分支导致 CI
+/// 全部真实执行测试失败。改为运行时实测语义——不放行 exec 的读放行
+/// profile 若能执行，说明未提及类别默认放行（旧语义），反之新语义。
 fn requires_explicit_categories() -> bool {
     static SEMANTICS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SEMANTICS.get_or_init(|| darwin_major() >= 25)
+    *SEMANTICS.get_or_init(|| {
+        std::process::Command::new(SEATBELT_BIN)
+            .arg("-p")
+            .arg("(version 1)(allow file-read*)")
+            .arg("/usr/bin/true")
+            .output()
+            .is_ok_and(|out| !out.status.success())
+    })
 }
 
 /// 编译为 SBPL profile 文本。
