@@ -10,7 +10,6 @@ tiangong-llm = { workspace = true }
 tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
-base64 = { workspace = true }
 chrono = { workspace = true, default-features = false, features = [
     "std",
     "clock",
@@ -18,34 +17,14 @@ chrono = { workspace = true, default-features = false, features = [
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-async-openai = { workspace = true, features = [
-    "byot",
-    "chat-completion",
-    "model",
-] }
-backoff = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "time",
-    "process",
     "io-util",
     "sync",
 ] }
-rmcp = { workspace = true, default-features = false, features = [
-    "client",
-    "transport-child-process",
-    "transport-streamable-http-client-reqwest",
-] }
-reqwest = { workspace = true, default-features = false, features = [
-    "blocking",
-    "rustls",
-] }
-futures-util = { workspace = true }
-http = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
 typed-builder = { workspace = true }
-zip = { workspace = true, default-features = false, features = ["deflate"] }
 tiangong-media = { workspace = true }
 tempfile = { workspace = true }
 
