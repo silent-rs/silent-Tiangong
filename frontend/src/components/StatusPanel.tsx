@@ -61,7 +61,19 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   const [hasTts, setHasTts] = useState(false);
 
   useEffect(() => {
-    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+    const refresh = () => api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+    refresh();
+    // 插件安装/启用/禁用后按钮状态即时刷新，而不是只在挂载时检查一次。
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    api.onPluginsChanged(refresh).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);

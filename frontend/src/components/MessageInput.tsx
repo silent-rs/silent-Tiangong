@@ -227,7 +227,27 @@ export function MessageInput({
   const isRecordingRef = useRef(false);
 
   useEffect(() => {
-    api.hasSttCapability().then(setHasStt).catch(() => setHasStt(false));
+    const refresh = () =>
+      api
+        .hasSttCapability()
+        .then((available) => {
+          setHasStt(available);
+          // STT 插件被禁用/卸载时终止进行中的录音，麦克风不再被占用。
+          if (!available && isRecordingRef.current) cancelVoiceRecordingRef.current();
+        })
+        .catch(() => setHasStt(false));
+    refresh();
+    // 插件安装/启用/禁用后录音入口即时刷新，而不是只在挂载时检查一次。
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    api.onPluginsChanged(refresh).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // 当前会话是否空闲
@@ -270,8 +290,9 @@ export function MessageInput({
   // ===== 文字模式相关 =====
   const loadCandidates = useCallback(async () => {
     try {
-      // 后端默认每组只取 50 条且截断发生在搜索之前（被截断的候选永远搜不到），
-      // 这里取大的组上限让前端搜索基于全量候选，仅渲染时截断。
+      // 接口定义每组候选上限为 1000（防止单个插件撑爆传输与渲染）；后端
+      // 截断发生在前端搜索之前，超过上限的候选不可搜。搜索在全量已收候选
+      // 上进行，渲染时每组再截断展示。
       const groups = await api.getMentionGroups(undefined, 1000);
       setMentionGroups(groups);
       // 注册插件提供的标记字符：编辑器 chip 与消息气泡从 token 重建时查表。
@@ -876,6 +897,10 @@ export function MessageInput({
     setVoiceCancelled(true);
     setTimeout(() => setVoiceCancelled(false), 1500);
   }, [recording]);
+
+  // 能力检测 effect 定义在本函数之前，经 ref 桥接取用最新实现。
+  const cancelVoiceRecordingRef = useRef(cancelVoiceRecording);
+  cancelVoiceRecordingRef.current = cancelVoiceRecording;
 
   useEffect(() => {
     if (interactionVisible && isRecordingRef.current) cancelVoiceRecording();

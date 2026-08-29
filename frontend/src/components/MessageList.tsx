@@ -151,9 +151,20 @@ export function MessageList() {
     };
   }, []);
 
-  // 检查 TTS 能力
+  // 检查 TTS 能力（插件启停后即时刷新）
   useEffect(() => {
-    api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+    const refresh = () => api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
+    refresh();
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    api.onPluginsChanged(refresh).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // 切换会话时关闭搜索
