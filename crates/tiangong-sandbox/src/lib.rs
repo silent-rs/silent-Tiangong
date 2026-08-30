@@ -9,10 +9,9 @@
 //! - 工作区快照恢复 → feature/workspace-snapshots
 //! - 无沙箱审批升级 → feature/sandbox-escalation
 
-pub mod host_policy;
-pub mod launcher_manager;
 mod path;
 pub mod sandbox;
+pub mod update;
 
 /// Windows 上通过进程环境传递一次性 Launcher 请求；Launcher 启动目标前会移除。
 /// Unix 使用 fd3，不使用该变量。
@@ -31,7 +30,6 @@ pub const LAUNCHER_PROTOCOL_VERSION: u32 = 1;
 /// 只接受相等值，杜绝新旧策略语义错位。
 pub const LAUNCHER_POLICY_SCHEMA: u32 = 2;
 
-pub use host_policy::{HostExecutionPolicy, SidecarTransport};
 pub use path::canonicalize_path;
 pub use sandbox::{
     SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits, SandboxedProgram,

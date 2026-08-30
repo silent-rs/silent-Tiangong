@@ -19,7 +19,10 @@
 //! - `policy_schema`：策略字段与安全语义。
 //!
 //! 子命令：
-//! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项）。
+//! - `--self-check`：激活前自检（平台探测 + 真实拦截核心项）；
+//! - `check-update`：只检查当前 Sandbox 是否有官方更新；
+//! - `update`：由 Sandbox 自身下载、验签、自检并更新当前程序；
+//! - `update --root <目录>`：将最新版安装到指定绝对目录。
 
 #[cfg(any(unix, windows))]
 use std::io::Read;
@@ -46,6 +49,9 @@ const POLICY_FD: i32 = 3;
 const EXIT_SANDBOX_UNAVAILABLE: i32 = 78;
 /// 自检专用：当前宿主环境无法验证（如嵌套沙箱），非制品缺陷。
 const EXIT_ENV_UNVERIFIABLE: i32 = 79;
+/// 自检 `.git` 可写探测标记（用户裁定 2026-08-30：agent 需要完整 git
+/// 工作流，`.git` 与源码同等对待）。父/子进程探针共用，重复探测幂等。
+const GIT_METADATA_PROBE_MARKER: &str = "GITWRITE";
 
 /// Launcher 启动指令（宿主经 fd3 写入）。
 #[derive(Debug, Deserialize)]
@@ -68,6 +74,47 @@ struct LaunchRequest {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--version" | "version")
+    ) {
+        println!("tiangong-sandbox {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
+        println!(
+            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox check-update [--manifest-url <https-url>]\n  tiangong-sandbox update [--manifest-url <https-url>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>]",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
+    #[cfg(windows)]
+    if args.first().map(String::as_str) == Some("complete-update") {
+        if let Err(error) = run_windows_update_completer(&args) {
+            eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
+            std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+        }
+        return;
+    }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("check-update" | "update")
+    ) {
+        match run_self_update(&args) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "launcher": "tiangong-sandbox",
+                        "product_version": env!("CARGO_PKG_VERSION"),
+                        "error": format!("{error:#}"),
+                    })
+                );
+                std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+            }
+        }
+    }
     if args.first().map(String::as_str) == Some("--self-check-network-probe") {
         let address = args.get(1).map(String::as_str).unwrap_or_default();
         std::process::exit(run_network_probe(address));
@@ -128,6 +175,63 @@ fn main() {
         eprintln!("{payload}");
         std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
     }
+}
+
+fn run_self_update(args: &[String]) -> Result<()> {
+    let command = args.first().map(String::as_str).context("缺少升级命令")?;
+    let mut root = None;
+    let mut manifest = tiangong_sandbox::update::DEFAULT_MANIFEST_URL.to_string();
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--root" if command == "update" => {
+                index += 1;
+                root = Some(PathBuf::from(args.get(index).context("--root 缺少值")?));
+            }
+            "--manifest-url" => {
+                index += 1;
+                manifest = args.get(index).context("--manifest-url 缺少值")?.clone();
+            }
+            unknown => bail!("未知升级参数: {unknown}"),
+        }
+        index += 1;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("创建 Sandbox 升级运行时失败")?;
+    let updater = tiangong_sandbox::update::SelfUpdater::new(manifest)?;
+    let status = runtime.block_on(async {
+        match (command, root) {
+            ("check-update", None) => updater.check().await,
+            ("update", None) => updater.update_current().await,
+            ("update", Some(directory)) => updater.install_to(&directory).await,
+            _ => unreachable!(),
+        }
+    })?;
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_windows_update_completer(args: &[String]) -> Result<()> {
+    let value = |name: &str| -> Result<&str> {
+        let index = args
+            .iter()
+            .position(|arg| arg == name)
+            .with_context(|| format!("缺少 {name}"))?;
+        args.get(index + 1)
+            .map(String::as_str)
+            .with_context(|| format!("{name} 缺少值"))
+    };
+    tiangong_sandbox::update::complete_windows_update(
+        value("--parent-pid")?.parse()?,
+        Path::new(value("--source")?),
+        Path::new(value("--signature-source")?),
+        Path::new(value("--target")?),
+        Path::new(value("--signature-target")?),
+        Path::new(value("--cleanup")?),
+    )
 }
 
 fn run_launch() -> Result<()> {
@@ -513,7 +617,7 @@ fn run_self_check() -> i32 {
         "outside_write_blocked",
         "outside_delete_blocked",
         "outside_config_write_blocked",
-        "git_metadata_write_blocked",
+        "git_metadata_write",
         "network_blocked",
         "sensitive_read_blocked",
         "symlink_escape_blocked",
@@ -608,7 +712,7 @@ struct WindowsProbeReport {
     outside_read_blocked: bool,
     outside_delete_blocked: bool,
     outside_config_write_blocked: bool,
-    git_metadata_write_blocked: bool,
+    git_metadata_write: bool,
     git_metadata_readable: bool,
     network_blocked: bool,
     sensitive_read_blocked: bool,
@@ -649,10 +753,7 @@ fn run_windows_enforcement_probes(report: &mut serde_json::Map<String, serde_jso
                     "outside_config_write_blocked",
                     probe.outside_config_write_blocked,
                 ),
-                (
-                    "git_metadata_write_blocked",
-                    probe.git_metadata_write_blocked,
-                ),
+                ("git_metadata_write", probe.git_metadata_write),
                 ("git_metadata_readable", probe.git_metadata_readable),
                 ("network_blocked", probe.network_blocked),
                 ("sensitive_read_blocked", probe.sensitive_read_blocked),
@@ -793,8 +894,8 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
     probe.outside_delete_blocked &= outside_delete.join("keep").is_file();
     probe.outside_config_write_blocked &=
         std::fs::read_to_string(&outside_config).is_ok_and(|value| value == "safe\n");
-    probe.git_metadata_write_blocked &=
-        std::fs::read_to_string(&git_config).is_ok_and(|value| value == "safe\n");
+    probe.git_metadata_write &=
+        std::fs::read_to_string(&git_config).is_ok_and(|value| value == GIT_METADATA_PROBE_MARKER);
     probe.existing_workspace_read_write &= std::fs::read_to_string(&existing_workspace_file)
         .is_ok_and(|value| value == "workspace-after");
     probe.path_traversal_blocked &= !request.traversal_target.exists();
@@ -965,7 +1066,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         return 2;
     };
     eprintln!("Windows 文件隔离探针: 验证父进程边界");
-    let (git_metadata_write_blocked, git_metadata_readable) =
+    let (git_metadata_write, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "父进程");
     let mut probe = WindowsProbeReport {
         workspace_write: probe_windows_workspace_write(&request.workspace, "inside.txt", "父进程"),
@@ -980,7 +1081,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
             .is_some_and(|path| std::fs::read(path).is_err()),
         outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
         outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
-        git_metadata_write_blocked,
+        git_metadata_write,
         git_metadata_readable,
         network_blocked: run_network_probe(&request.network_address) != 0,
         sensitive_read_blocked: request
@@ -1114,7 +1215,7 @@ fn run_windows_file_probe(raw: &str) -> i32 {
                 && child.outside_read_blocked
                 && child.outside_delete_blocked
                 && child.outside_config_write_blocked
-                && child.git_metadata_write_blocked
+                && child.git_metadata_write
                 && child.git_metadata_readable
                 && child.network_blocked
                 && child.sensitive_read_blocked
@@ -1145,7 +1246,7 @@ fn run_windows_child_probe(raw: &str, expected_stdin: Option<&str>) -> i32 {
         eprintln!("tiangong-sandbox-pipe-stderr");
     }
     eprintln!("Windows 文件隔离探针: 验证子进程边界");
-    let (git_metadata_write_blocked, git_metadata_readable) =
+    let (git_metadata_write, git_metadata_readable) =
         probe_windows_git_metadata(&request.git_config, "子进程");
     let report = WindowsProbeReport {
         workspace_write: probe_windows_workspace_write(
@@ -1162,7 +1263,7 @@ fn run_windows_child_probe(raw: &str, expected_stdin: Option<&str>) -> i32 {
             .sensitive_paths
             .first()
             .is_some_and(|path| std::fs::read(path).is_err()),
-        git_metadata_write_blocked,
+        git_metadata_write,
         git_metadata_readable,
         outside_delete_blocked: std::fs::remove_dir_all(&request.outside_delete).is_err(),
         outside_config_write_blocked: std::fs::write(&request.outside_config, "PWNED").is_err(),
@@ -1212,19 +1313,15 @@ fn probe_windows_workspace_write(workspace: &Path, filename: &str, process: &str
 
 #[cfg(windows)]
 fn probe_windows_git_metadata(path: &Path, process: &str) -> (bool, bool) {
-    let write = std::fs::write(path, "PWNED");
-    let delete = path.parent().map(std::fs::remove_dir_all);
-    let read = std::fs::read_to_string(path);
-    let write_blocked = write.is_err();
-    let delete_blocked = delete.as_ref().is_some_and(|result| result.is_err());
-    let readable = read.as_ref().is_ok_and(|value| value == "safe\n");
-    eprintln!(
-        "Windows 文件隔离探针: {process} Git 写入拒绝={write_blocked} ({:?})，删除拒绝={delete_blocked} ({:?})，只读内容保持={readable} ({:?})",
-        write.as_ref().err(),
-        delete.as_ref().and_then(|result| result.as_ref().err()),
-        read.as_ref().map(String::as_str),
-    );
-    (write_blocked && delete_blocked, readable)
+    // .git 可写是功能要求（用户裁定 2026-08-30）：agent 需要完整 git
+    // 工作流。写入探测标记并回读验证真实落盘；父/子探针共用同一标记，
+    // 重复探测幂等（首次探测前内容为宿主写入的 "safe\n"）。
+    let readable = std::fs::read_to_string(path)
+        .is_ok_and(|value| value == "safe\n" || value == GIT_METADATA_PROBE_MARKER);
+    let write_ok = std::fs::write(path, GIT_METADATA_PROBE_MARKER).is_ok()
+        && std::fs::read_to_string(path).is_ok_and(|value| value == GIT_METADATA_PROBE_MARKER);
+    eprintln!("Windows 文件隔离探针: {process} Git 写入放行={write_ok}，读取正常={readable}");
+    (write_ok, readable)
 }
 
 #[cfg(windows)]
@@ -1833,19 +1930,26 @@ fn run_enforcement_probes(report: &mut serde_json::Map<String, serde_json::Value
         ),
     );
 
+    // .git 可写是功能要求（用户裁定 2026-08-30）：agent 需要完整 git
+    // 工作流（add/commit/branch 等），沙箱必须放行写入并真实落盘。
     let output = run_sandbox_command(
         &policy,
         "/bin/sh",
         &[
             "-c".into(),
-            format!("printf PWNED > {}", shell_quote(&git_config)),
+            format!(
+                "printf {} > {}",
+                GIT_METADATA_PROBE_MARKER,
+                shell_quote(&git_config)
+            ),
         ],
     );
     report.insert(
-        "git_metadata_write_blocked".into(),
+        "git_metadata_write".into(),
         serde_json::Value::from(
-            !output.status.success()
-                && std::fs::read_to_string(&git_config).is_ok_and(|value| value == "safe\n"),
+            output.status.success()
+                && std::fs::read_to_string(&git_config)
+                    .is_ok_and(|value| value == GIT_METADATA_PROBE_MARKER),
         ),
     );
 

@@ -1,6 +1,6 @@
 name: Publish Sandbox
 
-# 沙箱独立组件在线发布（Launcher 制品 + 清单）：三平台矩阵构建+官方
+# 沙箱独立组件在线发布（Launcher 制品 + 清单）：四平台矩阵构建+官方
 # 签名制品、平台片段与结构化 release-info（协议/策略版本直接引用 crate
 # 常量，杜绝源码正则提取）。写入顺序：版本制品上传 → 制品回读验证
 # → latest.json.next 上传 → next 回读验证 → 正式 latest.json 最后上传
@@ -18,6 +18,10 @@ on:
       - "sandbox/v*"
   workflow_dispatch:
 
+concurrency:
+  group: publish-sandbox-production
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -32,19 +36,30 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve crate and tag versions
         id: version
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/tiangong-sandbox/Cargo.toml | head -1)"
           test -n "$version"
+          git fetch origin main:refs/remotes/origin/main
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             tag_version="${GITHUB_REF_NAME#sandbox/v}"
             if [[ "$tag_version" != "$version" ]]; then
               echo "::error::标签版本 $tag_version 与 crate 版本 $version 不一致，拒绝发布"
               exit 1
             fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::Sandbox 发布标签必须指向 main 已包含的提交"
+              exit 1
+            fi
           else
+            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+              echo "::error::手动生产发布只能从 main 触发，当前为 $GITHUB_REF_NAME"
+              exit 1
+            fi
             echo "::notice::手动触发，实际发布版本为 $version"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -73,9 +88,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc
+      - name: Install Linux build and sandbox dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler bubblewrap
 
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
@@ -118,7 +133,21 @@ jobs:
             | jq -r '.target_directory')/sandbox-dist"
           platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
           artifact="$dist/sandbox/${{ needs.resolve.outputs.version }}/tiangong-sb-$platform"
+          protocol="$(jq -r .protocol_version "$dist/release-info.json")"
+          schema="$(jq -r .policy_schema_max "$dist/release-info.json")"
           cargo run --locked -p xtask -- verify-sandbox-artifact "$artifact" "$artifact.sig"
+          set +e
+          report="$("$artifact" --self-check)"
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          case "${{ matrix.label }}" in
+            macOS*) [[ "$status" -eq 0 || "$status" -eq 79 ]] ;;
+            *) test "$status" -eq 0 ;;
+          esac
+          [[ "$(jq -r .product_version <<< "$report")" == "${{ needs.resolve.outputs.version }}" ]]
+          [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
+          [[ "$(jq -r .policy_schema <<< "$report")" == "$schema" ]]
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
@@ -179,12 +208,42 @@ jobs:
           unzip -o /tmp/ossutil.zip -d /tmp/ossutil
           sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
 
+      - name: Verify OSS credentials present
+        run: |
+          test -n "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" || \
+            { echo "::error::缺少 ALIYUN_OSS_ACCESS_KEY_ID"; exit 1; }
+          test -n "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}" || \
+            { echo "::error::缺少 ALIYUN_OSS_ACCESS_KEY_SECRET"; exit 1; }
+
       - name: Configure ossutil
         run: |
           ossutil config \
             -e oss-cn-hangzhou.aliyuncs.com \
             -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
             -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: "Guard: published version must increase monotonically"
+        run: |
+          # 首版只允许明确的 HTTP 404；网络、鉴权或服务异常不得误判首版。
+          status="$(curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -sS \
+            -o /tmp/current-latest.json -w '%{http_code}' \
+            "$OSS_BASE/sandbox/latest.json?guard=$GITHUB_RUN_ID")"
+          case "$status" in
+            200)
+              python3 - <<'PY'
+          import json, os
+          def parse(value):
+              parts = value.split('.')
+              assert len(parts) == 3 and all(p.isdigit() for p in parts), value
+              return tuple(map(int, parts))
+          current = json.load(open('/tmp/current-latest.json'))['version']
+          candidate = os.environ['SANDBOX_VERSION']
+          assert parse(candidate) > parse(current), f'候选 {candidate} 不高于线上 {current}'
+          PY
+              ;;
+            404) echo "线上 latest.json 明确不存在，按首版发布处理。" ;;
+            *) echo "::error::读取线上 latest.json 失败，HTTP $status"; exit 1 ;;
+          esac
 
       - name: "Guard: refuse to overwrite an existing version (per object)"
         run: |

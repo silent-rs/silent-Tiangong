@@ -70,7 +70,7 @@ jobs:
           printf '%s\n' "$report" | tee "$RUNNER_TEMP/self-check.json"
           test "$status" -eq 0
           for field in workspace_write outside_write_blocked outside_delete_blocked \
-            outside_config_write_blocked git_metadata_write_blocked network_blocked \
+            outside_config_write_blocked git_metadata_write network_blocked \
             sensitive_read_blocked symlink_escape_blocked path_traversal_blocked; do
             test "$(jq -r ".$field" <<< "$report")" == "true" \
               || { echo "::error::自检字段 $field 未通过"; exit 1; }
@@ -143,7 +143,7 @@ jobs:
           foreach ($field in @(
             'workspace_write','outside_write_blocked','outside_read_blocked',
             'outside_delete_blocked','outside_config_write_blocked',
-            'git_metadata_write_blocked','network_blocked','sensitive_read_blocked',
+            'git_metadata_write','network_blocked','sensitive_read_blocked',
             'path_traversal_blocked','child_restrictions_inherited',
             'resource_limits_applied','process_limit_enforced',
             'memory_limit_enforced','cpu_limit_enforced',
@@ -166,6 +166,8 @@ jobs:
             runner: ubuntu-22.04
           - label: macOS aarch64
             runner: macos-14
+          - label: macOS x86_64
+            runner: macos-15-intel
           - label: Windows x86_64
             runner: windows-2022
     steps:
@@ -187,6 +189,7 @@ jobs:
           test -f "$dist/release-info.json"
           version="$(jq -r .version "$dist/release-info.json")"
           protocol="$(jq -r .protocol_version "$dist/release-info.json")"
+          schema="$(jq -r .policy_schema_max "$dist/release-info.json")"
           platform="$(ls "$dist/fragments" | sed 's/\.json$//')"
           artifact="$dist/sandbox/$version/tiangong-sb-$platform"
           test -f "$artifact" && test -f "$artifact.sig" && test ! -L "$artifact"
@@ -205,3 +208,4 @@ jobs:
           [[ "$(jq -r .product_version <<< "$report")" == "$version" ]]
           # 协议断言以 release-info.json（crate 常量直引）为准，不做源码正则提取。
           [[ "$(jq -r .protocol_version <<< "$report")" == "$protocol" ]]
+          [[ "$(jq -r .policy_schema <<< "$report")" == "$schema" ]]
