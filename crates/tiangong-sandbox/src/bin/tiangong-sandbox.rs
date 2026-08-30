@@ -1319,7 +1319,7 @@ fn probe_windows_git_metadata(path: &Path, process: &str) -> (bool, bool) {
     let readable = std::fs::read_to_string(path)
         .is_ok_and(|value| value == "safe\n" || value == GIT_METADATA_PROBE_MARKER);
     let write_ok = std::fs::write(path, GIT_METADATA_PROBE_MARKER).is_ok()
-        && std::fs::read_to_string(path).as_deref() == Ok(GIT_METADATA_PROBE_MARKER);
+        && std::fs::read_to_string(path).is_ok_and(|value| value == GIT_METADATA_PROBE_MARKER);
     eprintln!("Windows 文件隔离探针: {process} Git 写入放行={write_ok}，读取正常={readable}");
     (write_ok, readable)
 }

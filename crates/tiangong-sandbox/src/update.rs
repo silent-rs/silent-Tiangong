@@ -104,7 +104,7 @@ impl SelfUpdater {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     fn with_test_pubkey(manifest_url: impl Into<String>, pubkey_b64: String) -> Result<Self> {
         let mut updater = Self::new(manifest_url)?;
         updater.official_pubkey_b64 = pubkey_b64;
