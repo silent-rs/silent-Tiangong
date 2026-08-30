@@ -1,10 +1,10 @@
-//! Fs sidecar 业务服务：按操作名分发请求，承载文件读写、进程级锁表与路径解析。
+//! Fs sidecar 业务服务：按操作名分发请求，承载文件读写与路径解析。
 //!
 //! 整合原进程内插件的 7 个工具执行 + set_workspace 钩子，全部经 IPC 暴露给
-//! 运行时（host 侧 invoke_sidecar）与 WASM 桥接。
+//! 运行时（host 侧 invoke_sidecar）与 WASM 桥接。无跨请求状态（按需进程随
+//! 调用销毁）：工作区与信任模式由每个请求的 access 上下文携带。
 
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -14,7 +14,9 @@ use tiangong_plugin_fs_protocol::tools::{
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest, TREE_DIR_OPERATION, TreeDirRequest,
     WRITE_FILE_OPERATION, WriteFileRequest,
 };
-use tiangong_plugin_fs_protocol::{Ack, FS_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
+use tiangong_plugin_fs_protocol::{
+    Ack, FS_PROTOCOL_VERSION, FsAccessContext, PLUGIN_ID, PLUGIN_VERSION,
+};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
@@ -23,21 +25,14 @@ use tiangong_plugin_runtime::protocol::{
 use crate::handlers;
 use crate::path_policy::{PathPolicy, TrustModePathPolicy};
 
-/// Fs sidecar 业务服务。
-pub struct FsService {
-    /// 当前会话工作目录（由 set_workspace 注入，路径解析基准）。
-    workspace: RwLock<Option<PathBuf>>,
-    /// 是否完全信任模式（放宽读路径越界校验，写仍受限）。
-    full_trust: RwLock<bool>,
-}
+/// Fs sidecar 业务服务。无跨请求状态（按需进程随调用销毁）：工作区
+/// 与信任模式由每个请求的 access 上下文携带，路径策略按请求构造。
+pub struct FsService {}
 
 impl FsService {
     /// 构造默认实例。
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            workspace: RwLock::new(None),
-            full_trust: RwLock::new(false),
-        })
+        Ok(Self {})
     }
 
     /// 按 sidecar 协议分发请求。
@@ -95,7 +90,7 @@ impl FsService {
             LIST_DIR_OPERATION => {
                 let req: ListDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 list_dir 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_list_dir(req, &*policy))
                         .await
@@ -105,7 +100,7 @@ impl FsService {
             TREE_DIR_OPERATION => {
                 let req: TreeDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 tree_dir 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_tree_dir(req, &*policy))
                         .await
@@ -115,7 +110,7 @@ impl FsService {
             READ_FILE_OPERATION => {
                 let req: ReadFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 read_file 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_read_file(req, &*policy))
                         .await
@@ -125,7 +120,7 @@ impl FsService {
             WRITE_FILE_OPERATION => {
                 let req: WriteFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 write_file 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_write_file(req, &*policy))
                         .await
@@ -135,7 +130,7 @@ impl FsService {
             REPLACE_IN_FILE_OPERATION => {
                 let req: ReplaceInFileRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 replace_in_file 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp = tokio::task::spawn_blocking(move || {
                     handlers::handle_replace_in_file(req, &*policy)
                 })
@@ -146,7 +141,7 @@ impl FsService {
             APPLY_PATCH_OPERATION => {
                 let req: ApplyPatchRequest =
                     serde_json::from_value(payload).with_context(|| "解析 apply_patch 请求失败")?;
-                let policy = self.path_policy();
+                let policy = path_policy_from_access(&req.access);
                 let resp = tokio::task::spawn_blocking(move || {
                     handlers::handle_apply_patch(req, &*policy)
                 })
@@ -155,34 +150,22 @@ impl FsService {
                 serde_json::to_value(resp).with_context(|| "序列化 apply_patch 响应失败")
             }
             SET_WORKSPACE_OPERATION => {
-                let req: SetWorkspaceRequest = serde_json::from_value(payload)
+                // 兼容保留：wasm 侧状态更新才是请求构造源；sidecar 无
+                // 进程内状态（按需进程随调用销毁，工作区与信任模式由
+                // 每个请求的 access 上下文携带）。
+                let _req: SetWorkspaceRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 set_workspace 请求失败")?;
-                self.handle_set_workspace(req)?;
                 serde_json::to_value(Ack {}).with_context(|| "序列化 set_workspace 响应失败")
             }
             operation => Err(anyhow!("不支持的 Fs 操作: {operation}")),
         }
     }
+}
 
-    // ── 生命周期 ─────────────────────────────────────────────
-
-    fn handle_set_workspace(&self, req: SetWorkspaceRequest) -> Result<()> {
-        if let Ok(mut guard) = self.workspace.write() {
-            *guard = req.workspace.map(PathBuf::from);
-        }
-        if let Ok(mut guard) = self.full_trust.write() {
-            *guard = req.full_trust;
-        }
-        Ok(())
-    }
-
-    // ── 辅助 ─────────────────────────────────────────────────
-
-    /// 构造当前会话的路径策略（基于缓存的 full_trust）。
-    fn path_policy(&self) -> Arc<dyn PathPolicy> {
-        let full_trust = self.full_trust.read().map(|g| *g).unwrap_or(false);
-        Arc::new(TrustModePathPolicy::new(full_trust))
-    }
+/// 按请求级访问上下文构造路径策略：信任模式随请求携带，不依赖进程
+/// 内状态（按需生命周期下 set_workspace 进程的缓存随调用销毁）。
+fn path_policy_from_access(access: &FsAccessContext) -> Arc<dyn PathPolicy> {
+    Arc::new(TrustModePathPolicy::new(access.full_trust))
 }
 
 #[async_trait::async_trait]
@@ -192,5 +175,42 @@ impl tiangong_plugin_sidecar::SidecarService for FsService {
         request: tiangong_plugin_runtime::protocol::Request,
     ) -> tiangong_plugin_runtime::protocol::Response {
         FsService::dispatch(self, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 信任模式随请求携带（按需生命周期无进程内状态）：同一不存在
+    /// 的工作区外路径，full_trust=false 的请求读取失败，full_trust=true
+    /// 的请求按信任模式放行。
+    #[test]
+    fn path_policy_follows_request_access() {
+        use tiangong_plugin_fs_protocol::tools::ListDirRequest;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = root.path().join("missing.txt");
+        let mut request = ListDirRequest::default();
+        request.access.workspace = Some(workspace.display().to_string());
+
+        request.access.full_trust = false;
+        let restricted = path_policy_from_access(&request.access);
+        assert!(
+            restricted
+                .resolve_read(outside.to_str().unwrap(), &workspace)
+                .is_err(),
+            "非信任请求读取不存在的工作区外路径应失败"
+        );
+
+        request.access.full_trust = true;
+        let trusted = path_policy_from_access(&request.access);
+        assert!(
+            trusted
+                .resolve_read(outside.to_str().unwrap(), &workspace)
+                .is_ok(),
+            "信任请求按 full_trust 语义放行"
+        );
     }
 }
