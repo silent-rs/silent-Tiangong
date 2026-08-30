@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "screenshot-input",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "wasm": {
     "binary": "tiangong_plugin_screenshot_input_wasm.wasm"
   },
@@ -12,8 +12,14 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 300000
   },
-  "entrypoints": ["desktop"],
-  "permissions": ["bridge.call", "session.write", "sidecar.invoke"],
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "bridge.call",
+    "session.write",
+    "sidecar.invoke"
+  ],
   "ui": {
     "sandbox": "shadow",
     "contributions": [
@@ -24,7 +30,9 @@
         "description": "截取屏幕或窗口并加入当前输入草稿",
         "icon": "camera",
         "entry": "dist/index.html",
-        "context": ["session"]
+        "context": [
+          "session"
+        ]
       }
     ]
   }

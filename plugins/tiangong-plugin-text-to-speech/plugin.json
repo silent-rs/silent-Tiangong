@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "text-to-speech",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wasm": {
     "binary": "tiangong_plugin_text_to_speech_wasm.wasm"
   },

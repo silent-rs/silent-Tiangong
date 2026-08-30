@@ -46,6 +46,7 @@ pub async fn exec_and_collect(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear();
+    configure_command_lifecycle(&mut command)?;
     for (key, value) in &env_allowlist {
         command.env(key, value);
     }
@@ -56,8 +57,11 @@ pub async fn exec_and_collect(
         command.env(key, value);
     }
 
+    let child = command
+        .spawn()
+        .with_context(|| format!("执行命令失败：{cmd}"))?;
     let output_result = if timeout_ms > 0 {
-        match timeout(Duration::from_millis(timeout_ms), command.output()).await {
+        match timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
             Ok(o) => o,
             Err(_) => {
                 return Ok(ExecResponse {
@@ -69,7 +73,7 @@ pub async fn exec_and_collect(
             }
         }
     } else {
-        command.output().await
+        child.wait_with_output().await
     };
 
     let output = output_result.context(format!("执行命令失败：{cmd}"))?;
@@ -131,8 +135,6 @@ pub fn split_command(raw: &str) -> (String, Vec<String>) {
 ///
 /// 再过滤动态加载器、shell 初始化和追踪类危险 key，避免命令执行环境被劫持。
 fn collect_runtime_env() -> BTreeMap<String, String> {
-    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
-    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
     let Ok(raw) = std::env::var(tiangong_plugin_runtime::sidecar::EXEC_ENV_JSON_ENV) else {
         return BTreeMap::new();
     };
@@ -140,13 +142,7 @@ fn collect_runtime_env() -> BTreeMap<String, String> {
         return BTreeMap::new();
     };
     env.into_iter()
-        .filter(|(key, _)| {
-            let upper = key.to_ascii_uppercase();
-            !DENIED_EXACT.contains(&upper.as_str())
-                && !DENIED_PREFIXES
-                    .iter()
-                    .any(|prefix| upper.starts_with(prefix))
-        })
+        .filter(|(key, _)| is_safe_env_key(key))
         .collect()
 }
 
@@ -170,7 +166,7 @@ fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
                 continue;
             };
             let key = key.trim();
-            if !is_valid_env_key(key) {
+            if !is_valid_env_key(key) || !is_safe_env_key(key) {
                 continue;
             }
             let value = normalize_env_value(value.trim());
@@ -178,6 +174,41 @@ fn load_local_env(cwd: &Path) -> Vec<(String, String)> {
         }
     }
     env
+}
+
+fn is_safe_env_key(key: &str) -> bool {
+    // 解释器启动注入类变量能让 node/python/perl/ruby/jvm 在启动前加载额外
+    // 代码，与动态加载器变量同层级拒绝（对齐 octos 危险环境清单）。
+    const DENIED_EXACT: &[&str] = &[
+        "BASH_ENV",
+        "ENV",
+        "PATH",
+        "PS4",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "PERL5OPT",
+        "RUBYOPT",
+        "RUBYLIB",
+        "JAVA_TOOL_OPTIONS",
+        "ZDOTDIR",
+    ];
+    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+    let upper = key.to_ascii_uppercase();
+    !DENIED_EXACT.contains(&upper.as_str())
+        && !DENIED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+fn configure_command_lifecycle(_command: &mut Command) -> Result<()> {
+    // 资源上限由执行边界施加：沙箱链路在 Launcher 进程树级强制
+    //（CPU 全 Unix、内存/进程数 Linux、Windows Job Object），关闭沙箱
+    // 的宿主执行器同样自带限额——命令进程不再自行读取环境变量施加。
+    Ok(())
 }
 
 fn is_valid_env_key(key: &str) -> bool {

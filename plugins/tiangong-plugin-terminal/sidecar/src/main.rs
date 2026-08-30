@@ -11,6 +11,7 @@ mod service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -20,7 +21,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config = tiangong_plugin_sidecar::SidecarConfig::new("terminal");
     tiangong_plugin_sidecar::run(config, || {
-        Ok(std::sync::Arc::new(service::TerminalService::new()))
+        let service = std::sync::Arc::new(service::TerminalService::new());
+        service.start_idle_exit_monitor();
+        Ok(service)
     })
     .await
 }

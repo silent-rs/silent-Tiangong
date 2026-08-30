@@ -28,11 +28,14 @@ const HISTORY_LIMIT_BYTES: usize = 128 * 1024;
 const COMMAND_POLL_INTERVAL_MS: u64 = 50;
 /// 登录 shell 清理残留输入并确认重新接管终端的最长等待时间。
 const SHELL_READY_TIMEOUT_SECS: u64 = 3;
+/// 最后一个 PTY 会话结束后保留短暂窗口，让关闭响应完成并容纳紧邻的新建请求。
+const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
 /// 内部命令边界标记公共前缀；这些行不得显示给用户。
 const MARKER_PREFIX: &str = "__TIANGONG_";
 
 pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    last_activity: Arc<Mutex<Option<Instant>>>,
     sequence: Mutex<u64>,
     spawn_lock: Mutex<()>,
 }
@@ -275,9 +278,49 @@ impl TerminalService {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            last_activity: Arc::new(Mutex::new(None)),
             sequence: Mutex::new(0),
             spawn_lock: Mutex::new(()),
         }
+    }
+
+    /// terminal 不随 App 常驻：首次业务请求由宿主按需拉起，最后一个 PTY
+    /// 会话结束且空闲窗口届满后退出；共享连接会在下次操作时重新启动。
+    pub fn start_idle_exit_monitor(&self) {
+        let sessions = Arc::clone(&self.sessions);
+        let last_activity = Arc::clone(&self.last_activity);
+        if let Err(error) = std::thread::Builder::new()
+            .name("terminal-idle-exit".to_string())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let has_sessions = sessions
+                        .lock()
+                        .map(|sessions| !sessions.is_empty())
+                        .unwrap_or(true);
+                    if has_sessions {
+                        continue;
+                    }
+                    let idle = last_activity
+                        .lock()
+                        .ok()
+                        .and_then(|activity| *activity)
+                        .is_some_and(|activity| {
+                            activity.elapsed() >= Duration::from_secs(SIDECAR_IDLE_EXIT_SECS)
+                        });
+                    if idle {
+                        tracing::info!("terminal sidecar 已无 PTY 会话，退出空闲进程");
+                        std::process::exit(0);
+                    }
+                }
+            })
+        {
+            tracing::warn!(%error, "启动 terminal 空闲退出监视失败");
+        }
+    }
+
+    fn mark_activity(&self) {
+        *self.last_activity.lock().expect("终端活动时间锁损坏") = Some(Instant::now());
     }
 
     fn next_sequence(&self) -> u64 {
@@ -1404,13 +1447,16 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 false,
             );
         }
+        if request.operation != HANDSHAKE_OPERATION {
+            self.mark_activity();
+        }
         let payload = match dispatch_operation(self, &request.operation, request.payload).await {
             Ok(value) => value,
             Err(error) => {
                 return Response::error(
                     &request_id,
                     ErrorCode::ServiceError,
-                    error.to_string(),
+                    format!("{error:#}"),
                     false,
                 );
             }

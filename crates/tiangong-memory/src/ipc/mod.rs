@@ -430,7 +430,9 @@ async fn handle_plugin_request_with_connection(
     }
 }
 
-async fn dispatch_checked_plugin_request(
+/// 无连接形态的插件请求分发（stdio 传输适配用）：进度通道不可用，
+/// 其余语义与 IPC 连接分发一致。
+pub async fn dispatch_checked_plugin_request(
     handle: MemoryHandle,
     request: PluginRequest,
 ) -> PluginResponse {

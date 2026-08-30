@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "fs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "wasm": {
     "binary": "tiangong_plugin_fs_wasm.wasm"
   },
@@ -12,6 +12,12 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["sidecar.invoke"],
-  "entrypoints": ["cli", "server", "desktop"]
+  "permissions": [
+    "sidecar.invoke"
+  ],
+  "entrypoints": [
+    "cli",
+    "server",
+    "desktop"
+  ]
 }
