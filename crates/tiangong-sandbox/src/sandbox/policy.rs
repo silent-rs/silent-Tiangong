@@ -125,11 +125,13 @@ impl SandboxPolicy {
             .collect()
     }
 
-    /// 防篡改段：宿主敏感路径与工作区内 `.git` 保持只读。
+    /// 防篡改段：宿主敏感路径保持只读。
     ///
     /// 当敏感根是工作区的祖先时不能整体锁死，否则默认的
     /// `<storage>/workspaces/<session>` 会失去写权限。白名单外本就默认禁写，
     /// 因此此时跳过祖先根仍会保护其它会话和宿主文件。
+    /// 工作区内 `.git` 不在此列（用户裁定 2026-08-30）：agent 需要完整
+    /// git 工作流，`.git` 与源码同等对待——可写。
     pub fn read_only_roots(&self) -> Vec<PathBuf> {
         let writable = self.writable_roots();
         let mut paths = self
@@ -142,10 +144,6 @@ impl SandboxPolicy {
                     .any(|root| root != protected && root.starts_with(protected))
             })
             .collect::<Vec<_>>();
-        // 工作区的 .git 防篡改无条件声明：沙箱策略在进程启动时定死，
-        // 若按"存在才加"生成，连接先建立、.git 后出现的时序会整段失防
-        //（规则不存在 ≠ 拒绝）。路径可预知，无需存在性探测。
-        paths.push(canonical_or_keep(&self.workspace.join(".git")));
         paths.sort();
         paths.dedup();
         paths
@@ -328,14 +326,16 @@ mod tests {
     }
 
     #[test]
-    fn git_metadata_file_is_read_only() {
+    fn git_metadata_is_writable_in_workspace() {
         let workspace = tempfile::tempdir().unwrap();
         let git_file = workspace.path().join(".git");
         std::fs::write(&git_file, "gitdir: ../metadata").unwrap();
         let policy = SandboxPolicy::workspace_write(workspace.path());
 
+        // .git 与源码同等对待（用户裁定 2026-08-30）：agent 需要完整 git
+        // 工作流，不得出现在只读根中。
         assert!(
-            policy
+            !policy
                 .read_only_roots()
                 .contains(&canonical_or_keep(&git_file))
         );

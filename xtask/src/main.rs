@@ -1661,6 +1661,10 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
 /// 常量漂移导致发布验签与运行时信任根不一致。
 const OFFICIAL_PLUGIN_PUBKEY_B64: &str =
     include_str!("../../crates/tiangong-plugin-runtime/src/official-pubkey.b64");
+/// Sandbox 自管理官方根：发布守卫与 Sandbox 内置验证共用此文件，
+/// 不随插件签名根的后续轮换漂移。
+const OFFICIAL_SANDBOX_PUBKEY_B64: &str =
+    include_str!("../../crates/tiangong-sandbox/src/official-pubkey.b64");
 
 /// staging 的 release.json 签名是否通过内置官方公钥验证（官方信任根
 /// 固定，不接受环境变量或配置覆盖）。无签名清单的插件（纯 UI 等）不设部署门槛。
@@ -1730,7 +1734,15 @@ fn verify_official_release(release_path: &Path) -> io::Result<()> {
 
 /// 以内置官方公钥验证签名文件（true = 匹配）。
 fn verify_with_official_pubkey(release_path: &Path, signature_path: &Path) -> io::Result<bool> {
-    let Some(public_text) = decode_base64_utf8(OFFICIAL_PLUGIN_PUBKEY_B64) else {
+    verify_with_pubkey(release_path, signature_path, OFFICIAL_PLUGIN_PUBKEY_B64)
+}
+
+fn verify_with_pubkey(
+    release_path: &Path,
+    signature_path: &Path,
+    public_key_b64: &str,
+) -> io::Result<bool> {
+    let Some(public_text) = decode_base64_utf8(public_key_b64) else {
         return Ok(false);
     };
     let Ok(public_key) = minisign::PublicKeyBox::from_string(public_text.trim()) else {
@@ -1961,7 +1973,7 @@ fn verify_sandbox_artifact(artifact: &str, signature: &str) -> io::Result<()> {
     let signature = Path::new(signature);
     require_file(artifact)?;
     require_file(signature)?;
-    match verify_with_official_pubkey(artifact, signature) {
+    match verify_with_pubkey(artifact, signature, OFFICIAL_SANDBOX_PUBKEY_B64) {
         Ok(true) => {
             eprintln!("[xtask] 官方公钥验签通过: {}", artifact.display());
             Ok(())

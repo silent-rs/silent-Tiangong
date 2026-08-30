@@ -185,21 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn seatbelt_denies_git_history_tampering() {
+    fn seatbelt_allows_git_history_operations() {
         if !seatbelt::seatbelt_available() || !can_apply_seatbelt() {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
-        // 建一个真实 .git 目录触发防篡改段。
+        // 建一个真实 .git 目录验证完整 git 工作流可用（用户裁定
+        // 2026-08-30：.git 与源码同等对待，不再防篡改）。
         let git_dir = workspace.path().join(".git");
         std::fs::create_dir_all(&git_dir).unwrap();
         let policy = SandboxPolicy::workspace_write(workspace.path());
 
         let target = git_dir.join("config");
-        let (code, stderr) = run_in_sandbox(&policy, &format!("echo x > {}", target.display()));
-        assert_ne!(code, 0, "工作区内 .git 应保持只读");
-        assert!(!target.exists());
-        assert!(explain_violation(&stderr).is_some());
+        let (code, _) = run_in_sandbox(&policy, &format!("echo x > {}", target.display()));
+        assert_eq!(code, 0, "工作区内 .git 写入应放行");
+        assert_eq!(std::fs::read_to_string(&target).unwrap().trim(), "x");
     }
 
     #[test]
