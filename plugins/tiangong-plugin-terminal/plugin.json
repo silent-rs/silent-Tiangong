@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "entrypoints": [
     "desktop"
   ],
@@ -153,7 +153,10 @@
   "capabilities": {
     "tools": true,
     "prompt": true,
-    "events": ["tool.*", "sidecar.*"]
+    "events": [
+      "tool.*",
+      "sidecar.*"
+    ]
   },
   "sidecar": {
     "binary": "tiangong-terminal-sidecar",

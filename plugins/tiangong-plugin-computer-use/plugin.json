@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "computer-use",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wasm": {
     "binary": "tiangong_plugin_computer_use_wasm.wasm"
   },
@@ -12,8 +12,14 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["sidecar.invoke"],
-  "entrypoints": ["desktop", "cli", "server"],
+  "permissions": [
+    "sidecar.invoke"
+  ],
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ],
   "mention": {
     "hint": "控制桌面应用：定位窗口、读取控件树、执行点击与输入"
   }

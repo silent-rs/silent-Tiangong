@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "skill",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wasm": {
     "binary": "tiangong_plugin_skill_wasm.wasm"
   },
@@ -12,8 +12,15 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"],
-  "entrypoints": ["desktop", "cli", "server"],
+  "permissions": [
+    "app-storage.read",
+    "sidecar.invoke"
+  ],
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ],
   "mention": {
     "hint": "管理技能（Skill）：查看、启用、创建与使用技能"
   }

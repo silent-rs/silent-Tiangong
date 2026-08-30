@@ -17,6 +17,7 @@ use tiangong_memory::election::{LeaderState, ProcessType, start_or_connect_with_
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -43,6 +44,19 @@ async fn main() -> anyhow::Result<()> {
     match managed.state() {
         LeaderState::Leader => {
             tracing::info!("memory sidecar 已成为 Leader，开始服务");
+            if tiangong_plugin_sidecar::stdio::stdio_requested() {
+                // stdio 传输：宿主一对一管理生命周期，进通用应答循环；
+                // actor/心跳由 managed 持有，stdin 关闭随 Drop 清理。
+                // 进度通道（IPC 连接形态）不可用，其余分发语义一致。
+                let handle = managed.handle();
+                return tiangong_plugin_sidecar::stdio::run_stdio(move || {
+                    Ok(std::sync::Arc::new(MemoryStdioService {
+                        handle,
+                        _managed: managed,
+                    }))
+                })
+                .await;
+            }
             // 阻塞等待终止信号（Ctrl+C / SIGTERM）。
             // ManagedMemory 持有 actor + IPC bridge + 心跳，Drop 时自动清理。
             wait_for_shutdown_signal().await?;
@@ -56,6 +70,23 @@ async fn main() -> anyhow::Result<()> {
     // managed Drop：停心跳、删 endpoint 文件、释放 leader.lock
     drop(managed);
     Ok(())
+}
+
+/// stdio 传输适配：把通用帧协议接到 memory 的插件请求分发。
+struct MemoryStdioService {
+    handle: tiangong_memory::MemoryHandle,
+    /// 持有 Leader 的 actor、IPC bridge 与心跳，随服务存活。
+    _managed: tiangong_memory::election::ManagedMemory,
+}
+
+#[async_trait::async_trait]
+impl tiangong_plugin_sidecar::SidecarService for MemoryStdioService {
+    async fn dispatch(
+        &self,
+        request: tiangong_plugin_runtime::protocol::Request,
+    ) -> tiangong_plugin_runtime::protocol::Response {
+        tiangong_memory::ipc::dispatch_checked_plugin_request(self.handle.clone(), request).await
+    }
 }
 
 #[cfg(unix)]

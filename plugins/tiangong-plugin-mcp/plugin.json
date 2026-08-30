@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wasm": {
     "binary": "tiangong_plugin_mcp_wasm.wasm"
   },
@@ -12,6 +12,13 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["app-storage.read", "sidecar.invoke"],
-  "entrypoints": ["desktop", "cli", "server"]
+  "permissions": [
+    "app-storage.read",
+    "sidecar.invoke"
+  ],
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ]
 }

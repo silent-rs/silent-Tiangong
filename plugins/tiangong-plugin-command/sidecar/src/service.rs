@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -9,7 +10,9 @@ use tiangong_plugin_command_protocol::exec::{
     ExecResponse, RUN_COMMAND_OPERATION, RUN_SHELL_OPERATION, RunCommandRequest, RunShellRequest,
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
 };
-use tiangong_plugin_command_protocol::{Ack, COMMAND_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
+use tiangong_plugin_command_protocol::{
+    Ack, COMMAND_PROTOCOL_VERSION, CommandAccessContext, PLUGIN_ID, PLUGIN_VERSION,
+};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
@@ -44,6 +47,9 @@ impl CommandService {
 
     /// 按 sidecar 协议分发请求。
     pub async fn dispatch(&self, request: Request) -> Response {
+        let started = Instant::now();
+        let operation = request.operation.clone();
+        tracing::info!(operation, "command sidecar 开始处理请求");
         let request_id = request.request_id.clone();
         if request.protocol_version != PROTOCOL_VERSION {
             return Response::error(
@@ -71,6 +77,11 @@ impl CommandService {
                 );
             }
         };
+        tracing::info!(
+            operation,
+            elapsed_ms = started.elapsed().as_millis(),
+            "command sidecar 请求处理完成"
+        );
         Response::success(&request_id, payload)
     }
 
@@ -115,7 +126,25 @@ impl CommandService {
 
     // ── 工具执行 ─────────────────────────────────────────────
 
+    /// 按需形态每次调用独立进程，`set_workspace` 的 init 状态不跨请求：
+    /// 以请求内宿主权威上下文（workspace/full_trust/allowed_commands）
+    /// 为准刷新；常驻形态下与 init 注入同值，幂等。
+    fn refresh_context_from_request(&self, access: &CommandAccessContext) {
+        if let Some(workspace) = &access.workspace
+            && let Ok(mut guard) = self.workspace.write()
+        {
+            *guard = Some(PathBuf::from(workspace));
+        }
+        if let Ok(mut guard) = self.full_trust.write() {
+            *guard = access.full_trust;
+        }
+        if let Ok(mut guard) = self.allowed_commands.write() {
+            *guard = access.allowed_commands.clone();
+        }
+    }
+
     async fn handle_run_command(&self, req: RunCommandRequest) -> ExecResponse {
+        self.refresh_context_from_request(&req.access);
         let base = match self.base() {
             Ok(b) => b,
             Err(e) => return error_response("run_command", e),
@@ -144,6 +173,7 @@ impl CommandService {
     }
 
     async fn handle_run_shell(&self, req: RunShellRequest) -> ExecResponse {
+        self.refresh_context_from_request(&req.access);
         let base = match self.base() {
             Ok(b) => b,
             Err(e) => return error_response("run_shell", e),

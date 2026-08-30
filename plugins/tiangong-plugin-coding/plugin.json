@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "coding",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "wasm": {
     "binary": "tiangong_plugin_coding_wasm.wasm"
   },
@@ -12,6 +12,12 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 30000
   },
-  "permissions": ["sidecar.invoke"],
-  "entrypoints": ["desktop", "cli", "server"]
+  "permissions": [
+    "sidecar.invoke"
+  ],
+  "entrypoints": [
+    "desktop",
+    "cli",
+    "server"
+  ]
 }
