@@ -111,13 +111,13 @@ jobs:
       - name: Verify signing key present
         shell: bash
         run: |
-          test -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" || \
-            { echo "::error::缺少官方签名私钥 secret"; exit 1; }
+          test -n "${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY }}" || \
+            { echo "::error::缺少 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY（必须匹配 Sandbox 内置官方公钥）"; exit 1; }
           key="$RUNNER_TEMP/launcher-release.key"
-          printf '%s' "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "$key"
+          printf '%s' "${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY }}" > "$key"
           echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=$key" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          if [ -n "${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
           fi
 
       - name: Build and sign launcher artifact

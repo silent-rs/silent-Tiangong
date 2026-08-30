@@ -72,8 +72,8 @@ sandbox/v0.1.0
 
 1. 合并本分支到 main，并确认 Sandbox CI 全部通过。
 2. 确认 GitHub Secrets：
-   - `TAURI_SIGNING_PRIVATE_KEY`
-   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（私钥无密码时可空）
+   - `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY`
+   - `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD`（私钥无密码时可空）
    - `ALIYUN_OSS_ACCESS_KEY_ID`
    - `ALIYUN_OSS_ACCESS_KEY_SECRET`
 3. 确认官方私钥能被仓库内置公钥验证。
