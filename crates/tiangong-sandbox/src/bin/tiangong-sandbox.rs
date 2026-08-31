@@ -2317,22 +2317,32 @@ mod tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
+    /// 将 Unix 风格路径转换为当前平台的绝对路径，Windows 上补盘符前缀。
+    fn platform_path(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
     #[test]
     fn inline_policy_parses_all_options() {
-        let parsed = parse_run_args(&strings(&[
-            "run",
-            "--mode",
-            "workspace-write",
-            "--workspace",
-            "/workspace",
-            "--writable",
-            "/tmp/run",
-            "--writable",
-            "/tmp/cache",
-            "--protect",
-            "/workspace/protected",
-            "--deny-read",
-            "/home/user/.ssh",
+        let workspace = platform_path("/workspace");
+        let extra_run = platform_path("/tmp/run");
+        let extra_cache = platform_path("/tmp/cache");
+        let protected = platform_path("/workspace/protected");
+        let denied = platform_path("/home/user/.ssh");
+        let mut args = strings(&["run", "--mode", "workspace-write", "--workspace"]);
+        args.push(workspace.display().to_string());
+        args.push("--writable".to_string());
+        args.push(extra_run.display().to_string());
+        args.push("--writable".to_string());
+        args.push(extra_cache.display().to_string());
+        args.push("--protect".to_string());
+        args.push(protected.display().to_string());
+        args.push("--deny-read".to_string());
+        args.push(denied.display().to_string());
+        args.extend(strings(&[
             "--network",
             "allow",
             "--max-cpu-seconds",
@@ -2344,42 +2354,29 @@ mod tests {
             "--",
             "echo",
             "ok",
-        ]))
-        .unwrap();
+        ]));
+        let parsed = parse_run_args(&args).unwrap();
         assert_eq!(
             parsed.policy.mode,
             tiangong_sandbox::SandboxMode::WorkspaceWrite
         );
-        assert_eq!(parsed.policy.workspace, PathBuf::from("/workspace"));
-        assert_eq!(
-            parsed.policy.extra_writable,
-            vec![PathBuf::from("/tmp/run"), PathBuf::from("/tmp/cache")]
-        );
-        assert_eq!(
-            parsed.policy.protected_paths,
-            vec![PathBuf::from("/workspace/protected")]
-        );
-        assert_eq!(
-            parsed.policy.denied_read_paths,
-            vec![PathBuf::from("/home/user/.ssh")]
-        );
+        assert_eq!(parsed.policy.workspace, workspace);
+        assert_eq!(parsed.policy.extra_writable, vec![extra_run, extra_cache]);
+        assert_eq!(parsed.policy.protected_paths, vec![protected]);
+        assert_eq!(parsed.policy.denied_read_paths, vec![denied]);
         assert!(parsed.policy.allow_network);
         assert_eq!(parsed.policy.resource_limits.max_cpu_time_seconds, 12);
         assert_eq!(parsed.policy.resource_limits.max_memory_bytes, 4096);
         assert_eq!(parsed.policy.resource_limits.max_processes, 8);
         assert_eq!(parsed.command, strings(&["echo", "ok"]));
     }
-
     #[test]
     fn inline_policy_defaults_are_fail_closed() {
-        let parsed = parse_run_args(&strings(&[
-            "run",
-            "--workspace",
-            "/workspace",
-            "--",
-            "/bin/true",
-        ]))
-        .unwrap();
+        let workspace = platform_path("/workspace");
+        let mut args = strings(&["run", "--workspace"]);
+        args.push(workspace.display().to_string());
+        args.extend(strings(&["--", "/bin/true"]));
+        let parsed = parse_run_args(&args).unwrap();
         assert_eq!(
             parsed.policy.mode,
             tiangong_sandbox::SandboxMode::WorkspaceWrite
@@ -2390,7 +2387,6 @@ mod tests {
             tiangong_sandbox::SandboxResourceLimits::default()
         );
     }
-
     #[test]
     fn policy_file_and_inline_options_are_mutually_exclusive() {
         let error = parse_run_args(&strings(&[
