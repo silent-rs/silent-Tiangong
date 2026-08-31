@@ -9,6 +9,8 @@
 //! - 工作区快照恢复 → feature/workspace-snapshots
 //! - 无沙箱审批升级 → feature/sandbox-escalation
 
+pub mod installed;
+pub mod launcher_manager;
 mod path;
 pub mod sandbox;
 pub mod update;
