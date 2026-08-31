@@ -28,6 +28,12 @@ use tiangong_plugin_runtime::protocol::{Request, Response};
 #[async_trait]
 pub trait SidecarService: Send + Sync {
     async fn dispatch(&self, request: Request) -> Response;
+
+    /// 请求级取消的资源清理钩子。普通异步任务由 stdio 运行器终止；持有
+    /// 子进程、PTY 或外部句柄的服务应按目标请求释放资源。
+    async fn cancel(&self, _request: &Request) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// 单例守卫：持有 IPC bridge，drop 时停 server 并清理 endpoint 文件。

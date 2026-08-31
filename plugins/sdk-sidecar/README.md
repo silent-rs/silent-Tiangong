@@ -29,6 +29,14 @@ await runSidecar({
 - `ctx.progress(message)` 向宿主发送进度；`ctx.notify(channel, payload)` 发送通知。
 - 业务错误抛 `SidecarError(message, code, retryable)`；其他异常按 `service_error` 返回。
 
+## 取消与并发（0.2.0）
+
+- 普通请求并发处理，默认上限 16，可由宿主通过 `TIANGONG_SIDECAR_MAX_CONCURRENCY` 收窄。
+- 宿主使用 `cancel` 帧按 `request_id` 取消；取消不占普通请求并发名额。
+- `dispatch` 的 `ctx.signal` 会在取消时触发；启动子进程的插件必须监听该信号并清理目标进程树。
+- 可选 `cancel(operation, payload, ctx)` 清理钩子用于释放 PTY、子进程与外部句柄。
+- 0.1.x 制品不支持请求级取消，宿主会在握手阶段明确要求升级，不会退回无沙箱模式。
+
 ## 协议要点（与宿主实现对齐）
 
 - 帧为单行 JSON + 换行；`kind` 取 `auth` / `request` / `progress` /

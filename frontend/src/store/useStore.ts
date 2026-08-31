@@ -1881,16 +1881,27 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 取消当前执行
   cancelTurn: async () => {
+    const cacheKey = selectCurrentInputCacheKey(get());
+    if (cacheKey) {
+      const cache = sessionViewCaches.get(cacheKey);
+      if (cache && cache.runStatus !== 'idle') {
+        sessionViewCaches.set(cacheKey, { ...cache, runSummary: '正在取消...' });
+      }
+    }
+    set((state) => ({
+      runSummary: state.runStatus === 'idle' ? state.runSummary : '正在取消...',
+    }));
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
+      timeoutHandle = setTimeout(() => {
+        set((state) => ({
+          runSummary: state.runStatus === 'idle'
+            ? state.runSummary
+            : '取消仍在后台处理中，可再次点击停止重试',
+        }));
+      }, 2000);
       const cancelled = await api.cancelTurn();
       if (cancelled) {
-        const cacheKey = selectCurrentInputCacheKey(get());
-        if (cacheKey) {
-          const cache = sessionViewCaches.get(cacheKey);
-          if (cache && cache.runStatus !== 'idle') {
-            sessionViewCaches.set(cacheKey, { ...cache, runSummary: '正在取消...' });
-          }
-        }
         let settledCache: InputCache | undefined;
         set((state) => {
           const inputCaches = cacheKey
@@ -1909,7 +1920,14 @@ export const useStore = create<AppState>((set, get) => ({
       return cancelled;
     } catch (error) {
       console.error('取消执行失败:', error);
+      set((state) => ({
+        runSummary: state.runStatus === 'idle'
+          ? state.runSummary
+          : '取消请求失败，任务可能仍在运行，请重试',
+      }));
       return false;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
   },
 

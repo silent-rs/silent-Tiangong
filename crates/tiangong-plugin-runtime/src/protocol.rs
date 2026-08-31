@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// 通用 sidecar 协议版本。
-pub const PROTOCOL_VERSION: &str = "0.1.0";
+pub const PROTOCOL_VERSION: &str = "0.2.0";
 /// 由运行时发起的健康检查操作。
 pub const HANDSHAKE_OPERATION: &str = "runtime.handshake";
 
@@ -91,6 +91,7 @@ pub enum ErrorCode {
     BadRequest,
     ServiceDisabled,
     ServiceError,
+    Cancelled,
 }
 
 /// 通用握手响应。
@@ -149,6 +150,10 @@ pub struct IpcAuth {
 pub enum IpcFrame {
     Auth(IpcAuth),
     Request(IpcRequest),
+    /// 请求级取消控制帧；不占用普通请求并发配额。
+    Cancel {
+        request_id: String,
+    },
     Progress {
         request_id: String,
         message: String,

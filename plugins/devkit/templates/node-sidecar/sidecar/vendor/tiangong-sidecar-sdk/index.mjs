@@ -18,7 +18,7 @@
 //     },
 //   });
 
-export const PROTOCOL_VERSION = '0.1.0';
+export const PROTOCOL_VERSION = '0.2.0';
 export const HANDSHAKE_OPERATION = 'runtime.handshake';
 
 const TRANSPORT_ENV = 'TIANGONG_PLUGIN_TRANSPORT';
@@ -30,7 +30,7 @@ const PLUGIN_VERSION_ENV = 'TIANGONG_PLUGIN_VERSION';
 export class SidecarError extends Error {
   /**
    * @param {string} message
-   * @param {'unavailable'|'timeout'|'payload_too_large'|'protocol_mismatch'|'permission_denied'|'bad_request'|'service_disabled'|'service_error'} code
+   * @param {'unavailable'|'timeout'|'payload_too_large'|'protocol_mismatch'|'permission_denied'|'bad_request'|'service_disabled'|'service_error'|'cancelled'} code
    * @param {boolean} retryable
    */
   constructor(message, code = 'service_error', retryable = false) {
@@ -72,6 +72,10 @@ export async function runSidecar(options) {
   };
 
   let authenticated = false;
+  const maxConcurrency = Math.max(1, Number.parseInt(process.env.TIANGONG_SIDECAR_MAX_CONCURRENCY ?? '16', 10) || 16);
+  let running = 0;
+  const queue = [];
+  const active = new Map();
   const rl = (await import('node:readline')).createInterface({
     input: process.stdin,
     crlfDelay: Infinity,
@@ -97,23 +101,47 @@ export async function runSidecar(options) {
       authenticated = true;
       return;
     }
-    if (frame?.kind !== 'request') {
-      process.stderr.write(`sidecar 收到非预期帧类型: ${frame?.kind}\n`);
-      return;
-    }
     if (!authenticated) {
       writeFrame({ kind: 'error', message: 'stdio 首帧必须是 Auth' });
       process.exit(1);
     }
-    handleRequest(frame).catch((error) => {
-      process.stderr.write(`sidecar 请求处理异常: ${error?.stack ?? error}\n`);
-    });
+    if (frame?.kind === 'cancel') {
+      const task = active.get(frame.request_id);
+      if (task) {
+        task.controller.abort(new SidecarError('请求已取消', 'cancelled'));
+        active.delete(frame.request_id);
+        Promise.resolve(options.cancel?.(task.operation, task.payload, task.ctx)).catch((error) => {
+          process.stderr.write(`sidecar 取消清理异常: ${error?.stack ?? error}\n`);
+        });
+      }
+      respond(frame.request_id, failureEnvelope(frame.request_id, 'cancelled', '请求已取消'));
+      return;
+    }
+    if (frame?.kind !== 'request') {
+      process.stderr.write(`sidecar 收到非预期帧类型: ${frame?.kind}\n`);
+      return;
+    }
+    queue.push(frame);
+    pump();
   });
 
   rl.on('close', () => {
     // 宿主已关闭管道（退出或停止）：随宿主退出。
     process.exit(0);
   });
+
+  function pump() {
+    while (running < maxConcurrency && queue.length > 0) {
+      const frame = queue.shift();
+      running += 1;
+      handleRequest(frame).catch((error) => {
+        process.stderr.write(`sidecar 请求处理异常: ${error?.stack ?? error}\n`);
+      }).finally(() => {
+        running -= 1;
+        pump();
+      });
+    }
+  }
 
   /**
    * @param {{kind: 'request', request_id: string, payload: any}} frame
@@ -143,7 +171,9 @@ export async function runSidecar(options) {
         }));
         return;
       }
+      const controller = new AbortController();
       const ctx = {
+        signal: controller.signal,
         progress(message) {
           if (typeof message !== 'string' || message.length === 0) {
             return;
@@ -157,10 +187,14 @@ export async function runSidecar(options) {
           writeFrame({ kind: 'notification', channel, payload: typeof payload === 'string' ? payload : JSON.stringify(payload ?? null) });
         },
       };
+      active.set(requestId, { controller, operation: envelope.operation, payload: envelope.payload ?? null, ctx });
       const result = await dispatch(envelope.operation, envelope.payload ?? null, ctx);
+      if (controller.signal.aborted) return;
+      active.delete(requestId);
       const payload = result && typeof result === 'object' && 'payload' in result ? result.payload : (result ?? null);
       respond(requestId, successEnvelope(requestId, payload));
     } catch (error) {
+      active.delete(requestId);
       if (error instanceof SidecarError) {
         respond(requestId, failureEnvelope(requestId, error.code, error.message, error.retryable));
         return;
