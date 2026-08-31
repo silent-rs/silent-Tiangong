@@ -58,6 +58,8 @@ struct StdioProcess {
     token: String,
     /// 本进程是否已发送过 Auth 首帧。
     authenticated: AtomicBool,
+    /// stdout 读线程观察到 EOF/错误后置位；并发请求据此无阻塞换代。
+    closed: Arc<AtomicBool>,
     #[cfg(windows)]
     lifecycle: WindowsJob,
 }
@@ -142,9 +144,14 @@ impl StdioSidecarConnection {
             bail!("stdio sidecar 已停止");
         }
         if let Some(process) = state.process.as_ref() {
-            // 共享状态中仍有进程代次即直接复用；退出由读线程关闭 pending，
-            // 下一次写失败后再换代。这里不查询 Child，避免并发请求等待进程锁。
-            return Ok(Arc::clone(process));
+            if !process.closed.load(Ordering::Acquire) {
+                return Ok(Arc::clone(process));
+            }
+            let process = state.process.take().expect("已确认存在的进程代次");
+            if let Ok(mut child) = process.child.lock() {
+                terminate_process_tree(&process, &mut child);
+            }
+            tracing::warn!(plugin_id = %self.config.plugin_id, "stdio sidecar 已退出，准备重启");
         }
         self.start_fresh(state)
     }
@@ -462,13 +469,20 @@ impl StdioSidecarConnection {
 
         let pending: Arc<Mutex<HashMap<String, PendingWaiter>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        spawn_stdio_reader(self.config.plugin_id.clone(), stdout, Arc::clone(&pending));
+        let closed = Arc::new(AtomicBool::new(false));
+        spawn_stdio_reader(
+            self.config.plugin_id.clone(),
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&closed),
+        );
         Ok(StdioProcess {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending,
             token,
             authenticated: AtomicBool::new(false),
+            closed,
             #[cfg(windows)]
             lifecycle,
         })
@@ -807,6 +821,7 @@ fn spawn_stdio_reader(
     plugin_id: String,
     stdout: std::process::ChildStdout,
     pending: Arc<Mutex<HashMap<String, PendingWaiter>>>,
+    closed: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
         .name(format!("plugin-sidecar-stdio-reader-{plugin_id}"))
@@ -862,6 +877,7 @@ fn spawn_stdio_reader(
                     }
                 }
             }
+            closed.store(true, Ordering::Release);
             fail_all_pending(&pending, "stdio sidecar 已关闭".to_string());
         })
         .expect("启动 stdio 读线程失败");
