@@ -52,3 +52,7 @@ npx -y @silent-ai/plugin-creator@1.0.2 build <id>
 ```
 
 然后在「插件创作」页安装（或让 Agent 调 `plugin_install`）。
+
+## 请求取消
+
+模板使用 sidecar SDK 0.2.0。长任务应监听 `ctx.signal`，并在 `cancel` 钩子中清理子进程和句柄。

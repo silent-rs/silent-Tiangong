@@ -5,11 +5,12 @@
 //! Request 交业务 dispatch），Response/Notification 写 stdout。stdin EOF
 //! 即宿主关闭，进程随之退出——宿主管理生命周期，跳过单例与信号等待。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use tiangong_plugin_runtime::protocol::{
-    ErrorCode as PluginErrorCode, IpcFrame, IpcRequest, IpcResponse, Request as PluginRequest,
+    ErrorCode as PluginErrorCode, IpcFrame, IpcResponse, Request as PluginRequest,
     Response as PluginResponse,
 };
 #[cfg(target_os = "macos")]
@@ -21,6 +22,7 @@ use crate::singleton::SidecarService;
 const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
 const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
 const TRANSPORT_STDIO: &str = "stdio";
+const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
 
 /// 宿主是否要求以 stdio 模式运行。
 pub fn stdio_requested() -> bool {
@@ -64,6 +66,14 @@ where
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut authenticated = false;
     let expected_token = std::env::var(STDIO_TOKEN_ENV).unwrap_or_default();
+    let max_concurrent = std::env::var("TIANGONG_SIDECAR_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_REQUESTS);
+    let permits = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    let active: Arc<tokio::sync::Mutex<HashMap<String, ActiveRequest>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut line = String::new();
     loop {
         line.clear();
@@ -105,8 +115,69 @@ where
                     .await;
                     bail!("stdio sidecar 在认证前收到请求");
                 }
-                if let Err(error) = dispatch_and_respond(&writer, &service_obj, request).await {
-                    tracing::warn!(service = %service_name, %error, "stdio 请求处理失败");
+                let plugin_request = match serde_json::from_value::<PluginRequest>(request.payload)
+                {
+                    Ok(plugin_request) => plugin_request,
+                    Err(error) => {
+                        let response = PluginResponse::error(
+                            &request.request_id,
+                            PluginErrorCode::BadRequest,
+                            format!("解析插件 sidecar 请求失败: {error}"),
+                            false,
+                        );
+                        let _ = respond(&writer, request.request_id, response).await;
+                        continue;
+                    }
+                };
+                let request_id = request.request_id;
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                active.lock().await.insert(
+                    request_id.clone(),
+                    ActiveRequest {
+                        request: plugin_request.clone(),
+                        cancel: cancel_tx,
+                    },
+                );
+                let permits_for_task = Arc::clone(&permits);
+                let writer_for_task = Arc::clone(&writer);
+                let service_for_task = Arc::clone(&service_obj);
+                let active_for_task = Arc::clone(&active);
+                let service_for_log = service_name.clone();
+                tokio::spawn(async move {
+                    let permit = match permits_for_task.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => return,
+                    };
+                    let response = tokio::select! {
+                        response = service_for_task.dispatch(plugin_request) => Some(response),
+                        _ = cancel_rx => None,
+                    };
+                    active_for_task.lock().await.remove(&request_id);
+                    drop(permit);
+                    if let Some(response) = response
+                        && let Err(error) = respond(&writer_for_task, request_id, response).await
+                    {
+                        tracing::warn!(service = %service_for_log, %error, "stdio 请求处理失败");
+                    }
+                });
+            }
+            IpcFrame::Cancel { request_id } => {
+                // 控制帧直接处理，不等待普通请求并发 permit。
+                let target = active.lock().await.remove(&request_id);
+                if let Some(target) = target {
+                    let _ = target.cancel.send(());
+                    if let Err(error) = service_obj.cancel(&target.request).await {
+                        tracing::warn!(service = %service_name, %request_id, %error, "stdio 取消清理失败");
+                    }
+                }
+                let response = PluginResponse::error(
+                    &request_id,
+                    PluginErrorCode::Cancelled,
+                    "请求已取消",
+                    false,
+                );
+                if let Err(error) = respond(&writer, request_id, response).await {
+                    tracing::warn!(service = %service_name, %error, "stdio 取消响应失败");
                 }
             }
             other => {
@@ -222,26 +293,22 @@ fn wait_for_process_exit(pid: libc::pid_t) -> bool {
     }
 }
 
-async fn dispatch_and_respond(
+struct ActiveRequest {
+    request: PluginRequest,
+    cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+async fn respond(
     writer: &Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
-    service_obj: &Arc<dyn SidecarService>,
-    request: IpcRequest,
+    request_id: String,
+    plugin_response: PluginResponse,
 ) -> Result<()> {
-    let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone()) {
-        Ok(plugin_request) => service_obj.dispatch(plugin_request).await,
-        Err(error) => PluginResponse::error(
-            &request.request_id,
-            PluginErrorCode::BadRequest,
-            format!("解析插件 sidecar 请求失败: {error}"),
-            false,
-        ),
-    };
     let payload =
         serde_json::to_value(&plugin_response).with_context(|| "序列化 sidecar 响应失败")?;
     write_frame(
         writer,
         &IpcFrame::Response(IpcResponse {
-            request_id: request.request_id,
+            request_id,
             payload,
         }),
     )

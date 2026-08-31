@@ -1198,6 +1198,9 @@ pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> 
     let session_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
+    if state.inner().core_manager.cancel_core(&session_id) {
+        return Ok(true);
+    }
     let session_lock = state.session_send_lock(&session_id);
     Ok(cancel_after_session_send_boundary(session_lock, || {
         state.inner().core_manager.cancel_core(&session_id)

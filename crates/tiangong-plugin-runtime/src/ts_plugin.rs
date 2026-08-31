@@ -124,13 +124,13 @@ impl ToolOverrideHandler for TsPluginAdapter {
         };
         let plugin_id = self.id.clone();
         let call = call.clone();
+        let session_id = session.id.clone();
         if self.sidecar_direct.load(Ordering::Acquire) {
             let tool_timeout_ms = tool.timeout_ms;
-            Box::pin(
-                async move { Some(invoke_sidecar_tool(&plugin_id, call, tool_timeout_ms).await) },
-            )
+            Box::pin(async move {
+                Some(invoke_sidecar_tool(&plugin_id, call, tool_timeout_ms, Some(session_id)).await)
+            })
         } else {
-            let session_id = session.id.clone();
             Box::pin(async move {
                 Some(crate::ts_tools::execute(plugin_id, session_id, call, tool.timeout_ms).await)
             })
@@ -149,7 +149,12 @@ fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
 ///
 /// 生命周期对齐页面接应路径：按工具声明的 `timeout_ms` 限时；超时或会话
 /// 取消（Future 被 drop）时终止本次按需 sidecar 进程，不遗留阻塞调用。
-async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -> ToolResult {
+async fn invoke_sidecar_tool(
+    plugin_id: &str,
+    call: ToolCall,
+    timeout_ms: u64,
+    session_id: Option<String>,
+) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
     };
@@ -186,18 +191,26 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
     let mut guard = SidecarProcessGuard {
         connection: Some(connection.clone()),
         stop_on_drop: on_demand,
+        session_id: session_id.clone(),
     };
     let operation = call.name.clone();
     let timeout_operation = operation.clone();
     let arguments = call.arguments.clone();
+    let invocation_context =
+        session_id.map(|session_id| crate::sidecar::SidecarInvocationContext {
+            session_id,
+            invocation_id: call.id.clone(),
+            authoritative_workspace: std::path::PathBuf::new(),
+        });
     let blocking = connection.clone();
     let invoked = tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms),
         tokio::task::spawn_blocking(move || {
-            blocking.invoke(
-                &operation,
-                &serde_json::to_string(&arguments).unwrap_or_default(),
-            )
+            let payload = serde_json::to_string(&arguments).unwrap_or_default();
+            match invocation_context {
+                Some(context) => blocking.invoke_with_context(&operation, &payload, &context),
+                None => blocking.invoke(&operation, &payload),
+            }
         }),
     )
     .await;
@@ -258,8 +271,9 @@ async fn invoke_sidecar_tool(plugin_id: &str, call: ToolCall, timeout_ms: u64) -
 
 struct SidecarProcessGuard {
     connection: Option<std::sync::Arc<dyn crate::sidecar::SidecarConnection>>,
-    /// 临时连接（按需直连）用 stop 终止；共享连接用 cancel_current。
+    /// 临时连接（按需直连）用 stop 终止；共享连接按会话取消目标请求。
     stop_on_drop: bool,
+    session_id: Option<String>,
 }
 
 impl Drop for SidecarProcessGuard {
@@ -268,9 +282,9 @@ impl Drop for SidecarProcessGuard {
             if self.stop_on_drop {
                 // 独立连接：终止即安全（连接与进程都只属于本次调用）。
                 let _ = connection.stop();
-            } else {
-                // 共享连接：只取消当前进程，连接继续服务后续调用。
-                connection.cancel_current();
+            } else if let Some(session_id) = self.session_id.as_deref() {
+                // 共享连接：只取消当前会话关联的请求，常驻进程继续服务其他调用。
+                let _ = connection.cancel_session(session_id);
             }
         }
     }
@@ -283,7 +297,7 @@ pub(crate) async fn invoke_sidecar_tool_for_test(
     call: ToolCall,
     timeout_ms: u64,
 ) -> ToolResult {
-    invoke_sidecar_tool(plugin_id, call, timeout_ms).await
+    invoke_sidecar_tool(plugin_id, call, timeout_ms, None).await
 }
 
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {

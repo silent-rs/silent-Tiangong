@@ -66,6 +66,7 @@ struct StdioProcess {
 struct PendingWaiter {
     response: SyncSender<Result<Value, String>>,
     progress: SyncSender<String>,
+    invocation: Option<crate::sidecar::SidecarInvocationContext>,
 }
 
 impl StdioSidecarConnection {
@@ -141,27 +142,9 @@ impl StdioSidecarConnection {
             bail!("stdio sidecar 已停止");
         }
         if let Some(process) = state.process.as_ref() {
-            let alive = process
-                .child
-                .lock()
-                .map(|mut child| {
-                    child
-                        .try_wait()
-                        .map(|status| status.is_none())
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            if alive {
-                return Ok(Arc::clone(process));
-            }
-            if let Ok(mut child) = process.child.lock() {
-                terminate_process_tree(process, &mut child);
-            }
-            tracing::warn!(
-                plugin_id = %self.config.plugin_id,
-                "stdio sidecar 已退出，准备重启"
-            );
-            state.process = None;
+            // 共享状态中仍有进程代次即直接复用；退出由读线程关闭 pending，
+            // 下一次写失败后再换代。这里不查询 Child，避免并发请求等待进程锁。
+            return Ok(Arc::clone(process));
         }
         self.start_fresh(state)
     }
@@ -199,6 +182,7 @@ impl StdioSidecarConnection {
         &self,
         operation: &str,
         payload: Value,
+        invocation: Option<crate::sidecar::SidecarInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
         let process = {
@@ -211,20 +195,64 @@ impl StdioSidecarConnection {
             }
             self.start_fresh(&mut state)?
         };
-        let result = self.round_trip(&process, operation, payload, on_progress);
+        let result = self.round_trip(&process, operation, payload, invocation, on_progress);
+        // 先清理进程，再获取 state 锁；读线程在发送关闭错误时可能短暂持有
+        // pending 锁，反向持锁会让请求收尾与取消互相等待。
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-        if let Ok(mut child) = process.child.lock() {
-            terminate_process_tree(&process, &mut child);
-        }
-        // cancel_current 可能已抢先清理（进程已被杀并移出）——幂等处理。
-        let already_cleared = state.process.is_none();
-        if !already_cleared {
+        if state
+            .process
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &process))
+        {
             state.process = None;
         }
         result
+    }
+
+    /// 按宿主会话取消其仍在执行的请求。常驻 sidecar 发送请求级 Cancel，
+    /// 不杀进程；按需 sidecar 每次调用独占进程，直接清理进程树。
+    pub fn cancel_session(&self, session_id: &str) -> Result<()> {
+        let process = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?
+            .process
+            .clone();
+        let Some(process) = process else {
+            return Ok(());
+        };
+        if self.config.lifecycle == crate::manifest::SidecarLifecycle::OnDemand {
+            self.cancel_current();
+            return Ok(());
+        }
+        let request_ids = process
+            .pending
+            .lock()
+            .map_err(|_| anyhow!("stdio sidecar pending 锁已损坏"))?
+            .iter()
+            .filter(|(_, waiter)| {
+                waiter
+                    .invocation
+                    .as_ref()
+                    .is_some_and(|context| context.session_id == session_id)
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            let waiter = process
+                .pending
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&request_id));
+            self.cancel_request(&process, &request_id)?;
+            if let Some(waiter) = waiter {
+                let _ = waiter.response.send(Err("请求已取消".to_string()));
+            }
+        }
+        Ok(())
     }
 
     /// 终止当前进行中的调用进程（工具级超时 / 会话取消用）：
@@ -452,6 +480,7 @@ impl StdioSidecarConnection {
             process,
             HANDSHAKE_OPERATION,
             serde_json::Value::Null,
+            None,
             &mut |_| {},
         )?;
         let handshake: HandshakeResponse =
@@ -495,6 +524,7 @@ impl StdioSidecarConnection {
         process: &Arc<StdioProcess>,
         operation: &str,
         payload: Value,
+        invocation: Option<crate::sidecar::SidecarInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
         let request = Request::new(operation, payload);
@@ -510,6 +540,7 @@ impl StdioSidecarConnection {
                 PendingWaiter {
                     response: response_tx,
                     progress: progress_tx,
+                    invocation,
                 },
             );
 
@@ -580,16 +611,35 @@ impl StdioSidecarConnection {
         });
         write_line(&mut stdin, &frame)
     }
+
+    fn write_frame(&self, process: &StdioProcess, frame: &IpcFrame) -> Result<()> {
+        let mut stdin = process
+            .stdin
+            .lock()
+            .map_err(|_| anyhow!("stdio sidecar 写端锁已损坏"))?;
+        write_line(&mut stdin, frame)
+    }
+
+    fn cancel_request(&self, process: &StdioProcess, request_id: &str) -> Result<()> {
+        self.write_frame(
+            process,
+            &IpcFrame::Cancel {
+                request_id: request_id.to_string(),
+            },
+        )?;
+        Ok(())
+    }
 }
 
 fn child_status(process: &StdioProcess) -> String {
-    let Ok(mut child) = process.child.lock() else {
-        return "无法读取子进程状态".to_string();
-    };
-    match child.try_wait() {
-        Ok(Some(status)) => format!("子进程退出状态: {status}"),
-        Ok(None) => "子进程仍在运行但输出已关闭".to_string(),
-        Err(error) => format!("读取子进程状态失败: {error}"),
+    match process.child.try_lock() {
+        Ok(mut child) => match child.try_wait() {
+            Ok(Some(status)) => format!("子进程退出状态: {status}"),
+            Ok(None) => "子进程仍在运行但输出已关闭".to_string(),
+            Err(error) => format!("读取子进程状态失败: {error}"),
+        },
+        Err(std::sync::TryLockError::WouldBlock) => "子进程仍在运行（状态查询忙）".to_string(),
+        Err(std::sync::TryLockError::Poisoned(_)) => "无法读取子进程状态".to_string(),
     }
 }
 
@@ -746,7 +796,7 @@ fn write_line(stdin: &mut ChildStdin, frame: &IpcFrame) -> Result<()> {
 }
 
 fn remove_pending(process: &StdioProcess, request_id: &str) {
-    if let Ok(mut pending) = process.pending.lock() {
+    if let Ok(mut pending) = process.pending.try_lock() {
         pending.remove(request_id);
     }
 }
@@ -775,25 +825,24 @@ fn spawn_stdio_reader(
                 };
                 match frame {
                     IpcFrame::Response(response) => {
-                        if let Some(waiter) = pending
+                        let waiter = pending
                             .lock()
                             .ok()
-                            .and_then(|mut map| map.remove(&response.request_id))
-                        {
-                            let _ = waiter
-                                .response
-                                .send(parse_response_payload(response.payload));
+                            .and_then(|mut map| map.remove(&response.request_id));
+                        if let Some(waiter) = waiter {
+                            let parsed = parse_response_payload(response.payload);
+                            let _ = waiter.response.send(parsed);
                         }
                     }
                     IpcFrame::Progress {
                         request_id,
                         message,
                     } => {
-                        if let Some(waiter) = pending
+                        let waiter = pending
                             .lock()
                             .ok()
-                            .and_then(|map| map.get(&request_id).cloned())
-                        {
+                            .and_then(|map| map.get(&request_id).cloned());
+                        if let Some(waiter) = waiter {
                             let _ = waiter.progress.try_send(message);
                         }
                     }
@@ -805,7 +854,7 @@ fn spawn_stdio_reader(
                     IpcFrame::Error { message } => {
                         fail_all_pending(&pending, format!("stdio sidecar 错误: {message}"));
                     }
-                    IpcFrame::Auth(_) | IpcFrame::Request(_) => {
+                    IpcFrame::Auth(_) | IpcFrame::Request(_) | IpcFrame::Cancel { .. } => {
                         tracing::warn!(
                             plugin_id = %plugin_id,
                             "stdio sidecar 发送了非预期的帧类型"
@@ -858,7 +907,7 @@ impl SidecarConnection for StdioSidecarConnection {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => self
-                .invoke_on_demand(operation, payload, on_progress)
+                .invoke_on_demand(operation, payload, None, on_progress)
                 .map_err(|error| {
                     if error.downcast_ref::<SidecarInvokeError>().is_some() {
                         error
@@ -881,7 +930,7 @@ impl SidecarConnection for StdioSidecarConnection {
                         }
                     })?
                 };
-                self.round_trip(&process, operation, payload, on_progress)
+                self.round_trip(&process, operation, payload, None, on_progress)
                     .map_err(|error| {
                         if error.downcast_ref::<SidecarInvokeError>().is_some() {
                             error
@@ -894,12 +943,57 @@ impl SidecarConnection for StdioSidecarConnection {
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }
 
+    fn invoke_with_context(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &crate::sidecar::SidecarInvocationContext,
+    ) -> Result<String> {
+        self.invoke_with_context_and_progress(operation, payload, context, &mut |_| {})
+    }
+
+    fn invoke_with_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &crate::sidecar::SidecarInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
+        let response = match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => {
+                self.invoke_on_demand(operation, payload, Some(context.clone()), on_progress)?
+            }
+            crate::manifest::SidecarLifecycle::Resident => {
+                let process = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+                    self.ensure_running(&mut state)?
+                };
+                self.round_trip(
+                    &process,
+                    operation,
+                    payload,
+                    Some(context.clone()),
+                    on_progress,
+                )?
+            }
+        };
+        serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
     fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
         StdioSidecarConnection::update_exec_env(self, env);
     }
 
     fn stop(&self) -> Result<()> {
         StdioSidecarConnection::stop(self)
+    }
+
+    fn cancel_session(&self, session_id: &str) -> Result<()> {
+        StdioSidecarConnection::cancel_session(self, session_id)
     }
 
     fn cancel_current(&self) {

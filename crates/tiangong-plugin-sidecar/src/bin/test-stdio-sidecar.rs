@@ -36,6 +36,15 @@ impl SidecarService for EchoService {
             "crash" => {
                 std::process::exit(86);
             }
+            "delay" => {
+                let millis = request
+                    .payload
+                    .get("millis")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(100);
+                tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+                Response::success(&request.request_id, request.payload)
+            }
             "hang" => hang_with_child(request).await,
             other => Response::error(
                 &request.request_id,
