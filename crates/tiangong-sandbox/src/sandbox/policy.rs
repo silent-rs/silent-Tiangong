@@ -24,6 +24,7 @@ pub struct SandboxPolicy {
     /// 会话工作区（WorkspaceWrite 模式下的主可写根）。
     pub workspace: PathBuf,
     /// 额外可写根（插件数据目录等）。
+    #[serde(default)]
     pub extra_writable: Vec<PathBuf>,
     /// 即使位于可写根内也保持只读的宿主敏感路径。
     #[serde(default)]
@@ -32,6 +33,7 @@ pub struct SandboxPolicy {
     #[serde(default)]
     pub denied_read_paths: Vec<PathBuf>,
     /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
+    #[serde(default)]
     pub allow_network: bool,
     /// 单次 command 的资源上限。
     #[serde(default)]
@@ -82,21 +84,6 @@ impl SandboxPolicy {
             denied_read_paths: Vec::new(),
             allow_network: true,
             resource_limits: SandboxResourceLimits::default(),
-        }
-    }
-
-    /// 加入宿主权威的默认敏感读取拒绝项。
-    ///
-    /// 覆盖常见凭据位置：SSH/AWS/GPG/Kubernetes/Docker/Azure/GCP/GitHub CLI
-    /// 与 `.netrc`。天工数据根下的配置、密钥与信任件同样拒绝读取。
-    pub fn protect_user_credentials(&mut self, storage_root: &Path) {
-        if let Some(home) = user_home_dir() {
-            for path in home_credential_relative_paths() {
-                self.denied_read_paths.push(home.join(path));
-            }
-        }
-        for path in protected_storage_relative_paths() {
-            self.denied_read_paths.push(storage_root.join(path));
         }
     }
 
@@ -161,74 +148,6 @@ impl SandboxPolicy {
         paths.dedup();
         paths
     }
-}
-
-/// 当前用户家目录（绝对路径，解析失败返回 None）。
-pub fn user_home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let value = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|| {
-            let drive = std::env::var_os("HOMEDRIVE")?;
-            let path = std::env::var_os("HOMEPATH")?;
-            Some(PathBuf::from(drive).join(path))
-        });
-    #[cfg(not(windows))]
-    let value = std::env::var_os("HOME").map(PathBuf::from);
-    value.filter(|path| path.is_absolute())
-}
-
-/// 家目录下必须保持只读的凭据相对路径清单：沙箱禁读（deny-read）与
-/// 家目录作工作区时的写保护（protected）共用同一份权威清单。
-pub fn home_credential_relative_paths() -> [&'static str; 9] {
-    [
-        ".ssh",
-        ".aws",
-        ".gnupg",
-        ".kube",
-        ".docker",
-        ".azure",
-        ".config/gcloud",
-        ".config/gh",
-        ".netrc",
-    ]
-}
-
-/// 家目录下凭据路径的绝对形态（家目录不可解析时为空）。
-pub fn home_credential_paths() -> Vec<PathBuf> {
-    let Some(home) = user_home_dir() else {
-        return Vec::new();
-    };
-    home_credential_relative_paths()
-        .iter()
-        .map(|path| home.join(path))
-        .collect()
-}
-
-/// storage_root 下对 sidecar 读写双禁的配置与信任件（相对路径段）：
-/// 模型/服务/MCP/应用配置（app.json 含沙箱开关本身）、签名密钥与信任
-/// 库、以及 Launcher 目录（沙箱防"被约束者"的核心——沙箱内进程必须
-/// 够不到 Launcher 与信任锚，防替换逃逸）。其余存储目录整体开放可写。
-pub fn protected_storage_relative_paths() -> [&'static str; 7] {
-    [
-        "keys",
-        "trust.db",
-        "mcp.json",
-        "models.json",
-        "server.json",
-        "app.json",
-        "sandbox",
-    ]
-}
-
-/// protected_paths 用的绝对清单：存储配置件 + 家目录凭据（读写双禁）。
-pub fn protected_paths_for(storage_root: &Path) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = protected_storage_relative_paths()
-        .iter()
-        .map(|path| storage_root.join(path))
-        .collect();
-    paths.extend(home_credential_paths());
-    paths
 }
 
 /// 规范化路径：能解析则用真实路径（macOS 上 `/var` → `/private/var`），
@@ -339,31 +258,5 @@ mod tests {
                 .read_only_roots()
                 .contains(&canonical_or_keep(&git_file))
         );
-    }
-
-    #[test]
-    fn credential_protection_covers_common_secret_locations() {
-        let root = tempfile::tempdir().unwrap();
-        let mut policy = SandboxPolicy::workspace_write("/workspace");
-        policy.protect_user_credentials(root.path());
-        let denied = policy.denied_read_roots();
-
-        // 用户目录凭据位置。
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            for path in [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".netrc"] {
-                assert!(
-                    denied.contains(&canonical_or_keep(&home.join(path))),
-                    "应拒绝读取 {}",
-                    path
-                );
-            }
-        }
-        // 天工数据根内的密钥与凭据文件。
-        for path in ["keys", "trust.db", "mcp.json", "models.json"] {
-            assert!(
-                denied.contains(&canonical_or_keep(&root.path().join(path))),
-                "应拒绝读取数据根内 {path}"
-            );
-        }
     }
 }

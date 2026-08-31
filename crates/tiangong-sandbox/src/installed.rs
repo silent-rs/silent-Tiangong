@@ -1,4 +1,4 @@
-//! 已安装 Sandbox 的官方签名与自检验证。
+//! 已安装 Sandbox 的签名与自检验证。
 //!
 //! 生产 Sandbox 只信任本 crate 内置的独立官方公钥，不接受插件用户密钥、
 //! 第三方插件公钥或任何运行时配置覆盖。
@@ -13,21 +13,26 @@ const OFFICIAL_PUBKEY_B64: &str = include_str!("official-pubkey.b64");
 
 /// 验证固定路径程序的普通文件形态与官方 minisign 签名。
 pub fn verify_official_signature(program: &Path) -> Result<()> {
+    verify_signature_with_public_key(program, OFFICIAL_PUBKEY_B64)
+}
+
+/// 使用宿主显式提供的 base64 minisign 公钥验证程序。
+pub fn verify_signature_with_public_key(program: &Path, public_key_b64: &str) -> Result<()> {
     ensure_regular_file(program, "Sandbox 程序")?;
     let signature_path = crate::launcher_manager::signature_path(program);
     ensure_regular_file(&signature_path, "Sandbox 签名")?;
     let public_text = base64::engine::general_purpose::STANDARD
-        .decode(OFFICIAL_PUBKEY_B64.trim())
-        .context("解析 Sandbox 官方公钥失败")?;
+        .decode(public_key_b64.trim())
+        .context("解析 Sandbox 公钥失败")?;
     let public =
-        PublicKey::decode(&String::from_utf8(public_text)?).context("解析 Sandbox 官方公钥失败")?;
+        PublicKey::decode(&String::from_utf8(public_text)?).context("解析 Sandbox 公钥失败")?;
     let signature_text = base64::engine::general_purpose::STANDARD
         .decode(std::fs::read_to_string(&signature_path)?.trim())?;
     let signature =
         Signature::decode(&String::from_utf8(signature_text)?).context("解析 Sandbox 签名失败")?;
     public
         .verify(&std::fs::read(program)?, &signature, false)
-        .context("Sandbox 官方签名验证不通过")
+        .context("Sandbox 签名验证不通过")
 }
 
 /// 官方验签后执行真实自检，并返回产品版本。

@@ -89,6 +89,14 @@ pub struct SelfUpdater {
 
 impl SelfUpdater {
     pub fn new(manifest_url: impl Into<String>) -> Result<Self> {
+        Self::with_public_key(manifest_url, OFFICIAL_PUBKEY_B64)
+    }
+
+    /// 使用调用方显式选择的更新端点和信任根。不会读取环境变量。
+    pub fn with_public_key(
+        manifest_url: impl Into<String>,
+        public_key_b64: impl Into<String>,
+    ) -> Result<Self> {
         let manifest_url = manifest_url.into();
         validate_https_url(&manifest_url, "更新清单")?;
         let client = reqwest::Client::builder()
@@ -100,15 +108,13 @@ impl SelfUpdater {
         Ok(Self {
             client,
             manifest_url,
-            official_pubkey_b64: OFFICIAL_PUBKEY_B64.trim().to_string(),
+            official_pubkey_b64: public_key_b64.into().trim().to_string(),
         })
     }
 
     #[cfg(all(test, not(windows)))]
     fn with_test_pubkey(manifest_url: impl Into<String>, pubkey_b64: String) -> Result<Self> {
-        let mut updater = Self::new(manifest_url)?;
-        updater.official_pubkey_b64 = pubkey_b64;
-        Ok(updater)
+        Self::with_public_key(manifest_url, pubkey_b64)
     }
 
     /// 只检查官方更新，不读写安装目录。

@@ -59,17 +59,27 @@ struct LaunchRequest {
     protocol_version: u32,
     policy_schema: u32,
     policy: tiangong_sandbox::SandboxPolicy,
+    #[serde(default)]
     plugin_id: String,
     program: String,
     program_root: String,
     program_sha256: String,
     #[serde(default)]
     args: Vec<String>,
-    /// 解释器形态：目标程序是宿主白名单解析的解释器（node/python），
-    /// 入口脚本与参数在 args 中。此时目标不在插件目录内、无插件清单，
-    /// 校验退化为路径形态 + 摘要 + 权限。
+    /// 目标校验方式。缺省为通用摘要校验；天工插件宿主可显式要求清单比对。
+    #[serde(default)]
+    target_validation: TargetValidation,
+    /// 旧协议兼容字段；新宿主应使用 target_validation。
     #[serde(default)]
     interpreter: bool,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TargetValidation {
+    #[default]
+    DigestOnly,
+    PluginManifest,
 }
 
 fn main() {
@@ -83,7 +93,7 @@ fn main() {
     }
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox check-update [--manifest-url <https-url>]\n  tiangong-sandbox update [--manifest-url <https-url>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>]",
+            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox run --policy <policy.json> -- <command> [args...]\n  tiangong-sandbox check-update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>] [--public-key <file>]",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -91,6 +101,13 @@ fn main() {
     #[cfg(windows)]
     if args.first().map(String::as_str) == Some("complete-update") {
         if let Err(error) = run_windows_update_completer(&args) {
+            eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
+            std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+        }
+        return;
+    }
+    if args.first().map(String::as_str) == Some("run") {
+        if let Err(error) = run_policy_file(&args) {
             eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
             std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
         }
@@ -177,10 +194,56 @@ fn main() {
     }
 }
 
+fn run_policy_file(args: &[String]) -> Result<()> {
+    if args.get(1).map(String::as_str) != Some("--policy") {
+        bail!("用法: run --policy <policy.json> -- <command> [args...]");
+    }
+    let policy_path = Path::new(args.get(2).context("--policy 缺少值")?);
+    if args.get(3).map(String::as_str) != Some("--") {
+        bail!("策略文件与命令之间必须使用 -- 分隔");
+    }
+    let program = Path::new(args.get(4).context("缺少要执行的命令")?);
+    let program = if program.is_absolute() {
+        program.to_path_buf()
+    } else if program.components().count() > 1 {
+        std::env::current_dir()?.join(program)
+    } else {
+        resolve_command_in_path(program).context("无法在 PATH 中解析命令")?
+    };
+    let program = std::fs::canonicalize(&program)
+        .with_context(|| format!("解析命令失败: {}", program.display()))?;
+    let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
+    let policy: tiangong_sandbox::SandboxPolicy = serde_json::from_slice(
+        &std::fs::read(policy_path)
+            .with_context(|| format!("读取策略文件失败: {}", policy_path.display()))?,
+    )
+    .context("解析策略文件失败")?;
+    let request = LaunchRequest {
+        protocol_version: PROTOCOL_VERSION,
+        policy_schema: POLICY_SCHEMA,
+        policy,
+        plugin_id: String::new(),
+        program: program.display().to_string(),
+        program_root: program_root.display().to_string(),
+        program_sha256: sha256_file(&program)?,
+        args: args[5..].to_vec(),
+        target_validation: TargetValidation::DigestOnly,
+        interpreter: false,
+    };
+    execute_request(request, false)
+}
+
+fn resolve_command_in_path(program: &Path) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
 fn run_self_update(args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).context("缺少升级命令")?;
     let mut root = None;
     let mut manifest = tiangong_sandbox::update::DEFAULT_MANIFEST_URL.to_string();
+    let mut public_key = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -192,6 +255,13 @@ fn run_self_update(args: &[String]) -> Result<()> {
                 index += 1;
                 manifest = args.get(index).context("--manifest-url 缺少值")?.clone();
             }
+            "--public-key" => {
+                index += 1;
+                public_key = Some(
+                    std::fs::read_to_string(args.get(index).context("--public-key 缺少值")?)
+                        .context("读取更新公钥失败")?,
+                );
+            }
             unknown => bail!("未知升级参数: {unknown}"),
         }
         index += 1;
@@ -200,7 +270,11 @@ fn run_self_update(args: &[String]) -> Result<()> {
         .enable_all()
         .build()
         .context("创建 Sandbox 升级运行时失败")?;
-    let updater = tiangong_sandbox::update::SelfUpdater::new(manifest)?;
+    let updater = if let Some(public_key) = public_key {
+        tiangong_sandbox::update::SelfUpdater::with_public_key(manifest, public_key)?
+    } else {
+        tiangong_sandbox::update::SelfUpdater::new(manifest)?
+    };
     let status = runtime.block_on(async {
         match (command, root) {
             ("check-update", None) => updater.check().await,
@@ -235,7 +309,10 @@ fn run_windows_update_completer(args: &[String]) -> Result<()> {
 }
 
 fn run_launch() -> Result<()> {
-    let request = read_request()?;
+    execute_request(read_request()?, true)
+}
+
+fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()> {
     if request.protocol_version != PROTOCOL_VERSION {
         bail!(
             "Launcher 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
@@ -257,11 +334,13 @@ fn run_launch() -> Result<()> {
     #[cfg(windows)]
     {
         let host_pid = std::env::var(tiangong_sandbox::HOST_PID_ENV)
-            .context("读取 Windows 宿主进程 ID 失败")?
-            .parse::<u32>()
-            .context("Windows 宿主进程 ID 无效")?;
-        let stop_event = std::env::var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV)
-            .context("读取 Windows Sandbox 停止事件失败")?;
+            .ok()
+            .map(|value| value.parse::<u32>().context("Windows 宿主进程 ID 无效"))
+            .transpose()?;
+        let stop_event = std::env::var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV).ok();
+        if inherited_request && (host_pid.is_none() || stop_event.is_none()) {
+            bail!("Windows 宿主生命周期信息缺失");
+        }
         // Launcher 是一次性单线程进程；移除信封后再继承环境，目标无法读取
         // 策略正文或停止事件名称。
         unsafe {
@@ -277,8 +356,8 @@ fn run_launch() -> Result<()> {
                 program_root: &program_root,
                 args: &request.args,
                 policy: &request.policy,
-                host_pid: Some(host_pid),
-                stop_event_name: Some(&stop_event),
+                host_pid,
+                stop_event_name: stop_event.as_deref(),
                 timeout: None,
             },
         )?;
@@ -313,7 +392,9 @@ fn run_launch() -> Result<()> {
     apply_unix_resource_limits(&mut command, &request.policy.resource_limits);
     #[cfg(unix)]
     unsafe {
-        libc::close(POLICY_FD);
+        if inherited_request {
+            libc::close(POLICY_FD);
+        }
         Err(command.exec().into())
     }
     #[cfg(not(any(unix, windows)))]
@@ -465,9 +546,8 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
         bail!("目标程序不在插件权威目录内");
     }
 
-    // 解释器形态：目标是宿主白名单解析的解释器程序（入口脚本在 args），
-    // 无插件清单可比对；校验到路径形态与摘要即止。
-    if request.interpreter {
+    // 通用缺省只校验路径形态、摘要与权限。旧 interpreter 字段保持兼容。
+    if request.target_validation == TargetValidation::DigestOnly || request.interpreter {
         let actual_sha256 = sha256_file(&canonical_program)?;
         if !request.program_sha256.eq_ignore_ascii_case(&actual_sha256) {
             bail!("目标程序摘要不匹配");
@@ -2059,6 +2139,7 @@ mod tests {
             program_root: root.display().to_string(),
             program_sha256: String::new(),
             args: Vec::new(),
+            target_validation: TargetValidation::PluginManifest,
             interpreter: false,
         }
     }
@@ -2100,6 +2181,39 @@ mod tests {
         // 无清单比对所需的完整字段时，错误应指向清单链路而非白名单。
         let error = validate_target(&req).unwrap_err();
         assert!(!error.to_string().contains("只允许启动"));
+    }
+
+    #[test]
+    fn missing_target_validation_defaults_to_digest_only() {
+        let value = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "policy_schema": POLICY_SCHEMA,
+            "policy": tiangong_sandbox::SandboxPolicy::workspace_write("/workspace"),
+            "program": "/bin/sh",
+            "program_root": "/bin",
+            "program_sha256": "00"
+        });
+        let request: LaunchRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.target_validation, TargetValidation::DigestOnly);
+    }
+
+    #[test]
+    fn digest_only_target_does_not_require_plugin_manifest() {
+        let fixture = tempfile::tempdir().unwrap();
+        let program = fixture.path().join("program");
+        std::fs::write(&program, "stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut req = request(fixture.path(), &program);
+        req.target_validation = TargetValidation::DigestOnly;
+        req.program_sha256 = sha256_file(&program).unwrap();
+        assert_eq!(
+            validate_target(&req).unwrap(),
+            std::fs::canonicalize(program).unwrap()
+        );
     }
 
     #[test]
