@@ -5,7 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [package.metadata.tiangong]
-transport-protocol = "0.1.0"
+transport-protocol = "0.2.0"
 
 [dependencies]
 tiangong-core = { workspace = true }

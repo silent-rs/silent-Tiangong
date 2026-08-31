@@ -624,16 +624,27 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     if let (Some(sidecar_crate), Some(sidecar_artifact)) =
         (config.sidecar_crate, config.sidecar_artifact)
     {
-        eprintln!("[xtask] 构建 {plugin_name} sidecar...");
-        run_cargo(
-            &workspace_root,
-            &["build", "-p", sidecar_crate, "--release"],
-        )?;
-        let sidecar = workspace_root.join("target").join("release").join(format!(
-            "{sidecar_artifact}{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-        require_file(&sidecar)?;
+        let sidecar = match non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_SIDECAR").map(PathBuf::from)
+        {
+            Some(path) => {
+                eprintln!("[xtask] using prebuilt sidecar");
+                require_file(&path)?;
+                path
+            }
+            None => {
+                eprintln!("[xtask] 构建 {plugin_name} sidecar...");
+                run_cargo(
+                    &workspace_root,
+                    &["build", "-p", sidecar_crate, "--release"],
+                )?;
+                let path = workspace_root.join("target").join("release").join(format!(
+                    "{sidecar_artifact}{}",
+                    std::env::consts::EXE_SUFFIX
+                ));
+                require_file(&path)?;
+                path
+            }
+        };
         let staged_sidecar = staging.join(format!(
             "{sidecar_artifact}{}",
             std::env::consts::EXE_SUFFIX

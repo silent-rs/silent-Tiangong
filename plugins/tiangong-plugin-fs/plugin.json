@@ -7,7 +7,7 @@
   },
   "sidecar": {
     "binary": "tiangong-fs-sidecar",
-    "transport_protocol": "0.1.0",
+    "transport_protocol": "0.2.0",
     "business_protocol": 1,
     "lifecycle": "on_demand",
     "startup_timeout_ms": 15000,
