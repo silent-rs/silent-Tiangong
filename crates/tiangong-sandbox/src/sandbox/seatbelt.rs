@@ -143,6 +143,7 @@ fn compile_profile_explicit_categories(
     } else {
         sbpl.push_str("(deny network*)\n");
     }
+    append_credential_service_rules(&mut sbpl, policy);
     sbpl.push_str("(allow process-exec*)\n(allow process-fork)\n");
     // Rust/C 运行时启动需读 sysctl（页大小——guard page 计算），zsh 5.9
     // 同样读 hw.* sysctl（Tahoe 上多方踩坑）；不显式放行直接崩。
@@ -186,7 +187,25 @@ fn compile_profile_legacy(policy: &SandboxPolicy, writable: &[std::path::PathBuf
     if !policy.allow_network {
         sbpl.push_str("(deny network*)\n");
     }
+    append_credential_service_rules(&mut sbpl, policy);
     sbpl
+}
+/// GitHub CLI 使用 macOS Keychain 取登录令牌，并由 Security.framework 通过
+/// trustd 校验 HTTPS 证书；OpenSSH 通过 opendirectoryd 解析当前用户
+/// （libinfo 查 uid/名称映射，membership 查组成员关系——缺任一都会让
+/// 沙箱内 ssh 报 "No user exists for uid"）。只为宿主显式授权的策略
+/// 开放这些精确服务。
+fn append_credential_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
+    if !policy.allow_credential_services {
+        return;
+    }
+    sbpl.push_str(
+        "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))\n\
+         (allow mach-lookup (global-name \"com.apple.securityd.xpc\"))\n\
+         (allow mach-lookup (global-name \"com.apple.trustd.agent\"))\n\
+         (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))\n\
+         (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.membership\"))\n",
+    );
 }
 
 /// 路径可安全进入 SBPL 文本：必须是 UTF-8 且不含控制字符
@@ -213,6 +232,30 @@ fn escape(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn credential_services_rules_follow_explicit_authorization() {
+        // 默认（未授权）：不出现任何凭据服务放行。
+        let mut policy = crate::sandbox::policy::SandboxPolicy::workspace_write("/tmp/ws");
+        let sbpl = compile_profile(&policy);
+        assert!(!sbpl.contains("mach-lookup"));
+
+        // 宿主显式授权：五个精确服务全部放行（Keychain、securityd、
+        // trustd、opendirectoryd libinfo 与 membership）。
+        policy.allow_credential_services = true;
+        let sbpl = compile_profile(&policy);
+        for service in [
+            "com.apple.SecurityServer",
+            "com.apple.securityd.xpc",
+            "com.apple.trustd.agent",
+            "com.apple.system.opendirectoryd.libinfo",
+            "com.apple.system.opendirectoryd.membership",
+        ] {
+            assert!(
+                sbpl.contains(&format!("(allow mach-lookup (global-name \"{service}\"))")),
+                "缺少放行: {service}"
+            );
+        }
+    }
     #[test]
     fn profile_denies_write_outside_roots_and_network() {
         let mut policy = SandboxPolicy::workspace_write("/tmp/ws");

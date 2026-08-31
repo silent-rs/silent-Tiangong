@@ -345,6 +345,9 @@ fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
         protected_paths,
         denied_read_paths,
         allow_network: matches!(args.network, CliNetwork::Allow),
+        // 凭据服务放行由宿主经策略文件显式授权；通用 CLI 保持默认
+        // 拒绝（fail-closed）。
+        allow_credential_services: false,
         resource_limits,
     })
 }
