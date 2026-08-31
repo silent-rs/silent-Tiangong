@@ -12,6 +12,9 @@
 - [x] 长 sidecar 调用移出界面命令处理线程。
 - [x] 前端停止后立即显示“正在取消”，后端超时显示仍在运行与重试提示，真实结束前不显示空闲。
 - [x] 同步 Rust sidecar 公共库、Node SDK 与官方 sidecar 制品版本；旧协议明确要求升级且不降级。
+- [x] 修复 Windows AppContainer stdio 句柄继承，受限 sidecar 使用独立可继承句柄传递握手和业务管道。
+- [x] 修复 Windows 插件升级/卸载前的 Launcher、sidecar、WASM、描述符与设置页句柄释放，避免永久 code=32。
+- [ ] 增加 Windows 原生 stdio 往返、启动失败清理和插件升级目录切换检查。
 - [x] 验证 stdio 往返、崩溃重启、协议拒绝、Rust/Node 构建与当前平台进程生命周期；并发中止、跨会话与连续取消由三平台 CI 继续覆盖。
 - [ ] 完成 Linux、macOS、Windows 检查、Rust 检查和前端 `yarn build`，创建单一 PR（不合并）。
 

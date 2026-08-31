@@ -2496,15 +2496,26 @@ fn unload_plugin_wasm(plugin_id: &str) {
         loaded.ui_plugin = None;
         loaded.component = None;
         loaded.wasm_bytes = None;
-        loaded
+        loaded.descriptor = None;
+        let adapters = loaded
             .instances
             .iter()
             .filter_map(Weak::upgrade)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // Desktop TS 适配器不持有 WASM Store，但在切换窗口内必须停用，
+        // 避免并发工具调用重新取得旧 sidecar/目录资源。
+        for adapter in loaded.ts_instances.iter().filter_map(Weak::upgrade) {
+            adapter.set_enabled(false);
+        }
+        adapters
     };
     for adapter in adapters {
         adapter.release_inner();
     }
+    // `ui_plugin` 可能已经被设置页命令克隆并正在处理。等待短暂窗口让命令
+    // 释放其 Store；真正永久占用不应靠 8 秒 rename 重试掩盖。
+    #[cfg(windows)]
+    std::thread::sleep(Duration::from_millis(50));
 }
 
 fn remove_sidecar_connection(directory: &Path) {

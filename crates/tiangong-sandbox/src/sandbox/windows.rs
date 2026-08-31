@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_ALL, GetHandleInformation, GetLastError,
-    HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree, SetHandleInformation,
-    WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_ALL,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_ABANDONED, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -1176,59 +1176,50 @@ impl Drop for ProcessAttributes {
 }
 
 struct InheritableStdio {
+    _owned: [OwnedHandle; 3],
     handles: [HANDLE; 3],
-    previous: [u32; 3],
-    changed: usize,
 }
 
 impl InheritableStdio {
     fn prepare() -> Result<Self> {
-        let handles = unsafe {
+        let source = unsafe {
             [
                 GetStdHandle(STD_INPUT_HANDLE),
                 GetStdHandle(STD_OUTPUT_HANDLE),
                 GetStdHandle(STD_ERROR_HANDLE),
             ]
         };
-        let mut previous = [0u32; 3];
-        for (index, handle) in handles.iter().copied().enumerate() {
+        let current_process = unsafe { GetCurrentProcess() };
+        let mut duplicated = Vec::with_capacity(3);
+        for handle in source {
             if handle.is_null() || handle == INVALID_HANDLE_VALUE {
                 bail!("Launcher 缺少可继承的标准输入输出句柄");
             }
-            if unsafe { GetHandleInformation(handle, &mut previous[index]) } == 0 {
-                return Err(std::io::Error::last_os_error()).context("读取 stdio 句柄标志失败");
-            }
-        }
-        let mut prepared = Self {
-            handles,
-            previous,
-            changed: 0,
-        };
-        for handle in prepared.handles.iter().copied() {
-            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
-                == 0
+            let mut copy = std::ptr::null_mut();
+            if unsafe {
+                DuplicateHandle(
+                    current_process,
+                    handle,
+                    current_process,
+                    &mut copy,
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
             {
-                return Err(std::io::Error::last_os_error()).context("设置 stdio 句柄继承失败");
+                return Err(std::io::Error::last_os_error()).context("复制 stdio 继承句柄失败");
             }
-            prepared.changed += 1;
+            duplicated.push(unsafe { OwnedHandle::from_raw_handle(copy) });
         }
-        Ok(prepared)
-    }
-}
-
-impl Drop for InheritableStdio {
-    fn drop(&mut self) {
-        for (handle, previous) in self
-            .handles
-            .iter()
-            .copied()
-            .zip(self.previous)
-            .take(self.changed)
-        {
-            unsafe {
-                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, previous & HANDLE_FLAG_INHERIT);
-            }
-        }
+        let owned: [OwnedHandle; 3] = duplicated
+            .try_into()
+            .map_err(|_| anyhow!("复制 stdio 句柄数量异常"))?;
+        let handles = owned.each_ref().map(raw_handle);
+        Ok(Self {
+            _owned: owned,
+            handles,
+        })
     }
 }
 
