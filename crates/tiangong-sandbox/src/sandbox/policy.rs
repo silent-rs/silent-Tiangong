@@ -35,6 +35,11 @@ pub struct SandboxPolicy {
     /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
     #[serde(default)]
     pub allow_network: bool,
+    /// 是否允许访问宿主系统凭据服务（macOS Keychain、OpenDirectory 与
+    /// 证书信任服务）。Git/SSH/GitHub CLI 等工具依赖这些系统服务解析
+    /// 用户身份与读取凭据；默认 false，仅宿主显式授权的策略开放。
+    #[serde(default)]
+    pub allow_credential_services: bool,
     /// 单次 command 的资源上限。
     #[serde(default)]
     pub resource_limits: SandboxResourceLimits,
@@ -71,6 +76,7 @@ impl SandboxPolicy {
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: false,
+            allow_credential_services: false,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -83,6 +89,7 @@ impl SandboxPolicy {
             protected_paths: Vec::new(),
             denied_read_paths: Vec::new(),
             allow_network: true,
+            allow_credential_services: true,
             resource_limits: SandboxResourceLimits::default(),
         }
     }
@@ -237,6 +244,7 @@ mod tests {
         assert_eq!(value["mode"], "workspace_write");
         assert_eq!(value["workspace"], "/workspace");
         assert_eq!(value["allow_network"], false);
+        assert_eq!(value["allow_credential_services"], false);
         assert_eq!(value["resource_limits"]["max_cpu_time_seconds"], 300);
         assert_eq!(value["resource_limits"]["max_processes"], 64);
 
