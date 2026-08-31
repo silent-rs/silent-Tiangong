@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "plugin-creator",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "entrypoints": [
     "desktop"
   ],
@@ -37,7 +37,7 @@
   "sidecar": {
     "runtime": "node",
     "entry": "sidecar/main.mjs",
-    "transport_protocol": "0.2.0",
+    "transport_protocol": "0.1.0",
     "business_protocol": 0,
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 300000

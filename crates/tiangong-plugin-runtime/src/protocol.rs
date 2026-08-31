@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// 通用 sidecar 协议版本。
-pub const PROTOCOL_VERSION: &str = "0.2.0";
+pub const PROTOCOL_VERSION: &str = "0.1.0";
 /// 由运行时发起的健康检查操作。
 pub const HANDSHAKE_OPERATION: &str = "runtime.handshake";
 
