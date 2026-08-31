@@ -5,6 +5,7 @@
 
 pub mod bwrap;
 pub mod policy;
+pub mod presets;
 pub mod seatbelt;
 #[cfg(windows)]
 pub mod windows;

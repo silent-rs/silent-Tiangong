@@ -33,6 +33,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 #[cfg(windows)]
 use serde::Serialize;
@@ -59,17 +60,27 @@ struct LaunchRequest {
     protocol_version: u32,
     policy_schema: u32,
     policy: tiangong_sandbox::SandboxPolicy,
+    #[serde(default)]
     plugin_id: String,
     program: String,
     program_root: String,
     program_sha256: String,
     #[serde(default)]
     args: Vec<String>,
-    /// 解释器形态：目标程序是宿主白名单解析的解释器（node/python），
-    /// 入口脚本与参数在 args 中。此时目标不在插件目录内、无插件清单，
-    /// 校验退化为路径形态 + 摘要 + 权限。
+    /// 目标校验方式。缺省为通用摘要校验；天工插件宿主可显式要求清单比对。
+    #[serde(default)]
+    target_validation: TargetValidation,
+    /// 旧协议兼容字段；新宿主应使用 target_validation。
     #[serde(default)]
     interpreter: bool,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TargetValidation {
+    #[default]
+    DigestOnly,
+    PluginManifest,
 }
 
 fn main() {
@@ -83,7 +94,7 @@ fn main() {
     }
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox check-update [--manifest-url <https-url>]\n  tiangong-sandbox update [--manifest-url <https-url>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>]",
+            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox run --policy <policy.json> -- <command> [args...]\n  tiangong-sandbox run --workspace <absolute-dir> [policy-options] -- <command> [args...]\n  tiangong-sandbox check-update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>] [--public-key <file>]",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -91,6 +102,13 @@ fn main() {
     #[cfg(windows)]
     if args.first().map(String::as_str) == Some("complete-update") {
         if let Err(error) = run_windows_update_completer(&args) {
+            eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
+            std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+        }
+        return;
+    }
+    if args.first().map(String::as_str) == Some("run") {
+        if let Err(error) = run_policy_file(&args) {
             eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
             std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
         }
@@ -177,10 +195,185 @@ fn main() {
     }
 }
 
+fn run_policy_file(args: &[String]) -> Result<()> {
+    let parsed = parse_run_args(args)?;
+    let program = Path::new(&parsed.command[0]);
+    let program = if program.is_absolute() {
+        program.to_path_buf()
+    } else if program.components().count() > 1 {
+        std::env::current_dir()?.join(program)
+    } else {
+        resolve_command_in_path(program).context("无法在 PATH 中解析命令")?
+    };
+    let program = std::fs::canonicalize(&program)
+        .with_context(|| format!("解析命令失败: {}", program.display()))?;
+    let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
+    let request = LaunchRequest {
+        protocol_version: PROTOCOL_VERSION,
+        policy_schema: POLICY_SCHEMA,
+        policy: parsed.policy,
+        plugin_id: String::new(),
+        program: program.display().to_string(),
+        program_root: program_root.display().to_string(),
+        program_sha256: sha256_file(&program)?,
+        args: parsed.command[1..].to_vec(),
+        target_validation: TargetValidation::DigestOnly,
+        interpreter: false,
+    };
+    execute_request(request, false)
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "tiangong-sandbox run",
+    disable_version_flag = true,
+    about = "使用策略文件或直接策略参数执行受限命令"
+)]
+struct RunArgs {
+    /// SandboxPolicy JSON 文件；不能与直接策略参数同时使用。
+    #[arg(long, value_name = "FILE", conflicts_with_all = INLINE_POLICY_ARGS)]
+    policy: Option<PathBuf>,
+    /// 沙箱模式，默认 workspace-write。
+    #[arg(long, value_enum, default_value_t = CliSandboxMode::WorkspaceWrite)]
+    mode: CliSandboxMode,
+    /// 主工作区绝对路径；直接策略参数形式必须提供。
+    #[arg(long, value_name = "ABSOLUTE_DIR", required_unless_present = "policy")]
+    workspace: Option<PathBuf>,
+    /// 额外可写绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    writable: Vec<PathBuf>,
+    /// 即使位于可写根内也保持只读的绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    protect: Vec<PathBuf>,
+    /// 禁止读取的绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    deny_read: Vec<PathBuf>,
+    /// 网络权限，默认 deny。
+    #[arg(long, value_enum, default_value_t = CliNetwork::Deny)]
+    network: CliNetwork,
+    /// CPU 时间上限（秒）。
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_cpu_seconds: Option<u64>,
+    /// 内存上限（字节）。
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_memory_bytes: Option<u64>,
+    /// 进程数量上限。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    max_processes: Option<u32>,
+    /// `--` 后要执行的命令及参数。
+    #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+    command: Vec<String>,
+}
+
+const INLINE_POLICY_ARGS: &[&str] = &[
+    "mode",
+    "workspace",
+    "writable",
+    "protect",
+    "deny_read",
+    "network",
+    "max_cpu_seconds",
+    "max_memory_bytes",
+    "max_processes",
+];
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliSandboxMode {
+    ReadOnly,
+    #[default]
+    WorkspaceWrite,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliNetwork {
+    Allow,
+    #[default]
+    Deny,
+}
+
+fn parse_run_args(args: &[String]) -> Result<ParsedRun> {
+    let parsed = RunArgs::try_parse_from(
+        std::iter::once("tiangong-sandbox run").chain(args.iter().skip(1).map(String::as_str)),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let command = parsed.command.clone();
+    let policy = if let Some(policy_path) = parsed.policy.as_ref() {
+        serde_json::from_slice(
+            &std::fs::read(policy_path)
+                .with_context(|| format!("读取策略文件失败: {}", policy_path.display()))?,
+        )
+        .context("解析策略文件失败")?
+    } else {
+        inline_policy(parsed)?
+    };
+    Ok(ParsedRun { policy, command })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedRun {
+    policy: tiangong_sandbox::SandboxPolicy,
+    command: Vec<String>,
+}
+
+fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
+    let workspace = absolute_cli_path(
+        args.workspace
+            .as_deref()
+            .context("直接策略参数必须提供 --workspace <absolute-dir>")?,
+        "--workspace",
+    )?;
+    let extra_writable = absolute_cli_paths(args.writable, "--writable")?;
+    let protected_paths = absolute_cli_paths(args.protect, "--protect")?;
+    let denied_read_paths = absolute_cli_paths(args.deny_read, "--deny-read")?;
+    let mut resource_limits = tiangong_sandbox::SandboxResourceLimits::default();
+    if let Some(value) = args.max_cpu_seconds {
+        resource_limits.max_cpu_time_seconds = value;
+    }
+    if let Some(value) = args.max_memory_bytes {
+        resource_limits.max_memory_bytes = value;
+    }
+    if let Some(value) = args.max_processes {
+        resource_limits.max_processes = value;
+    }
+    Ok(tiangong_sandbox::SandboxPolicy {
+        mode: match args.mode {
+            CliSandboxMode::ReadOnly => tiangong_sandbox::SandboxMode::ReadOnly,
+            CliSandboxMode::WorkspaceWrite => tiangong_sandbox::SandboxMode::WorkspaceWrite,
+        },
+        workspace,
+        extra_writable,
+        protected_paths,
+        denied_read_paths,
+        allow_network: matches!(args.network, CliNetwork::Allow),
+        resource_limits,
+    })
+}
+
+fn absolute_cli_paths(values: Vec<PathBuf>, option: &str) -> Result<Vec<PathBuf>> {
+    values
+        .into_iter()
+        .map(|path| absolute_cli_path(&path, option))
+        .collect()
+}
+
+fn absolute_cli_path(value: &Path, option: &str) -> Result<PathBuf> {
+    if !value.is_absolute() {
+        bail!("{option} 必须使用绝对路径: {}", value.display());
+    }
+    Ok(value.to_path_buf())
+}
+
+fn resolve_command_in_path(program: &Path) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
 fn run_self_update(args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).context("缺少升级命令")?;
     let mut root = None;
     let mut manifest = tiangong_sandbox::update::DEFAULT_MANIFEST_URL.to_string();
+    let mut public_key = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -192,6 +385,13 @@ fn run_self_update(args: &[String]) -> Result<()> {
                 index += 1;
                 manifest = args.get(index).context("--manifest-url 缺少值")?.clone();
             }
+            "--public-key" => {
+                index += 1;
+                public_key = Some(
+                    std::fs::read_to_string(args.get(index).context("--public-key 缺少值")?)
+                        .context("读取更新公钥失败")?,
+                );
+            }
             unknown => bail!("未知升级参数: {unknown}"),
         }
         index += 1;
@@ -200,7 +400,11 @@ fn run_self_update(args: &[String]) -> Result<()> {
         .enable_all()
         .build()
         .context("创建 Sandbox 升级运行时失败")?;
-    let updater = tiangong_sandbox::update::SelfUpdater::new(manifest)?;
+    let updater = if let Some(public_key) = public_key {
+        tiangong_sandbox::update::SelfUpdater::with_public_key(manifest, public_key)?
+    } else {
+        tiangong_sandbox::update::SelfUpdater::new(manifest)?
+    };
     let status = runtime.block_on(async {
         match (command, root) {
             ("check-update", None) => updater.check().await,
@@ -235,7 +439,10 @@ fn run_windows_update_completer(args: &[String]) -> Result<()> {
 }
 
 fn run_launch() -> Result<()> {
-    let request = read_request()?;
+    execute_request(read_request()?, true)
+}
+
+fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()> {
     if request.protocol_version != PROTOCOL_VERSION {
         bail!(
             "Launcher 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
@@ -257,11 +464,13 @@ fn run_launch() -> Result<()> {
     #[cfg(windows)]
     {
         let host_pid = std::env::var(tiangong_sandbox::HOST_PID_ENV)
-            .context("读取 Windows 宿主进程 ID 失败")?
-            .parse::<u32>()
-            .context("Windows 宿主进程 ID 无效")?;
-        let stop_event = std::env::var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV)
-            .context("读取 Windows Sandbox 停止事件失败")?;
+            .ok()
+            .map(|value| value.parse::<u32>().context("Windows 宿主进程 ID 无效"))
+            .transpose()?;
+        let stop_event = std::env::var(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV).ok();
+        if inherited_request && (host_pid.is_none() || stop_event.is_none()) {
+            bail!("Windows 宿主生命周期信息缺失");
+        }
         // Launcher 是一次性单线程进程；移除信封后再继承环境，目标无法读取
         // 策略正文或停止事件名称。
         unsafe {
@@ -277,8 +486,8 @@ fn run_launch() -> Result<()> {
                 program_root: &program_root,
                 args: &request.args,
                 policy: &request.policy,
-                host_pid: Some(host_pid),
-                stop_event_name: Some(&stop_event),
+                host_pid,
+                stop_event_name: stop_event.as_deref(),
                 timeout: None,
             },
         )?;
@@ -313,7 +522,9 @@ fn run_launch() -> Result<()> {
     apply_unix_resource_limits(&mut command, &request.policy.resource_limits);
     #[cfg(unix)]
     unsafe {
-        libc::close(POLICY_FD);
+        if inherited_request {
+            libc::close(POLICY_FD);
+        }
         Err(command.exec().into())
     }
     #[cfg(not(any(unix, windows)))]
@@ -465,9 +676,8 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
         bail!("目标程序不在插件权威目录内");
     }
 
-    // 解释器形态：目标是宿主白名单解析的解释器程序（入口脚本在 args），
-    // 无插件清单可比对；校验到路径形态与摘要即止。
-    if request.interpreter {
+    // 通用缺省只校验路径形态、摘要与权限。旧 interpreter 字段保持兼容。
+    if request.target_validation == TargetValidation::DigestOnly || request.interpreter {
         let actual_sha256 = sha256_file(&canonical_program)?;
         if !request.program_sha256.eq_ignore_ascii_case(&actual_sha256) {
             bail!("目标程序摘要不匹配");
@@ -2059,6 +2269,7 @@ mod tests {
             program_root: root.display().to_string(),
             program_sha256: String::new(),
             args: Vec::new(),
+            target_validation: TargetValidation::PluginManifest,
             interpreter: false,
         }
     }
@@ -2100,6 +2311,153 @@ mod tests {
         // 无清单比对所需的完整字段时，错误应指向清单链路而非白名单。
         let error = validate_target(&req).unwrap_err();
         assert!(!error.to_string().contains("只允许启动"));
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    /// 将 Unix 风格路径转换为当前平台的绝对路径，Windows 上补盘符前缀。
+    fn platform_path(unix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+        } else {
+            PathBuf::from(unix)
+        }
+    }
+    #[test]
+    fn inline_policy_parses_all_options() {
+        let workspace = platform_path("/workspace");
+        let extra_run = platform_path("/tmp/run");
+        let extra_cache = platform_path("/tmp/cache");
+        let protected = platform_path("/workspace/protected");
+        let denied = platform_path("/home/user/.ssh");
+        let mut args = strings(&["run", "--mode", "workspace-write", "--workspace"]);
+        args.push(workspace.display().to_string());
+        args.push("--writable".to_string());
+        args.push(extra_run.display().to_string());
+        args.push("--writable".to_string());
+        args.push(extra_cache.display().to_string());
+        args.push("--protect".to_string());
+        args.push(protected.display().to_string());
+        args.push("--deny-read".to_string());
+        args.push(denied.display().to_string());
+        args.extend(strings(&[
+            "--network",
+            "allow",
+            "--max-cpu-seconds",
+            "12",
+            "--max-memory-bytes",
+            "4096",
+            "--max-processes",
+            "8",
+            "--",
+            "echo",
+            "ok",
+        ]));
+        let parsed = parse_run_args(&args).unwrap();
+        assert_eq!(
+            parsed.policy.mode,
+            tiangong_sandbox::SandboxMode::WorkspaceWrite
+        );
+        assert_eq!(parsed.policy.workspace, workspace);
+        assert_eq!(parsed.policy.extra_writable, vec![extra_run, extra_cache]);
+        assert_eq!(parsed.policy.protected_paths, vec![protected]);
+        assert_eq!(parsed.policy.denied_read_paths, vec![denied]);
+        assert!(parsed.policy.allow_network);
+        assert_eq!(parsed.policy.resource_limits.max_cpu_time_seconds, 12);
+        assert_eq!(parsed.policy.resource_limits.max_memory_bytes, 4096);
+        assert_eq!(parsed.policy.resource_limits.max_processes, 8);
+        assert_eq!(parsed.command, strings(&["echo", "ok"]));
+    }
+    #[test]
+    fn inline_policy_defaults_are_fail_closed() {
+        let workspace = platform_path("/workspace");
+        let mut args = strings(&["run", "--workspace"]);
+        args.push(workspace.display().to_string());
+        args.extend(strings(&["--", "/bin/true"]));
+        let parsed = parse_run_args(&args).unwrap();
+        assert_eq!(
+            parsed.policy.mode,
+            tiangong_sandbox::SandboxMode::WorkspaceWrite
+        );
+        assert!(!parsed.policy.allow_network);
+        assert_eq!(
+            parsed.policy.resource_limits,
+            tiangong_sandbox::SandboxResourceLimits::default()
+        );
+    }
+    #[test]
+    fn policy_file_and_inline_options_are_mutually_exclusive() {
+        let error = parse_run_args(&strings(&[
+            "run",
+            "--policy",
+            "/tmp/policy.json",
+            "--workspace",
+            "/workspace",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn inline_policy_rejects_relative_paths_and_zero_limits() {
+        let relative = parse_run_args(&strings(&[
+            "run",
+            "--workspace",
+            "relative",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(relative.to_string().contains("必须使用绝对路径"));
+
+        let zero = parse_run_args(&strings(&[
+            "run",
+            "--workspace",
+            "/workspace",
+            "--max-processes",
+            "0",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(zero.to_string().contains("not in 1..="));
+    }
+
+    #[test]
+    fn missing_target_validation_defaults_to_digest_only() {
+        let value = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "policy_schema": POLICY_SCHEMA,
+            "policy": tiangong_sandbox::SandboxPolicy::workspace_write("/workspace"),
+            "program": "/bin/sh",
+            "program_root": "/bin",
+            "program_sha256": "00"
+        });
+        let request: LaunchRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.target_validation, TargetValidation::DigestOnly);
+    }
+
+    #[test]
+    fn digest_only_target_does_not_require_plugin_manifest() {
+        let fixture = tempfile::tempdir().unwrap();
+        let program = fixture.path().join("program");
+        std::fs::write(&program, "stub").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut req = request(fixture.path(), &program);
+        req.target_validation = TargetValidation::DigestOnly;
+        req.program_sha256 = sha256_file(&program).unwrap();
+        assert_eq!(
+            validate_target(&req).unwrap(),
+            std::fs::canonicalize(program).unwrap()
+        );
     }
 
     #[test]

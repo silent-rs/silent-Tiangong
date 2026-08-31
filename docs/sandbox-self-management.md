@@ -30,7 +30,7 @@ https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json
 <目录>/tiangong-sandbox[.exe].sig
 ```
 
-不会创建 `sandbox/versions/active` 版本仓库。`--manifest-url` 仅用于受控测试；生产使用 HTTPS，测试构建只允许本机回环 HTTP。
+不会创建 `sandbox/versions/active` 版本仓库。App 集成使用 `<storage>/sandbox/` 作为安装目录，生产启动验签只认 Sandbox 独立官方根；详见 `docs/sandbox-direct-storage.md`。`--manifest-url` 仅用于受控测试；生产使用 HTTPS，测试构建只允许本机回环 HTTP。
 
 ## 安全门禁
 

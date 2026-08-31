@@ -2,10 +2,11 @@
 name = "tiangong-sandbox"
 # Launcher 独立版本序列（不随 workspace/App 版本）：在线更新按此序列
 # 判定新旧与防降级，App 发版不要求 Launcher 同步改动。
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Command 工具的宿主强制操作系统沙箱套壳"
+readme = "README.md"
 
 [[bin]]
 name = "tiangong-sandbox"
@@ -21,6 +22,7 @@ libc = { workspace = true }
 tempfile = { workspace = true }
 scru128 = { workspace = true }
 base64 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
 fs2 = { workspace = true }
 minisign-verify = { workspace = true }
