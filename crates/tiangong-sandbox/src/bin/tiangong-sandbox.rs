@@ -33,6 +33,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 #[cfg(windows)]
 use serde::Serialize;
@@ -93,7 +94,7 @@ fn main() {
     }
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox run --policy <policy.json> -- <command> [args...]\n  tiangong-sandbox check-update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>] [--public-key <file>]",
+            "tiangong-sandbox {}\n\nUSAGE:\n  tiangong-sandbox --self-check\n  tiangong-sandbox run --policy <policy.json> -- <command> [args...]\n  tiangong-sandbox run --workspace <absolute-dir> [policy-options] -- <command> [args...]\n  tiangong-sandbox check-update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update [--manifest-url <https-url>] [--public-key <file>]\n  tiangong-sandbox update --root <absolute-dir> [--manifest-url <https-url>] [--public-key <file>]",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -195,14 +196,8 @@ fn main() {
 }
 
 fn run_policy_file(args: &[String]) -> Result<()> {
-    if args.get(1).map(String::as_str) != Some("--policy") {
-        bail!("用法: run --policy <policy.json> -- <command> [args...]");
-    }
-    let policy_path = Path::new(args.get(2).context("--policy 缺少值")?);
-    if args.get(3).map(String::as_str) != Some("--") {
-        bail!("策略文件与命令之间必须使用 -- 分隔");
-    }
-    let program = Path::new(args.get(4).context("缺少要执行的命令")?);
+    let parsed = parse_run_args(args)?;
+    let program = Path::new(&parsed.command[0]);
     let program = if program.is_absolute() {
         program.to_path_buf()
     } else if program.components().count() > 1 {
@@ -213,24 +208,159 @@ fn run_policy_file(args: &[String]) -> Result<()> {
     let program = std::fs::canonicalize(&program)
         .with_context(|| format!("解析命令失败: {}", program.display()))?;
     let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
-    let policy: tiangong_sandbox::SandboxPolicy = serde_json::from_slice(
-        &std::fs::read(policy_path)
-            .with_context(|| format!("读取策略文件失败: {}", policy_path.display()))?,
-    )
-    .context("解析策略文件失败")?;
     let request = LaunchRequest {
         protocol_version: PROTOCOL_VERSION,
         policy_schema: POLICY_SCHEMA,
-        policy,
+        policy: parsed.policy,
         plugin_id: String::new(),
         program: program.display().to_string(),
         program_root: program_root.display().to_string(),
         program_sha256: sha256_file(&program)?,
-        args: args[5..].to_vec(),
+        args: parsed.command[1..].to_vec(),
         target_validation: TargetValidation::DigestOnly,
         interpreter: false,
     };
     execute_request(request, false)
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "tiangong-sandbox run",
+    disable_version_flag = true,
+    about = "使用策略文件或直接策略参数执行受限命令"
+)]
+struct RunArgs {
+    /// SandboxPolicy JSON 文件；不能与直接策略参数同时使用。
+    #[arg(long, value_name = "FILE", conflicts_with_all = INLINE_POLICY_ARGS)]
+    policy: Option<PathBuf>,
+    /// 沙箱模式，默认 workspace-write。
+    #[arg(long, value_enum, default_value_t = CliSandboxMode::WorkspaceWrite)]
+    mode: CliSandboxMode,
+    /// 主工作区绝对路径；直接策略参数形式必须提供。
+    #[arg(long, value_name = "ABSOLUTE_DIR", required_unless_present = "policy")]
+    workspace: Option<PathBuf>,
+    /// 额外可写绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    writable: Vec<PathBuf>,
+    /// 即使位于可写根内也保持只读的绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    protect: Vec<PathBuf>,
+    /// 禁止读取的绝对路径，可重复。
+    #[arg(long, value_name = "ABSOLUTE_PATH")]
+    deny_read: Vec<PathBuf>,
+    /// 网络权限，默认 deny。
+    #[arg(long, value_enum, default_value_t = CliNetwork::Deny)]
+    network: CliNetwork,
+    /// CPU 时间上限（秒）。
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_cpu_seconds: Option<u64>,
+    /// 内存上限（字节）。
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    max_memory_bytes: Option<u64>,
+    /// 进程数量上限。
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    max_processes: Option<u32>,
+    /// `--` 后要执行的命令及参数。
+    #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
+    command: Vec<String>,
+}
+
+const INLINE_POLICY_ARGS: &[&str] = &[
+    "mode",
+    "workspace",
+    "writable",
+    "protect",
+    "deny_read",
+    "network",
+    "max_cpu_seconds",
+    "max_memory_bytes",
+    "max_processes",
+];
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliSandboxMode {
+    ReadOnly,
+    #[default]
+    WorkspaceWrite,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliNetwork {
+    Allow,
+    #[default]
+    Deny,
+}
+
+fn parse_run_args(args: &[String]) -> Result<ParsedRun> {
+    let parsed = RunArgs::try_parse_from(
+        std::iter::once("tiangong-sandbox run").chain(args.iter().skip(1).map(String::as_str)),
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let command = parsed.command.clone();
+    let policy = if let Some(policy_path) = parsed.policy.as_ref() {
+        serde_json::from_slice(
+            &std::fs::read(policy_path)
+                .with_context(|| format!("读取策略文件失败: {}", policy_path.display()))?,
+        )
+        .context("解析策略文件失败")?
+    } else {
+        inline_policy(parsed)?
+    };
+    Ok(ParsedRun { policy, command })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedRun {
+    policy: tiangong_sandbox::SandboxPolicy,
+    command: Vec<String>,
+}
+
+fn inline_policy(args: RunArgs) -> Result<tiangong_sandbox::SandboxPolicy> {
+    let workspace = absolute_cli_path(
+        args.workspace
+            .as_deref()
+            .context("直接策略参数必须提供 --workspace <absolute-dir>")?,
+        "--workspace",
+    )?;
+    let extra_writable = absolute_cli_paths(args.writable, "--writable")?;
+    let protected_paths = absolute_cli_paths(args.protect, "--protect")?;
+    let denied_read_paths = absolute_cli_paths(args.deny_read, "--deny-read")?;
+    let mut resource_limits = tiangong_sandbox::SandboxResourceLimits::default();
+    if let Some(value) = args.max_cpu_seconds {
+        resource_limits.max_cpu_time_seconds = value;
+    }
+    if let Some(value) = args.max_memory_bytes {
+        resource_limits.max_memory_bytes = value;
+    }
+    if let Some(value) = args.max_processes {
+        resource_limits.max_processes = value;
+    }
+    Ok(tiangong_sandbox::SandboxPolicy {
+        mode: match args.mode {
+            CliSandboxMode::ReadOnly => tiangong_sandbox::SandboxMode::ReadOnly,
+            CliSandboxMode::WorkspaceWrite => tiangong_sandbox::SandboxMode::WorkspaceWrite,
+        },
+        workspace,
+        extra_writable,
+        protected_paths,
+        denied_read_paths,
+        allow_network: matches!(args.network, CliNetwork::Allow),
+        resource_limits,
+    })
+}
+
+fn absolute_cli_paths(values: Vec<PathBuf>, option: &str) -> Result<Vec<PathBuf>> {
+    values
+        .into_iter()
+        .map(|path| absolute_cli_path(&path, option))
+        .collect()
+}
+
+fn absolute_cli_path(value: &Path, option: &str) -> Result<PathBuf> {
+    if !value.is_absolute() {
+        bail!("{option} 必须使用绝对路径: {}", value.display());
+    }
+    Ok(value.to_path_buf())
 }
 
 fn resolve_command_in_path(program: &Path) -> Option<PathBuf> {
@@ -2181,6 +2311,124 @@ mod tests {
         // 无清单比对所需的完整字段时，错误应指向清单链路而非白名单。
         let error = validate_target(&req).unwrap_err();
         assert!(!error.to_string().contains("只允许启动"));
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn inline_policy_parses_all_options() {
+        let parsed = parse_run_args(&strings(&[
+            "run",
+            "--mode",
+            "workspace-write",
+            "--workspace",
+            "/workspace",
+            "--writable",
+            "/tmp/run",
+            "--writable",
+            "/tmp/cache",
+            "--protect",
+            "/workspace/protected",
+            "--deny-read",
+            "/home/user/.ssh",
+            "--network",
+            "allow",
+            "--max-cpu-seconds",
+            "12",
+            "--max-memory-bytes",
+            "4096",
+            "--max-processes",
+            "8",
+            "--",
+            "echo",
+            "ok",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed.policy.mode,
+            tiangong_sandbox::SandboxMode::WorkspaceWrite
+        );
+        assert_eq!(parsed.policy.workspace, PathBuf::from("/workspace"));
+        assert_eq!(
+            parsed.policy.extra_writable,
+            vec![PathBuf::from("/tmp/run"), PathBuf::from("/tmp/cache")]
+        );
+        assert_eq!(
+            parsed.policy.protected_paths,
+            vec![PathBuf::from("/workspace/protected")]
+        );
+        assert_eq!(
+            parsed.policy.denied_read_paths,
+            vec![PathBuf::from("/home/user/.ssh")]
+        );
+        assert!(parsed.policy.allow_network);
+        assert_eq!(parsed.policy.resource_limits.max_cpu_time_seconds, 12);
+        assert_eq!(parsed.policy.resource_limits.max_memory_bytes, 4096);
+        assert_eq!(parsed.policy.resource_limits.max_processes, 8);
+        assert_eq!(parsed.command, strings(&["echo", "ok"]));
+    }
+
+    #[test]
+    fn inline_policy_defaults_are_fail_closed() {
+        let parsed = parse_run_args(&strings(&[
+            "run",
+            "--workspace",
+            "/workspace",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed.policy.mode,
+            tiangong_sandbox::SandboxMode::WorkspaceWrite
+        );
+        assert!(!parsed.policy.allow_network);
+        assert_eq!(
+            parsed.policy.resource_limits,
+            tiangong_sandbox::SandboxResourceLimits::default()
+        );
+    }
+
+    #[test]
+    fn policy_file_and_inline_options_are_mutually_exclusive() {
+        let error = parse_run_args(&strings(&[
+            "run",
+            "--policy",
+            "/tmp/policy.json",
+            "--workspace",
+            "/workspace",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot be used with"));
+    }
+
+    #[test]
+    fn inline_policy_rejects_relative_paths_and_zero_limits() {
+        let relative = parse_run_args(&strings(&[
+            "run",
+            "--workspace",
+            "relative",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(relative.to_string().contains("必须使用绝对路径"));
+
+        let zero = parse_run_args(&strings(&[
+            "run",
+            "--workspace",
+            "/workspace",
+            "--max-processes",
+            "0",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(zero.to_string().contains("not in 1..="));
     }
 
     #[test]

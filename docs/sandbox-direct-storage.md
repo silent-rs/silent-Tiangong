@@ -7,17 +7,30 @@
 ## 需求
 
 1. Sandbox 不认识天工的 `storage_root`，安装目录完全由宿主决定。库只负责在宿主传入的目录中定位 `tiangong-sandbox[.exe]` 和伴生签名。
-2. 增加通用命令：
+2. 提供策略文件和直接命令行参数两种通用执行形式：
 
 ```text
 tiangong-sandbox run --policy <policy.json> -- <command> [args...]
+
+tiangong-sandbox run \
+  --mode workspace-write \
+  --workspace /absolute/workspace \
+  --writable /absolute/run-temp \
+  --protect /absolute/workspace/protected \
+  --deny-read /home/user/.ssh \
+  --network deny \
+  --max-cpu-seconds 300 \
+  --max-memory-bytes 2147483648 \
+  --max-processes 64 \
+  -- <command> [args...]
 ```
 
-3. 策略文件直接使用 `SandboxPolicy` JSON。保护路径、禁读路径、额外可写路径和网络权限全部由宿主传入。
-4. 目标程序默认执行路径、摘要、文件类型和权限校验，不要求 `plugin.json`。天工插件宿主可以显式启用插件清单比对。
-5. 常见凭据和天工数据文件清单是可选预设，不是通用策略的隐式默认值。
-6. 更新端点和 minisign 信任根可由调用方通过显式参数配置；不允许环境变量静默替换生产信任根。
-7. 天工生产安装验证入口仍只接受 crate 内置官方公钥，并在验签后执行自检。
+3. `--writable`、`--protect` 和 `--deny-read` 可以重复。直接参数缺省使用 `workspace-write`、禁止网络和默认资源上限，并且必须提供绝对路径的 `--workspace`。
+4. `--policy` 与直接策略参数互斥，不做隐式合并或覆盖。策略文件直接使用 `SandboxPolicy` JSON。保护路径、禁读路径、额外可写路径和网络权限全部由宿主传入。
+5. 目标程序默认执行路径、摘要、文件类型和权限校验，不要求 `plugin.json`。天工插件宿主可以显式启用插件清单比对。
+6. 常见凭据和天工数据文件清单是可选预设，不是通用策略的隐式默认值。
+7. 更新端点和 minisign 信任根可由调用方通过显式参数配置；不允许环境变量静默替换生产信任根。
+8. 天工生产安装验证入口仍只接受 crate 内置官方公钥，并在验签后执行自检。
 
 ## 兼容性
 
@@ -52,7 +65,7 @@ tiangong-sandbox run --policy <policy.json> -- <command> [args...]
 ## 完成标准
 
 - 宿主可自行选择任意绝对安装目录。
-- 无天工插件清单时可用策略文件执行普通命令。
+- 无天工插件清单时可用策略文件或直接命令行策略执行普通命令。
 - 越界写和禁读行为仍由三平台现有沙箱实现强制执行。
 - 天工生产官方根与第三方显式信任根入口分离。
 - Sandbox crate 构建、测试和严格检查通过。
