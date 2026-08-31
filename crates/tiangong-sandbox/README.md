@@ -21,6 +21,74 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 
 库提供程序定位、签名验证和自检能力，但不会自动拼接天工的存储根或 `sandbox` 目录。
 
+## 正式版本下载
+
+正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、协议版本、各平台下载地址、SHA-256 和签名地址。
+
+当前正式版为 `0.1.0`：
+
+| 平台 | 程序 | minisign 签名 |
+| --- | --- | --- |
+| macOS Apple Silicon | [tiangong-sb-darwin-aarch64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-aarch64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-aarch64.sig) |
+| macOS Intel | [tiangong-sb-darwin-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-x86_64.sig) |
+| Linux x86_64 | [tiangong-sb-linux-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-linux-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-linux-x86_64.sig) |
+| Windows x86_64 | [tiangong-sb-windows-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-windows-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-windows-x86_64.sig) |
+
+手动下载后，将程序重命名为 `tiangong-sandbox`（Windows 为 `tiangong-sandbox.exe`），签名放在同目录并命名为程序名加 `.sig`。macOS 和 Linux 还需要添加执行权限：
+
+```bash
+chmod +x tiangong-sandbox
+./tiangong-sandbox --self-check
+```
+
+版本源码与发布记录可在 [silent-rs/silent-Tiangong](https://github.com/silent-rs/silent-Tiangong) 查看。正式二进制以官方最新版本清单及其签名为准。
+
+### 包管理器支持计划
+
+目前正式版通过官方 OSS 和内置自更新能力发布，尚未提供包管理器安装命令。后续计划逐步增加：
+
+- macOS：Homebrew Formula；
+- Debian / Ubuntu：APT 仓库与 `.deb`；
+- Fedora / RHEL 系：RPM 仓库；
+- Windows：WinGet，并评估 Chocolatey / Scoop；
+- Rust 用户：评估 crates.io 安装入口。
+
+包管理器发布仍需复用同一套版本、SHA-256、minisign 验签和 `--self-check` 门禁。在对应仓库和自动发布流程上线前，不应使用尚未发布的 `brew install`、`apt install` 等命令。
+
+## 正式版本下载
+
+正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、协议版本、各平台下载地址、SHA-256 和签名地址。
+
+当前正式版为 `0.1.0`：
+
+| 平台 | 程序 | minisign 签名 |
+| --- | --- | --- |
+| macOS Apple Silicon | [tiangong-sb-darwin-aarch64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-aarch64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-aarch64.sig) |
+| macOS Intel | [tiangong-sb-darwin-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-darwin-x86_64.sig) |
+| Linux x86_64 | [tiangong-sb-linux-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-linux-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-linux-x86_64.sig) |
+| Windows x86_64 | [tiangong-sb-windows-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-windows-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.0/tiangong-sb-windows-x86_64.sig) |
+
+手动下载后，将程序重命名为 `tiangong-sandbox`（Windows 为 `tiangong-sandbox.exe`），签名放在同目录并命名为程序名加 `.sig`。macOS 和 Linux 还需要添加执行权限：
+
+```bash
+chmod +x tiangong-sandbox
+./tiangong-sandbox --self-check
+```
+
+版本源码与发布记录可在 [silent-rs/silent-Tiangong](https://github.com/silent-rs/silent-Tiangong) 查看。正式二进制以官方最新版本清单及其签名为准。
+
+### 包管理器支持计划
+
+目前正式版通过官方 OSS 和内置自更新能力发布，尚未提供包管理器安装命令。后续计划逐步增加：
+
+- macOS：Homebrew Formula；
+- Debian / Ubuntu：APT 仓库与 `.deb`；
+- Fedora / RHEL 系：RPM 仓库；
+- Windows：WinGet，并评估 Chocolatey / Scoop；
+- Rust 用户：评估 crates.io 安装入口。
+
+包管理器发布仍需复用同一套版本、SHA-256、minisign 验签和 `--self-check` 门禁。在对应仓库和自动发布流程上线前，不应使用尚未发布的 `brew install`、`apt install` 等命令。
+
 ## 快速使用
 
 ### 直接在命令行中设置策略
