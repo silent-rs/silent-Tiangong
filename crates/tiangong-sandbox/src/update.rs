@@ -910,7 +910,7 @@ mod tests {
         assert_eq!(
             status,
             UpdateStatus::Updated {
-                previous: "0.1.0".into(),
+                previous: env!("CARGO_PKG_VERSION").into(),
                 version: "0.2.0".into(),
                 path: current.clone(),
             }
