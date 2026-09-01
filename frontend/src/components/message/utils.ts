@@ -67,10 +67,10 @@ export function msgReasoning(message: MessageItem): string {
 }
 
 /** 总结阶段的状态标记，需在前端展示时剥离。 */
-const SUMMARY_STATUS_MARKERS = ["[DONE]", "[ASK_USER]", "[NEED_MORE_WORK]"];
+const SUMMARY_STATUS_MARKERS = ["[DONE]", "[NEED_MORE_WORK]"];
 const NEED_MORE_WORK_MARKER = "[NEED_MORE_WORK]";
 
-/** 剥离总结阶段回复首行的状态标记（[DONE]/[ASK_USER]/[NEED_MORE_WORK]）。 */
+/** 剥离总结阶段回复首行的状态标记（[DONE]/[NEED_MORE_WORK]）。 */
 export function stripSummaryStatusMarker(text: string): string {
   const trimmed = text.trimStart();
   for (const marker of SUMMARY_STATUS_MARKERS) {
@@ -88,12 +88,12 @@ export function isNeedMoreWorkMessage(message: MessageItem): boolean {
 /**
  * 获取消息的可展示文本：无条件剥离总结阶段首行状态标记。
  *
- * `[DONE]`/`[ASK_USER]`/`[NEED_MORE_WORK]` 是 summary 阶段提示词要求 LLM 首行输出的
+ * `[DONE]`/`[NEED_MORE_WORK]` 是 summary 阶段提示词要求 LLM 首行输出的
  * 完成度信号，属于控制标记而非正文。后端不应为显示而篡改正文（否则会污染后续喂回 LLM
  * 的上下文），剥离职责落在显示层。不依赖 `message.phase`，保证任何情况下都正确显示。
  *
  * 注意：`[NEED_MORE_WORK]` 在 AgentTurn 的分组逻辑中已被单独拦截为 thinking 片段，
- * 不会走到这里；此处主要处理 `[DONE]`/`[ASK_USER]`。
+ * 不会走到这里；此处主要处理 `[DONE]`。
  */
 export function displayTextContent(message: MessageItem): string {
   return stripSummaryStatusMarker(textContent(message));

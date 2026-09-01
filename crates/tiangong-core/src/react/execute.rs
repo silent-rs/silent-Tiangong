@@ -603,12 +603,23 @@ pub(super) fn persist_streamed_react_message(
     emit_session_message_upsert(ctx, pending_msg_id);
 }
 
+const NEED_MORE_WORK_MARKER: &str = "[NEED_MORE_WORK]";
+
 /// ReAct 文本回复的后续去向。
 enum ReactTextDisposition {
     /// 有效最终答复：提交（PendingFinish）。
     Complete,
+    /// 模型明确声明仍有工作：保留为过程消息并继续请求模型。
+    Continue,
     /// 无效输出（空回复/合成占位符）：明确失败。
     InvalidOutput,
+}
+
+/// 与前端展示层保持一致：忽略开头空白、大小写不敏感，并按标记前缀识别。
+fn is_need_more_work_text(text: &str) -> bool {
+    text.trim_start()
+        .get(..NEED_MORE_WORK_MARKER.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(NEED_MORE_WORK_MARKER))
 }
 
 fn handle_react_text_response(
@@ -657,10 +668,13 @@ fn handle_react_text_response(
 
     // 附件内容不进入模型请求（模型看不见），自然会调用读取插件处理——
     // 工具使用由模型基于上下文自主决策（Agent 的根基），Loop 不做义务门控。
-    if response.text.trim().is_empty() {
-        return ReactTextDisposition::InvalidOutput;
+    if is_need_more_work_text(&response.text) {
+        ReactTextDisposition::Continue
+    } else if response.text.trim().is_empty() {
+        ReactTextDisposition::InvalidOutput
+    } else {
+        ReactTextDisposition::Complete
     }
-    ReactTextDisposition::Complete
 }
 
 fn finish_react_text(
@@ -688,6 +702,7 @@ fn finish_react_text(
                 state.accumulated_usage.clone(),
             ))
         }
+        ReactTextDisposition::Continue => ExecutionPhase::NeedModel,
         ReactTextDisposition::InvalidOutput => {
             // 模型未产生有效输出：明确失败，不把空回复发布为最终答复。
             let reason = "模型未产生有效回复".to_string();

@@ -440,6 +440,47 @@ async fn completes_with_direct_text_answer() {
     );
 }
 
+/// `[NEED_MORE_WORK]` 与前端采用相同的宽松前缀规则：忽略前导空白和大小写，
+/// 命中后保留该过程消息并继续请求模型，直到得到普通最终回复。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn need_more_work_marker_continues_model_loop() {
+    let server = MockServer::start().await;
+    mount_sse(
+        &server,
+        vec![
+            text_delta_chunk("\n  [need_more_work]还有检查需要完成。"),
+            usage_chunk(10, 4),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("所有检查均已完成。"), usage_chunk(12, 3)],
+    )
+    .await;
+
+    let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+    assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+    assert_eq!(result.usage.total_tokens, 29, "两次模型请求的用量都应累计");
+    let assistant_messages = harness
+        .ctx
+        .session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .collect::<Vec<_>>();
+    assert!(assistant_messages.iter().any(|message| {
+        message.phase == crate::session::MessagePhase::React
+            && message.text_content().contains("[need_more_work]")
+    }));
+    assert!(assistant_messages.iter().any(|message| {
+        message.phase == crate::session::MessagePhase::Summary
+            && message.text_content() == "所有检查均已完成。"
+    }));
+}
+
 /// 请求前压缩保留模型可见的续接消息：上一 turn 观测压力超阈值，下一 turn
 /// 在发起模型请求前压缩（ALR-303），摘要与 resume 持久化到磁盘。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
