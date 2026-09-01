@@ -38,6 +38,23 @@
   （`plugin_id` + `contribution_id`，如浏览器的多个标签页、多例三方 App），
   仅当同 App 实例数 > 1 时显示；逐个走 `handleCloseTab`（含 webview 运行时关闭）。
 
+### 布局穿透修复（多终端 Tab 撑大拓展区）
+
+现象：多开终端 Tab 后，终端 xterm 内容的固有宽度沿 flex 链穿透
+（内容区 → TabsContainer 根 → MainApp 行容器均缺 `min-w-0`），
+把拓展区撑到超出窗口：右侧「关闭工作区」按钮被挤出可视区、消息区被压缩。
+
+修复（全链补宽度约束）：
+
+- `MainApp.tsx` 行容器：`flex min-w-0 flex-1 min-h-0`；
+- `TabsContainer.tsx` 根容器：补 `min-w-0`；
+- `TabsContainer.tsx` 内容区：补 `min-w-0 overflow-hidden`（关键：阻断
+  插件内容固有宽度的 min-content 贡献，xterm 由 fit 按容器实际宽度调列数）；
+- `PluginAppTabContent.tsx` 实例容器：补 `min-w-0`。
+
+已用独立布局复现页验证：修复前关闭按钮被撑出容器 ~800px，
+修复后按钮始终在容器内、拓展区保持分配宽度。
+
 ## 不做
 
 - 不做会话恢复持久化。

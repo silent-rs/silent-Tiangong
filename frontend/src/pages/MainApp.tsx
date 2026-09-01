@@ -795,7 +795,7 @@ export function MainApp() {
           <AppSidebar />
 
           <main className="flex flex-1 flex-col min-w-0 bg-background">
-            <div className="flex flex-1 min-h-0">
+            <div className="flex min-w-0 flex-1 min-h-0">
               <div
                 className={`relative isolate flex flex-col min-w-0 ${showWorkspacePanel ? 'shrink-0' : 'flex-1'}`}
                 style={showWorkspacePanel ? { width: chatPanelWidth } : undefined}

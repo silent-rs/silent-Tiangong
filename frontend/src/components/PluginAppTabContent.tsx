@@ -30,7 +30,7 @@ export function PluginAppTabContent({
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
   const containerClassName = isActive
-    ? 'flex h-full min-h-0 w-full flex-1 flex-col'
+    ? 'flex h-full min-h-0 w-full min-w-0 flex-1 flex-col'
     : 'hidden';
 
   useEffect(() => {

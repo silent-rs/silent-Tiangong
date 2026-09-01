@@ -787,7 +787,7 @@ export function TabsContainer({
 
 
   return (
-    <div className="flex h-full flex-1 flex-col bg-background">
+    <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
       {/* tab 栏：滚动区 flex-1 min-w-0 承载溢出，右侧操作区 shrink-0 固定宽度，
           保证 tab 再多时「关闭工作区」按钮始终可见；滚动条悬浮显示不占位。 */}
       <div className="flex min-w-0 shrink-0 items-center gap-1 border-b px-2 py-1">
@@ -944,8 +944,10 @@ export function TabsContainer({
         </div>
       </div>
 
-      {/* App 实例内容：矩阵态隐藏保活（切换矩阵不销毁插件实例） */}
-      <div className={mode === 'matrix' ? 'hidden' : 'min-h-0 flex-1'}>
+      {/* App 实例内容：矩阵态隐藏保活（切换矩阵不销毁插件实例）。
+          min-w-0 + overflow-hidden 阻断终端等插件内容的固有宽度穿透
+          flex 链撑大拓展区（否则右侧按钮被挤出窗口、消息区被压缩）。 */}
+      <div className={mode === 'matrix' ? 'hidden' : 'min-h-0 min-w-0 flex-1 overflow-hidden'}>
         {tabs.map((tab) => (
           tab.sandbox === 'native' && tab.plugin_id === '__builtin__' ? (
             // 官方内置 App 的 native 容器（设计 6.2 ③，仅官方）：按贡献分派组件
