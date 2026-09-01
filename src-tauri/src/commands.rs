@@ -1500,41 +1500,16 @@ pub async fn set_reasoning_effort(
                 .await?
         }
     };
-    let session_lock = state.session_send_lock(&session_id);
-    let _send_guard = session_lock.lock_owned().await;
+    crate::session_ops::update_reasoning_effort(&state.core_manager, &session_id, Some(effort))
+        .map_err(|error| error.to_string())?;
 
-    let next_effort = effort;
-    let previous_override =
-        crate::session_ops::update_reasoning_effort(&state.core_manager, &session_id, Some(effort))
-            .map_err(|error| error.to_string())?;
-
-    // 先通知当前 turn，确保工具执行后的下一次模型请求立即使用新强度。
+    // 只通知目标会话当前 Core；活跃 turn 的下一次模型请求使用新强度。
+    // 不等待会话发送锁，也不刷新其他 Core 或插件。
     state
         .inner()
         .core_manager
-        .set_core_reasoning_effort(&session_id, next_effort);
-    if let Err(error) = state.sync_core_config_from_state().await {
-        rollback_session_reasoning_effort(state.inner(), &session_id, previous_override).await;
-        return Err(error);
-    }
+        .set_core_reasoning_effort(&session_id, effort);
     Ok(())
-}
-
-async fn rollback_session_reasoning_effort(
-    state: &TiangongApp,
-    session_id: &str,
-    previous_override: Option<tiangong_llm::request::ReasoningEffort>,
-) {
-    if let Err(error) = crate::session_ops::update_reasoning_effort(
-        &state.core_manager,
-        session_id,
-        previous_override,
-    ) {
-        warn!(%error, %session_id, "回滚会话思考强度失败");
-    }
-    if let Err(error) = state.sync_core_config_from_state().await {
-        warn!(%error, %session_id, "回滚会话思考强度后同步配置失败");
-    }
 }
 
 #[tauri::command]
