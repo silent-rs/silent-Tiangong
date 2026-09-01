@@ -163,7 +163,20 @@ impl Guest for Component {
                     "properties": {
                         "condition": {
                             "type": "object",
-                            "description": "等待条件，kind 为 appear/disappear/focus/available/value 之一"
+                            "description": "等待条件。appear/disappear 使用 target；focus/available/value 使用 element；value 可带 expected",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["appear", "disappear", "focus", "available", "value"] },
+                                "target": {
+                                    "type": "object",
+                                    "properties": {
+                                        "app_name": { "type": "string" },
+                                        "title": { "type": "string" }
+                                    }
+                                },
+                                "element": element_ref_schema(),
+                                "expected": { "type": "string" }
+                            },
+                            "required": ["kind"]
                         },
                         "timeout_ms": { "type": "integer", "description": "超时毫秒数，必须大于 0", "minimum": 1 }
                     },
@@ -345,10 +358,14 @@ fn handle_find(arguments: String) -> Result<ToolResult, PluginError> {
         window: args.get("window").and_then(parse_element_ref),
         snapshot: args.get("snapshot").and_then(serde_json::Value::as_u64),
         conditions: FindConditions {
-            automation_id: conditions_raw.get("automation_id").and_then(as_str_owned),
-            role: conditions_raw.get("role").and_then(as_str_owned),
-            name: conditions_raw.get("name").and_then(as_str_owned),
-            value: conditions_raw.get("value").and_then(as_str_owned),
+            // 工具协议会用空字符串表示“未指定”；筛选协议必须归一化为 None，
+            // 否则 exact 模式下空 automation_id/value 会排除全部控件。
+            automation_id: conditions_raw
+                .get("automation_id")
+                .and_then(as_non_empty_str_owned),
+            role: conditions_raw.get("role").and_then(as_non_empty_str_owned),
+            name: conditions_raw.get("name").and_then(as_non_empty_str_owned),
+            value: conditions_raw.get("value").and_then(as_non_empty_str_owned),
             visible: conditions_raw
                 .get("visible")
                 .and_then(serde_json::Value::as_bool),
@@ -524,6 +541,13 @@ fn as_u32_bounded(v: &serde_json::Value) -> Option<u32> {
 /// 把 JSON 值的字符串视图转为 owned String。
 fn as_str_owned(v: &serde_json::Value) -> Option<String> {
     v.as_str().map(String::from)
+}
+
+/// 筛选条件中的空字符串表示“未指定”，不能作为 exact 条件下传。
+fn as_non_empty_str_owned(v: &serde_json::Value) -> Option<String> {
+    v.as_str()
+        .filter(|value| !value.is_empty())
+        .map(String::from)
 }
 
 fn parse_element_ref(v: &serde_json::Value) -> Option<ElementRef> {
