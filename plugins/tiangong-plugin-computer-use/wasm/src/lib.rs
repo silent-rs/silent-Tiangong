@@ -243,9 +243,17 @@ fn handle_list_windows(arguments: String) -> Result<ToolResult, PluginError> {
         Ok(v) => v,
         Err(f) => return Ok(f),
     };
-    let pid = args.get("pid").and_then(as_u32_bounded);
-    // pid 超范围（超 u32）时返回参数错误，而非截断成另一个有效值。
-    if args.get("pid").is_some() && pid.is_none() {
+    // 工具参数层用 0 表示“不筛选”；协议层则用 None 表示。先归一化，
+    // 避免把 pid=0 下传后过滤掉全部窗口。
+    let pid = args
+        .get("pid")
+        .and_then(as_u32_bounded)
+        .filter(|pid| *pid > 0);
+    // 非零 pid 超范围（超 u32）时返回参数错误，而非截断成另一个有效值。
+    if args
+        .get("pid")
+        .is_some_and(|value| value.as_u64().is_none_or(|pid| pid > u32::MAX as u64))
+    {
         return Ok(tool_failure(
             "desktop_list_windows 的 pid 超出有效范围",
             "pid out of range",
