@@ -725,25 +725,10 @@ fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
         use std::os::unix::process::CommandExt;
 
         // 每个 stdio sidecar 独占进程组，正常取消时可连同 Shell 后台进程清理。
+        // 宿主退出由常驻读循环观察 stdin EOF 后清理整个组。请求已经并发
+        // 分发，长 dispatch 不会阻塞 EOF；不再叠加 Linux PDEATHSIG，避免
+        // 测试运行器/启动代理换代时把仍有活宿主的常驻 sidecar 误杀。
         command.process_group(0);
-
-        #[cfg(target_os = "linux")]
-        {
-            let expected_parent = unsafe { libc::getpid() };
-            // SAFETY: pre_exec 内仅调用异步信号安全的 libc 原语。
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    // 消除 fork 与 prctl 之间父进程已经退出的竞态。
-                    if libc::getppid() != expected_parent {
-                        return Err(std::io::Error::other("sidecar 宿主已退出"));
-                    }
-                    Ok(())
-                });
-            }
-        }
     }
     let _ = command;
     Ok(())
