@@ -31,7 +31,8 @@
 
 - Tab 栏采用 flex 布局：滚动区 `flex-1 min-w-0` 承载溢出（横向滚动），
   右侧「关闭工作区」按钮独立 `shrink-0` 容器，Tab 再多也始终可见；
-  滚动区 `overflow-y-hidden` + `custom-scrollbar`（悬浮显示滚动条，不常驻占位）。
+  滚动条完全隐藏（`scrollbar-width:none` + `::-webkit-scrollbar` 隐藏，
+  不占位、不撑高 tab 栏），滚动能力由滚轮横滑/触控板/自动滚入承担。
 - 鼠标滚轮（垂直）在 Tab 栏上转为横向滚动；触控板横向滚动保持原生行为。
 - 活跃 Tab 变化时自动滚入可视区（`data-tab-id` + `scrollIntoView`）。
 - Tab 右键菜单新增「关闭所有同 App 标签页」：同 App = 同插件同贡献点

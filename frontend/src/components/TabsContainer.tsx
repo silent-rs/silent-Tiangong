@@ -789,11 +789,12 @@ export function TabsContainer({
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
       {/* tab 栏：滚动区 flex-1 min-w-0 承载溢出，右侧操作区 shrink-0 固定宽度，
-          保证 tab 再多时「关闭工作区」按钮始终可见；滚动条悬浮显示不占位。 */}
+          保证 tab 再多时「关闭工作区」按钮始终可见；滚动条完全隐藏
+          （不占位、不撑高 tab 栏），滚动能力由滚轮横滑/触控板/自动滚入承担。 */}
       <div className="flex min-w-0 shrink-0 items-center gap-1 border-b px-2 py-1">
         <div
           ref={tabsScrollRef}
-          className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden"
+          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
           {onShowMatrix && (
             <Button
