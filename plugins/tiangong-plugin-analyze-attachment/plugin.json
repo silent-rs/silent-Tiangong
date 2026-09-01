@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "analyze-attachment",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "wasm": {
     "binary": "tiangong_plugin_analyze_attachment_wasm.wasm"
   },

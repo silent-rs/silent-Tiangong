@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "coding",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "wasm": {
     "binary": "tiangong_plugin_coding_wasm.wasm"
   },
