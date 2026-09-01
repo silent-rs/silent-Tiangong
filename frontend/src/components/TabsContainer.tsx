@@ -209,6 +209,8 @@ export function TabsContainer({
   const hydratedSessionRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const terminalSessionIdRef = useRef('');
+  /** tab 栏横向滚动容器：滚轮转横向滚动 + 活跃 tab 自动滚入可视区。 */
+  const tabsScrollRef = useRef<HTMLDivElement>(null);
   const terminalSessionId = activeSessionId || newConversationId || '';
   terminalSessionIdRef.current = terminalSessionId;
 
@@ -331,6 +333,35 @@ export function TabsContainer({
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  // 鼠标滚轮（垂直）转为 tab 栏横向滚动；触控板横向滚动（deltaX）保持原生行为。
+  useEffect(() => {
+    const el = tabsScrollRef.current;
+    if (!el) return;
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      if (el.scrollWidth <= el.clientWidth) return;
+      event.preventDefault();
+      const step = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY * 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? event.deltaY * el.clientWidth
+          : event.deltaY;
+      el.scrollLeft += step;
+    };
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  // 活跃 tab 变化时滚入可视区（工具拉起/命令聚焦远处 tab 时不必手动翻找）。
+  useEffect(() => {
+    const el = tabsScrollRef.current;
+    if (!el || !activeTabId) return;
+    const activeEl = el.querySelector<HTMLElement>(
+      `[data-tab-id="${CSS.escape(activeTabId)}"]`,
+    );
+    activeEl?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [activeTabId]);
 
 
   useEffect(() => {
@@ -757,8 +788,13 @@ export function TabsContainer({
 
   return (
     <div className="flex h-full flex-1 flex-col bg-background">
-      <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      {/* tab 栏：滚动区 flex-1 min-w-0 承载溢出，右侧操作区 shrink-0 固定宽度，
+          保证 tab 再多时「关闭工作区」按钮始终可见；滚动条悬浮显示不占位。 */}
+      <div className="flex min-w-0 shrink-0 items-center gap-1 border-b px-2 py-1">
+        <div
+          ref={tabsScrollRef}
+          className="custom-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden"
+        >
           {onShowMatrix && (
             <Button
               size="sm"
@@ -783,6 +819,7 @@ export function TabsContainer({
               <ContextMenu key={tab.id}>
                 <ContextMenuTrigger asChild>
                   <div
+                    data-tab-id={tab.id}
                     className={`group flex h-7 min-w-28 max-w-44 shrink-0 cursor-default items-center gap-1.5 rounded px-2 text-xs transition-colors ${
                       active
                         ? 'bg-muted text-foreground'
@@ -858,6 +895,31 @@ export function TabsContainer({
                       关闭其他标签页
                     </ContextMenuItem>
                   )}
+                  {(() => {
+                    // 同 App = 同插件同贡献点（如浏览器的多个标签页、多例三方 App）。
+                    if (tab.kind !== 'plugin' || !tab.plugin_id || !tab.contribution_id) {
+                      return null;
+                    }
+                    const sameAppTabs = tabs.filter((item) => (
+                      item.kind === 'plugin'
+                      && item.plugin_id === tab.plugin_id
+                      && item.contribution_id === tab.contribution_id
+                    ));
+                    if (sameAppTabs.length <= 1) return null;
+                    return (
+                      <ContextMenuItem
+                        onClick={() => {
+                          void (async () => {
+                            for (const item of sameAppTabs) {
+                              await handleCloseTab(item.id);
+                            }
+                          })();
+                        }}
+                      >
+                        关闭所有同 App 标签页
+                      </ContextMenuItem>
+                    );
+                  })()}
                   <ContextMenuSeparator className="my-1" />
                   <ContextMenuItem onClick={() => void handleCloseTab(tab.id)}>
                     关闭标签页
@@ -868,16 +930,18 @@ export function TabsContainer({
           })}
         </div>
 
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 w-7 shrink-0 p-0 text-muted-foreground hover:text-foreground"
-          onClick={handleCloseWorkspace}
-          title="关闭工作区"
-          aria-label="关闭工作区"
-        >
-          <X className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex shrink-0 items-center">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+            onClick={handleCloseWorkspace}
+            title="关闭工作区"
+            aria-label="关闭工作区"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
       {/* App 实例内容：矩阵态隐藏保活（切换矩阵不销毁插件实例） */}
