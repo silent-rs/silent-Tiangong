@@ -4,10 +4,14 @@
 //! Auth 首帧 → 握手 → 请求往返 → 进程崩溃后自动换代重启。
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use tiangong_plugin_runtime::manifest::SidecarLifecycle;
 use tiangong_plugin_runtime::protocol::PROTOCOL_VERSION;
-use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
+use tiangong_plugin_runtime::sidecar::{
+    SidecarConfig, SidecarConnection, SidecarInvocationContext, StdioSidecarConnection,
+};
 
 fn echo_sidecar_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_test-stdio-sidecar"))
@@ -77,6 +81,58 @@ fn stdio_handshake_reports_identity() {
     assert!(error.to_string().contains("未知操作"));
     let _ = PROTOCOL_VERSION;
     connection.stop().unwrap();
+}
+
+#[test]
+fn resident_request_cancel_returns_immediately_and_keeps_sidecar_running() {
+    let (endpoint, log, data_dir) = temp_paths("request-cancel");
+    let config = SidecarConfig::new(
+        "test-stdio",
+        "0.0.0",
+        echo_sidecar_binary(),
+        endpoint,
+        log,
+        data_dir,
+        std::env::temp_dir(),
+    )
+    .with_lifecycle(SidecarLifecycle::Resident)
+    .with_timeouts(Duration::from_secs(10), Duration::from_secs(10));
+    let connection = Arc::new(StdioSidecarConnection::new(config));
+    let invoking = Arc::clone(&connection);
+    let request = std::thread::spawn(move || {
+        invoking.invoke_with_context(
+            "delay",
+            r#"{"millis":5000}"#,
+            &SidecarInvocationContext {
+                session_id: "cancel-target".to_string(),
+                invocation_id: "tool-delay".to_string(),
+                authoritative_workspace: std::env::temp_dir(),
+            },
+        )
+    });
+
+    // 等待业务请求（握手请求完成后）登记 pending；在它自然完成前取消。
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && connection.active_request_count() == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(connection.active_request_count(), 1, "delay 请求未及时登记");
+    let cancelled_at = Instant::now();
+    connection.cancel_session("cancel-target").unwrap();
+    let result = request.join().unwrap();
+    assert!(result.unwrap_err().to_string().contains("请求已取消"));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(2),
+        "请求级取消必须在 2 秒内唤醒调用方"
+    );
+
+    // Cancel 只结束目标请求；同一常驻 sidecar 继续处理后续请求。
+    let raw = connection.invoke("echo", r#"{"after":"cancel"}"#).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(response["after"], "cancel");
+    // 避免 fixture 的显式进程回收干扰请求级取消断言；进程生命周期由
+    // 既有 stop/宿主崩溃用例单独覆盖。
+    std::mem::forget(connection);
 }
 
 #[cfg(target_os = "macos")]
