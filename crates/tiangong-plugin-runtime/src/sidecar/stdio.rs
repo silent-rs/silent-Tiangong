@@ -219,6 +219,26 @@ impl StdioSidecarConnection {
         result
     }
 
+    fn finish_waiter_then_cancel(
+        &self,
+        waiter: Option<PendingWaiter>,
+        request_id: &str,
+        cancel: impl FnOnce() -> Result<()>,
+    ) {
+        // 必须先唤醒调用方，再尽力写 Cancel；否则写端已关闭时会退化到请求超时。
+        if let Some(waiter) = waiter {
+            let _ = waiter.response.send(Err("请求已取消".to_string()));
+        }
+        if let Err(error) = cancel() {
+            tracing::debug!(
+                plugin_id = %self.config.plugin_id,
+                %request_id,
+                %error,
+                "stdio sidecar 已不可通信，忽略取消帧写入失败"
+            );
+        }
+    }
+
     /// 按宿主会话取消其仍在执行的请求。常驻 sidecar 发送请求级 Cancel，
     /// 不杀进程；按需 sidecar 每次调用独占进程，直接清理进程树。
     pub fn cancel_session(&self, session_id: &str) -> Result<()> {
@@ -254,12 +274,22 @@ impl StdioSidecarConnection {
                 .lock()
                 .ok()
                 .and_then(|mut pending| pending.remove(&request_id));
-            self.cancel_request(&process, &request_id)?;
-            if let Some(waiter) = waiter {
-                let _ = waiter.response.send(Err("请求已取消".to_string()));
-            }
+            self.finish_waiter_then_cancel(waiter, &request_id, || {
+                self.cancel_request(&process, &request_id)
+            });
         }
         Ok(())
+    }
+
+    /// 测试与诊断：当前活跃请求数。只读 pending 表，不触发进程动作。
+    #[doc(hidden)]
+    pub fn active_request_count(&self) -> usize {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.process.clone())
+            .and_then(|process| process.pending.lock().ok().map(|pending| pending.len()))
+            .unwrap_or(0)
     }
 
     /// 终止当前进行中的调用进程（工具级超时 / 会话取消用）：
@@ -1049,6 +1079,42 @@ impl SidecarConnection for StdioSidecarConnection {
 impl Drop for StdioSidecarConnection {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod cancel_order_tests {
+    use super::*;
+
+    #[test]
+    fn cancel_notifies_waiter_before_ignoring_write_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let config = SidecarConfig::new(
+            "cancel-order",
+            "0.0.0",
+            root.path().join("missing-sidecar"),
+            root.path().join("endpoint.json"),
+            root.path().join("sidecar.log"),
+            root.path().join("data"),
+            root.path(),
+        );
+        let connection = StdioSidecarConnection::new(config);
+        let (response_tx, response_rx) = sync_channel(1);
+        let (progress_tx, _progress_rx) = sync_channel(1);
+        connection.finish_waiter_then_cancel(
+            Some(PendingWaiter {
+                response: response_tx,
+                progress: progress_tx,
+                invocation: None,
+            }),
+            "request-cancel",
+            || {
+                // 写帧动作执行前，调用方必须已经收到取消结果；随后模拟写失败。
+                let result = response_rx.try_recv().expect("等待者应先被取消唤醒");
+                assert_eq!(result.unwrap_err(), "请求已取消");
+                Err(anyhow!("stdio 已关闭"))
+            },
+        );
     }
 }
 
