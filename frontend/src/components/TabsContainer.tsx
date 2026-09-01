@@ -788,30 +788,30 @@ export function TabsContainer({
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-background">
-      {/* tab 栏：滚动区 flex-1 min-w-0 承载溢出，右侧操作区 shrink-0 固定宽度，
-          保证 tab 再多时「关闭工作区」按钮始终可见；滚动条完全隐藏
-          （不占位、不撑高 tab 栏），滚动能力由滚轮横滑/触控板/自动滚入承担。 */}
+      {/* tab 栏：启动台按钮与右侧操作区均固定（shrink-0），中间滚动区
+          flex-1 min-w-0 承载溢出，tab 再多时两端按钮始终可见；滚动条完全
+          隐藏（不占位、不撑高 tab 栏），滚动能力由滚轮横滑/触控板/自动滚入承担。 */}
       <div className="flex min-w-0 shrink-0 items-center gap-1 border-b px-2 py-1">
+        {onShowMatrix && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className={`h-7 w-7 shrink-0 p-0 ${
+              mode === 'matrix'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={onShowMatrix}
+            title="启动台（回到拓展区矩阵）"
+            aria-label="启动台"
+          >
+            <Grid3x3 className="h-3.5 w-3.5" />
+          </Button>
+        )}
         <div
           ref={tabsScrollRef}
           className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
-          {onShowMatrix && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className={`h-7 w-7 shrink-0 p-0 ${
-                mode === 'matrix'
-                  ? 'bg-muted text-foreground'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-              onClick={onShowMatrix}
-              title="启动台（回到拓展区矩阵）"
-              aria-label="启动台"
-            >
-              <Grid3x3 className="h-3.5 w-3.5" />
-            </Button>
-          )}
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
             const webviewPlugin = isWebviewPluginTab(tab);
