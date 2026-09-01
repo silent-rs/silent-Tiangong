@@ -278,7 +278,7 @@ function AgentTurnView({
           const { msg, isStreaming } = frag;
           const visibleText = displayTextContent(msg);
           const isReactPhase = msg.phase === "react";
-          // 流式输出无条件剥离状态标记（[DONE]/[NEED_MORE_WORK]/[ASK_USER] 等），
+          // 流式输出无条件剥离状态标记（[DONE]/[NEED_MORE_WORK]），
           // 即使后端 phase 尚未传播到也兜底，避免标记泄漏到界面。
           const visibleStreamingContent = stripSummaryStatusMarker(streamingContent);
           const agentReply = !isStreaming ? parseAgentReply(visibleText) : null;
