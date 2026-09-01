@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-generate-video-sidecar"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Generate-Video 独立 sidecar（读取模型配置、调用视频生成、轮询任务）"
