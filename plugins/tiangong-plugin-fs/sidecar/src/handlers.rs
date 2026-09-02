@@ -132,8 +132,17 @@ pub fn handle_read_file(req: ReadFileRequest, policy: &dyn PathPolicy) -> FsTool
             req.max_lines.clamp(1, MAX_READ_MAX_LINES)
         };
         let full_path = policy.resolve_read(&req.path, &base)?;
-        if !full_path.is_file() {
-            return Err(anyhow!("目标不是文件：{}", full_path.display()));
+        // 信任模式解析对不存在路径静默放行，这里必须区分"不存在"与"类型不对"，
+        // 否则文件缺失会被误报成"目标不是文件"，误导调用方反复重试。
+        match fs::metadata(&full_path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Err(anyhow!("目标不是文件：{}", full_path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(anyhow!("文件不存在：{}", full_path.display()));
+            }
+            Err(e) => {
+                return Err(anyhow!("无法访问目标文件：{}（{e}）", full_path.display()));
+            }
         }
         let content = fs::read_to_string(&full_path)
             .with_context(|| format!("读取文件失败：{}", full_path.display()))?;
@@ -793,6 +802,67 @@ mod tests {
             workspace: Some(root.to_string_lossy().into_owned()),
             full_trust: false,
         }
+    }
+
+    #[test]
+    fn read_file_missing_path_reports_not_found() {
+        let root = tempfile::tempdir().unwrap();
+
+        let response = handle_read_file(
+            ReadFileRequest {
+                path: "docs/requirements.md".to_string(),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(true),
+        );
+
+        assert!(!response.ok);
+        assert!(
+            response.stderr.contains("文件不存在"),
+            "stderr={}",
+            response.stderr
+        );
+    }
+
+    #[test]
+    fn read_file_directory_target_reports_not_file() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("docs")).unwrap();
+
+        let response = handle_read_file(
+            ReadFileRequest {
+                path: "docs".to_string(),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(true),
+        );
+
+        assert!(!response.ok);
+        assert!(
+            response.stderr.contains("目标不是文件"),
+            "stderr={}",
+            response.stderr
+        );
+    }
+
+    #[test]
+    fn read_file_reads_markdown_content() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("README.md"), "第一行\n第二行\n").unwrap();
+
+        let response = handle_read_file(
+            ReadFileRequest {
+                path: "README.md".to_string(),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(true),
+        );
+
+        assert!(response.ok, "{}", response.stderr);
+        assert!(response.stdout.contains("第一行"));
     }
 
     #[test]
