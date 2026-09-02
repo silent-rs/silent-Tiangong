@@ -215,12 +215,12 @@ async fn sidecar_handles_tool(
 /// 对象，sidecar 返回 ToolOutcome 形状（ok/summary/stdout/stderr/exit_code，
 /// 后四项可缺省）。
 ///
-/// 生命周期对齐页面接应路径：按工具声明的 `timeout_ms` 限时；超时或会话
-/// 取消（Future 被 drop）时终止本次按需 sidecar 进程，不遗留阻塞调用。
+/// Handler 调用本身不设时限；用户或会话取消时，进程守卫负责定向取消
+/// 当前请求。启动、连接和写入仍保留基础故障保护。
 async fn invoke_sidecar_tool(
     plugin_id: &str,
     call: ToolCall,
-    timeout_ms: u64,
+    _timeout_ms: u64,
     session_context: Option<(String, std::path::PathBuf, String)>,
     feedback: Option<tiangong_core::core::plugin::PluginFeedbackTx>,
 ) -> ToolResult {
@@ -286,68 +286,54 @@ async fn invoke_sidecar_tool(
         session_id: session_id.clone(),
     };
     let operation = call.name.clone();
-    let timeout_operation = operation.clone();
     let arguments = call.arguments.clone();
     let actor_id = session_context
         .as_ref()
         .map(|(_, _, actor_id)| actor_id.clone())
         .unwrap_or_default();
-    let deadline_ms = chrono::Local::now()
-        .naive_local()
-        .and_utc()
-        .timestamp_millis()
-        .saturating_add(timeout_ms as i64)
-        .max(0) as u64;
     let invocation_context =
         session_id.map(|session_id| crate::protocol::RequestInvocationContext {
             session_id,
             invocation_id: call.id.clone(),
             workspace: authoritative_workspace.to_string_lossy().into_owned(),
             actor_id,
-            deadline_ms: Some(deadline_ms),
+            deadline_ms: None,
         });
     let blocking = connection.clone();
     let plugin_id_for_feedback = plugin_id.to_string();
-    let invoked = tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        tokio::task::spawn_blocking(move || {
-            let payload = serde_json::to_string(&arguments).unwrap_or_default();
-            let mut on_progress = |message: String| {
-                if crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message) {
-                    return;
-                }
-                let Some(feedback) = &feedback else {
-                    return;
-                };
-                match serde_json::from_str::<tiangong_types::StreamEvent>(&message) {
-                    Ok(event) => feedback.send_stream_event(event),
-                    Err(_) => feedback.send_stream_event(tiangong_types::StreamEvent::ReactText {
-                        message_id: call.id.clone(),
-                        content: message,
-                    }),
-                }
-            };
-            match invocation_context {
-                Some(context) => blocking.invoke_with_invocation_context_and_progress(
-                    &operation,
-                    &payload,
-                    &context,
-                    &mut on_progress,
-                ),
-                None => blocking.invoke_with_progress(&operation, &payload, &mut on_progress),
+    let invoked = tokio::task::spawn_blocking(move || {
+        let payload = serde_json::to_string(&arguments).unwrap_or_default();
+        let mut on_progress = |message: String| {
+            if crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message) {
+                return;
             }
-        }),
-    )
+            let Some(feedback) = &feedback else {
+                return;
+            };
+            match serde_json::from_str::<tiangong_types::StreamEvent>(&message) {
+                Ok(event) => feedback.send_stream_event(event),
+                Err(_) => feedback.send_stream_event(tiangong_types::StreamEvent::ReactText {
+                    message_id: call.id.clone(),
+                    content: message,
+                }),
+            }
+        };
+        match invocation_context {
+            Some(context) => blocking.invoke_with_invocation_context_and_progress(
+                &operation,
+                &payload,
+                &context,
+                &mut on_progress,
+            ),
+            None => blocking.invoke_with_progress(&operation, &payload, &mut on_progress),
+        }
+    })
     .await;
     let outcome = match invoked {
-        // 工具级超时：guard drop 终止进程。
-        Err(_) => Err(anyhow::anyhow!(
-            "sidecar 工具 {timeout_operation} 超时（{timeout_ms}ms），已终止本次执行"
-        )),
-        Ok(Ok(Ok(raw))) => serde_json::from_str::<serde_json::Value>(&raw)
+        Ok(Ok(raw)) => serde_json::from_str::<serde_json::Value>(&raw)
             .map_err(|error| anyhow::anyhow!("解析 sidecar 工具响应失败：{error}")),
-        Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(error)) => Err(anyhow::anyhow!("sidecar 调用任务失败：{error}")),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(anyhow::anyhow!("sidecar 调用任务失败：{error}")),
     };
     // 完成判定在业务映射前：传输层 Ok 即完成。
     let outcome_is_complete = outcome.is_ok();

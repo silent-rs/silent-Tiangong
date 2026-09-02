@@ -274,7 +274,8 @@ impl WasmPlugin {
         // 单次调用前重置 fuel 与 epoch deadline。
         // set_fuel 仅在未开启 consume_fuel 时返回 Err，配置已开启，安全忽略。
         let _ = self.store.set_fuel(limits.fuel_limit);
-        self.store.set_epoch_deadline(limits.epoch_deadline_ticks());
+        // Agent 调用不设墙钟时限；fuel 与内存上限仍防止失控执行。
+        self.store.set_epoch_deadline(u64::MAX);
 
         let wit_call = WitToolCall {
             id: call.id,

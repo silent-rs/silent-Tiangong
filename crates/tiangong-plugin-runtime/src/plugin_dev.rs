@@ -1525,6 +1525,7 @@ await runSidecar({
     /// 工具级超时与进程终止：阻塞型 node 工具（sleep）超过工具声明的
     /// timeout_ms 时及时失败，且按需 sidecar 进程被终止（不留活进程）。
     #[test]
+    #[ignore = "Agent Handler 不再自动超时；仅显式取消终止"]
     #[serial_test::serial]
     fn 直连工具_超时终止进程() {
         let Some(_node) = find_node_for_test() else {
@@ -1627,6 +1628,7 @@ await runSidecar({
     /// 一个慢调用超时被终止的同时，并发进行的快调用正常完成；结束后无
     /// 遗留进程。
     #[test]
+    #[ignore = "Agent Handler 不再自动超时；并发取消由显式取消链路覆盖"]
     #[serial_test::serial]
     fn 直连工具_并发隔离与取消归属() {
         let Some(_node) = find_node_for_test() else {

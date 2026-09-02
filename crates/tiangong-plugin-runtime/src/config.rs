@@ -11,7 +11,7 @@ pub struct PluginRuntimeConfig {
     pub fuel_limit: u64,
     /// epoch 心跳间隔：宿主以此周期递增 epoch 计数。
     pub epoch_interval: Duration,
-    /// 单次工具调用的 epoch deadline：到期未返回则被强制终止。
+    /// 旧版 epoch 时限配置。Agent Handler 调用不再使用，仅保留配置兼容。
     pub epoch_deadline: Duration,
     /// 单个 WASM 实例线性内存上限（字节）。
     pub memory_limit: usize,
