@@ -2,10 +2,13 @@
 //!
 //! 本模块只处理进程、endpoint、鉴权和 JSON Lines 传输，不理解插件业务协议。
 //! TCP 与 stdio 两种传输并存：TCP 为存量默认，stdio 为沙箱友好的新传输
-//! （RFC 0017 D16）。通道由宿主策略决定，插件清单不参与通信通道决策。
+//! （RFC 0017 D16）。当前只有 command 由宿主策略强制使用 stdio，插件清单
+//! 不参与通信通道或沙箱权限决策。
 
+pub mod command;
 pub mod stdio;
 
+pub use command::EphemeralCommandConnection;
 pub use stdio::{StdioSidecarConnection, TRANSPORT_STDIO};
 
 use std::fs::OpenOptions;
@@ -17,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use crate::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcEndpoint, IpcFrame, IpcRequest,
@@ -158,6 +162,27 @@ pub struct InterpreterLaunch {
     pub args: Vec<String>,
 }
 
+/// 宿主按已验签权限授予的天工敏感配置读取能力（最小权限：逐文件开放；
+/// 密钥/信任库/Launcher 目录不可开放；用户凭据由独立策略管理）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SensitiveStorageAccess {
+    /// `models.json`（模型配置，含端点与密钥）——`model-config.read`。
+    pub model_config: bool,
+    /// `mcp.json`（MCP server 配置）——MCP 插件所需。
+    pub mcp_config: bool,
+    /// `server.json`（服务配置）——`app-storage.read`。
+    pub server_config: bool,
+    /// `app.json`（应用配置，含沙箱开关）——暂无授权路径，保留字段。
+    pub app_config: bool,
+}
+
+impl SensitiveStorageAccess {
+    /// 是否值得注入存储根路径（至少一项可读才有意义）。
+    pub fn any(self) -> bool {
+        self.model_config || self.mcp_config || self.server_config || self.app_config
+    }
+}
+
 /// 一个插件 sidecar 的本地运行配置。
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
@@ -168,7 +193,11 @@ pub struct SidecarConfig {
     pub log: PathBuf,
     pub data_dir: PathBuf,
     pub storage_root: PathBuf,
-    pub allow_sensitive_storage: bool,
+    pub sensitive_storage: SensitiveStorageAccess,
+    /// 宿主按已验证插件身份授予的用户凭据目录只读能力。
+    pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
+    /// 是否允许写入当前用户的 `~/.cache`。
+    pub sandbox_user_cache_write: bool,
     pub transport_protocol: String,
     pub business_protocol: u32,
     pub start_timeout: Duration,
@@ -187,22 +216,28 @@ pub struct SidecarConfig {
     /// sidecar 进程是否进 OS 沙箱（RFC 0017 D12 继承式，仅 stdio 传输支持）。
     #[allow(dead_code)]
     pub sandbox: bool,
+    /// 是否跟随用户全局沙箱开关。仅首次实际使用才启动的 sidecar（包括
+    /// terminal、command、解释器与清单声明的按需插件）开启；随 App 预加载
+    /// 的常驻服务保持宿主强制沙箱，不接受此开关降级。
+    pub sandbox_follows_user_switch: bool,
     /// 沙箱可写根覆盖（一次性实例的会话工作区；None 用数据目录）。
     #[allow(dead_code)]
     pub sandbox_workspace: Option<PathBuf>,
     /// 沙箱额外可写根（每次执行的专用临时目录等）。
     #[allow(dead_code)]
     pub sandbox_extra_writable: Vec<PathBuf>,
-    /// 除宿主默认凭据路径外额外禁止读取的路径（受控验证使用）。
-    #[allow(dead_code)]
+    /// 额外禁止读取的路径（测试与宿主强制策略使用）。
     pub sandbox_denied_read_paths: Vec<PathBuf>,
+    /// 用户环境变量黑名单。
+    pub sandbox_environment_blocklist: Vec<String>,
     /// 沙箱内进程使用的专用临时目录。
     pub sandbox_temp_dir: Option<PathBuf>,
+    /// 覆盖单次执行的资源上限（None 用沙箱默认值；Launcher 与 sidecar 双层施加）。
+    pub sandbox_resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
     /// Launcher 允许启动目标程序的插件权威目录。
     #[allow(dead_code)]
     pub sandbox_program_root: Option<PathBuf>,
     /// 宿主针对当前已安装制品计算的摘要；Launcher 仍会在每次启动时独立复核。
-    #[allow(dead_code)]
     sandbox_program_sha256: Option<String>,
     /// 沙箱内是否放行网络（文件写白名单不受影响）。
     #[allow(dead_code)]
@@ -227,7 +262,9 @@ impl SidecarConfig {
             log: log.into(),
             data_dir: data_dir.into(),
             storage_root: storage_root.into(),
-            allow_sensitive_storage: false,
+            sensitive_storage: SensitiveStorageAccess::default(),
+            user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
+            sandbox_user_cache_write: false,
             transport_protocol: PROTOCOL_VERSION.to_string(),
             business_protocol: 0,
             start_timeout: DEFAULT_START_TIMEOUT,
@@ -238,18 +275,34 @@ impl SidecarConfig {
             lifecycle: crate::manifest::SidecarLifecycle::OnDemand,
             integrity_manifest: None,
             sandbox: false,
+            sandbox_follows_user_switch: false,
             sandbox_workspace: None,
             sandbox_extra_writable: Vec::new(),
             sandbox_denied_read_paths: Vec::new(),
+            sandbox_environment_blocklist: Vec::new(),
             sandbox_temp_dir: None,
+            sandbox_resource_limits: None,
             sandbox_program_root: None,
             sandbox_program_sha256: None,
             sandbox_network: false,
         }
     }
 
-    pub fn with_sensitive_storage(mut self, allowed: bool) -> Self {
-        self.allow_sensitive_storage = allowed;
+    pub fn with_sensitive_storage(mut self, access: SensitiveStorageAccess) -> Self {
+        self.sensitive_storage = access;
+        self
+    }
+
+    pub fn with_user_credential_reads(
+        mut self,
+        access: crate::host_policy::UserCredentialReadAccess,
+    ) -> Self {
+        self.user_credential_reads = access;
+        self
+    }
+
+    pub fn with_sandbox_user_cache_write(mut self, allowed: bool) -> Self {
+        self.sandbox_user_cache_write = allowed;
         self
     }
 
@@ -403,6 +456,18 @@ impl SidecarConfig {
         self
     }
 
+    /// 设置此 sidecar 是否跟随用户全局沙箱开关。
+    pub fn with_sandbox_user_switch(mut self, follows: bool) -> Self {
+        self.sandbox_follows_user_switch = follows;
+        self
+    }
+
+    /// 本次 spawn 是否实际启用 OS 沙箱。调用方传入当前用户开关快照；
+    /// 宿主安全基线未声明沙箱，或受开关控制且用户已关闭时，返回 false。
+    pub(crate) fn sandbox_enabled_for_spawn(&self, sandbox_disabled: bool) -> bool {
+        self.sandbox && !(self.sandbox_follows_user_switch && sandbox_disabled)
+    }
+
     /// 沙箱内放行网络（fetch 等网络型插件；文件写白名单不受影响）。
     pub fn with_sandbox_network(mut self, allow: bool) -> Self {
         self.sandbox_network = allow;
@@ -427,6 +492,22 @@ impl SidecarConfig {
         self
     }
 
+    pub fn with_sandbox_user_policy(mut self, policy: &tiangong_config::SandboxUserPolicy) -> Self {
+        for configured in &policy.directory_allowlist {
+            let path = PathBuf::from(configured);
+            if path.is_dir() {
+                self.sandbox_extra_writable.push(path);
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "忽略不存在或已失效的沙箱目录白名单项"
+                );
+            }
+        }
+        self.sandbox_environment_blocklist = policy.environment_blocklist.clone();
+        self
+    }
+
     /// 设置本次沙箱进程的临时目录；调用方还需将其父级或自身加入可写根。
     pub fn with_sandbox_temp_dir(mut self, temp_dir: Option<PathBuf>) -> Self {
         self.sandbox_temp_dir = temp_dir;
@@ -438,6 +519,21 @@ impl SidecarConfig {
         self.sandbox_program_root = root;
         self
     }
+
+    /// 覆盖单次执行的沙箱资源上限（Launcher 强制施加，sidecar 层纵深防御）。
+    pub fn with_sandbox_resource_limits(
+        mut self,
+        limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    ) -> Self {
+        self.sandbox_resource_limits = limits;
+        self
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 sidecar 目标程序失败: {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// 通过 endpoint 文件连接本地 sidecar，并在不可用时负责启动。
@@ -737,7 +833,7 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
-        if self.config.allow_sensitive_storage {
+        if self.config.sensitive_storage.any() {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
         // 注入本机 server 连接信息（scheduler 等需回调 host 的 sidecar 使用）。
@@ -1271,3 +1367,55 @@ fn configure_detached(command: &mut Command) {
 
 #[cfg(not(any(unix, windows)))]
 fn configure_detached(_command: &mut Command) {}
+
+#[cfg(test)]
+mod sandbox_switch_tests {
+    use super::*;
+
+    fn config() -> SidecarConfig {
+        SidecarConfig::new(
+            "terminal",
+            "0.1.0",
+            "/tmp/terminal-sidecar",
+            "/tmp/endpoint.json",
+            "/tmp/sidecar.log",
+            "/tmp/data",
+            "/tmp/storage",
+        )
+    }
+
+    #[test]
+    fn sandbox_user_policy_ignores_missing_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("existing");
+        let missing = root.path().join("missing");
+        std::fs::create_dir(&existing).unwrap();
+        let policy = tiangong_config::SandboxUserPolicy {
+            directory_allowlist: vec![
+                existing.display().to_string(),
+                missing.display().to_string(),
+            ],
+            environment_blocklist: vec!["SECRET".to_string()],
+        };
+
+        let configured = config().with_sandbox_user_policy(&policy);
+        assert!(configured.sandbox_extra_writable.contains(&existing));
+        assert!(!configured.sandbox_extra_writable.contains(&missing));
+        assert_eq!(configured.sandbox_environment_blocklist, vec!["SECRET"]);
+    }
+
+    #[test]
+    fn user_switch_only_disables_opted_in_sandbox() {
+        let follows = config().with_sandbox(true).with_sandbox_user_switch(true);
+        assert!(follows.sandbox_enabled_for_spawn(false));
+        assert!(!follows.sandbox_enabled_for_spawn(true));
+
+        let forced = config().with_sandbox(true).with_sandbox_user_switch(false);
+        assert!(forced.sandbox_enabled_for_spawn(false));
+        assert!(forced.sandbox_enabled_for_spawn(true));
+
+        let unsandboxed = config().with_sandbox(false).with_sandbox_user_switch(true);
+        assert!(!unsandboxed.sandbox_enabled_for_spawn(false));
+        assert!(!unsandboxed.sandbox_enabled_for_spawn(true));
+    }
+}

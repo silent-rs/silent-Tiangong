@@ -1464,6 +1464,388 @@ pub async fn set_default_trust_mode(
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SandboxPolicyView {
+    pub directory_allowlist: Vec<String>,
+    pub environment_blocklist: Vec<String>,
+}
+
+impl From<tiangong_config::SandboxUserPolicy> for SandboxPolicyView {
+    fn from(value: tiangong_config::SandboxUserPolicy) -> Self {
+        Self {
+            directory_allowlist: value.directory_allowlist,
+            environment_blocklist: value.environment_blocklist,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_sandbox_policy(
+    state: State<'_, TiangongApp>,
+) -> Result<SandboxPolicyView, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.config.sandbox_policy.clone().into()))
+        .await
+}
+
+fn normalize_path_list(values: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let base = std::env::current_dir().map_err(|error| error.to_string())?;
+    values
+        .into_iter()
+        .filter_map(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            let path = std::path::PathBuf::from(raw);
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                base.join(path)
+            };
+            if !absolute.exists() {
+                return Some(Err(format!("目录不存在：{}", absolute.display())));
+            }
+            if !absolute.is_dir() {
+                return Some(Err(format!("路径不是目录：{}", absolute.display())));
+            }
+            let normalized = match std::fs::canonicalize(&absolute) {
+                Ok(path) => path,
+                Err(error) => {
+                    return Some(Err(format!(
+                        "解析目录失败：{}（{error}）",
+                        absolute.display()
+                    )));
+                }
+            };
+            let text = normalized.to_string_lossy().to_string();
+            seen.insert(text.clone()).then_some(Ok(text))
+        })
+        .collect()
+}
+
+fn normalize_env_list(values: Vec<String>) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::BTreeSet::new();
+    values
+        .into_iter()
+        .filter_map(|raw| {
+            let item = raw.trim().to_string();
+            if item.is_empty() {
+                return None;
+            }
+            Some(if is_valid_env_name(&item) {
+                let key = item.to_ascii_lowercase();
+                Ok(seen.insert(key).then_some(item))
+            } else {
+                Err(format!("无效的环境变量名：{item}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| values.into_iter().flatten().collect())
+}
+
+#[tauri::command]
+pub async fn set_sandbox_policy(
+    policy: SandboxPolicyView,
+    state: State<'_, TiangongApp>,
+) -> Result<SandboxPolicyView, String> {
+    let cleaned = tiangong_config::SandboxUserPolicy {
+        directory_allowlist: normalize_path_list(policy.directory_allowlist)?,
+        environment_blocklist: normalize_env_list(policy.environment_blocklist)?,
+    };
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    config.sandbox_policy = cleaned.clone();
+    config.command_env_blocklist = cleaned.environment_blocklist.clone();
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            Ok(())
+        })
+        .await?;
+    tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+    Ok(cleaned.into())
+}
+
+#[tauri::command]
+pub async fn get_sandbox_disabled(state: State<'_, TiangongApp>) -> Result<bool, String> {
+    state
+        .with_state_read(|core_state| Ok(core_state.config.sandbox_disabled))
+        .await
+}
+
+#[tauri::command]
+pub async fn get_command_env_blocklist(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<String>, String> {
+    let config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    Ok(config.command_env_blocklist)
+}
+
+/// 手动安装或更新 Sandbox 的结果。程序与签名直接位于存储目录的 sandbox 下。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum LauncherUpdateResult {
+    Installed { version: String },
+}
+
+#[tauri::command]
+pub async fn upgrade_launcher(
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<LauncherUpdateResult, String> {
+    use tauri::Emitter as _;
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    tiangong_plugin_runtime::launcher_update::mark_launcher_preparing(true);
+    let _ = app.emit(
+        "startup-prepare-step",
+        serde_json::json!({ "step": "launcher" }),
+    );
+    let result = tiangong_plugin_runtime::launcher_update::LauncherUpdater::new()
+        .install_or_update(&storage_root)
+        .await;
+    tiangong_plugin_runtime::launcher_update::mark_launcher_preparing(false);
+    match result {
+        Ok(version) => {
+            tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+            tiangong_plugin_runtime::registry::prewarm_resident_sidecars(&storage_root);
+            let _ = app.emit(
+                "startup-prepare-step",
+                serde_json::json!({ "step": "done", "version": version }),
+            );
+            Ok(LauncherUpdateResult::Installed { version })
+        }
+        Err(error) => {
+            let reason = format!("{error:#}");
+            tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(Some(
+                reason.clone(),
+            ));
+            Err(format!("Sandbox 安装或更新失败：{reason}"))
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SandboxUpdateState {
+    pub status: String,
+    pub version: Option<String>,
+    pub failure: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_sandbox_update_state(
+    state: State<'_, TiangongApp>,
+) -> Result<SandboxUpdateState, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let (status, version) =
+        tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
+    let failure = (status
+        == tiangong_plugin_runtime::launcher_update::SandboxLauncherStatus::Failed)
+        .then(|| {
+            tiangong_plugin_runtime::launcher_update::startup_prepare_failure_reason()
+                .unwrap_or_else(|| "启动准备失败".to_string())
+        });
+    Ok(SandboxUpdateState {
+        status: status.as_str().to_string(),
+        version,
+        failure,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct StartupPrepareResult {
+    pub installed_version: Option<String>,
+}
+
+#[tauri::command]
+pub async fn prepare_startup_resources(
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<StartupPrepareResult, String> {
+    use tauri::Emitter as _;
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    if tiangong_plugin_runtime::launcher_update::launcher_available(&storage_root) {
+        tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+        return Ok(StartupPrepareResult {
+            installed_version: None,
+        });
+    }
+    tiangong_plugin_runtime::launcher_update::mark_launcher_preparing(true);
+    let _ = app.emit(
+        "startup-prepare-step",
+        serde_json::json!({ "step": "launcher" }),
+    );
+    let result = tiangong_plugin_runtime::launcher_update::LauncherUpdater::new()
+        .install_or_update(&storage_root)
+        .await;
+    tiangong_plugin_runtime::launcher_update::mark_launcher_preparing(false);
+    match result {
+        Ok(version) => {
+            tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+            tiangong_plugin_runtime::registry::prewarm_resident_sidecars(&storage_root);
+            let _ = app.emit(
+                "startup-prepare-step",
+                serde_json::json!({ "step": "done", "version": version }),
+            );
+            Ok(StartupPrepareResult {
+                installed_version: Some(version),
+            })
+        }
+        Err(error) => {
+            let reason = format!("{error:#}");
+            tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(Some(
+                reason.clone(),
+            ));
+            Err(reason)
+        }
+    }
+}
+
+/// 内置注入类环境变量屏蔽清单（环境变量管理 Modal 提示
+/// "已由系统内置屏蔽"与保存去重用；与执行侧同源不漂移）。
+#[derive(Debug, serde::Serialize)]
+pub struct BuiltinEnvBlocklist {
+    /// 精确变量名（匹配大小写不敏感）。
+    pub exact: Vec<String>,
+    /// 变量名前缀（LD_/DYLD_ 动态加载注入类）。
+    pub prefixes: Vec<String>,
+}
+
+#[tauri::command]
+pub fn get_builtin_env_blocklist() -> BuiltinEnvBlocklist {
+    BuiltinEnvBlocklist {
+        exact: tiangong_plugin_runtime::builtin_denied_env_keys()
+            .iter()
+            .map(|key| key.to_string())
+            .collect(),
+        prefixes: tiangong_plugin_runtime::builtin_denied_env_prefixes()
+            .iter()
+            .map(|prefix| prefix.to_string())
+            .collect(),
+    }
+}
+
+/// 校验并规范化命令环境变量屏蔽清单（后端为最终权威，任何调用来源
+/// 都得到相同约束）：去空白与空项 → 校验变量名格式（非法整次拒绝并
+/// 返回具体非法项，不静默丢弃）→ 大小写不敏感去重 → 剔除系统内置
+/// 屏蔽项（精确名与 LD_/DYLD_ 前缀，系统已始终屏蔽，用户清单不冗余）。
+fn normalize_env_blocklist(raw: Vec<String>) -> Result<Vec<String>, String> {
+    let invalid: Vec<String> = raw
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty() && !is_valid_env_name(item))
+        .map(|item| item.to_string())
+        .collect();
+    if !invalid.is_empty() {
+        return Err(format!(
+            "非法变量名：{}（须以字母或下划线开头，仅含字母、数字、下划线）",
+            invalid.join("、")
+        ));
+    }
+    let builtin_exact: std::collections::HashSet<String> =
+        tiangong_plugin_runtime::builtin_denied_env_keys()
+            .iter()
+            .map(|key| key.to_ascii_lowercase())
+            .collect();
+    let builtin_prefixes = tiangong_plugin_runtime::builtin_denied_env_prefixes();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    Ok(raw
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| {
+            let lower = item.to_ascii_lowercase();
+            // 内置屏蔽项剔除：系统始终屏蔽，保存进用户清单只造成冗余。
+            if builtin_exact.contains(&lower)
+                || builtin_prefixes
+                    .iter()
+                    .any(|prefix| item.to_ascii_uppercase().starts_with(prefix))
+            {
+                return false;
+            }
+            seen.insert(lower)
+        })
+        .collect())
+}
+
+/// 环境变量名格式校验：^[A-Za-z_][A-Za-z0-9_]*$。
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_'))
+        && chars.all(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
+}
+
+#[tauri::command]
+pub async fn set_command_env_blocklist(
+    blocklist: Vec<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let cleaned = normalize_env_blocklist(blocklist)?;
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    if config.command_env_blocklist == cleaned {
+        return Ok(());
+    }
+    config.command_env_blocklist = cleaned.clone();
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            Ok(())
+        })
+        .await?;
+    tracing::info!(count = cleaned.len(), "用户已更新命令环境变量屏蔽清单");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_sandbox_disabled(
+    disabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    if config.sandbox_disabled == disabled {
+        return Ok(());
+    }
+    config.sandbox_disabled = disabled;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config = config;
+            Ok(())
+        })
+        .await?;
+    // 沙箱状态由 plugin-runtime 宿主执行层自主管理；它会停止当前按需
+    // sidecar（含 terminal），下一次终端操作/工具调用按新开关重建。
+    // OS 沙箱不能在存活进程上原地切换。
+    tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+    if disabled {
+        tracing::warn!(
+            "用户已关闭沙箱：所有按需 sidecar（含 terminal/command）将以完整用户权限启动"
+        );
+    } else {
+        tracing::info!("用户已重新开启沙箱：所有按需 sidecar 将恢复系统沙箱");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_reasoning_effort(
     session_id: Option<String>,
@@ -3910,8 +4292,34 @@ mod tests {
 
     use super::{
         cancel_after_session_send_boundary, done_event_keeps_turn_running,
-        merge_agent_worker_messages, save_started_bot_state, stop_bot_with_state,
+        merge_agent_worker_messages, normalize_path_list, save_started_bot_state,
+        stop_bot_with_state,
     };
+
+    #[test]
+    fn sandbox_directory_allowlist_requires_existing_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("allowed");
+        let file = root.path().join("file.txt");
+        let missing = root.path().join("missing");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(&file, "x").unwrap();
+
+        let normalized = normalize_path_list(vec![directory.display().to_string()]).unwrap();
+        assert_eq!(
+            normalized,
+            vec![std::fs::canonicalize(&directory)
+                .unwrap()
+                .display()
+                .to_string()]
+        );
+        assert!(normalize_path_list(vec![missing.display().to_string()])
+            .unwrap_err()
+            .contains("目录不存在"));
+        assert!(normalize_path_list(vec![file.display().to_string()])
+            .unwrap_err()
+            .contains("路径不是目录"));
+    }
 
     #[tokio::test]
     async fn cancel_waits_for_send_boundary_and_returns_delivery_result() {
@@ -4736,17 +5144,50 @@ pub async fn bridge_call(
     plugin_id: String,
     method: String,
     payload: String,
+    session_id: Option<String>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
+    // 前端实例只传会话 ID；sidecar 可写域必须由宿主从权威 Session 加载，
+    // 不能采用抢到全局工具事件的界面实例所携带的工作区。
+    let authoritative_workspace = if method.starts_with("sidecar.") {
+        match session_id.filter(|id| !id.trim().is_empty()) {
+            Some(session_id) => {
+                let session = state
+                    .inner()
+                    .core_manager
+                    .load_session(&session_id)
+                    .map_err(|error| format!("加载 sidecar 调用所属会话失败: {error}"))?;
+                let cwd = session.cwd.trim();
+                if cwd.is_empty() {
+                    return Err(format!("会话 {session_id} 未配置工作区"));
+                }
+                Some(PathBuf::from(cwd))
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
     if method.starts_with("plugin-dev.") || method.starts_with("dialog.") {
         return tokio::task::spawn_blocking(move || {
-            tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
+            tiangong_plugin_runtime::bridge_call_with_workspace(
+                &plugin_id,
+                &method,
+                &payload,
+                authoritative_workspace.as_deref(),
+            )
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string());
     }
-    tiangong_plugin_runtime::bridge_call(&plugin_id, &method, &payload)
-        .map_err(|error| error.to_string())
+    tiangong_plugin_runtime::bridge_call_with_workspace(
+        &plugin_id,
+        &method,
+        &payload,
+        authoritative_workspace.as_deref(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// 订阅宿主事件通道（按 capabilities.events 授权放行）。

@@ -51,7 +51,7 @@ struct StdioState {
 }
 
 struct StdioProcess {
-    child: Mutex<Child>,
+    child: Arc<Mutex<Child>>,
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<String, PendingWaiter>>>,
     /// 本进程代次的认证 token（Auth 首帧内容，子进程经环境变量持有同值）。
@@ -61,7 +61,7 @@ struct StdioProcess {
     /// stdout 读线程观察到 EOF/错误后置位；并发请求据此无阻塞换代。
     closed: Arc<AtomicBool>,
     #[cfg(windows)]
-    lifecycle: WindowsJob,
+    lifecycle: WindowsLifecycle,
 }
 
 #[derive(Clone)]
@@ -349,12 +349,6 @@ impl StdioSidecarConnection {
     /// `is_file` 校验，不触发目录扫描），不在配置中保存可能过期的
     /// 解释器路径副本。
     fn spawn_once(&self) -> std::result::Result<StdioProcess, SpawnAttemptError> {
-        if !self.config.binary.is_file() {
-            return Err(SpawnAttemptError::Preparation(anyhow!(
-                "sidecar 二进制不存在: {}",
-                self.config.binary.display()
-            )));
-        }
         if let Some(parent) = self.config.log.parent() {
             preparation(
                 std::fs::create_dir_all(parent)
@@ -378,11 +372,11 @@ impl StdioSidecarConnection {
         )?;
 
         let token = scru128::new().to_string();
-        // OS 沙箱路径（经 tiangong-sandbox Launcher 启动）由沙箱覆盖分支
-        // 在本传输层之上叠加；此处仅负责直接 spawn 与 stdio 管道接续。
         // 解释器形态：以宿主缓存解析的解释器程序运行 entry（本地信任时
-        // 先复核内容清单）。
-        let (program, mut command) = match self.config.interpreter.as_ref() {
+        // 先复核内容清单）。OS 沙箱路径（经 tiangong-sandbox Launcher 启动）
+        // 在本传输层之上叠加：声明沙箱的 sidecar 一律经 Launcher 启动，
+        // 策略通过继承描述符传入，见下方 launch_policy。
+        let (program, target_args) = match self.config.interpreter.as_ref() {
             Some(launch) => {
                 if let Some(manifest_path) = &self.config.integrity_manifest {
                     let root = preparation(
@@ -409,10 +403,9 @@ impl StdioSidecarConnection {
                         launch.entry.display()
                     )));
                 }
-                let mut command = Command::new(&program);
-                command.arg(&launch.entry);
-                command.args(&launch.args);
-                (program, command)
+                let mut args = vec![launch.entry.display().to_string()];
+                args.extend(launch.args.iter().cloned());
+                (program, args)
             }
             None => {
                 if !self.config.binary.is_file() {
@@ -421,13 +414,191 @@ impl StdioSidecarConnection {
                         self.config.binary.display()
                     )));
                 }
-                (
-                    self.config.binary.clone(),
-                    Command::new(&self.config.binary),
+                (self.config.binary.clone(), Vec::new())
+            }
+        };
+
+        // 用户开关仅作用于宿主标记为“首次实际使用才启动”的 sidecar。
+        // 每次 spawn 都读取最新配置，关闭与重新开启无需重建连接对象；配置
+        // 尚未初始化时按开启处理（fail-safe 向保护方向）。
+        let sandbox_disabled = crate::registry::sandbox_disabled();
+        let sandbox_enabled = self.config.sandbox_enabled_for_spawn(sandbox_disabled);
+        if self.config.sandbox_follows_user_switch && sandbox_disabled {
+            tracing::warn!(
+                plugin_id = %self.config.plugin_id,
+                "用户已关闭沙箱：按需 sidecar 将以完整用户权限启动"
+            );
+        }
+
+        // 沙箱不放行全局系统临时目录：常驻 sidecar 无显式专用目录时，
+        // 宿主在存储根下为其创建一个（lance 向量库等依赖 TMPDIR 的
+        // spill/临时文件）。固定子目录名复用，不随重启累积。
+        let effective_temp_dir = if let Some(temp_dir) = &self.config.sandbox_temp_dir {
+            Some(temp_dir.clone())
+        } else if sandbox_enabled {
+            let dir = self
+                .config
+                .storage_root
+                .join("tmp")
+                .join(&self.config.plugin_id);
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => Some(dir),
+                Err(error) => {
+                    return Err(SpawnAttemptError::Preparation(anyhow!(
+                        "创建 sidecar 专用临时目录失败: {}: {error:#}",
+                        dir.display()
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        // 本次实际启用沙箱时经官方 Launcher 启动；用户显式关闭且该
+        // sidecar 属按需进程时直接启动目标程序。解释器形态把解释器作为
+        // 目标程序，入口脚本和固定参数作为参数。
+        let launch_policy = if sandbox_enabled {
+            // 统一写域模型：会话工作区（config 显式传入，未传时默认存储根
+            // ——常驻插件在 registry 侧已用全局默认工作区覆盖）+ 存储根；
+            // 敏感清单读写双禁，其余目录只读。
+            let workspace = self
+                .config
+                .sandbox_workspace
+                .clone()
+                .unwrap_or_else(|| self.config.storage_root.clone());
+            let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
+            policy.extra_writable = self.config.sandbox_extra_writable.clone();
+            // 存储根统一并入可写域（显式 workspace 即存储根时自然去重）。
+            policy.extra_writable.push(self.config.storage_root.clone());
+            // 工具链缓存（npm 等）是功能基础设施而非用户数据：npx/uvx
+            // 启动 MCP server 需要写包缓存。
+            if let Some(home) = crate::interpreter_env::user_home_dir() {
+                policy.extra_writable.push(home.join(".npm"));
+            }
+            apply_user_cache_write(&mut policy, self.config.sandbox_user_cache_write);
+            if let Some(temp_dir) = &effective_temp_dir {
+                policy.extra_writable.push(temp_dir.clone());
+            }
+            // 系统临时目录开放：大量库与工具（lance spill、编辑器临时
+            // 文件、语言运行时缓存）默认写系统 temp，不开放会功能异常。
+            // std::env::temp_dir() 三平台通用（Windows 为 %TEMP%）。
+            policy.extra_writable.push(std::env::temp_dir());
+            // 全局 /tmp 仅 Unix 存在——Windows 上没有此路径，加了会在
+            // Seatbelt/bwrap 的路径校验中产生无效条目。
+            #[cfg(unix)]
+            policy.extra_writable.push(std::path::PathBuf::from("/tmp"));
+            // 配置与信任件读写双禁：模型/服务/MCP/应用配置（app.json 含
+            // 沙箱开关本身）、签名密钥与信任库、Launcher 目录（沙箱内
+            // 进程必须够不到 Launcher 与信任锚，防替换逃逸）；家目录
+            // 凭据默认同禁，随后仅按宿主验证过的插件身份移除读取禁令。
+            policy.protected_paths = tiangong_protected_paths(&self.config.storage_root);
+            tiangong_sandbox::sandbox::presets::apply_tiangong(
+                &mut policy,
+                &self.config.storage_root,
+            );
+            // 按宿主授权最小开放对应天工配置的读取（写禁与防篡改保持
+            // 不变，密钥/信任库/Launcher 不在本段豁免之列）。
+            exempt_authorized_reads(
+                &mut policy,
+                self.config.sensitive_storage,
+                &self.config.storage_root,
+            );
+            // mcp.json 由 mcp 插件自管（官方身份经宿主验证后才置位
+            // mcp_config）：开放其写权限，否则 bot 注册 MCP server 时
+            // sidecar 无法落盘配置；其余敏感配置仍由宿主写入、插件只读。
+            if self.config.sensitive_storage.mcp_config {
+                exempt_mcp_config_write(&mut policy, &self.config.storage_root);
+            }
+            exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
+            policy
+                .denied_read_paths
+                .extend(self.config.sandbox_denied_read_paths.clone());
+            policy.allow_network = self.config.sandbox_network;
+            if let Some(limits) = &self.config.sandbox_resource_limits {
+                policy.resource_limits = *limits;
+            }
+            retain_existing_writable_roots(&mut policy);
+            Some(policy)
+        } else {
+            None
+        };
+        // fd 守卫必须存活到 spawn 完成：match 臂内绑定会在臂结束时提前
+        // drop、导致沙箱程序读不到策略（审查修复）。
+        let mut policy_fd_guard = None;
+        // 沙箱路径下真正创建的进程是 Launcher：spawn 失败的错误上下文按
+        // 实际程序呈现；program 字段仍保留解释器路径供恢复接口比对。
+        let mut spawned_program: Option<std::path::PathBuf> = None;
+        let mut command = match &launch_policy {
+            Some(policy) => {
+                let program_sha256 = preparation(
+                    self.config
+                        .sandbox_program_sha256
+                        .clone()
+                        .filter(|_| self.config.interpreter.is_none())
+                        .map(Ok)
+                        .unwrap_or_else(|| super::sha256_file(&program)),
+                )?;
+                let sandbox_bin = preparation(resolve_launcher(
+                    &self.config.storage_root,
                 )
+                .ok_or_else(|| {
+                    anyhow!(
+                        "插件 {} 声明沙箱但 Launcher 未就绪（在线更新尚未完成或安装失败），拒绝启动；请稍后重试或检查网络",
+                        self.config.plugin_id
+                    )
+                }))?;
+                // Launcher 是安全边界执行者：每次启动前验签（官方或本机
+                // 信任根任一通过），签名缺失/不匹配一律拒绝，防单文件替换。
+                // Launcher 是安全边界执行者：每次启动前验签（官方或本机
+                // 信任根任一通过），签名缺失/不匹配一律拒绝，防单文件替换。
+                preparation(
+                    crate::signature::verify_launcher_signature(
+                        &sandbox_bin,
+                        &self.config.storage_root,
+                    )
+                    .context("沙箱 Launcher 验签失败，拒绝启动沙箱"),
+                )?;
+                // 解释器形态的权威目录是解释器所在目录（目标程序不在
+                // 插件目录内，Launcher 按解释器形态做退化校验）；native
+                // 形态沿用插件目录（清单比对依据）。
+                let program_root = preparation(
+                    if self.config.interpreter.is_some() {
+                        program.parent()
+                    } else {
+                        self.config
+                            .sandbox_program_root
+                            .as_deref()
+                            .or_else(|| program.parent())
+                    }
+                    .map(|path| path.display().to_string())
+                    .ok_or_else(|| anyhow!("sidecar 目标程序缺少权威目录")),
+                )?;
+                let request = serde_json::json!({
+                    "protocol_version": tiangong_sandbox::LAUNCHER_PROTOCOL_VERSION,
+                    "policy_schema": tiangong_sandbox::LAUNCHER_POLICY_SCHEMA,
+                    "policy": policy,
+                    "plugin_id": self.config.plugin_id,
+                    "program": program.display().to_string(),
+                    "program_root": program_root,
+                    "program_sha256": program_sha256,
+                    "args": target_args,
+                    "interpreter": self.config.interpreter.is_some(),
+                });
+                let mut command = Command::new(&sandbox_bin);
+                policy_fd_guard = Some(preparation(prepare_policy_fd(
+                    &mut command,
+                    request.to_string(),
+                ))?);
+                spawned_program = Some(sandbox_bin);
+                command
+            }
+            None => {
+                let mut command = Command::new(&program);
+                command.args(&target_args);
+                command
             }
         };
         sanitize_spawn_environment(&mut command);
+        apply_user_environment_policy(&mut command, &self.config);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -447,7 +618,7 @@ impl StdioSidecarConnection {
         for (key, value) in crate::interpreter_env::child_env_overrides() {
             command.env(key, value);
         }
-        if let Some(temp_dir) = &self.config.sandbox_temp_dir {
+        if let Some(temp_dir) = &effective_temp_dir {
             if !temp_dir.is_absolute() || !temp_dir.is_dir() {
                 return Err(SpawnAttemptError::Preparation(anyhow!(
                     "sidecar 专用临时目录无效: {}",
@@ -459,7 +630,19 @@ impl StdioSidecarConnection {
                 .env("TMP", temp_dir)
                 .env("TEMP", temp_dir);
         }
-        if self.config.allow_sensitive_storage {
+        #[cfg(windows)]
+        let sandbox_stop = preparation(
+            launch_policy
+                .as_ref()
+                .map(|_| WindowsStopEvent::new())
+                .transpose()
+                .context("创建 Windows Sandbox 停止事件失败"),
+        )?;
+        #[cfg(windows)]
+        if let Some(stop) = &sandbox_stop {
+            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, &stop.name);
+        }
+        if self.config.sensitive_storage.any() {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
         if let Some(env) = self.exec_env.lock().ok().filter(|env| !env.is_empty())
@@ -469,14 +652,21 @@ impl StdioSidecarConnection {
         }
         preparation(configure_process_lifecycle(&mut command))?;
         #[cfg(windows)]
-        let lifecycle = preparation(WindowsJob::new().context("创建 sidecar Job Object 失败"))?;
+        let lifecycle = match sandbox_stop {
+            Some(stop) => WindowsLifecycle::Sandbox(stop),
+            None => WindowsLifecycle::Job(preparation(
+                WindowsJob::new(None).context("创建 sidecar Job Object 失败"),
+            )?),
+        };
         let mut child = command.spawn().map_err(|error| {
-            let context = format!("启动 stdio sidecar 失败: {}", program.display());
+            let display = spawned_program.as_deref().unwrap_or(&program);
+            let context = format!("启动 stdio sidecar 失败: {}", display.display());
             SpawnAttemptError::ProcessCreation {
                 program,
                 source: anyhow::Error::new(error).context(context),
             }
         })?;
+        drop(policy_fd_guard);
         #[cfg(windows)]
         if let Err(error) = lifecycle.assign(&child) {
             let _ = child.kill();
@@ -499,15 +689,17 @@ impl StdioSidecarConnection {
 
         let pending: Arc<Mutex<HashMap<String, PendingWaiter>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let child = Arc::new(Mutex::new(child));
         let closed = Arc::new(AtomicBool::new(false));
         spawn_stdio_reader(
             self.config.plugin_id.clone(),
             stdout,
             Arc::clone(&pending),
+            Arc::clone(&child),
             Arc::clone(&closed),
         );
         Ok(StdioProcess {
-            child: Mutex::new(child),
+            child,
             stdin: Mutex::new(stdin),
             pending,
             token,
@@ -704,17 +896,103 @@ fn preparation<T>(result: anyhow::Result<T>) -> std::result::Result<T, SpawnAtte
     result.map_err(SpawnAttemptError::Preparation)
 }
 
-fn sanitize_spawn_environment(command: &mut Command) {
-    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
-    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+/// 为沙箱程序准备策略描述符：匿名管道写端写入长度前缀和策略正文后立即
+/// 关闭；读端经 pre_exec 复制到 fd3 并关闭原描述符。
+///
+/// 返回的读端守卫必须存活到 `spawn` 返回——父进程随后正常关闭（无泄漏）；
+/// 标准库管道两端在返回调用方前均已设置 FD_CLOEXEC，避免并发 spawn 继承
+/// 尚未关闭的写端，导致 Launcher 永远等不到策略 EOF。
+#[cfg(unix)]
+struct PolicyFdGuard(std::io::PipeReader);
+
+#[cfg(not(unix))]
+struct PolicyFdGuard;
+
+#[cfg(unix)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    let policy_bytes = policy_json.as_bytes();
+    if policy_bytes.len() > tiangong_sandbox::MAX_POLICY_FRAME_BYTES {
+        bail!(
+            "Launcher 策略超过长度上限: actual={}, max={}",
+            policy_bytes.len(),
+            tiangong_sandbox::MAX_POLICY_FRAME_BYTES
+        );
+    }
+    let length = u32::try_from(policy_bytes.len()).context("Launcher 策略长度无法编码")?;
+    let (read_fd, mut writer) = std::io::pipe().context("创建策略管道失败")?;
+    writer
+        .write_all(&length.to_be_bytes())
+        .and_then(|_| writer.write_all(policy_bytes))
+        .and_then(|_| writer.flush())
+        .context("写入策略管道失败")?;
+    drop(writer);
+
+    let guard = PolicyFdGuard(read_fd);
+    let raw_read = guard.0.as_raw_fd();
+    // pre_exec（fork 后、exec 前）：复制到 fd3 并关闭原描述符（若非 3）。
+    // dup2 会清除目标 fd 的 CLOEXEC；原描述符恰好已经是 3 时则必须显式
+    // 清除，否则并发 spawn 中拿到 fd3 的 Launcher 会在 exec 后读到 EBADF。
+    // SAFETY: pre_exec 限制内仅调用异步信号安全函数。
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            if raw_read == 3 {
+                let flags = libc::fcntl(raw_read, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(raw_read, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else {
+                if libc::dup2(raw_read, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(raw_read);
+            }
+            Ok(())
+        });
+    }
+    Ok(guard)
+}
+
+#[cfg(windows)]
+fn prepare_policy_fd(command: &mut Command, policy_json: String) -> Result<PolicyFdGuard> {
+    command.env(tiangong_sandbox::POLICY_ENV, policy_json);
+    Ok(PolicyFdGuard)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn prepare_policy_fd(_command: &mut Command, _policy_json: String) -> Result<PolicyFdGuard> {
+    bail!("当前平台没有可用的 Launcher 策略传输通道")
+}
+
+pub(super) fn sanitize_spawn_environment(command: &mut Command) {
+    // 解释器启动注入类（NODE_OPTIONS/PYTHON*/PERL5OPT/RUBY*/JAVA_TOOL_OPTIONS/
+    // ZDOTDIR）能让目标后续拉起的解释器在启动前加载额外代码，与动态加载
+    // 前缀同层级拒绝（对齐 octos 危险环境清单）。
     for (key, _) in std::env::vars_os() {
         let upper = key.to_string_lossy().to_ascii_uppercase();
-        if DENIED_EXACT.contains(&upper.as_str())
-            || DENIED_PREFIXES
+        if crate::BUILTIN_DENIED_ENV_KEYS.contains(&upper.as_str())
+            || crate::BUILTIN_DENIED_ENV_PREFIXES
                 .iter()
                 .any(|prefix| upper.starts_with(prefix))
         {
             command.env_remove(key);
+        }
+    }
+}
+
+fn apply_user_environment_policy(command: &mut Command, config: &SidecarConfig) {
+    for (key, _) in std::env::vars_os() {
+        let key_text = key.to_string_lossy();
+        if config
+            .sandbox_environment_blocklist
+            .iter()
+            .any(|item| key_text.eq_ignore_ascii_case(item))
+        {
+            command.env_remove(&key);
         }
     }
 }
@@ -725,9 +1003,6 @@ fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
         use std::os::unix::process::CommandExt;
 
         // 每个 stdio sidecar 独占进程组，正常取消时可连同 Shell 后台进程清理。
-        // 宿主退出由常驻读循环观察 stdin EOF 后清理整个组。请求已经并发
-        // 分发，长 dispatch 不会阻塞 EOF；不再叠加 Linux PDEATHSIG，避免
-        // 测试运行器/启动代理换代时把仍有活宿主的常驻 sidecar 误杀。
         command.process_group(0);
     }
     let _ = command;
@@ -745,7 +1020,7 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
     // Windows 侧 Job Object 整组终止（KILL_ON_JOB_CLOSE + 显式 Terminate），
     // 不需要子进程句柄；随后的 child.kill/wait 对已死进程为 no-op。
     #[cfg(windows)]
-    process.lifecycle.terminate();
+    process.lifecycle.terminate(child);
     #[cfg(not(windows))]
     let _ = process;
     let _ = child.kill();
@@ -753,16 +1028,99 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
 }
 
 #[cfg(windows)]
-struct WindowsJob {
+enum WindowsLifecycle {
+    Job(WindowsJob),
+    Sandbox(WindowsStopEvent),
+}
+
+#[cfg(windows)]
+impl WindowsLifecycle {
+    pub(super) fn assign(&self, child: &Child) -> std::io::Result<()> {
+        match self {
+            Self::Job(job) => job.assign(child),
+            // Sandbox Launcher 在恢复目标线程前自行创建并应用内层 Job，避免
+            // spawn 与宿主 AssignProcessToJobObject 之间出现逃逸窗口。
+            Self::Sandbox(_) => Ok(()),
+        }
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        match self {
+            Self::Job(job) => job.terminate(),
+            Self::Sandbox(stop) => stop.signal_and_wait(child),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsStopEvent {
+    handle: std::os::windows::io::OwnedHandle,
+    name: String,
+}
+
+#[cfg(windows)]
+impl WindowsStopEvent {
+    fn new() -> std::io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let name = format!("Local\\TiangongSandboxStop-{}", scru128::new());
+        let wide = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Sandbox 停止事件名称冲突",
+            ));
+        }
+        Ok(Self {
+            handle: unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) },
+            name,
+        })
+    }
+
+    fn signal_and_wait(&self, child: &mut Child) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::SetEvent;
+
+        unsafe {
+            SetEvent(self.handle.as_raw_handle());
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if child.try_wait().is_ok_and(|status| status.is_some()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(super) struct WindowsJob {
     handle: std::os::windows::io::OwnedHandle,
 }
 
 #[cfg(windows)]
 impl WindowsJob {
-    fn new() -> std::io::Result<Self> {
+    pub(super) fn new(
+        resource_limits: Option<tiangong_sandbox::SandboxResourceLimits>,
+    ) -> std::io::Result<Self> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             SetInformationJobObject,
         };
@@ -777,6 +1135,17 @@ impl WindowsJob {
         };
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(resource_limits) = resource_limits {
+            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                | JOB_OBJECT_LIMIT_JOB_MEMORY
+                | JOB_OBJECT_LIMIT_JOB_TIME;
+            limits.BasicLimitInformation.PerJobUserTimeLimit = resource_limits
+                .max_cpu_time_seconds
+                .saturating_mul(10_000_000)
+                as i64;
+            limits.BasicLimitInformation.ActiveProcessLimit = resource_limits.max_processes;
+            limits.JobMemoryLimit = resource_limits.max_memory_bytes as usize;
+        }
         let configured = unsafe {
             SetInformationJobObject(
                 job.raw_handle(),
@@ -791,7 +1160,7 @@ impl WindowsJob {
         Ok(job)
     }
 
-    fn assign(&self, child: &Child) -> std::io::Result<()> {
+    pub(super) fn assign(&self, child: &Child) -> std::io::Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
 
@@ -802,7 +1171,7 @@ impl WindowsJob {
         Ok(())
     }
 
-    fn terminate(&self) {
+    pub(super) fn terminate(&self) {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
         unsafe {
             TerminateJobObject(self.raw_handle(), 1);
@@ -836,6 +1205,7 @@ fn spawn_stdio_reader(
     plugin_id: String,
     stdout: std::process::ChildStdout,
     pending: Arc<Mutex<HashMap<String, PendingWaiter>>>,
+    child: Arc<Mutex<Child>>,
     closed: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
@@ -894,6 +1264,22 @@ fn spawn_stdio_reader(
             }
             closed.store(true, Ordering::Release);
             fail_all_pending(&pending, "stdio sidecar 已关闭".to_string());
+            // 自行退出的常驻 sidecar（如最后一个 PTY 会话关闭后的
+            // terminal）必须由宿主回收。轮询时不长期持有 child 锁，保证
+            // stop/cancel 仍能并发终止关闭 stdout 后未退出的异常进程。
+            loop {
+                let exited = child
+                    .lock()
+                    .map(|mut child| match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => true,
+                        Ok(None) => false,
+                    })
+                    .unwrap_or(true);
+                if exited {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         })
         .expect("启动 stdio 读线程失败");
 }
@@ -1108,13 +1494,16 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn job_object_kills_children_on_close() {
+    fn job_object_applies_process_and_memory_limits() {
         use windows_sys::Win32::System::JobObjects::{
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JobObjectExtendedLimitInformation, QueryInformationJobObject,
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+            JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject,
         };
 
-        let job = WindowsJob::new().unwrap();
+        let expected = tiangong_sandbox::SandboxResourceLimits::default();
+        let job = WindowsJob::new(Some(expected)).unwrap();
         let mut actual: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         let queried = unsafe {
             QueryInformationJobObject(
@@ -1130,5 +1519,276 @@ mod windows_tests {
             actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             0
         );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            0
+        );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY,
+            0
+        );
+        assert_ne!(
+            actual.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_TIME,
+            0
+        );
+        assert_eq!(
+            actual.BasicLimitInformation.PerJobUserTimeLimit,
+            expected.max_cpu_time_seconds as i64 * 10_000_000
+        );
+        assert_eq!(
+            actual.BasicLimitInformation.ActiveProcessLimit,
+            expected.max_processes
+        );
+        assert_eq!(actual.JobMemoryLimit, expected.max_memory_bytes as usize);
+    }
+}
+
+/// 按宿主授权从禁读清单移除对应配置文件（仅读开放；写保护不动）。
+fn exempt_authorized_reads(
+    policy: &mut tiangong_sandbox::SandboxPolicy,
+    access: super::SensitiveStorageAccess,
+    storage_root: &std::path::Path,
+) {
+    let mut exemptions: Vec<std::path::PathBuf> = Vec::new();
+    if access.model_config {
+        exemptions.push(storage_root.join("models.json"));
+    }
+    if access.mcp_config {
+        exemptions.push(storage_root.join("mcp.json"));
+    }
+    if access.server_config {
+        exemptions.push(storage_root.join("server.json"));
+    }
+    if access.app_config {
+        exemptions.push(storage_root.join("app.json"));
+    }
+    if exemptions.is_empty() {
+        return;
+    }
+    policy
+        .denied_read_paths
+        .retain(|path| !exemptions.contains(path));
+}
+
+/// mcp.json 的写豁免：它是 MCP 配置的权威存储，唯一合法写者是 mcp
+/// 插件自身（宿主已验证官方签名身份）。从写保护清单移除后，写权限
+/// 随存储根整体可写恢复；其他插件对 mcp.json 的写保护不变。
+fn exempt_mcp_config_write(
+    policy: &mut tiangong_sandbox::SandboxPolicy,
+    storage_root: &std::path::Path,
+) {
+    let target = storage_root.join("mcp.json");
+    policy.protected_paths.retain(|path| *path != target);
+}
+
+/// 天工宿主的 Launcher 解析：存储目录直存优先，宿主程序同目录（开发与
+/// 测试布局）兜底。P1 通用化后组合策略由宿主决定，crate 只提供原语。
+fn resolve_launcher(storage_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    tiangong_sandbox::launcher_manager::resolve_installed_program(&storage_root.join("sandbox"))
+        .or_else(tiangong_sandbox::launcher_manager::sibling_program)
+}
+
+/// 天工宿主的 `protected_paths`（读写双禁）组合：存储配置信任件 + 家目录
+/// 凭据。P1 通用化后预设组合归宿主，crate 只提供通用原语。
+fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = [
+        "keys",
+        "trust.db",
+        "mcp.json",
+        "models.json",
+        "server.json",
+        "app.json",
+        "sandbox",
+    ]
+    .iter()
+    .map(|path| storage_root.join(path))
+    .collect();
+    paths.extend(tiangong_sandbox::sandbox::presets::common_credential_paths());
+    paths
+}
+
+/// 按宿主验证过的插件身份移除用户凭据目录禁读；写保护清单保持不变。
+fn exempt_authorized_user_credentials(
+    policy: &mut tiangong_sandbox::SandboxPolicy,
+    access: crate::host_policy::UserCredentialReadAccess,
+) {
+    // 文件凭据（~/.ssh 等）经 denied_read 豁免；系统凭据服务（Keychain、
+    // OpenDirectory、trustd）经 allow_credential_services 放行——沙箱内
+    // ssh 解析 uid、gh 读钥匙串都依赖后者，缺任一都会功能回退。
+    policy.allow_credential_services = access.ssh || access.github_cli;
+    let Some(home) = crate::interpreter_env::user_home_dir() else {
+        return;
+    };
+    let mut exemptions = Vec::new();
+    if access.ssh {
+        exemptions.push(home.join(".ssh"));
+    }
+    if access.github_cli {
+        exemptions.push(home.join(".config/gh"));
+    }
+    policy
+        .denied_read_paths
+        .retain(|path| !exemptions.contains(path));
+}
+
+/// 最终策略中的额外写根都必须是已存在目录。Linux bubblewrap 的 bind
+/// 源不存在会拒绝启动；其他平台也不应携带无效授权项。
+fn retain_existing_writable_roots(policy: &mut tiangong_sandbox::SandboxPolicy) {
+    policy.extra_writable.retain(|path| {
+        if path.is_dir() {
+            true
+        } else {
+            tracing::warn!(
+                path = %path.display(),
+                "忽略不存在或不是目录的沙箱额外可写根"
+            );
+            false
+        }
+    });
+}
+
+/// 仅为宿主授权的插件增加用户工具缓存写根。
+fn apply_user_cache_write(policy: &mut tiangong_sandbox::SandboxPolicy, allowed: bool) {
+    if !allowed {
+        return;
+    }
+    if let Some(home) = crate::interpreter_env::user_home_dir() {
+        policy.extra_writable.push(home.join(".cache"));
+    }
+}
+
+#[cfg(test)]
+mod sensitive_access_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_config_write_exemption_scopes_to_mcp_plugin() {
+        let storage = std::path::Path::new("/tmp/sensitive-storage");
+        let mcp_json = storage.join("mcp.json");
+
+        // mcp 插件（mcp_config 授权）：mcp.json 移出写保护，可写恢复。
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        policy.protected_paths = tiangong_protected_paths(storage);
+        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
+        exempt_mcp_config_write(&mut policy, storage);
+        assert!(!policy.protected_paths.contains(&mcp_json));
+        // 其他敏感配置的写保护不受影响。
+        assert!(policy.protected_paths.contains(&storage.join("keys")));
+        assert!(policy.protected_paths.contains(&storage.join("trust.db")));
+        assert!(
+            policy
+                .protected_paths
+                .contains(&storage.join("models.json"))
+        );
+        assert!(policy.protected_paths.contains(&storage.join("app.json")));
+
+        // 未授权插件：不调用豁免，mcp.json 写保护原样保留。
+        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        strict.protected_paths = tiangong_protected_paths(storage);
+        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut strict, storage);
+        assert!(strict.protected_paths.contains(&mcp_json));
+    }
+    #[test]
+    fn exempt_opens_only_authorized_configs() {
+        let storage = std::path::Path::new("/tmp/sensitive-storage");
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
+        let before = policy.denied_read_paths.len();
+        assert!(before >= 5, "清单应含配置与信任件（实际 {before}）");
+
+        // 授权模型+MCP：对应配置移出禁读，密钥/信任库/Launcher 保留。
+        exempt_authorized_reads(
+            &mut policy,
+            super::super::SensitiveStorageAccess {
+                model_config: true,
+                mcp_config: true,
+                ..Default::default()
+            },
+            storage,
+        );
+        assert!(
+            !policy
+                .denied_read_paths
+                .contains(&storage.join("models.json"))
+        );
+        assert!(!policy.denied_read_paths.contains(&storage.join("mcp.json")));
+        assert!(policy.denied_read_paths.contains(&storage.join("keys")));
+        assert!(policy.denied_read_paths.contains(&storage.join("trust.db")));
+        assert!(policy.denied_read_paths.contains(&storage.join("sandbox")));
+        assert!(
+            policy
+                .denied_read_paths
+                .contains(&storage.join("server.json"))
+        );
+
+        // 无授权：禁读清单原样保留。
+        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut strict, storage);
+        let strict_before = strict.denied_read_paths.clone();
+        exempt_authorized_reads(
+            &mut strict,
+            super::super::SensitiveStorageAccess::default(),
+            storage,
+        );
+        assert_eq!(strict.denied_read_paths, strict_before);
+    }
+
+    #[test]
+    fn git_workflow_credentials_are_readable_but_remain_write_protected() {
+        let Some(home) = crate::interpreter_env::user_home_dir() else {
+            return;
+        };
+        let storage = std::path::Path::new("/tmp/sensitive-storage");
+        let ssh = home.join(".ssh");
+        let github_cli = home.join(".config/gh");
+        let aws = home.join(".aws");
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        policy.protected_paths = tiangong_protected_paths(storage);
+        tiangong_sandbox::sandbox::presets::apply_tiangong(&mut policy, storage);
+
+        exempt_authorized_user_credentials(
+            &mut policy,
+            crate::host_policy::UserCredentialReadAccess {
+                ssh: true,
+                github_cli: true,
+            },
+        );
+
+        assert!(!policy.denied_read_paths.contains(&ssh));
+        assert!(!policy.denied_read_paths.contains(&github_cli));
+        assert!(policy.denied_read_paths.contains(&aws));
+        assert!(policy.protected_paths.contains(&ssh));
+        assert!(policy.protected_paths.contains(&github_cli));
+        assert!(policy.allow_credential_services);
+    }
+
+    #[test]
+    fn missing_optional_cache_is_not_added_to_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join(".npm");
+        let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(root.path());
+
+        policy.extra_writable.push(missing.clone());
+        retain_existing_writable_roots(&mut policy);
+        assert!(!policy.extra_writable.contains(&missing));
+
+        std::fs::create_dir(&missing).unwrap();
+        policy.extra_writable.push(missing.clone());
+        retain_existing_writable_roots(&mut policy);
+        assert!(policy.extra_writable.contains(&missing));
+    }
+
+    #[test]
+    fn user_cache_write_is_explicitly_opt_in() {
+        let Some(home) = crate::interpreter_env::user_home_dir() else {
+            return;
+        };
+        let cache = tiangong_sandbox::sandbox::policy::canonical_or_keep(&home.join(".cache"));
+        let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+        apply_user_cache_write(&mut strict, false);
+        assert!(!strict.writable_roots().contains(&cache));
+
+        apply_user_cache_write(&mut strict, true);
+        assert!(strict.writable_roots().contains(&cache));
     }
 }

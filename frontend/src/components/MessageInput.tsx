@@ -3,7 +3,7 @@ import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock } from 'lucide-react';
+import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -95,6 +95,9 @@ export function MessageInput({
   const isSending = inputCache.is_sending;
   const setInputCacheText = useStore((state) => state.setInputCacheText);
   const setInputCacheAttachments = useStore((state) => state.setInputCacheAttachments);
+  const sandboxDisabled = useStore((state) => state.sandboxDisabled);
+  const loadSandboxDisabled = useStore((state) => state.loadSandboxDisabled);
+  const setPendingSettingsTab = useStore((state) => state.setPendingSettingsTab);
   const sendMessage = useStore((state) => state.sendMessage);
   const appendMessage = useStore((state) => state.appendMessage);
   const enqueueInputMessage = useStore((state) => state.enqueueInputMessage);
@@ -205,6 +208,13 @@ export function MessageInput({
       cancelled = true;
     };
   }, [activeSessionId]);
+
+  // 按需进程沙箱开关（全局）：状态图标来源；null 表示尚未加载。
+  useEffect(() => {
+    if (sandboxDisabled === null) {
+      void loadSandboxDisabled();
+    }
+  }, [sandboxDisabled, loadSandboxDisabled]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -1337,6 +1347,16 @@ export function MessageInput({
                       </>
                     )}
                   </div>
+                )}
+                {sandboxDisabled === true && (
+                  <button
+                    onClick={() => setPendingSettingsTab('agent')}
+                    className="flex items-center gap-1 text-red-500 transition-colors hover:text-red-400"
+                    title="按需进程沙箱已关闭：终端、命令及其他按需 Sidecar 以完整用户权限启动，点击前往设置重新开启"
+                  >
+                    <Unlock className="w-3 h-3" />
+                    <span>沙箱关</span>
+                  </button>
                 )}
                 <button
                   onClick={toggleTrustMode}

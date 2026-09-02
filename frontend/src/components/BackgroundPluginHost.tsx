@@ -36,12 +36,14 @@ export function BackgroundPluginHost({
 
 function BackgroundInstance({ instance }: { instance: BackgroundPluginInstance }) {
   const [html, setHtml] = useState('');
+  // workspace 仅用于展示给插件；Sidecar 权限不消费它。已持久化会话若
+  // 未出现在前端列表中不回退当前可见会话的全局工作区，避免造成误导。
   const workspace = useStore((state) => state.sessions.find(
     (session) => session.id === instance.sessionId,
   )?.cwd || (
     state.newConversationId === instance.sessionId
       ? state.sessionCwd || state.workspaceDir
-      : state.workspaceDir
+      : ''
   ));
 
   useEffect(() => {

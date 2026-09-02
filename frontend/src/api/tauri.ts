@@ -5,6 +5,28 @@ import { listen } from '@tauri-apps/api/event';
 // 类型定义
 // ============================================================================
 
+/** 手动安装或更新 Sandbox 的结果。 */
+export type LauncherUpdateResult = { status: 'installed'; version: string };
+
+/** Sandbox 状态（启动准备页与设置页共用）。 */
+export interface SandboxUpdateState {
+  status: 'missing' | 'preparing' | 'ready' | 'failed';
+  version: string | null;
+  failure: string | null;
+}
+
+export interface StartupPrepareResult {
+  installed_version: string | null;
+}
+
+/** 内置注入类环境变量屏蔽清单（管理 Modal 提示与保存去重用）。 */
+export interface BuiltinEnvBlocklist {
+  /** 精确变量名（匹配大小写不敏感）。 */
+  exact: string[];
+  /** 变量名前缀（LD_/DYLD_ 动态加载注入类）。 */
+  prefixes: string[];
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -671,6 +693,11 @@ export type TrustedPublisherEntry = {
   imported_at: string;
 };
 
+export interface SandboxPolicyView {
+  directory_allowlist: string[];
+  environment_blocklist: string[];
+}
+
 export const api = {
   // ----------------------------------------------------------------
   // 会话管理
@@ -787,6 +814,38 @@ export const api = {
 
   setDefaultTrustMode: (mode: string): Promise<void> =>
     invoke('set_default_trust_mode', { mode }),
+
+  getSandboxDisabled: (): Promise<boolean> =>
+    invoke('get_sandbox_disabled'),
+
+  setSandboxDisabled: (disabled: boolean): Promise<void> =>
+    invoke('set_sandbox_disabled', { disabled }),
+
+  getSandboxPolicy: (): Promise<SandboxPolicyView> =>
+    invoke('get_sandbox_policy'),
+
+  setSandboxPolicy: (policy: SandboxPolicyView): Promise<SandboxPolicyView> =>
+    invoke('set_sandbox_policy', { policy }),
+
+  getCommandEnvBlocklist: (): Promise<string[]> =>
+    invoke('get_command_env_blocklist'),
+
+  setCommandEnvBlocklist: (blocklist: string[]): Promise<void> =>
+    invoke('set_command_env_blocklist', { blocklist }),
+
+  /** 手动安装或更新固定路径中的 Sandbox。 */
+  upgradeLauncher: (): Promise<LauncherUpdateResult> =>
+    invoke('upgrade_launcher'),
+
+  getSandboxUpdateState: (): Promise<SandboxUpdateState> =>
+    invoke('get_sandbox_update_state'),
+
+  prepareStartupResources: (): Promise<StartupPrepareResult> =>
+    invoke('prepare_startup_resources'),
+
+
+  getBuiltinEnvBlocklist: (): Promise<BuiltinEnvBlocklist> =>
+    invoke('get_builtin_env_blocklist'),
 
 
   getReasoningEffort: (sessionId?: string): Promise<string> =>
@@ -1208,8 +1267,13 @@ export const api = {
   // ── 宿主桥接（Host Bridge）：插件 UI ↔ 宿主统一通道 ──
   // method 按命名空间路由：plugin.* 转发到本插件 WASM，其余命名空间按接缝任务接入。
 
-  bridgeCall: (pluginId: string, method: string, payload: string): Promise<string> =>
-    invoke('bridge_call', { pluginId, method, payload }),
+  bridgeCall: (
+    pluginId: string,
+    method: string,
+    payload: string,
+    sessionId?: string | null,
+  ): Promise<string> =>
+    invoke('bridge_call', { pluginId, method, payload, sessionId }),
 
   bridgeSubscribe: (pluginId: string, channel: string): Promise<void> =>
     invoke('bridge_subscribe', { pluginId, channel }),

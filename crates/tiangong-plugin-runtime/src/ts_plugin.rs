@@ -127,8 +127,17 @@ impl ToolOverrideHandler for TsPluginAdapter {
         let session_id = session.id.clone();
         if self.sidecar_direct.load(Ordering::Acquire) {
             let tool_timeout_ms = tool.timeout_ms;
+            let workspace = std::path::PathBuf::from(session.cwd.trim());
             Box::pin(async move {
-                Some(invoke_sidecar_tool(&plugin_id, call, tool_timeout_ms, Some(session_id)).await)
+                Some(
+                    invoke_sidecar_tool(
+                        &plugin_id,
+                        call,
+                        tool_timeout_ms,
+                        Some((session_id, workspace)),
+                    )
+                    .await,
+                )
             })
         } else {
             Box::pin(async move {
@@ -153,7 +162,7 @@ async fn invoke_sidecar_tool(
     plugin_id: &str,
     call: ToolCall,
     timeout_ms: u64,
-    session_id: Option<String>,
+    session_context: Option<(String, std::path::PathBuf)>,
 ) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
@@ -173,11 +182,34 @@ async fn invoke_sidecar_tool(
     // 只终止自己，并发调用互不可见；常驻形态：共享缓存连接（进程内多路
     // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
     let on_demand =
-        installed.manifest.sidecar.as_ref().is_some_and(|sidecar| {
-            sidecar.lifecycle == crate::manifest::SidecarLifecycle::OnDemand
-        });
+        installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
+    let session_id = session_context
+        .as_ref()
+        .map(|(session_id, _)| session_id.clone());
+    let authoritative_workspace = session_context
+        .as_ref()
+        .map(|(_, workspace)| workspace.clone())
+        .unwrap_or_default();
+    let session_workspace = if installed.manifest.should_preload_sidecar() {
+        None
+    } else {
+        session_context
+            .as_ref()
+            .map(|(_, workspace)| workspace.as_path())
+    };
     let connection = if on_demand {
-        crate::registry::ephemeral_sidecar_connection(&storage_root, &installed)
+        crate::registry::ephemeral_sidecar_connection_with_workspace(
+            &storage_root,
+            &installed,
+            session_workspace,
+        )
+    } else if session_workspace.is_some() {
+        crate::registry::sidecar_connection_with_workspace(
+            &storage_root,
+            &installed,
+            false,
+            session_workspace,
+        )
     } else {
         crate::registry::sidecar_connection(&storage_root, &installed, false)
     };
@@ -200,7 +232,7 @@ async fn invoke_sidecar_tool(
         session_id.map(|session_id| crate::sidecar::SidecarInvocationContext {
             session_id,
             invocation_id: call.id.clone(),
-            authoritative_workspace: std::path::PathBuf::new(),
+            authoritative_workspace,
         });
     let blocking = connection.clone();
     let invoked = tokio::time::timeout(

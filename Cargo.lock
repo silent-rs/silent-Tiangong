@@ -11527,6 +11527,9 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-command-protocol",
+ "tiangong-sandbox",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11848,8 +11851,10 @@ name = "tiangong-toolkit"
 version = "0.15.5"
 dependencies = [
  "anyhow",
+ "dunce",
  "tiangong-types",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

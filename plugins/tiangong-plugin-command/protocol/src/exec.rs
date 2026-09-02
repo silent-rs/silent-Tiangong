@@ -72,12 +72,6 @@ pub struct SetWorkspaceRequest {
     /// 新工作目录；None 表示清除。
     #[serde(default)]
     pub workspace: Option<String>,
-    /// 是否完全信任模式。
-    #[serde(default)]
-    pub full_trust: bool,
-    /// 用户自定义允许命令列表。
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
 }
 pub struct SetWorkspace;
 impl CommandOperation for SetWorkspace {

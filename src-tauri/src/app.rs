@@ -445,6 +445,12 @@ impl TiangongApp {
         });
     }
 
+    /// Sandbox 首次安装与更新由启动准备页和设置页显式触发；宿主不运行
+    /// 独立后台更新器，实际下载与替换复用 Sandbox 自管理能力。
+    pub fn start_launcher_updater(&self, _app_handle: tauri::AppHandle) {
+        tracing::debug!("Sandbox 更新由用户入口显式触发，后台更新任务未启用");
+    }
+
     /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
     ///
     /// core 不存在时返回 false。大多数场景应通过 [`Self::tool_injection_tx`] push 到 channel，

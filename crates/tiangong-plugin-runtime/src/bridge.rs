@@ -9,6 +9,7 @@
 //! 对应接缝任务中接入。事件订阅当前只提供登记骨架，事件源在事件接缝任务接入。
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
@@ -162,6 +163,19 @@ pub fn event_declaration_allows(declared: &[String], channel: &str) -> bool {
 ///
 /// `payload` 为不透明负载，透传不解析。
 pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<String> {
+    bridge_call_with_workspace(plugin_id, method, payload, None)
+}
+
+/// 带宿主权威会话工作区的桥接调用。
+///
+/// 工作区是宿主上下文，不属于插件业务负载；仅 sidecar 路由消费它来构造
+/// 沙箱可写域，其余桥接能力保持原有行为。
+pub fn bridge_call_with_workspace(
+    plugin_id: &str,
+    method: &str,
+    payload: &str,
+    workspace: Option<&Path>,
+) -> Result<String> {
     let Some(namespace) = namespace_of(method) else {
         tracing::warn!(plugin_id, method, "bridge.call 拒绝未知 method");
         bail!(
@@ -233,8 +247,13 @@ pub fn bridge_call(plugin_id: &str, method: &str, payload: &str) -> Result<Strin
                 .and_then(|dir| dir.parent().map(|p| p.to_path_buf()))
                 .and_then(|plugins_dir| plugins_dir.parent().map(|p| p.to_path_buf()))
                 .ok_or_else(|| anyhow::anyhow!("无法定位插件存储根"))?;
-            let result =
-                crate::registry::invoke_sidecar(&storage_root, plugin_id, operation, request)?;
+            let result = crate::registry::invoke_sidecar_with_workspace(
+                &storage_root,
+                plugin_id,
+                operation,
+                request,
+                workspace,
+            )?;
             // 结果观察者（宿主注入的通用机制，不解析业务语义）：宿主可用
             // 于受信产物溯源登记等策略（如创作链构建登记）。
             if let Some(observer) = sidecar_result_observer() {

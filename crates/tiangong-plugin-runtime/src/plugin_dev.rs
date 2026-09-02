@@ -488,6 +488,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 初始化测试配置并准备测试 Launcher 信任链：sidecar 恒走沙箱
+    ///（策略表不接受关闭输入），本组测试以测试密钥签名的真实 Launcher
+    /// 覆盖安装/签名/调用契约的完整链路。
+    fn init_config_with_launcher(root: &Path) {
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        tiangong_config::registry::init_from_dir(&config_dir);
+        crate::test_support::ensure_test_launcher_signed(root).unwrap();
+    }
+
+    fn wait_for_pid_file(path: &Path, timeout: std::time::Duration, context: &str) -> i32 {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                return raw
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|error| panic!("{context} PID 无效: {error}"));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{context} 未在 {timeout:?} 内生成 PID 文件：{}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn make_project(root: &Path, id: &str) -> PathBuf {
         let dir = root.join(PLUGIN_DEV_DIR).join(id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -707,7 +735,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "node-sc-demo";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
@@ -768,7 +796,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let caller = "node-sc-auth-caller";
         make_project(root.path(), caller);
         make_node_sidecar_release(root.path(), caller);
@@ -840,7 +868,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let caller = "node-sc-fp-caller";
         let target = "node-sc-fp-target";
         make_project(root.path(), caller);
@@ -913,7 +941,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let caller = "node-sc-revoke-caller";
         let target = "node-sc-revoke-target";
         make_project(root.path(), caller);
@@ -958,7 +986,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "node-sc-observer";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
@@ -1001,7 +1029,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "node-sc-third-party";
         make_project(root.path(), id);
         let release = make_node_sidecar_release(root.path(), id);
@@ -1137,7 +1165,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "node-sc-mixed-trust";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
@@ -1235,7 +1263,7 @@ await runSidecar({
         }
         let root = tempfile::tempdir().unwrap();
         // 安装链的可用性探测读取全局模型配置；测试进程用隔离目录初始化。
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "plugin-creator";
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(id);
         copy_tree_for_test(&release_source, &dev_root.join("release"));
@@ -1282,7 +1310,7 @@ await runSidecar({
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let creator = "plugin-creator";
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
         copy_tree_for_test(&release_source, &dev_root.join("release"));
@@ -1358,7 +1386,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 纯ui插件_构建指纹核验() {
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "ui-fp-demo";
         make_project(root.path(), id);
         // 纯 UI 产物：ui 贡献 + 内容清单，无 sidecar（devkit 全模板统一生成清单）。
@@ -1407,7 +1435,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "pure-tool-demo";
         make_project(root.path(), id);
         // 构造 node-tool 形态产物：tools + sidecar，无 ui/wasm。
@@ -1465,7 +1493,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 插件图标_安装与读取往返() {
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "icon-demo";
         make_project(root.path(), id);
         let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
@@ -1504,14 +1532,14 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "blocking-tool";
         make_project(root.path(), id);
         let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
         std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
         std::fs::write(
             release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"blocking-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"slow_job","description":"慢任务","input_schema":{"type":"object"},"timeout_ms":1500}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
+            r#"{"schema_version":2,"id":"blocking-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"slow_job","description":"慢任务","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
         let sdk =
@@ -1557,23 +1585,24 @@ await runSidecar({
                         name: "slow_job".to_string(),
                         arguments: json!({"pid_file": &pid_file}),
                     },
-                    1500,
+                    30000,
                 )
                 .await
             });
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
+            // 沙箱冷启动（Launcher 验签+隔离层+解释器）计入工具预算。
+            started.elapsed() < std::time::Duration::from_secs(45),
             "超时应及时返回，实际 {:?}",
             started.elapsed()
         );
         assert!(!result.ok, "超时应失败: {}", result.summary);
         // 进程终止断言：pid 文件出现后，对应进程应在短时间内消失。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_pid_file(
+            &pid_file,
+            std::time::Duration::from_secs(5),
+            &format!("慢调用结果：{}", result.summary),
+        );
         while std::time::Instant::now() < deadline {
             let alive = std::process::Command::new("kill")
                 .arg("-0")
@@ -1605,14 +1634,14 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        tiangong_config::registry::init_from_dir(&root.path().join("config"));
+        init_config_with_launcher(root.path());
         let id = "concurrent-tool";
         make_project(root.path(), id);
         let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
         std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
         std::fs::write(
             release.join("plugin.json"),
-            r#"{"schema_version":2,"id":"concurrent-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"quick_job","description":"快","input_schema":{"type":"object"},"timeout_ms":20000},{"name":"slow_job","description":"慢","input_schema":{"type":"object"},"timeout_ms":1500}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
+            r#"{"schema_version":2,"id":"concurrent-tool","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"quick_job","description":"快","input_schema":{"type":"object"},"timeout_ms":60000},{"name":"slow_job","description":"慢","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","request_timeout_ms":60000}}"#,
         )
         .unwrap();
         let sdk =
@@ -1662,7 +1691,7 @@ await runSidecar({
                         let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
                             id,
                             call("quick_job", json!({"tag": "并发一"})),
-                            20000,
+                            60000,
                         )
                         .await;
                         assert!(result.ok, "并发快调用一应成功: {}", result.summary);
@@ -1672,7 +1701,7 @@ await runSidecar({
                         let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
                             id,
                             call("quick_job", json!({"tag": "并发二"})),
-                            20000,
+                            60000,
                         )
                         .await;
                         assert!(result.ok, "并发快调用二应成功: {}", result.summary);
@@ -1682,7 +1711,7 @@ await runSidecar({
                         let result = crate::ts_plugin::invoke_sidecar_tool_for_test(
                             id,
                             call("slow_job", json!({"pid_file": &pid_file})),
-                            1500,
+                            30000,
                         )
                         .await;
                         assert!(!result.ok, "慢调用应超时失败");
@@ -1692,11 +1721,7 @@ await runSidecar({
 
         // 慢调用的按需进程被终止；无遗留。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let pid = wait_for_pid_file(&pid_file, std::time::Duration::from_secs(5), "并发慢调用");
         let process_alive = |pid: i32| {
             std::process::Command::new("kill")
                 .arg("-0")

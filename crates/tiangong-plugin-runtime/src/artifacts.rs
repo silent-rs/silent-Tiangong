@@ -1147,6 +1147,40 @@ mod tests {
 mod extract_and_catalog_tests {
     use super::*;
 
+    fn write_installed_manifest(directory: &Path, id: &str, version: &str) {
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(
+            directory.join(MANIFEST_FILE),
+            format!(
+                r#"{{"schema_version":2,"id":"{id}","version":"{version}","mention":{{"hint":"test"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn 已安装状态忽略暂存目录与目录名不匹配项() {
+        let root = tempfile::tempdir().unwrap();
+        let plugins = root.path().join("plugins");
+        write_installed_manifest(&plugins.join("demo"), "demo", "1.2.0");
+        write_installed_manifest(&plugins.join(".demo-staging-123"), "demo", "1.1.0");
+        write_installed_manifest(&plugins.join("wrong-directory"), "other", "9.9.9");
+
+        let installed = installed_plugin_states(root.path());
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            installed.get("demo").map(|state| state.version.as_str()),
+            Some("1.2.0")
+        );
+    }
+
+    #[test]
+    fn 版本一致或线上更旧时不提示更新() {
+        assert!(!version_is_newer("1.2.3", "1.2.3"));
+        assert!(!version_is_newer("1.2.3", "1.2.2"));
+        assert!(version_is_newer("1.2.3", "1.2.4"));
+    }
+
     fn remote_artifact(name: &str) -> RemoteArtifact {
         RemoteArtifact {
             url: format!("https://example.com/plugins/demo/0.2.0/{name}"),

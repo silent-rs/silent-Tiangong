@@ -113,6 +113,16 @@ pub fn generate_token(length: usize) -> String {
     out
 }
 
+/// 用户可自主维护的沙箱策略。目录白名单额外开放读写，环境黑名单
+/// 从进程环境移除；路径范围不做业务限制，仅由设置入口规范化。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct SandboxUserPolicy {
+    #[serde(default, alias = "write_allowlist")]
+    pub directory_allowlist: Vec<String>,
+    #[serde(default)]
+    pub environment_blocklist: Vec<String>,
+}
+
 /// 天工完整应用配置
 ///
 /// 包含 Core 所需的配置（models/trust_mode）以及应用层配置（server）。
@@ -133,6 +143,13 @@ pub struct TiangongConfig {
     // ===== 应用层配置 =====
     /// 默认工作目录
     pub workspace_dir: String,
+    /// 用户显式关闭按需进程沙箱（全局；关闭时 terminal/command/解释器等按需 sidecar 以完整用户权限运行）
+    pub sandbox_disabled: bool,
+    /// 用户沙箱路径与环境授权。用户规则可开放任意数据路径；宿主管理面
+    /// 保护由运行时强制叠加，不能通过本配置覆盖。
+    pub sandbox_policy: SandboxUserPolicy,
+    /// 旧版命令环境变量黑名单兼容字段；加载后合并进 sandbox_policy.environment_blocklist。
+    pub command_env_blocklist: Vec<String>,
     /// Server 配置
     pub server: ServerConfig,
 }
@@ -145,6 +162,9 @@ impl Default for TiangongConfig {
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             workspace_dir: crate::loader::default_workspace_dir(),
+            sandbox_disabled: false,
+            sandbox_policy: SandboxUserPolicy::default(),
+            command_env_blocklist: Vec::new(),
             server: ServerConfig::default(),
         }
     }

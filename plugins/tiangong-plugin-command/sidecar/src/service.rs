@@ -1,37 +1,26 @@
-//! Command sidecar 业务服务：按操作名分发请求，承载 tokio 子进程 spawn 与命令校验策略。
+//! Command sidecar 业务服务：校验基础输入并执行命令，访问边界由宿主沙箱实施。
 
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::exec;
 use tiangong_plugin_command_protocol::exec::{
     ExecResponse, RUN_COMMAND_OPERATION, RUN_SHELL_OPERATION, RunCommandRequest, RunShellRequest,
     SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
 };
-use tiangong_plugin_command_protocol::{
-    Ack, COMMAND_PROTOCOL_VERSION, CommandAccessContext, PLUGIN_ID, PLUGIN_VERSION,
-};
+use tiangong_plugin_command_protocol::{Ack, COMMAND_PROTOCOL_VERSION, PLUGIN_ID, PLUGIN_VERSION};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_toolkit as shared;
-
-use crate::command_policy::{CommandPolicy, TrustModeCommandPolicy};
-use crate::exec;
 
 /// Command sidecar 业务服务。
 pub struct CommandService {
     /// 当前会话工作目录（由 set_workspace 注入，cwd 解析基准）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 是否完全信任模式（跳过命令/路径校验）。
-    full_trust: RwLock<bool>,
-    /// 用户自定义允许命令列表（扩展内置白名单）。
-    allowed_commands: RwLock<Vec<String>>,
-    /// 命令执行策略（沙箱预留点 A：可替换实现）。
-    policy: Arc<dyn CommandPolicy>,
 }
 
 impl CommandService {
@@ -39,9 +28,6 @@ impl CommandService {
     pub fn new() -> Result<Self> {
         Ok(Self {
             workspace: RwLock::new(None),
-            full_trust: RwLock::new(false),
-            allowed_commands: RwLock::new(Vec::new()),
-            policy: Arc::new(TrustModeCommandPolicy::new()),
         })
     }
 
@@ -126,25 +112,17 @@ impl CommandService {
 
     // ── 工具执行 ─────────────────────────────────────────────
 
-    /// 按需形态每次调用独立进程，`set_workspace` 的 init 状态不跨请求：
-    /// 以请求内宿主权威上下文（workspace/full_trust/allowed_commands）
-    /// 为准刷新；常驻形态下与 init 注入同值，幂等。
-    fn refresh_context_from_request(&self, access: &CommandAccessContext) {
-        if let Some(workspace) = &access.workspace
+    /// 按需形态每次调用独立进程，以请求内宿主权威工作区刷新上下文。
+    fn refresh_workspace_from_request(&self, workspace: Option<&str>) {
+        if let Some(workspace) = workspace
             && let Ok(mut guard) = self.workspace.write()
         {
             *guard = Some(PathBuf::from(workspace));
         }
-        if let Ok(mut guard) = self.full_trust.write() {
-            *guard = access.full_trust;
-        }
-        if let Ok(mut guard) = self.allowed_commands.write() {
-            *guard = access.allowed_commands.clone();
-        }
     }
 
     async fn handle_run_command(&self, req: RunCommandRequest) -> ExecResponse {
-        self.refresh_context_from_request(&req.access);
+        self.refresh_workspace_from_request(req.access.workspace.as_deref());
         let base = match self.base() {
             Ok(b) => b,
             Err(e) => return error_response("run_command", e),
@@ -155,25 +133,18 @@ impl CommandService {
         }
         let (cmd, mut cmd_args) = exec::split_command(raw_cmd);
         cmd_args.extend(req.args.iter().cloned());
-        let effective_cwd = match self.policy.resolve_cwd(req.cwd.as_deref(), &base) {
+        let effective_cwd = match resolve_cwd(req.cwd.as_deref(), &base) {
             Ok(c) => c,
             Err(e) => return error_response("run_command", e),
         };
         let timeout_ms = timeout_to_ms(req.timeout_secs);
-        // 校验经 CommandPolicy（沙箱预留点 A）。
-        if let Err(e) =
-            self.policy
-                .validate_run_command(&cmd, &cmd_args, &effective_cwd, &req.access)
-        {
-            return error_response("run_command", e);
-        }
         exec::exec_and_collect(&cmd, &cmd_args, &effective_cwd, timeout_ms)
             .await
             .unwrap_or_else(|e| error_response("命令执行", e))
     }
 
     async fn handle_run_shell(&self, req: RunShellRequest) -> ExecResponse {
-        self.refresh_context_from_request(&req.access);
+        self.refresh_workspace_from_request(req.access.workspace.as_deref());
         let base = match self.base() {
             Ok(b) => b,
             Err(e) => return error_response("run_shell", e),
@@ -187,21 +158,15 @@ impl CommandService {
         } else {
             req.shell.as_str()
         };
-        let (cmd, cmd_args) = match shared::derive_shell_exec_args(script, Some(shell)) {
+        let (cmd, cmd_args) = match exec::derive_shell_exec_args(script, Some(shell)) {
             Ok(v) => v,
             Err(e) => return error_response("run_shell", e),
         };
-        let effective_cwd = match self.policy.resolve_cwd(req.cwd.as_deref(), &base) {
+        let effective_cwd = match resolve_cwd(req.cwd.as_deref(), &base) {
             Ok(c) => c,
             Err(e) => return error_response("run_shell", e),
         };
         let timeout_ms = timeout_to_ms(req.timeout_secs);
-        if let Err(e) = self
-            .policy
-            .validate_run_shell(&cmd, &cmd_args, &effective_cwd, &req.access)
-        {
-            return error_response("run_shell", e);
-        }
         exec::exec_and_collect(&cmd, &cmd_args, &effective_cwd, timeout_ms)
             .await
             .unwrap_or_else(|e| error_response("命令执行", e))
@@ -212,12 +177,6 @@ impl CommandService {
     fn handle_set_workspace(&self, req: SetWorkspaceRequest) -> Result<()> {
         if let Ok(mut guard) = self.workspace.write() {
             *guard = req.workspace.map(PathBuf::from);
-        }
-        if let Ok(mut guard) = self.full_trust.write() {
-            *guard = req.full_trust;
-        }
-        if let Ok(mut guard) = self.allowed_commands.write() {
-            *guard = req.allowed_commands;
         }
         Ok(())
     }
@@ -234,12 +193,35 @@ impl CommandService {
     }
 }
 
-/// timeout 秒 → 毫秒（对齐原实现：0 表无限等待，用 command_timeout_ms 默认值）。
+/// 只做输入有效性检查；目录访问范围由 Runtime 与 Launcher 沙箱决定。
+fn resolve_cwd(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
+    let raw = raw.unwrap_or(".").trim();
+    let candidate = if raw.is_empty() || raw == "." {
+        base.to_path_buf()
+    } else {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            base.join(path)
+        }
+    };
+    if !candidate.is_dir() {
+        return Err(anyhow!("workdir 不是目录：{}", candidate.display()));
+    }
+    std::fs::canonicalize(&candidate)
+        .with_context(|| format!("解析工作目录失败：{}", candidate.display()))
+}
+
+/// timeout 秒转换为毫秒，0 使用默认值。
 fn timeout_to_ms(timeout_secs: u64) -> u64 {
     if timeout_secs > 0 {
         timeout_secs.saturating_mul(1000)
     } else {
-        shared::command_timeout_ms()
+        std::env::var("TOOL_COMMAND_TIMEOUT_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(30_000)
     }
 }
 

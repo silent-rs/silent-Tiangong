@@ -18,6 +18,7 @@ pub mod config;
 mod execution;
 pub mod host_state;
 pub mod interpreter_env;
+pub mod launcher_update;
 pub mod loader;
 pub mod manifest;
 pub mod plugin_dev;
@@ -25,6 +26,12 @@ pub mod protocol;
 pub mod registry;
 pub mod seams;
 pub mod sidecar;
+/// 测试支撑（非公开 API，仅供测试复用）。
+#[doc(hidden)]
+pub mod test_support;
+
+pub mod host_policy;
+
 pub mod signature;
 pub mod slots;
 pub mod trust;
@@ -33,10 +40,10 @@ mod ts_tools;
 
 pub use adapter::WasmPluginAdapter;
 pub use bridge::{
-    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call, bridge_emit,
-    bridge_subscribe, bridge_unsubscribe, emit_plugins_changed, set_app_handler,
-    set_browser_handler, set_dialog_handler, set_event_emitter, set_session_input_handler,
-    set_terminal_handler, set_webview_handler,
+    BRIDGE_NAMESPACES, EVENT_NAMESPACE_PREFIXES, NativeServiceHandler, bridge_call,
+    bridge_call_with_workspace, bridge_emit, bridge_subscribe, bridge_unsubscribe,
+    emit_plugins_changed, set_app_handler, set_browser_handler, set_dialog_handler,
+    set_event_emitter, set_session_input_handler, set_terminal_handler, set_webview_handler,
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
@@ -63,3 +70,31 @@ pub use trust::{
     import_trusted_publisher, list_trusted_publishers, publisher_fingerprint,
     remove_trusted_publisher,
 };
+
+/// Runtime 启动 Sidecar 时始终屏蔽的精确环境变量名。
+pub const BUILTIN_DENIED_ENV_KEYS: &[&str] = &[
+    "BASH_ENV",
+    "ENV",
+    "PS4",
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5OPT",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "ZDOTDIR",
+];
+
+/// Runtime 启动 Sidecar 时始终屏蔽的环境变量名前缀。
+pub const BUILTIN_DENIED_ENV_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+
+/// 内置注入类屏蔽的精确变量名清单（匹配大小写不敏感）。
+pub fn builtin_denied_env_keys() -> &'static [&'static str] {
+    BUILTIN_DENIED_ENV_KEYS
+}
+
+/// 内置屏蔽的变量名前缀清单（匹配大小写不敏感）。
+pub fn builtin_denied_env_prefixes() -> &'static [&'static str] {
+    BUILTIN_DENIED_ENV_PREFIXES
+}

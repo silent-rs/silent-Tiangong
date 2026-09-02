@@ -24,8 +24,8 @@ pub mod logging;
 pub mod registry;
 
 pub use config::{
-    ServerConfig, TiangongConfig, generate_token, load_server_config, load_server_config_from_dir,
-    save_server_config, save_server_config_to_dir, server_config_path,
+    SandboxUserPolicy, ServerConfig, TiangongConfig, generate_token, load_server_config,
+    load_server_config_from_dir, save_server_config, save_server_config_to_dir, server_config_path,
 };
 pub use loader::{default_tiangong_dir, load_tiangong_config, load_tiangong_config_from_dir};
 

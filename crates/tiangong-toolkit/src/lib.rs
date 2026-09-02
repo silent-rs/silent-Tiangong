@@ -17,6 +17,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+mod path;
+use path::canonicalize_path;
 
 pub mod process;
 
@@ -65,14 +67,13 @@ pub fn app_storage_root() -> PathBuf {
 /// 避免隐式依赖 `SESSION_CWD`。应用存储根（`~/.tiangong/`）天然可信，
 /// 始终追加，无需插件经 hook 声明。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
-    let workspace_canonical = workspace
-        .canonicalize()
+    let workspace_canonical = canonicalize_path(workspace)
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
 
     let mut roots = vec![workspace_canonical];
     // 应用自管存储根（~/.tiangong/），始终允许。
     let storage = app_storage_root();
-    let storage_canonical = storage.canonicalize().unwrap_or(storage);
+    let storage_canonical = canonicalize_path(&storage).unwrap_or(storage);
     if !roots.iter().any(|r| r == &storage_canonical) {
         roots.push(storage_canonical);
     }
@@ -87,9 +88,8 @@ pub fn write_allowed_roots() -> Result<Vec<PathBuf>> {
 /// 基于 `base` 工作目录校验路径是否落在允许写入的根目录内。
 fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path) -> Result<()> {
     let roots = write_allowed_roots_with(base)?;
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
+    let canonical =
+        canonicalize_path(path).with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
             "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
@@ -103,8 +103,7 @@ fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path
 pub fn resolve_effective_cwd_with(raw: Option<&str>, base: &Path) -> Result<PathBuf> {
     let value = raw.unwrap_or(".").trim();
     let cwd = if value.is_empty() {
-        base.canonicalize()
-            .with_context(|| format!("解析工作目录失败：{}", base.display()))?
+        canonicalize_path(base).with_context(|| format!("解析工作目录失败：{}", base.display()))?
     } else {
         resolve_path_from_base(value, base)?
     };
@@ -128,7 +127,7 @@ pub fn resolve_workspace_path_trusted_with(raw: &str, base: &Path) -> Result<Pat
     }
     let candidate = resolve_path_candidate(raw, base);
     // 存在时 canonicalize 解析符号链接，不存在时直接返回
-    Ok(candidate.canonicalize().unwrap_or(candidate))
+    Ok(canonicalize_path(&candidate).unwrap_or(candidate))
 }
 
 pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
@@ -138,8 +137,7 @@ pub fn resolve_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
     }
 
     let candidate = resolve_path_candidate(raw, base);
-    let canonical = candidate
-        .canonicalize()
+    let canonical = canonicalize_path(&candidate)
         .with_context(|| format!("解析路径失败：{}", candidate.display()))?;
     Ok(canonical)
 }
@@ -161,8 +159,7 @@ pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
         };
         anchor = next;
     }
-    let parent_canonical = anchor
-        .canonicalize()
+    let parent_canonical = canonicalize_path(&anchor)
         .with_context(|| format!("解析目标目录失败：{}", anchor.display()))?;
     let roots = write_allowed_roots_with(base)?;
 
@@ -189,131 +186,6 @@ fn resolve_path_candidate(raw: &str, base: &Path) -> PathBuf {
 
 fn is_path_in_allowed_roots(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
-}
-
-fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
-    let roots = write_allowed_roots()?;
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("解析{label}失败：{}", path.display()))?;
-    if !is_path_in_allowed_roots(&canonical, &roots) {
-        return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
-            canonical.display()
-        ));
-    }
-    Ok(())
-}
-
-pub fn validate_command_args_in_allowed_roots(
-    cmd: &str,
-    args: &[String],
-    base_dir: &Path,
-) -> Result<()> {
-    if matches!(cmd, "echo" | "pwd") || !command_may_write_files(cmd) {
-        return Ok(());
-    }
-
-    let roots = write_allowed_roots_with(base_dir)?;
-    let mut skip_next_value = false;
-    for arg in args {
-        let raw = arg.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        if skip_next_value {
-            skip_next_value = false;
-            continue;
-        }
-        if raw.starts_with('-') {
-            skip_next_value = option_requires_value(cmd, raw);
-            continue;
-        }
-        if !write_command_argument_may_be_path(cmd, raw) {
-            continue;
-        }
-        ensure_command_arg_path_allowed(raw, base_dir, &roots)?;
-    }
-    Ok(())
-}
-
-fn option_requires_value(cmd: &str, option: &str) -> bool {
-    match cmd {
-        "head" | "tail" => matches!(option, "-n" | "--lines" | "-c" | "--bytes"),
-        _ => false,
-    }
-}
-
-fn command_may_write_files(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "cp" | "mv"
-            | "rm"
-            | "mkdir"
-            | "touch"
-            | "chmod"
-            | "ln"
-            | "cargo"
-            | "git"
-            | "node"
-            | "npm"
-            | "npx"
-            | "yarn"
-            | "pnpm"
-            | "ts-node"
-            | "python"
-            | "python3"
-            | "pip"
-            | "pip3"
-            | "pipx"
-            | "uv"
-            | "uvx"
-            | "sea-orm-cli"
-            | "bash"
-            | "sh"
-            | "powershell"
-            | "pwsh"
-    )
-}
-
-fn write_command_argument_may_be_path(cmd: &str, raw: &str) -> bool {
-    match cmd {
-        "cp" | "mv" | "rm" | "mkdir" | "touch" | "chmod" | "ln" => true,
-        "cargo" | "git" | "node" | "npm" | "npx" | "yarn" | "pnpm" | "ts-node" | "python"
-        | "python3" | "pip" | "pip3" | "pipx" | "uv" | "uvx" | "sea-orm-cli" => {
-            raw.contains('/') || raw == "." || raw == ".." || raw.starts_with('~')
-        }
-        _ => false,
-    }
-}
-
-fn ensure_command_arg_path_allowed(raw: &str, base_dir: &Path, roots: &[PathBuf]) -> Result<()> {
-    let candidate = resolve_path_candidate(raw, base_dir);
-    let anchor = if candidate.exists() {
-        candidate
-    } else {
-        let mut parent = candidate
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| anyhow!("命令参数路径非法，无法解析父目录：{}", candidate.display()))?;
-        while !parent.exists() {
-            parent = parent.parent().map(Path::to_path_buf).ok_or_else(|| {
-                anyhow!("命令参数路径非法，无法解析父目录：{}", candidate.display())
-            })?;
-        }
-        parent
-    };
-
-    let canonical = anchor
-        .canonicalize()
-        .with_context(|| format!("解析命令参数路径失败：{}", anchor.display()))?;
-    if !is_path_in_allowed_roots(&canonical, roots) {
-        return Err(anyhow!(
-            "命令参数路径越界，仅允许当前目录、~/.tiangong 或临时目录：{}",
-            raw
-        ));
-    }
-    Ok(())
 }
 
 fn expand_home_path(raw: &str) -> Option<PathBuf> {
@@ -347,7 +219,7 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// 相对工作目录的路径展示（显式传入工作目录，供插件 handler 使用）。
 pub fn display_rel_path_with(path: &Path, base: &Path) -> String {
-    let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let root = canonicalize_path(base).unwrap_or_else(|_| base.to_path_buf());
     path.strip_prefix(&root)
         .map(|rel| {
             let rel_text = rel.display().to_string();
@@ -358,334 +230,6 @@ pub fn display_rel_path_with(path: &Path, base: &Path) -> String {
             }
         })
         .unwrap_or_else(|_| path.display().to_string())
-}
-
-pub fn is_allowed_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        // 基础命令
-        "echo"
-            | "pwd"
-            | "ls"
-            | "cat"
-            | "head"
-            | "tail"
-            | "wc"
-            | "rg"
-            | "grep"
-            | "find"
-            | "which"
-            | "env"
-            | "printenv"
-            // 文件操作
-            | "cp"
-            | "mv"
-            | "rm"
-            | "mkdir"
-            | "touch"
-            | "chmod"
-            | "ln"
-            // 开发工具
-            | "cargo"
-            | "git"
-            | "node"
-            | "npm"
-            | "npx"
-            | "yarn"
-            | "pnpm"
-            | "ts-node"
-            | "python"
-            | "python3"
-            | "pip"
-            | "pip3"
-            | "pipx"
-            | "uv"
-            | "uvx"
-            | "sea-orm-cli"
-            // 网络工具
-            | "curl"
-            | "wget"
-            // Shell
-            | "bash"
-            | "sh"
-            | "powershell"
-            | "pwsh"
-    )
-}
-
-/// 命令校验结果。
-///
-/// 白名单机制不做硬性拦截——白名单外的命令返回
-/// [`CommandValidation::NeedsApproval`] 作为风险信息。硬性拒绝（forbidden
-/// tokens、路径越界、shell 形式不合法）仍通过 `Err` 返回。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandValidation {
-    /// 命令在内置白名单或用户扩展白名单内，校验通过。
-    Allowed,
-    /// 命令不在白名单内，但未命中硬性拒绝条件。
-    NeedsApproval { cmd: String },
-}
-
-/// 判断命令是否在允许列表内（内置白名单 + 用户扩展）。
-pub fn is_command_allowed(cmd: &str, extra_allowed: &[String]) -> bool {
-    is_allowed_command(cmd) || extra_allowed.iter().any(|c| c == cmd)
-}
-
-/// 校验 shell 脚本命令（`bash -lc`/`sh -c`/`powershell -Command` 形式）。
-///
-/// 返回 [`CommandValidation`] 表示白名单校验结果；`Err` 仅用于硬性拒绝
-///（forbidden tokens、重定向、shell 形式不合法、路径越界）。
-pub fn validate_shell_command_args(
-    shell_cmd: &str,
-    args: &[String],
-    base_dir: &Path,
-    extra_allowed: &[String],
-) -> Result<CommandValidation> {
-    let (expected_flag, flag_label) = match shell_cmd {
-        "bash" => ("-lc", "bash -lc"),
-        "sh" => ("-c", "sh -c"),
-        "powershell" | "pwsh" => ("-Command", "powershell -Command"),
-        _ => return Err(anyhow!("不支持的 shell 命令：{shell_cmd}")),
-    };
-    if args.len() != 2 || args.first().map(String::as_str) != Some(expected_flag) {
-        return Err(anyhow!(
-            "{shell_cmd} 仅允许 {flag_label} 单脚本形式：run_shell(script=...) 或 run_command(cmd={shell_cmd},args=[\"{expected_flag}\",\"<script>\"])"
-        ));
-    }
-    let script = args
-        .get(1)
-        .map(String::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if script.is_empty() {
-        return Err(anyhow!("{shell_cmd} 脚本不能为空"));
-    }
-    if script_contains_write_redirection(script) {
-        return Err(anyhow!(
-            "shell 脚本不允许使用重定向写入，请改用受控文件工具"
-        ));
-    }
-    validate_shell_script(script, base_dir, extra_allowed)
-}
-
-fn script_contains_write_redirection(script: &str) -> bool {
-    script.contains(">>") || script.contains('>') || script.contains("<<")
-}
-
-fn validate_shell_script(
-    script: &str,
-    base_dir: &Path,
-    extra_allowed: &[String],
-) -> Result<CommandValidation> {
-    let lowered = script.to_ascii_lowercase();
-    if contains_forbidden_shell_tokens(&lowered) {
-        return Err(anyhow!("shell 脚本包含不允许的高风险控制符或命令"));
-    }
-
-    // 按 &&、||、; 分割为子命令，逐个验证
-    let sub_commands = split_shell_commands(script);
-    let mut needs_approval_cmd: Option<String> = None;
-    for sub in &sub_commands {
-        let sub = sub.trim();
-        if sub.is_empty() {
-            continue;
-        }
-        // 跳过注释行和 shebang
-        if sub.starts_with('#') {
-            continue;
-        }
-        // 跳过管道后面的部分
-        let sub = sub.split('|').next().unwrap_or(sub).trim();
-        if sub.is_empty() {
-            continue;
-        }
-        // 去掉末尾的后台符 &
-        let sub = sub.trim_end_matches('&').trim();
-        if sub.is_empty() {
-            continue;
-        }
-
-        let cmd = extract_shell_head_command(sub)
-            .ok_or_else(|| anyhow!("无法识别 shell 脚本命令：{sub}"))?;
-
-        // cd 不需要命令白名单检查，但路径需要在允许范围内
-        if cmd == "cd" {
-            let target = sub.split_whitespace().nth(1).unwrap_or(".");
-            let resolved = resolve_path_candidate(target, base_dir);
-            ensure_path_in_write_allowed_roots(&resolved, "shell 脚本 cd 目标")?;
-            continue;
-        }
-
-        // 白名单（内置 + 用户扩展）内的命令直接通过；白名单外的不报错，
-        // 记录下需要审批的命令名，最终返回 NeedsApproval。
-        if !is_shell_head_allowed(cmd, extra_allowed) {
-            needs_approval_cmd = Some(cmd.to_string());
-            continue;
-        }
-
-        // 检查路径参数是否在允许范围内
-        let args: Vec<String> = sub
-            .split_whitespace()
-            .skip(1)
-            .map(ToString::to_string)
-            .collect();
-        validate_command_args_in_allowed_roots(cmd, &args, base_dir)?;
-    }
-    Ok(match needs_approval_cmd {
-        Some(cmd) => CommandValidation::NeedsApproval { cmd },
-        None => CommandValidation::Allowed,
-    })
-}
-
-/// 按 &&、||、;、换行 分割 shell 命令
-fn split_shell_commands(script: &str) -> Vec<String> {
-    let mut commands = Vec::new();
-    let mut current = String::new();
-    let mut chars = script.chars().peekable();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' if !in_double_quote => {
-                in_single_quote = !in_single_quote;
-                current.push(ch);
-            }
-            '"' if !in_single_quote => {
-                in_double_quote = !in_double_quote;
-                current.push(ch);
-            }
-            '&' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'&') => {
-                chars.next(); // consume second &
-                commands.push(current.clone());
-                current.clear();
-            }
-            '|' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'|') => {
-                chars.next(); // consume second |
-                commands.push(current.clone());
-                current.clear();
-            }
-            ';' | '\n' if !in_single_quote && !in_double_quote => {
-                commands.push(current.clone());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.trim().is_empty() {
-        commands.push(current);
-    }
-    commands
-}
-
-fn contains_forbidden_shell_tokens(script: &str) -> bool {
-    const FORBIDDEN: [&str; 8] = [
-        "sudo ", "chmod -r", "chown ", "shutdown", "reboot", "poweroff", "mkfs", "dd if=",
-    ];
-    FORBIDDEN.iter().any(|token| script.contains(token))
-}
-
-fn extract_shell_head_command(script: &str) -> Option<&str> {
-    script.split_whitespace().next()
-}
-
-/// 判断 shell 脚本首命令是否在允许列表内（内置 shell head 白名单 + 用户扩展）。
-///
-/// shell head 白名单比 [`is_allowed_command`] 多了控制流关键字（`for`/`while`/`if`）
-/// 和 shell 内建（`cd`/`test`/`[`/`nohup`/`screen`/`tmux`/`tar`/`unzip`）。
-fn is_shell_head_allowed(cmd: &str, extra_allowed: &[String]) -> bool {
-    // shell 脚本首命令白名单（与 is_allowed_command 保持一致）
-    is_allowed_command(cmd)
-        || matches!(
-            cmd,
-            "cd" | "curl"
-                | "wget"
-                | "tar"
-                | "unzip"
-                | "test"
-                | "["
-                | "nohup"
-                | "screen"
-                | "tmux"
-                | "for"
-                | "while"
-                | "if"
-        )
-        || extra_allowed.iter().any(|c| c == cmd)
-}
-
-pub fn derive_shell_exec_args(script: &str, shell: Option<&str>) -> Result<(String, Vec<String>)> {
-    let shell = shell
-        .unwrap_or("auto")
-        .trim()
-        .to_ascii_lowercase()
-        .replace(' ', "");
-    let selected = match shell.as_str() {
-        "" | "auto" => {
-            if cfg!(target_os = "windows") {
-                "powershell"
-            } else {
-                "bash"
-            }
-        }
-        "bash" => "bash",
-        "sh" => "sh",
-        "powershell" => "powershell",
-        "pwsh" => "pwsh",
-        other => return Err(anyhow!("不支持的 shell 类型：{other}")),
-    };
-
-    let args = match selected {
-        "bash" => vec!["-lc".to_string(), script.to_string()],
-        "sh" => vec!["-c".to_string(), script.to_string()],
-        "powershell" | "pwsh" => vec!["-Command".to_string(), script.to_string()],
-        _ => return Err(anyhow!("不支持的 shell 类型：{selected}")),
-    };
-    Ok((selected.to_string(), args))
-}
-
-pub fn command_env_allowlist() -> Vec<(String, String)> {
-    const ALLOWED: [&str; 21] = [
-        "PATH",
-        "HOME",
-        "USER",
-        "SHELL",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "SystemRoot",
-        "ComSpec",
-        "PATHEXT",
-        // 代理设置
-        "http_proxy",
-        "https_proxy",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "all_proxy",
-        "NO_PROXY",
-        "no_proxy",
-    ];
-    ALLOWED
-        .iter()
-        .filter_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| ((*name).to_string(), value))
-        })
-        .collect::<Vec<_>>()
-}
-
-pub fn command_timeout_ms() -> u64 {
-    // 默认 30 秒超时，防止工具执行卡住
-    // 可通过 TOOL_COMMAND_TIMEOUT_MS 环境变量覆盖（毫秒，0 表示无限等待）
-    std::env::var("TOOL_COMMAND_TIMEOUT_MS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(30_000)
 }
 
 pub fn execute_command_with_timeout(

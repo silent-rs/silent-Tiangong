@@ -743,6 +743,10 @@ fn run_gui() {
             // 离线或失败仅记日志。
             state.start_plugin_auto_updater(app.handle().clone());
 
+            // 沙箱 Launcher 在线更新：后台拉取官方清单，经三重门禁后
+            // 激活下载版；内置版保留为回退底线。
+            state.start_launcher_updater(app.handle().clone());
+
             #[cfg(debug_assertions)]
             {
                 let app_handle = app.handle().clone();
@@ -815,6 +819,9 @@ fn run_gui() {
             tiangong_app::commands::get_models_config,
             tiangong_app::commands::set_models_config,
             tiangong_app::commands::prewarm_workspace_index,
+            tiangong_app::commands::get_sandbox_update_state,
+            tiangong_app::commands::prepare_startup_resources,
+            tiangong_app::commands::get_builtin_env_blocklist,
             tiangong_app::commands::get_model_capabilities,
             tiangong_app::commands::get_model_list,
             tiangong_app::commands::fetch_provider_models,
@@ -852,6 +859,13 @@ fn run_gui() {
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_default_trust_mode,
             tiangong_app::commands::set_default_trust_mode,
+            tiangong_app::commands::get_sandbox_disabled,
+            tiangong_app::commands::set_sandbox_disabled,
+            tiangong_app::commands::get_sandbox_policy,
+            tiangong_app::commands::set_sandbox_policy,
+            tiangong_app::commands::get_command_env_blocklist,
+            tiangong_app::commands::upgrade_launcher,
+            tiangong_app::commands::set_command_env_blocklist,
             tiangong_app::commands::get_reasoning_effort,
             tiangong_app::commands::set_reasoning_effort,
             tiangong_app::commands::get_provider_balance,

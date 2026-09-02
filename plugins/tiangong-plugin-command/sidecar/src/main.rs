@@ -1,7 +1,7 @@
 //! Command 独立 sidecar 进程。
 //!
 //! 作为 Command 的唯一常驻进程运行，承载全部 tokio 子进程 spawn（run_command /
-//! run_shell）、命令校验策略（CommandPolicy）与 env 注入。通过 TCP IPC 暴露给
+//! run_shell）与受控 env 注入。访问边界由宿主沙箱实施，通过 TCP IPC 暴露给
 //! 运行时访问。
 //!
 //! 工作流程：
@@ -12,7 +12,6 @@
 //! 单例与 IPC 由 `tiangong-plugin-sidecar` 通用运行库提供。无 GUI 句柄、无管理
 //! API 直调、无跨实例共享状态，下沉最干净。
 
-mod command_policy;
 mod exec;
 mod service;
 

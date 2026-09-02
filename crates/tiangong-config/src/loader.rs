@@ -26,6 +26,12 @@ struct AppConfigFile {
     #[serde(default)]
     default_trust_mode: Option<TrustMode>,
     #[serde(default)]
+    sandbox_disabled: bool,
+    #[serde(default)]
+    sandbox_policy: crate::config::SandboxUserPolicy,
+    #[serde(default)]
+    command_env_blocklist: Vec<String>,
+    #[serde(default)]
     custom_system_prompt: String,
     #[serde(default)]
     agent_config: Option<LegacyAgentConfig>,
@@ -110,6 +116,10 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         tracing::warn!("读取 custom-prompt.md 失败：{error}");
         app.legacy_custom_system_prompt().to_string()
     });
+    let mut sandbox_policy = app.sandbox_policy.clone();
+    if sandbox_policy.environment_blocklist.is_empty() && !app.command_env_blocklist.is_empty() {
+        sandbox_policy.environment_blocklist = app.command_env_blocklist.clone();
+    }
     let workspace_dir =
         if app.workspace_dir.trim().is_empty() || !Path::new(&app.workspace_dir).is_dir() {
             default_workspace_dir()
@@ -129,6 +139,9 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         default_trust_mode: app.resolved_default_trust_mode(),
         custom_system_prompt,
         workspace_dir,
+        sandbox_disabled: app.sandbox_disabled,
+        sandbox_policy,
+        command_env_blocklist: app.command_env_blocklist,
         server,
     }
 }

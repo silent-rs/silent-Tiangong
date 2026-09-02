@@ -960,6 +960,14 @@ export interface AppState {
   setSessionCwd: (cwd: string) => Promise<void>;
   setWorkspaceDir: (workspaceDir: string) => Promise<void>;
 
+  /** 用户"按需进程沙箱"开关（全局）：null 表示尚未从宿主加载。 */
+  sandboxDisabled: boolean | null;
+  commandEnvBlocklist: string[] | null;
+  loadSandboxDisabled: () => Promise<void>;
+  loadCommandEnvBlocklist: () => Promise<void>;
+  setCommandEnvBlocklist: (blocklist: string[]) => Promise<void>;
+  setSandboxDisabled: (disabled: boolean) => Promise<void>;
+
   loadMcpServers: () => Promise<void>;
 
   setSelectedAgentTab: (tab: string | null) => void;
@@ -1002,6 +1010,8 @@ export const useStore = create<AppState>((set, get) => ({
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  sandboxDisabled: null,
+  commandEnvBlocklist: null,
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
   setReasoningEffort: (effort: string) => {
@@ -1998,6 +2008,47 @@ export const useStore = create<AppState>((set, get) => ({
       set({ workspaceDir });
     } catch (error) {
       console.error('设置工作空间失败:', error);
+      throw error;
+    }
+  },
+
+  // 加载用户"按需进程沙箱"开关（设置页与输入区状态图标共用）
+  loadSandboxDisabled: async () => {
+    try {
+      const disabled = await api.getSandboxDisabled();
+      set({ sandboxDisabled: disabled });
+    } catch (error) {
+      console.error('加载按需进程沙箱开关失败:', error);
+    }
+  },
+
+  // 命令环境变量屏蔽清单（宿主直跑路径的黑名单扩展）
+  loadCommandEnvBlocklist: async () => {
+    try {
+      const blocklist = await api.getCommandEnvBlocklist();
+      set({ commandEnvBlocklist: blocklist });
+    } catch (error) {
+      console.error('加载环境变量屏蔽清单失败:', error);
+    }
+  },
+
+  setCommandEnvBlocklist: async (blocklist: string[]) => {
+    try {
+      await api.setCommandEnvBlocklist(blocklist);
+      set({ commandEnvBlocklist: blocklist });
+    } catch (error) {
+      console.error('保存环境变量屏蔽清单失败:', error);
+      throw error;
+    }
+  },
+
+  // 写入用户"按需进程沙箱"开关并同步宿主配置
+  setSandboxDisabled: async (disabled: boolean) => {
+    try {
+      await api.setSandboxDisabled(disabled);
+      set({ sandboxDisabled: disabled });
+    } catch (error) {
+      console.error('设置命令沙箱开关失败:', error);
       throw error;
     }
   },

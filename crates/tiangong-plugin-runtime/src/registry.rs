@@ -20,8 +20,8 @@ use crate::loader::{
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest, SidecarRuntime};
 use crate::sidecar::{
-    CONTENT_MANIFEST_FILE, InterpreterLaunch, ProcessSidecarConnection, SidecarConfig,
-    SidecarConnection, StdioSidecarConnection,
+    CONTENT_MANIFEST_FILE, EphemeralCommandConnection, InterpreterLaunch, ProcessSidecarConnection,
+    SidecarConfig, SidecarConnection, StdioSidecarConnection,
 };
 use crate::signature::{SignedPluginRelease, verify_signed_release};
 use crate::ts_plugin::TsPluginAdapter;
@@ -33,9 +33,18 @@ static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock
 /// 扫描发现但被忽略的无效插件（签名无效、沙箱越权、清单损坏）。
 /// 随 `preload_installed_plugins` 全量刷新，供插件管理列表展示和清理。
 static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new();
-static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>>> =
-    OnceLock::new();
+static SIDECAR_CONNECTIONS: OnceLock<
+    Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>,
+> = OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
+
+/// 按需启动 sidecar 的沙箱策略在进程启动后不可扩权，因此连接缓存必须
+/// 同时按安装目录和会话工作区区分，不能让默认连接遮蔽当前对话的可写域。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SidecarConnectionKey {
+    directory: PathBuf,
+    workspace: Option<PathBuf>,
+}
 
 /// 全局 server 连接信息（可覆盖更新），供需要回调 host 的 sidecar 使用。
 ///
@@ -314,8 +323,22 @@ fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<dyn SidecarConnection>>> {
+fn sidecar_connections() -> &'static Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>
+{
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 当前用户全局沙箱开关。tiangong-config 注册表是唯一真相源；
+/// 页面直调 terminal 与工具调用均在每次 spawn 时读取，配置未初始化时
+/// 按开启处理（disabled=false，fail-safe）。
+pub fn sandbox_disabled() -> bool {
+    tiangong_config::registry::try_sandbox_disabled().unwrap_or(false)
+}
+
+/// 用户切换沙箱设置后停止现有按需进程。配置值已由调用方写入唯一真相源；
+/// 下一次 terminal/command/解释器/按需插件调用会自主读取并按新状态重建。
+pub fn on_sandbox_setting_changed() {
+    restart_on_demand_sidecars_for_sandbox_switch();
 }
 
 /// 宿主退出时逐个停止所有已启动的 sidecar。
@@ -344,6 +367,44 @@ pub fn shutdown_all_sidecars() {
         }
     }
     tracing::info!(total, stopped, "sidecar 关闭完成");
+}
+
+/// 用户切换全局沙箱开关后，停止所有首次实际使用才启动的 sidecar。
+///
+/// OS 沙箱在进程创建时固化，运行中不能原地添加或移除。这里终止当前
+/// terminal/command/解释器/按需插件进程并保留连接对象；下一次调用由
+/// `spawn` 读取最新开关重建。随 App 预加载的常驻服务不受影响。
+fn restart_on_demand_sidecars_for_sandbox_switch() {
+    let on_demand_ids = loaded_plugins()
+        .lock()
+        .map(|plugins| {
+            plugins
+                .iter()
+                .filter(|(_, loaded)| !loaded.manifest.should_preload_sidecar())
+                .map(|(id, _)| id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    if on_demand_ids.is_empty() {
+        return;
+    }
+    let connections = sidecar_connections()
+        .lock()
+        .map(|connections| {
+            connections
+                .values()
+                .filter(|connection| on_demand_ids.contains(connection.plugin_id()))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for connection in &connections {
+        connection.cancel_current();
+    }
+    tracing::info!(
+        sidecars = connections.len(),
+        "沙箱开关已切换：按需 sidecar 当前进程已停止，后续调用将按新策略重建"
+    );
 }
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
@@ -602,10 +663,10 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
-    // Command sidecar 等 Core 汇总 exec_env 后再首次启动；其他常驻 sidecar
-    //（如 scheduler）继续在预加载/热加载阶段启动。
+    // 仅预热原生常驻 sidecar。解释器即使脚本声明常驻，也等首次实际
+    // 使用时才启动；command 继续由每次调用的独立连接承载。
     if installed.enabled
-        && installed.manifest.id != "command"
+        && installed.manifest.should_preload_sidecar()
         && let Some(connection) = &sidecar
     {
         connection.ensure_running()?;
@@ -691,11 +752,31 @@ pub fn invoke_sidecar(
     operation: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
+    invoke_sidecar_with_workspace(storage_root, plugin_id, operation, payload, None)
+}
+
+/// 使用宿主权威会话工作区调用 sidecar。
+///
+/// `workspace` 独立于插件业务负载，不能由 payload 中的 `cwd` 或全局活跃
+/// 工作区替代。按需启动的连接按规范化后的工作区隔离，避免不同会话串用权限；
+/// 随应用预热并持续运行的连接仍使用原有通用可写域。
+pub fn invoke_sidecar_with_workspace(
+    storage_root: &Path,
+    plugin_id: &str,
+    operation: &str,
+    payload: serde_json::Value,
+    workspace: Option<&Path>,
+) -> Result<serde_json::Value> {
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if !installed.enabled {
         bail!("插件 {plugin_id} 已停用");
     }
-    let connection = sidecar_connection(storage_root, &installed, false)?;
+    let workspace = if installed.manifest.should_preload_sidecar() {
+        None
+    } else {
+        workspace
+    };
+    let connection = sidecar_connection_with_workspace(storage_root, &installed, false, workspace)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
     let response = connection.invoke(operation, &payload)?;
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
@@ -831,6 +912,34 @@ mod tests {
             hint: String::new(),
             mark: String::new(),
         }
+    }
+
+    #[test]
+    fn 插件发现忽略内部事务目录并拒绝目录名与清单id不一致() {
+        let root = tempfile::tempdir().unwrap();
+        let plugins = root.path().join("plugins");
+        for (directory, id) in [
+            ("demo", "demo"),
+            (".demo-staging-123", "demo"),
+            ("wrong-directory", "other"),
+        ] {
+            let path = plugins.join(directory);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join(MANIFEST_FILE),
+                format!(
+                    r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"test"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let (installed, invalid) = discover_installed_plugins(root.path());
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].manifest.id, "demo");
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].id, "wrong-directory");
+        assert!(invalid[0].reason.contains("目录名"));
     }
 
     #[test]
@@ -1301,7 +1410,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         Err(error) => (None, Some(error.to_string())),
     };
     if installed.enabled
-        && installed.manifest.id != "command"
+        && installed.manifest.should_preload_sidecar()
         && let Some(connection) = &sidecar
         && let Err(error) = connection.ensure_running()
     {
@@ -1668,6 +1777,27 @@ fn install_staged_plugin_inner(
     status
 }
 
+/// Launcher 就绪后的常驻 sidecar 补预热：启动期 Launcher 未就绪时预热
+/// 失败的插件在此重试。幂等（连接缓存命中即返回）；单个插件失败不阻断
+/// 其余插件。范围与启动期预热一致（should_preload_sidecar：原生常驻、
+/// 非 terminal/command、不含未使用的解释器）。
+pub fn prewarm_resident_sidecars(storage_root: &Path) {
+    let targets: Vec<String> = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        plugins
+            .values()
+            .filter(|loaded| loaded.enabled)
+            .filter(|loaded| loaded.manifest.should_preload_sidecar())
+            .map(|loaded| loaded.manifest.id.clone())
+            .collect()
+    };
+    for plugin_id in targets {
+        prewarm_plugin_sidecar(storage_root, &plugin_id);
+    }
+}
+
 /// 后台预热插件 sidecar：拉起进程并完成握手（幂等，已运行则即时返回）。
 /// 失败不影响使用——首个业务调用会按原路径重试启动。
 pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
@@ -1679,7 +1809,7 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
             let Ok(installed) = find_installed_plugin(&storage_root, &plugin_id) else {
                 return;
             };
-            if !installed.enabled || installed.manifest.sidecar.is_none() {
+            if !installed.enabled || !installed.manifest.should_preload_sidecar() {
                 return;
             }
             match sidecar_connection(&storage_root, &installed, false)
@@ -1754,7 +1884,7 @@ pub fn set_plugin_enabled(
         }
     } else {
         create_disabled_marker(&marker)?;
-        let (instances, ts_instances, sidecar) = {
+        let (instances, ts_instances) = {
             let mut plugins = loaded_plugins()
                 .lock()
                 .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
@@ -1773,7 +1903,7 @@ pub fn set_plugin_enabled(
                 .iter()
                 .filter_map(Weak::upgrade)
                 .collect::<Vec<_>>();
-            (instances, ts_instances, loaded.sidecar.clone())
+            (instances, ts_instances)
         };
         for adapter in &instances {
             adapter.set_enabled(false);
@@ -1783,9 +1913,7 @@ pub fn set_plugin_enabled(
         }
         crate::ts_tools::cancel_plugin_calls(plugin_id);
         crate::bridge::clear_plugin_subscriptions(plugin_id);
-        if let Some(connection) = sidecar
-            && let Err(error) = connection.stop()
-        {
+        if let Err(error) = stop_connection_for_directory(&installed.directory) {
             for adapter in &instances {
                 adapter.set_enabled(true);
             }
@@ -2439,12 +2567,14 @@ fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
 }
 
 fn stop_connection_for_directory(directory: &Path) -> Result<()> {
-    let connection = sidecar_connections()
+    let connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?
-        .get(directory)
-        .cloned();
-    if let Some(connection) = connection {
+        .iter()
+        .filter(|(key, _)| key.directory == directory)
+        .map(|(_, connection)| connection.clone())
+        .collect::<Vec<_>>();
+    for connection in connections {
         connection.stop()?;
     }
     remove_sidecar_connection(directory);
@@ -2520,7 +2650,7 @@ fn unload_plugin_wasm(plugin_id: &str) {
 
 fn remove_sidecar_connection(directory: &Path) {
     if let Ok(mut connections) = sidecar_connections().lock() {
-        connections.remove(directory);
+        connections.retain(|key, _| key.directory != directory);
     }
 }
 
@@ -2537,7 +2667,12 @@ fn discover_installed_plugins(
     };
     let mut manifest_paths = entries
         .filter_map(Result::ok)
-        .map(|entry| entry.path().join(MANIFEST_FILE))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            // `.transactions`、`.rollback` 与旧版 `.id-staging-*` 都是内部
+            // 事务目录，即使包含完整 manifest 也绝不是有效安装目录。
+            (!name.to_string_lossy().starts_with('.')).then(|| entry.path().join(MANIFEST_FILE))
+        })
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
     manifest_paths.sort();
@@ -2554,6 +2689,18 @@ fn discover_installed_plugins(
             .unwrap_or_default();
         match PluginManifest::load(&path) {
             Ok(manifest) => {
+                if manifest.id != directory_name {
+                    invalid_plugins.push(InvalidPluginEntry {
+                        id: directory_name.clone(),
+                        name: manifest.id.clone(),
+                        manifest_version: Some(manifest.version.clone()),
+                        reason: format!(
+                            "插件目录名 {directory_name} 与清单 ID {} 不一致",
+                            manifest.id
+                        ),
+                    });
+                    continue;
+                }
                 let signed_release = match verify_signed_release(&directory, &manifest) {
                     Ok(value) => value,
                     Err(error) => {
@@ -2659,17 +2806,46 @@ pub(crate) fn sidecar_connection(
     installed: &InstalledPlugin,
     refresh: bool,
 ) -> Result<Arc<dyn SidecarConnection>> {
-    sidecar_connection_inner(storage_root, installed, refresh, false)
+    sidecar_connection_inner(storage_root, installed, refresh, false, None)
+}
+
+/// 带宿主权威会话工作区的连接构造。
+pub(crate) fn sidecar_connection_with_workspace(
+    storage_root: &Path,
+    installed: &InstalledPlugin,
+    refresh: bool,
+    session_workspace: Option<&Path>,
+) -> Result<Arc<dyn SidecarConnection>> {
+    let session_workspace = session_workspace
+        .map(canonicalize_session_workspace)
+        .transpose()?;
+    sidecar_connection_inner(storage_root, installed, refresh, false, session_workspace)
+}
+
+fn canonicalize_session_workspace(workspace: &Path) -> Result<PathBuf> {
+    if !workspace.is_absolute() {
+        bail!("当前会话工作区必须是绝对路径: {}", workspace.display());
+    }
+    let workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("解析当前会话工作区失败: {}", workspace.display()))?;
+    if !workspace.is_dir() {
+        bail!("当前会话工作区不是目录: {}", workspace.display());
+    }
+    Ok(workspace)
 }
 
 /// 临时连接（按需直连的并发隔离用）：走同样的启动门槛与配置构造，但不
 /// 进入共享连接表——连接及其进程完全归属发起本次调用的执行方，超时/取消
 /// 只影响自己，并发调用互不可见。
-pub(crate) fn ephemeral_sidecar_connection(
+pub(crate) fn ephemeral_sidecar_connection_with_workspace(
     storage_root: &Path,
     installed: &InstalledPlugin,
+    session_workspace: Option<&Path>,
 ) -> Result<Arc<dyn SidecarConnection>> {
-    sidecar_connection_inner(storage_root, installed, false, true)
+    let session_workspace = session_workspace
+        .map(canonicalize_session_workspace)
+        .transpose()?;
+    sidecar_connection_inner(storage_root, installed, false, true, session_workspace)
 }
 
 fn sidecar_connection_inner(
@@ -2677,6 +2853,7 @@ fn sidecar_connection_inner(
     installed: &InstalledPlugin,
     refresh: bool,
     ephemeral: bool,
+    session_workspace: Option<PathBuf>,
 ) -> Result<Arc<dyn SidecarConnection>> {
     let sidecar = installed
         .manifest
@@ -2714,11 +2891,28 @@ fn sidecar_connection_inner(
             None
         }
     };
+    if signed_release.is_some_and(|release| !release.has_permission("sidecar.invoke")) {
+        bail!("插件 {} 的签名未授权 sidecar.invoke", installed.manifest.id);
+    }
     if !installed.manifest.permissions.is_empty()
         && !installed.manifest.has_permission("sidecar.invoke")
     {
         bail!("插件 {} 未声明 sidecar.invoke 权限", installed.manifest.id);
     }
+    // 沙箱策略由宿主权威策略表决定（RFC 0017 透明执行封套）：
+    // 不读 manifest 的 sandbox / sandbox_network（插件自声明是提权通道）。
+    let official_signed =
+        signed_release.is_some_and(|release| release.publisher == crate::trust::OFFICIAL_PUBLISHER);
+    if installed.manifest.id == "command" && !official_signed {
+        bail!("command 插件必须由官方发布者签名");
+    }
+    let host_policy = crate::host_policy::resolve(&installed.manifest.id, official_signed);
+    // 用户全局沙箱开关只控制首次实际使用才启动的 sidecar：terminal、
+    // command、解释器和清单声明的按需插件。随 App 启动的预加载常驻服务
+    // 继续执行宿主强制沙箱；配置读取失败按开启处理（fail-safe）。
+    let follows_user_sandbox_switch = !installed.manifest.should_preload_sidecar();
+    let use_stdio = interpreter.is_some()
+        || host_policy.transport == crate::host_policy::SidecarTransport::Stdio;
 
     // native：插件目录内可执行文件（补平台后缀）；解释器：宿主白名单程序 + 入口。
     let binary = match interpreter.as_ref() {
@@ -2753,12 +2947,36 @@ fn sidecar_connection_inner(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
     )
-    .with_server_endpoint(server_url, server_token);
+    .with_server_endpoint(server_url, server_token)
+    .with_sandbox(host_policy.sandbox)
+    .with_sandbox_user_switch(follows_user_sandbox_switch)
+    .with_sandbox_program_root(Some(installed.directory.clone()))
+    .with_sandbox_network(host_policy.allow_network)
+    .with_user_credential_reads(host_policy.user_credential_reads)
+    .with_sandbox_user_cache_write(host_policy.allow_user_cache_write)
+    .with_sandbox_user_policy(&tiangong_config::registry::try_sandbox_policy());
+    // 统一写域：宿主会话工作区 + 存储根（敏感清单双禁由传输层施加）。
+    // 没有会话上下文的全局调用才使用应用默认工作区；带会话上下文时
+    // 不采信插件 payload，也不允许默认工作区覆盖当前对话。
+    if host_policy.sandbox {
+        let workspace = session_workspace.or_else(|| {
+            let configured = tiangong_config::registry::config().workspace_dir.clone();
+            let path = PathBuf::from(configured);
+            path.is_dir()
+                .then(|| std::fs::canonicalize(&path).unwrap_or(path))
+        });
+        if let Some(workspace) = workspace {
+            config = config.with_sandbox_workspace(Some(workspace));
+        }
+    }
     if let Some(signed_release) = signed_release {
-        config = config.with_sensitive_storage(
-            signed_release.has_permission("model-config.read")
-                || signed_release.has_permission("app-storage.read"),
-        );
+        // 最小权限：逐文件按已验签权限开放读取；未授权项保持禁读。
+        config = config.with_sensitive_storage(crate::sidecar::SensitiveStorageAccess {
+            model_config: signed_release.has_permission("model-config.read"),
+            mcp_config: installed.manifest.id == "mcp",
+            server_config: signed_release.has_permission("app-storage.read"),
+            app_config: false,
+        });
     }
     if let Some(launch) = interpreter {
         // 本地信任解释器 sidecar：spawn 前按内容清单复核文件树，防安装后篡改。
@@ -2766,29 +2984,41 @@ fn sidecar_connection_inner(
             .with_interpreter(launch)
             .with_integrity_manifest(installed.directory.join(CONTENT_MANIFEST_FILE));
     }
-    config = config.with_lifecycle(sidecar.lifecycle);
+    config = config.with_lifecycle(installed.manifest.sidecar_lifecycle());
 
     if ephemeral {
-        return Ok(match config.interpreter.as_ref() {
-            Some(_) => Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>,
-            None => Arc::new(ProcessSidecarConnection::new(config)),
+        return Ok(if installed.manifest.id == "command" {
+            Arc::new(EphemeralCommandConnection::new(config)) as Arc<dyn SidecarConnection>
+        } else if use_stdio {
+            Arc::new(StdioSidecarConnection::new(config)) as Arc<dyn SidecarConnection>
+        } else {
+            Arc::new(ProcessSidecarConnection::new(config))
         });
     }
+    let connection_key = SidecarConnectionKey {
+        directory: installed.directory.clone(),
+        workspace: config.sandbox_workspace.clone(),
+    };
     let mut connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?;
-    if refresh || !connections.contains_key(&installed.directory) {
-        // 通道由宿主决定：解释器 sidecar 只开放 stdio（无监听端口、生命周期与宿主
-        // 绑定）；native 保持存量 TCP。
-        let connection: Arc<dyn SidecarConnection> = if config.interpreter.is_some() {
+    if refresh {
+        connections.retain(|key, _| key.directory != installed.directory);
+    }
+    if !connections.contains_key(&connection_key) {
+        // 通信通道由宿主策略表权威决定（插件不声明）：spawn 时注入的
+        // 环境变量即通道选择，sidecar 通用库自动适配。
+        let connection: Arc<dyn SidecarConnection> = if installed.manifest.id == "command" {
+            Arc::new(EphemeralCommandConnection::new(config))
+        } else if use_stdio {
             Arc::new(StdioSidecarConnection::new(config))
         } else {
             Arc::new(ProcessSidecarConnection::new(config))
         };
-        connections.insert(installed.directory.clone(), connection);
+        connections.insert(connection_key.clone(), connection);
     }
     connections
-        .get(&installed.directory)
+        .get(&connection_key)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("创建插件 sidecar 连接失败"))
 }

@@ -385,7 +385,10 @@ fn handle_search_code_blocking(
         }
     };
 
-    let timeout_ms = shared::command_timeout_ms();
+    let timeout_ms = std::env::var("TOOL_COMMAND_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(30_000);
     let target_text = full_path.display().to_string();
     let rg_result = shared::execute_command_with_timeout(
         Command::new("rg")

@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 fn workspace_target_dist() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugin-dist")
 }
+
 fn plugin_creator_version() -> String {
     let manifest: serde_json::Value = serde_json::from_str(include_str!(
         "../../../plugins/tiangong-plugin-creator/plugin.json"
@@ -101,6 +102,8 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
     rewrite_oss_urls(&dist_copy.path().join("plugins-index/catalog.json"), port);
 
     let storage = tempfile::tempdir().unwrap();
+    tiangong_plugin_runtime::test_support::ensure_test_launcher_signed(storage.path())
+        .expect("准备 E2E 测试 Launcher");
     tiangong_config::registry::init_from_dir(&storage.path().join("config"));
 
     let previous_catalog = std::env::var("TIANGONG_PLUGIN_CATALOG_URL").ok();
@@ -190,7 +193,16 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
                     "devkit.validate",
                     serde_json::json!({"args": ["nonexistent"], "root": "/tmp/catalog-install-dev"}),
                 )
-                .expect("三方签名插件 sidecar 调用");
+                .unwrap_or_else(|error| {
+                    let log = storage
+                        .path()
+                        .join("plugins/plugin-creator/logs/sidecar.log");
+                    let log_tail = std::fs::read_to_string(&log).unwrap_or_else(|read_error| {
+                        format!("读取 {} 失败: {read_error}", log.display())
+                    });
+                    panic!("三方签名插件 sidecar 调用: {error:#}; sidecar 日志:
+{log_tail}")
+                });
                 assert_eq!(
                     response["ok"],
                     serde_json::json!(false),

@@ -63,6 +63,16 @@ pub fn custom_prompt_path() -> PathBuf {
 struct AppConfigFile<'a> {
     default_trust_mode: TrustMode,
     workspace_dir: &'a str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    sandbox_disabled: bool,
+    #[serde(default, skip_serializing_if = "sandbox_policy_is_default")]
+    sandbox_policy: &'a crate::config::SandboxUserPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_env_blocklist: &'a Vec<String>,
+}
+
+fn sandbox_policy_is_default(value: &&crate::config::SandboxUserPolicy) -> bool {
+    **value == crate::config::SandboxUserPolicy::default()
 }
 
 /// 保存应用长期配置到 `app.json`。
@@ -73,6 +83,9 @@ pub fn save_app_config_at(
     dir: &Path,
     default_trust_mode: TrustMode,
     workspace_dir: &str,
+    sandbox_disabled: bool,
+    sandbox_policy: &crate::config::SandboxUserPolicy,
+    command_env_blocklist: &Vec<String>,
 ) -> Result<()> {
     let path = dir.join("app.json");
     if let Some(parent) = path.parent() {
@@ -82,6 +95,9 @@ pub fn save_app_config_at(
     let content = serde_json::to_string_pretty(&AppConfigFile {
         default_trust_mode,
         workspace_dir,
+        sandbox_disabled,
+        sandbox_policy,
+        command_env_blocklist,
     })
     .context("序列化应用配置失败")?;
     std::fs::write(&path, content)
@@ -294,6 +310,65 @@ mod tests {
     use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
+
+    /// 按需进程沙箱开关持久化：关闭状态写入 app.json 并能读回；
+    /// 默认开启时序列化省略该字段（旧版文件兼容）。
+    #[test]
+    fn app_config_roundtrips_sandbox_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            true,
+            &crate::config::SandboxUserPolicy::default(),
+            &vec!["MY_SECRET_TOKEN".to_string()],
+        )
+        .unwrap();
+        assert!(crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+        assert_eq!(
+            crate::loader::load_tiangong_config_from_dir(dir.path()).command_env_blocklist,
+            vec!["MY_SECRET_TOKEN".to_string()]
+        );
+
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            false,
+            &crate::config::SandboxUserPolicy::default(),
+            &Vec::new(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("app.json")).unwrap();
+        assert!(
+            !raw.contains("sandbox_disabled"),
+            "默认开启时不应写入字段: {raw}"
+        );
+        assert!(!crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_disabled);
+    }
+
+    #[test]
+    fn app_config_roundtrips_user_sandbox_policy_without_restricting_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = crate::config::SandboxUserPolicy {
+            directory_allowlist: vec!["/".to_string()],
+            environment_blocklist: vec!["SECRET".to_string()],
+        };
+        save_app_config_at(
+            dir.path(),
+            TrustMode::default(),
+            dir.path().to_str().unwrap(),
+            false,
+            &policy,
+            &Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::loader::load_tiangong_config_from_dir(dir.path()).sandbox_policy,
+            policy
+        );
+    }
 
     /// save_models_config_at 应把 routing 中未注册到 models 的条目自动补入 models。
     #[test]

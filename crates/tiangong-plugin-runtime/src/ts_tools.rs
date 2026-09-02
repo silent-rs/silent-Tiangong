@@ -16,8 +16,8 @@ use tiangong_core::tool::ToolResult;
 
 const MAX_RESULT_FIELD_BYTES: usize = 2_000_000;
 
-/// 每插件拉起请求冷却表：UI 挂载并完成订阅通常在秒级，冷却期内不重复
-/// 请求，避免同一 turn 连续工具调用触发反复弹面板。
+/// 每插件、每会话拉起请求冷却表：工具订阅是插件级全局信号，但实际
+/// 处理实例按会话过滤，因此不同会话必须各自确保执行壳已挂载。
 static UI_LAUNCH_LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 const UI_LAUNCH_COOLDOWN: Duration = Duration::from_secs(3);
 
@@ -32,13 +32,14 @@ fn request_plugin_ui(plugin_id: &str, session_id: &str) {
         return;
     };
     let now = Instant::now();
+    let cooldown_key = format!("{plugin_id}\0{session_id}");
     if last_by_plugin
-        .get(plugin_id)
+        .get(&cooldown_key)
         .is_some_and(|last| now.duration_since(*last) < UI_LAUNCH_COOLDOWN)
     {
         return;
     }
-    last_by_plugin.insert(plugin_id.to_string(), now);
+    last_by_plugin.insert(cooldown_key, now);
     drop(last_by_plugin);
     let payload = serde_json::json!({ "session_id": session_id, "mode": "background" }).to_string();
     match crate::bridge::open_app_for_plugin(plugin_id, &payload) {
@@ -175,27 +176,27 @@ pub async fn execute(
         subscribed,
         "TS 工具等待接应（无订阅者时请求后台挂载插件实例）"
     );
-    if !subscribed {
-        // 既无界面可接应、又无 sidecar 可直连（直连在适配器层已分派，走到
-        // 这里说明插件有页面路径）：立即明确失败，不傻等超时。
-        let has_ui = crate::registry::plugin_manifest(&plugin_id).is_some_and(|manifest| {
-            manifest
-                .ui_contributions()
-                .iter()
-                .any(|contribution| contribution.slot == "extension.tab")
-        });
-        if !has_ui {
-            let _ = pending_calls()
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.remove(&invocation_id));
-            emit_closed(&plugin_id, &invocation_id, TsToolCloseStatus::Cancelled);
-            return failure_result(format!(
-                "插件 {plugin_id} 的工具 {} 无接应：插件未声明 extension.tab 界面，\
-                 也没有可供直连的 sidecar；请补齐界面贡献或 sidecar 声明",
-                invocation.name
-            ));
-        }
+    // 全局已有订阅者不代表本会话已有匹配实例。始终按「插件 + 会话」
+    // 请求执行壳，前端会对同会话实例去重；挂载后的订阅重放本调用。
+    let has_ui = crate::registry::plugin_manifest(&plugin_id).is_some_and(|manifest| {
+        manifest
+            .ui_contributions()
+            .iter()
+            .any(|contribution| contribution.slot == "extension.tab")
+    });
+    if !has_ui && !subscribed {
+        let _ = pending_calls()
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&invocation_id));
+        emit_closed(&plugin_id, &invocation_id, TsToolCloseStatus::Cancelled);
+        return failure_result(format!(
+            "插件 {plugin_id} 的工具 {} 无接应：插件未声明 extension.tab 界面，\
+             也没有可供直连的 sidecar；请补齐界面贡献或 sidecar 声明",
+            invocation.name
+        ));
+    }
+    if has_ui {
         request_plugin_ui(&plugin_id, &session_id);
     }
 
