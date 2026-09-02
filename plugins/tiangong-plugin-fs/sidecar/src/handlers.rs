@@ -45,9 +45,7 @@ pub fn handle_list_dir(req: ListDirRequest, policy: &dyn PathPolicy) -> FsToolRe
         let base = base_of(&req.access)?;
         let path = req.path.as_deref().unwrap_or(".");
         let full_path = policy.resolve_read(path, &base)?;
-        if !full_path.is_dir() {
-            return Err(anyhow!("目标不是目录：{}", full_path.display()));
-        }
+        ensure_dir_target(&full_path)?;
         let mut items = Vec::new();
         for entry in fs::read_dir(&full_path)
             .with_context(|| format!("读取目录失败：{}", full_path.display()))?
@@ -84,9 +82,7 @@ pub fn handle_tree_dir(req: TreeDirRequest, policy: &dyn PathPolicy) -> FsToolRe
             req.max_depth.min(MAX_TREE_MAX_DEPTH)
         };
         let full_path = policy.resolve_read(path, &base)?;
-        if !full_path.is_dir() {
-            return Err(anyhow!("目标不是目录：{}", full_path.display()));
-        }
+        ensure_dir_target(&full_path)?;
         let rel = shared::display_rel_path_with(&full_path, &base);
         let mut lines = vec![if rel == "." {
             "./".to_string()
@@ -428,6 +424,19 @@ fn finalize_write(
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────
+
+/// 目录类读工具的目标判定：区分目录不存在 / 目标不是目录 / 无法访问
+/// （信任模式解析对不存在路径静默放行，不能依赖单一 is_dir 判定）。
+fn ensure_dir_target(full_path: &Path) -> Result<()> {
+    match fs::metadata(full_path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(anyhow!("目标不是目录：{}", full_path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(anyhow!("目录不存在：{}", full_path.display()))
+        }
+        Err(e) => Err(anyhow!("无法访问目标目录：{}（{e}）", full_path.display())),
+    }
+}
 
 fn error_response(tool: &str, e: anyhow::Error) -> FsToolResponse {
     let summary = format!("{tool} 失败：{e}");
@@ -802,6 +811,47 @@ mod tests {
             workspace: Some(root.to_string_lossy().into_owned()),
             full_trust: false,
         }
+    }
+
+    #[test]
+    fn list_dir_missing_path_reports_not_found() {
+        let root = tempfile::tempdir().unwrap();
+
+        let response = handle_list_dir(
+            ListDirRequest {
+                path: Some("docs".to_string()),
+                access: access(root.path()),
+            },
+            &TrustModePathPolicy::new(true),
+        );
+
+        assert!(!response.ok);
+        assert!(
+            response.stderr.contains("目录不存在"),
+            "stderr={}",
+            response.stderr
+        );
+    }
+
+    #[test]
+    fn list_dir_file_target_reports_not_dir() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
+
+        let response = handle_list_dir(
+            ListDirRequest {
+                path: Some("README.md".to_string()),
+                access: access(root.path()),
+            },
+            &TrustModePathPolicy::new(true),
+        );
+
+        assert!(!response.ok);
+        assert!(
+            response.stderr.contains("目标不是目录"),
+            "stderr={}",
+            response.stderr
+        );
     }
 
     #[test]
