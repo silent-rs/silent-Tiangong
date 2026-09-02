@@ -2149,6 +2149,16 @@ mod tests {
         assert_eq!(first["ok"], true, "首次执行结果: {first}");
         assert_eq!(first["exit_code"], 0);
         assert_eq!(first["stdout"], "marker.txt");
+        // 权威 cwd 生效：命令在宿主注入的会话工作目录执行（shell 回显的
+        // 目录即传入的工作目录——逻辑路径原样，不做物理化）。
+        assert!(
+            first["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&workspace),
+            "summary 应体现权威工作目录: {}",
+            first["summary"]
+        );
         let terminal = first["summary"]
             .as_str()
             .and_then(|summary| {
@@ -2160,6 +2170,10 @@ mod tests {
             .expect("summary 应含终端编号")
             .to_string();
         assert!(!terminal.is_empty());
+        assert!(
+            terminal.starts_with("tty-"),
+            "自动创建的终端编号应带 tty- 前缀: {terminal}"
+        );
 
         let second = outcome_of(
             service
@@ -2178,6 +2192,125 @@ mod tests {
                 .contains("复用空闲终端"),
             "第二次应复用空闲终端: {}",
             second["summary"]
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_send_同会话输入送达并返回画面() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        let first = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["ready"]}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(first["ok"], true);
+        let terminal = first["summary"]
+            .as_str()
+            .and_then(|summary| {
+                summary
+                    .split("终端 ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('（').next())
+            })
+            .expect("summary 应含终端编号")
+            .to_string();
+
+        // 命令结束后 shell 回到提示符：向该终端发送新命令，输入应送达
+        // 且返回内容包含命令回显与输出（视图在线走画面快照，离线走
+        // 原始输出回显——测试无视图，验证回显路径）。
+        let sent = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_send",
+                    serde_json::json!({
+                        "terminal_id": terminal,
+                        "input": "echo sent-ok\r",
+                        "wait": 3,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(sent["ok"], true, "terminal_send 结果: {sent}");
+        assert!(
+            sent["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sent-ok"),
+            "回显应包含发送的命令输出: {}",
+            sent["stdout"]
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_open后的唯一编号可继续交互() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        let opened = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_open",
+                    serde_json::json!({}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(opened["ok"], true, "terminal_open 结果: {opened}");
+        let terminal = opened["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches("已打开终端 ")
+            .to_string();
+        assert!(
+            terminal.starts_with("terminal-"),
+            "terminal_open 应返回独立编号: {terminal}"
+        );
+
+        // 空闲终端建立后即可按编号发送输入（用户面板的等价路径）。
+        let sent = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_send",
+                    serde_json::json!({
+                        "terminal_id": terminal,
+                        "input": "echo opened\r",
+                        "wait": 3,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(sent["ok"], true, "send 结果: {sent}");
+        assert!(
+            sent["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("opened"),
+            "回显应包含输出: {}",
+            sent["stdout"]
         );
 
         service
