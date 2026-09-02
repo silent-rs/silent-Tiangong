@@ -3643,13 +3643,16 @@ pub async fn get_server_config(state: State<'_, TiangongApp>) -> Result<ServerCo
     let config = state
         .with_state_read(|core_state| Ok(core_state.config.server.clone()))
         .await?;
-    let running = state.is_embedded_server_running() || is_server_running(&config);
+    let running = server_health_check(&config);
+    let status = server_status_name(config.enabled, running).to_string();
     let auth_token_masked = config.masked_auth_token();
     Ok(ServerConfigView {
         host: config.host,
         port: config.port,
         auth_token_masked,
+        enabled: config.enabled,
         running,
+        status,
     })
 }
 
@@ -3680,32 +3683,31 @@ pub async fn set_server_config(
 /// 启动嵌入式 Server（Desktop 模式下 Server 运行在 app 进程内）
 #[tauri::command]
 pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, String> {
-    let config = state
+    start_embedded_server_with_intent(state.inner()).await
+}
+
+/// 保存持续开启意图并启动 Desktop 嵌入式 Server。
+///
+/// 开启意图先落盘；启动失败时保留该意图，使托盘和设置页显示异常状态，
+/// 且下次 App 启动仍会继续尝试恢复。
+pub async fn start_embedded_server_with_intent(state: &TiangongApp) -> Result<String, String> {
+    let mut config = state
         .with_state_read(|core_state| Ok(core_state.config.server.clone()))
         .await?;
-
-    // 优先检查嵌入式 server 是否已运行
-    if state.is_embedded_server_running() {
-        return Ok("Server 已在运行（嵌入式）".to_string());
+    if !config.enabled {
+        config.enabled = true;
+        save_server_config_to_state(state, config.clone()).await?;
     }
 
-    // 检查是否有外部 server 进程占用端口
     if server_health_check(&config) {
-        return Ok("Server 已在运行（外部进程）".to_string());
+        return Ok("Server 已在运行".to_string());
+    }
+    if state.is_embedded_server_running() {
+        let _ = state.stop_embedded_server();
     }
 
     state.start_embedded_server(&config.host, config.port, config.auth_token.clone())?;
-
-    // 等待健康检查通过
-    if let Err(err) = wait_for_server_health(&config).await {
-        let _ = state.stop_embedded_server();
-        return Err(err);
-    }
-
-    // 持久化 enabled 标记，重启后自动拉起
-    let mut config = config;
-    config.enabled = true;
-    if let Err(error) = save_server_config_to_state(state.inner(), config.clone()).await {
+    if let Err(error) = wait_for_server_health(&config).await {
         let _ = state.stop_embedded_server();
         return Err(error);
     }
@@ -3713,9 +3715,25 @@ pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, Strin
     Ok(format!("Server 已启动：{}:{}", config.host, config.port))
 }
 
+/// App 启动时恢复上次保持开启的嵌入式 Server。
+pub async fn restore_embedded_server(state: &TiangongApp) -> Result<Option<String>, String> {
+    let enabled = state
+        .with_state_read(|core_state| Ok(core_state.config.server.enabled))
+        .await?;
+    if !enabled {
+        return Ok(None);
+    }
+    start_embedded_server_with_intent(state).await.map(Some)
+}
+
 /// 停止 Server
 #[tauri::command]
 pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String> {
+    stop_server_with_intent(state.inner()).await
+}
+
+/// 停止服务并清除持续开启意图；异常状态下没有存活服务时也可正常关闭。
+pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, String> {
     let config = state
         .with_state_read(|core_state| Ok(core_state.config.server.clone()))
         .await?;
@@ -3727,7 +3745,7 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
         // 持久化 enabled 标记
         let mut config = config;
         config.enabled = false;
-        save_server_config_to_state(state.inner(), config).await?;
+        save_server_config_to_state(state, config).await?;
 
         return Ok("Server 已停止".to_string());
     }
@@ -3737,7 +3755,10 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     let running_by_pid = server_pid_alive();
     if !running_by_health && !running_by_pid {
         cleanup_dead_server_pid();
-        return Ok("Server 未运行".to_string());
+        let mut config = config;
+        config.enabled = false;
+        save_server_config_to_state(state, config).await?;
+        return Ok("Server 已关闭".to_string());
     }
     if running_by_health && !running_by_pid {
         cleanup_dead_server_pid();
@@ -3749,7 +3770,7 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     // 持久化 enabled 标记
     let mut config = config;
     config.enabled = false;
-    save_server_config_to_state(state.inner(), config).await?;
+    save_server_config_to_state(state, config).await?;
 
     Ok("Server 已停止".to_string())
 }
@@ -3815,6 +3836,17 @@ pub fn bot_server_env(
     config: &tiangong_server::config::ServerConfig,
 ) -> std::collections::BTreeMap<String, String> {
     tiangong_bots::server_env(&config.host, config.port, config.auth_token.clone())
+}
+
+/// 将持续开启意图与实时健康状态归一化为展示状态。
+pub fn server_status_name(enabled: bool, running: bool) -> &'static str {
+    if running {
+        "running"
+    } else if enabled {
+        "error"
+    } else {
+        "stopped"
+    }
 }
 
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。

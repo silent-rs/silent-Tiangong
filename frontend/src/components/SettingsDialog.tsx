@@ -1484,7 +1484,9 @@ function ServerConfigPanel() {
     host: '127.0.0.1',
     port: 8080,
     auth_token_masked: '',
+    enabled: false,
     running: false,
+    status: 'stopped',
   });
   const [editHost, setEditHost] = useState('');
   const [editPort, setEditPort] = useState('8080');
@@ -1590,14 +1592,16 @@ function ServerConfigPanel() {
           <div className="flex items-center justify-between gap-3 mb-4">
             <div className="flex items-center gap-2">
               <span className="text-sm text-muted-foreground">状态：</span>
-              <Badge variant={config.running ? 'default' : 'secondary'}>
-                {config.running ? '运行中' : '未运行'}
+              <Badge
+                variant={config.status === 'error' ? 'destructive' : config.running ? 'default' : 'secondary'}
+              >
+                {config.status === 'error' ? '运行异常' : config.running ? '运行中' : '未运行'}
               </Badge>
             </div>
             <div className="flex items-center gap-2">
               {isToggling && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
               <Switch
-                checked={config.running}
+                checked={config.enabled}
                 disabled={isSaving || isToggling}
                 onCheckedChange={handleToggleServer}
               />
