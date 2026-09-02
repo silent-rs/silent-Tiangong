@@ -38,6 +38,9 @@ pub struct TerminalService {
     last_activity: Arc<Mutex<Option<Instant>>>,
     sequence: Mutex<u64>,
     spawn_lock: Mutex<()>,
+    /// 进行中的 Agent 工具调用（invocation_id → 执行终端）：宿主超时或
+    /// 会话取消时经 Cancel 帧中断等待，本表把取消定位到具体 PTY。
+    active_tools: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +295,20 @@ impl TerminalService {
             last_activity: Arc::new(Mutex::new(None)),
             sequence: Mutex::new(0),
             spawn_lock: Mutex::new(()),
+            active_tools: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 登记一次执行中的工具调用；返回的守卫在正常完成或 future 被丢弃
+    /// （宿主超时/取消后的 select 中断）时移除登记。
+    fn track_active_tool(&self, invocation_id: &str, terminal_id: &str) -> ActiveToolGuard {
+        self.active_tools
+            .lock()
+            .expect("活动工具表锁损坏")
+            .insert(invocation_id.to_string(), terminal_id.to_string());
+        ActiveToolGuard {
+            active_tools: Arc::clone(&self.active_tools),
+            invocation_id: invocation_id.to_string(),
         }
     }
 
@@ -1542,6 +1559,22 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
 struct ToolScope {
     session_id: String,
     workspace: String,
+    invocation_id: String,
+}
+
+/// 活动工具登记守卫：dispatch future 被取消（select 丢弃）时随栈展开
+/// 自动移除，与 cancel 钩子的移除幂等互备。
+struct ActiveToolGuard {
+    active_tools: Arc<Mutex<HashMap<String, String>>>,
+    invocation_id: String,
+}
+
+impl Drop for ActiveToolGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active_tools.lock() {
+            active.remove(&self.invocation_id);
+        }
+    }
 }
 
 fn tool_scope(context: Option<&RequestInvocationContext>) -> Result<ToolScope> {
@@ -1551,6 +1584,7 @@ fn tool_scope(context: Option<&RequestInvocationContext>) -> Result<ToolScope> {
     Ok(ToolScope {
         session_id: context.session_id.clone(),
         workspace: context.workspace.clone(),
+        invocation_id: context.invocation_id.clone(),
     })
 }
 
@@ -1727,6 +1761,10 @@ impl TerminalService {
         // 用户即可看到输出。
         request_host_app_open(&scope.session_id, &session_id, false).await;
 
+        // 登记执行中的调用：宿主超时/会话取消经 Cancel 帧中断等待时，
+        // cancel 钩子据此定位终端并发送 Ctrl+C，命令不会脱离调用方控制。
+        let _active = self.track_active_tool(&scope.invocation_id, &session_id);
+
         let executed = self
             .exec_in_session(ExecRequest {
                 session_id: session_id.clone(),
@@ -1746,6 +1784,7 @@ impl TerminalService {
                 cwd: workspace.filter(|value| !value.is_empty()),
             })
             .await;
+        drop(_active);
         let executed = match executed {
             Ok(executed) => executed,
             Err(error) => {
@@ -1914,6 +1953,53 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
             }
         };
         Response::success(&request_id, payload)
+    }
+
+    /// 请求级取消：宿主工具超时或会话取消经 Cancel 帧到达（stdio runner
+    /// 已丢弃等待 future），把取消落到具体 PTY——发送 Ctrl+C 中断正在
+    /// 执行的命令并复位执行状态，命令不会脱离调用方无限运行。
+    async fn cancel(&self, request: &Request) -> Result<()> {
+        let Some(context) = request.context.as_ref() else {
+            return Ok(());
+        };
+        let terminal_id = self
+            .active_tools
+            .lock()
+            .expect("活动工具表锁损坏")
+            .remove(&context.invocation_id);
+        let Some(terminal_id) = terminal_id else {
+            // 非执行型调用（send 的画面等待等）：等待 future 已被 runner
+            // 丢弃，无 PTY 资源需要释放。
+            return Ok(());
+        };
+        let interrupted = self.with_session(&terminal_id, |session| {
+            session
+                .writer
+                .write_all(b"\x03")
+                .context("取消写入中断输入失败")?;
+            session.writer.flush().context("取消刷新中断输入失败")?;
+            // 等待 future 已被丢弃，phase 恢复逻辑不会执行；此处复位，
+            // 终端回到空闲池可被后续调用复用。
+            session.phase = SessionPhase::Idle;
+            Ok(())
+        });
+        match interrupted {
+            Ok(()) => tracing::info!(
+                invocation_id = %context.invocation_id,
+                terminal = %terminal_id,
+                "已按取消请求中断终端命令"
+            ),
+            Err(error) => {
+                // 终端已退出（会话结束）等场景：无需中断，登记已清除。
+                tracing::debug!(
+                    invocation_id = %context.invocation_id,
+                    terminal = %terminal_id,
+                    %error,
+                    "取消时终端已不可写"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2715,6 +2801,82 @@ mod tests {
             "terminal_open 应返回独立编号: {terminal}"
         );
         service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// 取消链路：宿主超时/会话取消后 Cancel 帧到达，dispatch future 已被
+    /// runner 丢弃——cancel 钩子必须把 Ctrl+C 落到执行中的终端并复位
+    /// phase，命令不脱离调用方无限运行、终端可被后续调用复用。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 取消中断执行中的命令并复位终端() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        // 长命令在独立 task 中执行（对齐 runner：dispatch 由任务持有）。
+        let service_for_task = std::sync::Arc::new(service);
+        let request = tool_request(
+            "run_command",
+            serde_json::json!({"cmd": "sleep", "args": ["60"]}),
+            Some(("session-a", workspace.as_str())),
+        );
+        let task_service = std::sync::Arc::clone(&service_for_task);
+        let task_request = request.clone();
+        let running = tokio::spawn(async move {
+            task_service.dispatch(task_request).await;
+        });
+        // 等待命令进入执行（登记出现）。
+        let terminal = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(active) = service_for_task.active_tools.lock() {
+                    if let Some((_, terminal)) = active.iter().next() {
+                        break terminal.clone();
+                    }
+                }
+                assert!(Instant::now() < deadline, "长命令应登记为活动工具调用");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+
+        // 模拟宿主超时：先执行取消钩子（此时等待 future 仍挂起，与
+        // stdio runner 的顺序一致），再丢弃等待 future。
+        service_for_task
+            .cancel(&request)
+            .await
+            .expect("取消钩子不应失败");
+        running.abort();
+
+        // 终端 phase 已复位：后续调用可立即复用该终端并成功执行。
+        let after = outcome_of(
+            service_for_task
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["recovered"]}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(after["ok"], true, "取消后终端应可复用: {after}");
+        assert_eq!(after["stdout"], "recovered");
+        assert!(
+            after["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("复用空闲终端"),
+            "取消后应复用被中断的终端: {}",
+            after["summary"]
+        );
+        assert!(
+            service_for_task.with_session(&terminal, |_| Ok(())).is_ok(),
+            "终端应存活（取消中断命令而非杀死终端）"
+        );
+
+        service_for_task
             .kill_session(SessionIdRequest {
                 session_id: terminal,
             })
