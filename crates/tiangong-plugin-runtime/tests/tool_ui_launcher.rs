@@ -205,7 +205,7 @@ fn 无订阅者时请求拉起且订阅后重放并闭合() {
 }
 
 #[test]
-fn 已有订阅者时不请求拉起() {
+fn 已有订阅者时仍按会话请求拉起() {
     let _guard = REGISTRY_LOCK.lock().unwrap();
     init_globals();
     let root = tempfile::TempDir::new().unwrap();
@@ -218,6 +218,7 @@ fn 已有订阅者时不请求拉起() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(async {
         let mut session = Session::new("测试会话");
+        let session_id = session.id.clone();
         let call = ToolCall {
             id: "call-2".to_string(),
             name: "demo_tool".to_string(),
@@ -230,11 +231,18 @@ fn 已有订阅者时不请求拉起() {
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // 工具订阅是插件级全局信号，但处理实例按会话过滤：全局已有
+        // 订阅者不代表本会话已有匹配实例，仍须按「插件 + 会话」请求
+        // 执行壳（前端对同会话实例去重）。
         assert!(
-            !app_hits()[before..]
+            app_hits()[before..]
                 .iter()
-                .any(|(plugin_id, _, _)| plugin_id == "tool-ui-demo-b"),
-            "已有订阅者时不应经 app.open 请求打开"
+                .any(|(plugin_id, method, session_arg)| {
+                    plugin_id == "tool-ui-demo-b"
+                        && method == "app.open#background"
+                        && session_arg == &session_id
+                }),
+            "已有订阅者时仍应按会话经 app.open 请求执行壳"
         );
 
         // 正常投递路径同样可用：直接消费重放/新事件并闭合。

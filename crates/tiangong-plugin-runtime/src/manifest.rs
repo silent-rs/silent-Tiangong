@@ -219,9 +219,10 @@ pub struct SidecarManifest {
     /// 传给入口的固定参数（受数量与长度约束）。
     #[serde(default)]
     pub args: Vec<String>,
-    /// 进程生命周期（按需默认；常驻需显式声明）。
-    #[serde(default)]
-    pub lifecycle: SidecarLifecycle,
+    /// 脚本/进程运行周期。省略时由宿主按运行时形态兼容解析：存量原生
+    /// sidecar 为常驻，解释器脚本为按需；command 始终按调用独立运行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<SidecarLifecycle>,
     #[serde(default = "default_transport_protocol")]
     pub transport_protocol: String,
     #[serde(default)]
@@ -233,6 +234,35 @@ pub struct SidecarManifest {
 }
 
 impl PluginManifest {
+    /// sidecar 启动后的有效运行周期。
+    ///
+    /// 生命周期字段晚于原生插件体系引入，旧清单均未声明。原生插件保持
+    /// 原有常驻语义；解释器脚本保持按需默认；command 的调用隔离由宿主
+    /// 强制，不允许清单将其扩大为共享常驻进程。
+    pub(crate) fn sidecar_lifecycle(&self) -> SidecarLifecycle {
+        let Some(sidecar) = self.sidecar.as_ref() else {
+            return SidecarLifecycle::OnDemand;
+        };
+        if self.id == "command" {
+            return SidecarLifecycle::OnDemand;
+        }
+        sidecar.lifecycle.unwrap_or(match sidecar.runtime {
+            SidecarRuntime::Native => SidecarLifecycle::Resident,
+            SidecarRuntime::Node | SidecarRuntime::Python => SidecarLifecycle::OnDemand,
+        })
+    }
+
+    /// 是否应在 App 加载插件快照时启动并保持 sidecar。
+    /// 解释器只在首次实际使用时启动，即使其脚本声明为常驻；terminal
+    /// 由 PTY 会话驱动，首次终端操作时才启动并自行在空闲后退出。
+    pub(crate) fn should_preload_sidecar(&self) -> bool {
+        self.sidecar.as_ref().is_some_and(|sidecar| {
+            self.id != "terminal"
+                && sidecar.runtime == SidecarRuntime::Native
+                && self.sidecar_lifecycle() == SidecarLifecycle::Resident
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("读取插件清单失败: {}", path.display()))?;
@@ -340,7 +370,7 @@ impl PluginManifest {
             if self.ui_contributions().is_empty()
                 && self.tools.as_ref().is_some_and(|tools| !tools.is_empty())
                 && sidecar.runtime != SidecarRuntime::Native
-                && sidecar.lifecycle == SidecarLifecycle::Resident
+                && self.sidecar_lifecycle() == SidecarLifecycle::Resident
             {
                 bail!(
                     "插件 {} 无界面工具直连形态只允许按需 sidecar（lifecycle=on_demand）；常驻进程的取消无法按请求归属",
@@ -1095,6 +1125,9 @@ mod tests {
             Some(std::path::Path::new("sidecar/main.mjs"))
         );
         assert!(sidecar.binary.is_none());
+        assert!(sidecar.lifecycle.is_none());
+        assert_eq!(manifest.sidecar_lifecycle(), SidecarLifecycle::OnDemand);
+        assert!(!manifest.should_preload_sidecar());
     }
 
     #[test]
@@ -1147,6 +1180,26 @@ mod tests {
             manifest.sidecar.as_ref().unwrap().runtime,
             SidecarRuntime::Native
         );
+        assert_eq!(manifest.sidecar_lifecycle(), SidecarLifecycle::Resident);
+        assert!(manifest.should_preload_sidecar());
+
+        // command 即使声明常驻也由宿主强制保持按调用隔离。
+        let command: PluginManifest = serde_json::from_str(
+            &sidecar_json(r#"{"binary":"sidecar-bin","lifecycle":"resident"}"#)
+                .replace("com.example.sc", "command"),
+        )
+        .unwrap();
+        assert_eq!(command.sidecar_lifecycle(), SidecarLifecycle::OnDemand);
+        assert!(!command.should_preload_sidecar());
+
+        // terminal 跨请求保存 PTY 状态，但不随 App 预热；实际进程由终端
+        // 会话驱动启动，并在最后一个会话结束后自行退出。
+        let terminal: PluginManifest = serde_json::from_str(
+            &sidecar_json(r#"{"binary":"sidecar-bin"}"#).replace("com.example.sc", "terminal"),
+        )
+        .unwrap();
+        assert_eq!(terminal.sidecar_lifecycle(), SidecarLifecycle::Resident);
+        assert!(!terminal.should_preload_sidecar());
     }
 
     #[test]
@@ -1167,9 +1220,10 @@ mod tests {
             .expect("按需直连形态应合法");
         let error = manifest("resident", false).validate().unwrap_err();
         assert!(format!("{error:#}").contains("只允许按需"));
-        manifest("resident", true)
-            .validate()
-            .expect("有界面常驻不受限");
+        let resident = manifest("resident", true);
+        resident.validate().expect("有界面常驻不受限");
+        assert_eq!(resident.sidecar_lifecycle(), SidecarLifecycle::Resident);
+        assert!(!resident.should_preload_sidecar());
     }
 
     #[test]

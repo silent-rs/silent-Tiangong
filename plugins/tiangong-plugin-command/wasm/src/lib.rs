@@ -1,9 +1,8 @@
 //! Command 插件的 WASM 桥接组件。
 //!
 //! 本组件只做桥接：工具规格、参数解析、prompt 段落与生命周期入口；run_command /
-//! run_shell 经 sidecar.invoke 转发（tokio 子进程 spawn、命令校验、env 注入全部在
-//! sidecar 进程内）。wasm 侧不做任何校验（路径越界依赖文件系统，整体下沉 sidecar，
-//! 与 fetch/fs 改造一致）。
+//! run_shell 经 sidecar.invoke 转发；命令访问边界由 Runtime 与 Launcher 的系统沙箱
+//! 统一实施，WASM 只负责工具参数与业务协议桥接。
 
 mod bindings;
 mod sidecar_client;
@@ -33,15 +32,11 @@ mod state {
 
     struct PluginState {
         workspace: Option<String>,
-        full_trust: bool,
-        allowed_commands: Vec<String>,
     }
 
     thread_local! {
         static STATE: RefCell<PluginState> = const { RefCell::new(PluginState {
             workspace: None,
-            full_trust: false,
-            allowed_commands: Vec::new(),
         }) };
     }
 
@@ -49,36 +44,19 @@ mod state {
         STATE.with(|s| s.borrow_mut().workspace = ws);
     }
 
-    pub fn set_full_trust(full_trust: bool) {
-        STATE.with(|s| s.borrow_mut().full_trust = full_trust);
-    }
-
-    pub fn set_allowed_commands(cmds: Vec<String>) {
-        STATE.with(|s| s.borrow_mut().allowed_commands = cmds);
-    }
-
-    /// 构造访问上下文（沙箱预留点 B：未来扩展此结构即可细化权限）。
+    /// 构造携带权威工作区的执行上下文。
     pub fn access_context() -> tiangong_plugin_command_protocol::CommandAccessContext {
         STATE.with(|s| {
             let s = s.borrow();
             tiangong_plugin_command_protocol::CommandAccessContext {
                 workspace: s.workspace.clone(),
-                full_trust: s.full_trust,
-                allowed_commands: s.allowed_commands.clone(),
             }
         })
     }
 
-    /// 取当前缓存的 workspace/full_trust/allowed_commands 用于变更检测。
-    pub fn snapshot() -> (Option<String>, bool, Vec<String>) {
-        STATE.with(|s| {
-            let s = s.borrow();
-            (
-                s.workspace.clone(),
-                s.full_trust,
-                s.allowed_commands.clone(),
-            )
-        })
+    /// 取当前缓存的工作区用于变更检测。
+    pub fn snapshot() -> Option<String> {
+        STATE.with(|s| s.borrow().workspace.clone())
     }
 }
 
@@ -158,52 +136,17 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn set_workspace(workspace: Option<String>, full_trust: bool) -> Result<(), PluginError> {
-        // 工作目录和信任模式都未变时，跳过 sidecar 调用。
-        let (ws, ft, _) = state::snapshot();
-        if ws == workspace && ft == full_trust {
+    fn set_workspace(workspace: Option<String>, _full_trust: bool) -> Result<(), PluginError> {
+        if state::snapshot() == workspace {
             return Ok(());
         }
         state::set_workspace(workspace.clone());
-        state::set_full_trust(full_trust);
-        // 通知 sidecar 工作区与信任模式变更。
-        let (_, _, allowed_commands) = state::snapshot();
-        let request = SetWorkspaceRequest {
-            workspace,
-            full_trust,
-            allowed_commands,
-        };
-        sidecar_client::invoke::<SetWorkspace>(&request)
+        sidecar_client::invoke::<SetWorkspace>(&SetWorkspaceRequest { workspace })
             .map_err(|error| plugin_err(format!("set_workspace 调用 sidecar 失败: {error}")))?;
         Ok(())
     }
 
-    fn on_config_updated(config_json: String) -> Result<(), PluginError> {
-        // 解析 CoreConfig 里的 allowed_commands（用户扩展白名单）并缓存 + 推送 sidecar。
-        // 与原进程内插件语义对齐：allowed_commands 经 on_config_updated 注入。
-        let config: serde_json::Value = serde_json::from_str(&config_json).unwrap_or_default();
-        let allowed: Vec<String> = config
-            .get("allowed_commands")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(ToString::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if allowed.is_empty() {
-            return Ok(());
-        }
-        state::set_allowed_commands(allowed.clone());
-        // 推送给 sidecar（携带当前 workspace/full_trust）。
-        let (ws, ft, _) = state::snapshot();
-        let request = SetWorkspaceRequest {
-            workspace: ws,
-            full_trust: ft,
-            allowed_commands: allowed,
-        };
-        sidecar_client::invoke::<SetWorkspace>(&request)
-            .map_err(|error| plugin_err(format!("on_config_updated 推送失败: {error}")))?;
+    fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -224,7 +167,7 @@ impl Guest for Component {
     }
 }
 
-/// run_command：解析参数 → 组装请求（带 CommandAccessContext）→ invoke sidecar。
+/// run_command：解析参数 → 组装请求 → invoke sidecar。
 fn handle_run_command(arguments: String) -> Result<ToolResult, PluginError> {
     let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(serde_json::json!({}));
     let request = RunCommandRequest {

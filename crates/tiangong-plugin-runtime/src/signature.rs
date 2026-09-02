@@ -258,6 +258,56 @@ fn verify_minisign_with_pubkey(
         .context("插件签名验证不通过")
 }
 
+/// 以内置官方公钥验签（Launcher 在线更新激活门禁专用：在线制品必须
+/// 官方根，不接受本机用户密钥根）。
+pub fn verify_minisign_with_official_pubkey(content: &[u8], signature_b64: &str) -> Result<()> {
+    verify_minisign_with_pubkey(content, signature_b64, OFFICIAL_PUBKEY_B64)
+}
+
+/// 沙箱 Launcher 的伴生签名文件（与 Launcher 同路径，内容为
+/// base64 包装的 minisign 签名文本，与插件 `.sig` 格式一致）。
+pub const LAUNCHER_SIGNATURE_SUFFIX: &str = ".sig";
+
+/// 验证沙箱 Launcher 签名：官方内置公钥与本机用户密钥任一通过即可。
+///
+/// Launcher 是安全边界的执行者，其信任锚必须高于沙箱自身（沙箱内进程
+/// 够不到它），因此启动前逐次验签、失败即拒（fail-closed）；签名文件
+/// 缺失同样拒绝。签名在发布时由 `xtask prepare-sandbox-release` 施加
+/// （在线更新链携带），本地开发由 `xtask sign-sandbox` 施加，与插件
+/// 发布共用同一把官方私钥。
+pub fn verify_launcher_signature(launcher_path: &Path, storage_root: &Path) -> Result<()> {
+    let signature_path = launcher_path.with_file_name(format!(
+        "{}{LAUNCHER_SIGNATURE_SUFFIX}",
+        launcher_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("Launcher 路径文件名无效")?
+    ));
+    let content = std::fs::read(launcher_path)
+        .with_context(|| format!("读取沙箱 Launcher 失败: {}", launcher_path.display()))?;
+    let signature_b64 = std::fs::read_to_string(&signature_path)
+        .with_context(|| format!("沙箱 Launcher 缺少签名文件: {}", signature_path.display()))?;
+
+    let official = verify_minisign_with_pubkey(&content, &signature_b64, OFFICIAL_PUBKEY_B64);
+    if official.is_ok() {
+        return Ok(());
+    }
+    let user = crate::trust::user_public_key_b64(storage_root)
+        .and_then(|pubkey| verify_minisign_with_pubkey(&content, &signature_b64, &pubkey));
+    match user {
+        Ok(()) => Ok(()),
+        Err(user_error) => {
+            let official_error = official
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "官方根已通过但本机根失败（不应发生）".to_string());
+            Err(anyhow::anyhow!(
+                "沙箱 Launcher 签名验证不通过（官方与本机信任根均拒绝）: 官方根: {official_error}; 本机根: {user_error:#}"
+            ))
+        }
+    }
+}
+
 fn sha256_file(path: &Path) -> Result<String> {
     let bytes =
         std::fs::read(path).with_context(|| format!("读取签名制品失败: {}", path.display()))?;
@@ -296,6 +346,38 @@ fn sidecar_binary_path(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::manifest::PluginManifest;
+
+    /// Launcher 验签：用户密钥根通过、篡改拒绝、缺签名拒绝、官方根外的
+    /// 签名拒绝。签名经 trust::sign_with_user_key 真实生成。
+    #[test]
+    fn launcher_signature_verification_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        let launcher = root.path().join("tiangong-sandbox");
+        std::fs::write(&launcher, b"launcher-bytes-v1").unwrap();
+
+        // 无签名文件：拒绝。
+        let error = verify_launcher_signature(&launcher, &storage).unwrap_err();
+        assert!(error.to_string().contains("缺少签名文件"), "{error:#}");
+
+        // 用户密钥签名：通过。
+        crate::trust::sign_with_user_key(&storage, &launcher).unwrap();
+        verify_launcher_signature(&launcher, &storage).unwrap();
+
+        // 篡改 Launcher 内容：拒绝。
+        std::fs::write(&launcher, b"launcher-bytes-tampered").unwrap();
+        let error = verify_launcher_signature(&launcher, &storage).unwrap_err();
+        assert!(error.to_string().contains("签名验证不通过"), "{error:#}");
+
+        // 恢复内容并换一个不受信任密钥的签名：拒绝（两个根都不认）。
+        std::fs::write(&launcher, b"launcher-bytes-v1").unwrap();
+        let rogue = tempfile::tempdir().unwrap();
+        std::fs::write(&launcher, b"launcher-bytes-v1").unwrap();
+        crate::trust::sign_with_user_key(rogue.path(), &launcher).unwrap();
+        let error = verify_launcher_signature(&launcher, &storage).unwrap_err();
+        assert!(error.to_string().contains("签名验证不通过"), "{error:#}");
+    }
 
     /// devkit 同款内容清单：受管全树（排除清单自身与签名文件）路径 + sha256。
     fn write_content_manifest(dir: &Path) {

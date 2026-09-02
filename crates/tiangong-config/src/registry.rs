@@ -63,6 +63,40 @@ pub fn try_models() -> Option<tiangong_llm::models_config::ModelsConfig> {
         .map(|config| config.models)
 }
 
+/// 读取用户"按需进程沙箱"开关；尚未初始化配置时返回 None（调用方按开启处理）。
+pub fn try_sandbox_disabled() -> Option<bool> {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| config.sandbox_disabled)
+}
+
+/// 宿主直跑时用户自定义的环境变量屏蔽清单（缺省为空）。
+pub fn try_sandbox_policy() -> crate::config::SandboxUserPolicy {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| config.sandbox_policy)
+        .unwrap_or_default()
+}
+
+pub fn try_command_env_blocklist() -> Vec<String> {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| {
+            if config.sandbox_policy.environment_blocklist.is_empty() {
+                config.command_env_blocklist
+            } else {
+                config.sandbox_policy.environment_blocklist
+            }
+        })
+        .unwrap_or_default()
+}
+
 /// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
 ///
 /// 处理顺序：
@@ -108,7 +142,14 @@ impl TiangongConfig {
         } else {
             crate::io::save_custom_prompt_at(&prompt_path, &self.custom_system_prompt)?;
         }
-        crate::io::save_app_config_at(dir, self.default_trust_mode, &self.workspace_dir)?;
+        crate::io::save_app_config_at(
+            dir,
+            self.default_trust_mode,
+            &self.workspace_dir,
+            self.sandbox_disabled,
+            &self.sandbox_policy,
+            &self.command_env_blocklist,
+        )?;
         Ok(())
     }
 }

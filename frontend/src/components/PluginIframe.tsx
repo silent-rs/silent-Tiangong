@@ -43,7 +43,6 @@ export function PluginIframe({
   const theme = useResolvedTheme();
   const channel = useMemo(() => crypto.randomUUID(), [pluginId, html]);
   const maskColor = usePluginMask(iframeRef, channel);
-
   const sendHostContext = useCallback(() => {
     iframeRef.current?.contentWindow?.postMessage(
       hostContext(
@@ -121,7 +120,10 @@ export function PluginIframe({
       const queue = pluginCallQueues.get(pluginId) ?? Promise.resolve();
       pluginCallQueues.set(pluginId, queue.then(async () => {
         try {
-          const result = await api.bridgeCall(pluginId, normalizeBridgeMethod(method), payload);
+          const bridgeMethod = normalizeBridgeMethod(method);
+          const result = sessionId
+            ? await api.bridgeCall(pluginId, bridgeMethod, payload, sessionId)
+            : await api.bridgeCall(pluginId, bridgeMethod, payload);
           source.postMessage({ id, channel, result }, '*');
         } catch (e) {
           source.postMessage(
@@ -136,7 +138,7 @@ export function PluginIframe({
     return () => {
       window.setTimeout(() => window.removeEventListener('message', handler), 1000);
     };
-  }, [channel, pluginId]);
+  }, [channel, pluginId, sessionId]);
 
   return (
     <div className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">

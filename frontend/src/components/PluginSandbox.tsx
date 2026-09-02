@@ -111,7 +111,10 @@ function currentRootTheme(): 'light' | 'dark' {
  * 创建绑定单个插件贡献的桥接：call 走 T003 白名单通道；
  * on 经 bridge_subscribe 订阅 + 全局 bridge_event 分发，dispose 时全部退订。
  */
-function createHostBridge(pluginId: string): DisposableHostBridge {
+function createHostBridge(
+  pluginId: string,
+  getContext: () => PluginHostContext,
+): DisposableHostBridge {
   let disposed = false;
   const channelHandlers = new Map<string, Set<(payload: string) => void>>();
   const requestedChannels = new Set<string>();
@@ -145,7 +148,10 @@ function createHostBridge(pluginId: string): DisposableHostBridge {
       // 真正生效，避免首批输出在 invoke 与 subscribe 的竞态中丢失。
       await Promise.all([...pendingSubscriptions]);
       if (disposed) throw new Error('bridge 已随容器卸载');
-      return api.bridgeCall(pluginId, method, payload);
+      const sessionId = getContext().session?.id;
+      return sessionId
+        ? api.bridgeCall(pluginId, method, payload, sessionId)
+        : api.bridgeCall(pluginId, method, payload);
     },
     on(channel, handler) {
       let handlers = channelHandlers.get(channel);
@@ -222,8 +228,6 @@ function ShadowContainer({
     const host = hostRef.current;
     if (!host) return;
     const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
-    const bridge = createHostBridge(pluginId);
-    let cancelled = false;
     let currentContext = hostContext(
       currentRootTheme(),
       `shadow:${pluginId}:${contributionId}`,
@@ -233,6 +237,8 @@ function ShadowContainer({
         ? { instance_id: instanceId, visible }
         : undefined,
     );
+    const bridge = createHostBridge(pluginId, () => currentContext);
+    let cancelled = false;
     const contextHandlers = new Set<HostContextHandler>();
     const cleanups: ShadowCleanup[] = [];
     const beforeCloseHandlers = new Set<ShadowBeforeClose>();

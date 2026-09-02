@@ -1,9 +1,9 @@
 //! 命令执行实现：tokio 子进程 spawn + kill_on_drop + env_clear + 三层 env 注入
 //! + 超时 + stdout/stderr 截断。整体从原进程内 `handler.rs` 迁移。
 //!
-//! env 注入三层（对齐原实现）：
-//! 1. allowlist（PATH/HOME 等 21 个系统/代理变量，从 sidecar 进程环境读）
-//! 2. runtime_env（各插件贡献的汇总环境变量）
+//! env 注入三层：
+//! 1. 基础运行环境（PATH/HOME 等系统与代理变量）
+//! 2. runtime_env（宿主下发的受控环境变量）
 //! 3. file_env（cwd 下 .env.local / .env）
 //!
 //! 注：runtime_env 当前经 sidecar 进程环境继承（exec_env 由 host 注入 sidecar
@@ -28,7 +28,7 @@ pub async fn exec_and_collect(
     cwd: &Path,
     timeout_ms: u64,
 ) -> Result<ExecResponse> {
-    let env_allowlist = shared::command_env_allowlist();
+    let env_allowlist = command_env_allowlist();
     // runtime_env：当前经 sidecar 进程环境继承。exec_env 由 host 在 spawn sidecar
     // 时注入（若 host 未注入则为空，与原进程内 runtime_env 恒空等价）。
     // TODO（沙箱预留点 C）：未来 runtime_env 接通后，此处应从受控来源读取，
@@ -129,6 +129,75 @@ pub fn split_command(raw: &str) -> (String, Vec<String>) {
     }
     let cmd = parts.remove(0);
     (cmd, parts)
+}
+
+/// 派生 shell 程序和参数；只校验工具支持的 shell 类型，不分析脚本文本。
+pub fn derive_shell_exec_args(script: &str, shell: Option<&str>) -> Result<(String, Vec<String>)> {
+    let shell = shell
+        .unwrap_or("auto")
+        .trim()
+        .to_ascii_lowercase()
+        .replace(' ', "");
+    let selected = match shell.as_str() {
+        "" | "auto" => {
+            if cfg!(target_os = "windows") {
+                "powershell"
+            } else {
+                "bash"
+            }
+        }
+        "bash" => "bash",
+        "sh" => "sh",
+        "powershell" => "powershell",
+        "pwsh" => "pwsh",
+        other => return Err(anyhow::anyhow!("不支持的 shell 类型：{other}")),
+    };
+    let flag = if matches!(selected, "powershell" | "pwsh") {
+        "-Command"
+    } else if selected == "bash" {
+        "-lc"
+    } else {
+        "-c"
+    };
+    Ok((
+        selected.to_string(),
+        vec![flag.to_string(), script.to_string()],
+    ))
+}
+
+/// Command 子进程所需的最小基础环境。
+fn command_env_allowlist() -> Vec<(String, String)> {
+    const ALLOWED: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "SystemRoot",
+        "ComSpec",
+        "PATHEXT",
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+    ALLOWED
+        .iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| ((*name).to_string(), value))
+        })
+        .collect()
 }
 
 /// 收集 runtime_env：解析 host 在 sidecar 启动时注入的受控 JSON 信封。

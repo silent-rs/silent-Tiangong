@@ -28,18 +28,24 @@ semver = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
 scru128 = { workspace = true }
+tiangong-sandbox = { workspace = true }
+tiangong-toolkit = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 minisign-verify = "0.2"
 minisign = "0.9"
+tempfile = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 serial_test = { workspace = true }
+tiangong-plugin-command-protocol = { workspace = true }

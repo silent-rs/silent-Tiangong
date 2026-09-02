@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -13,7 +13,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
-import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession } from '@/api/tauri';
+import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession, SandboxUpdateState, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
@@ -158,6 +158,10 @@ export function SettingsDialog() {
                   <BotIcon className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">移动端控制</span>
                 </TabsTrigger>
+                <TabsTrigger value="sandbox" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <ShieldCheck className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">沙箱管理</span>
+                </TabsTrigger>
                 <TabsTrigger value="plugin-manager" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                   <Package className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">插件管理</span>
@@ -201,6 +205,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <BotPanel />
+              </TabsContent>
+              <TabsContent value="sandbox" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <SandboxSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
               <TabsContent value="plugin-manager" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <PluginManagerSettings
@@ -250,7 +257,6 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
   const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
   const [isSavingWorkspace, setIsSavingWorkspace] = useState(false);
   const { showSuccess } = useToast();
-
   useEffect(() => {
     setEditWorkspaceDir(workspaceDir);
   }, [workspaceDir]);
@@ -370,12 +376,54 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
   );
 }
 
-// ============================================================================
-// LLM 设置组件（三层架构：Providers / Models / Routing）
-// ============================================================================
+const EMPTY_SANDBOX_POLICY: SandboxPolicyView = {
+  directory_allowlist: [], environment_blocklist: [],
+};
+
+function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
+  const { sandboxDisabled, loadSandboxDisabled, setSandboxDisabled } = useStore();
+  const [policy, setPolicy] = useState<SandboxPolicyView>(EMPTY_SANDBOX_POLICY);
+  const [directoryInput, setDirectoryInput] = useState('');
+  const [environmentInput, setEnvironmentInput] = useState('');
+  const [confirmDisable, setConfirmDisable] = useState(false);
+  const [sandboxState, setSandboxState] = useState<SandboxUpdateState | null>(null);
+  const [checking, setChecking] = useState(false);
+  const { showSuccess, showError } = useToast();
+  useEffect(() => { if (sandboxDisabled === null) void loadSandboxDisabled(); }, [sandboxDisabled, loadSandboxDisabled]);
+  useEffect(() => { void api.getSandboxPolicy().then(setPolicy).catch((e) => showError('加载失败', String(e))); }, [showError]);
+  const refresh = useCallback(() => { void api.getSandboxUpdateState().then(setSandboxState).catch(() => {}); }, []);
+  useEffect(refresh, [refresh]);
+  const save = async (next: SandboxPolicyView) => {
+    onSaveStatusChange('saving');
+    try { const saved = await api.setSandboxPolicy(next); setPolicy(saved); onSaveStatusChange('saved'); setTimeout(() => onSaveStatusChange('idle'), 1500); }
+    catch (e) { onSaveStatusChange('error'); showError('保存失败', String(e)); throw e; }
+  };
+  const addDirectory = async () => {
+    const value = directoryInput.trim(); if (!value) return;
+    await save({ ...policy, directory_allowlist: [...policy.directory_allowlist, value] }); setDirectoryInput('');
+  };
+  const chooseDirectory = async () => {
+    const selected = await openDialog({ directory: true, multiple: false, title: '选择允许沙箱读写的目录' });
+    if (typeof selected === 'string') await save({ ...policy, directory_allowlist: [...policy.directory_allowlist, selected] });
+  };
+  const addEnvironment = async () => {
+    const value = environmentInput.trim(); if (!value) return;
+    await save({ ...policy, environment_blocklist: [...policy.environment_blocklist, value] }); setEnvironmentInput('');
+  };
+  const toggle = async (disabled: boolean) => { await setSandboxDisabled(disabled); setConfirmDisable(false); showSuccess(disabled ? '沙箱已关闭' : '沙箱已开启', '按需进程将在下次使用时按新设置重建'); };
+  const update = async () => { setChecking(true); try { const r = await api.upgradeLauncher(); refresh(); showSuccess('沙箱程序已就绪', `v${r.version}`); } catch (e) { showError('更新失败', String(e)); } finally { setChecking(false); } };
+  const List = ({ items, remove }: { items: string[]; remove: (index: number) => void }) => <div className="rounded-lg border divide-y">{items.length === 0 ? <p className="p-4 text-sm text-muted-foreground">列表为空</p> : items.map((item, index) => <div key={`${item}-${index}`} className="flex items-center gap-3 px-3 py-2"><span className="min-w-0 flex-1 truncate font-mono text-xs" title={item}>{item}</span><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => remove(index)} aria-label={`删除 ${item}`}><Trash2 className="h-3.5 w-3.5" /></Button></div>)}</div>;
+  return <div className="mx-auto max-w-3xl space-y-6 p-6">
+    <div><h2 className="text-lg font-semibold">沙箱管理</h2></div>
+    <Card><CardContent className="space-y-5 pt-6"><div className="flex items-center justify-between"><div><Label>按需进程沙箱</Label><p className="text-xs text-muted-foreground">Terminal、Command、解释器及其他按需进程</p></div><Switch checked={sandboxDisabled !== true} disabled={sandboxDisabled === null} onCheckedChange={(enabled) => enabled ? void toggle(false) : setConfirmDisable(true)} /></div><div className="flex items-center justify-between"><div><Label>沙箱程序</Label><p className="text-xs text-muted-foreground">{sandboxState?.status === 'ready' ? `已就绪${sandboxState.version ? ` v${sandboxState.version}` : ''}` : '未就绪'}</p></div><Button variant="outline" disabled={checking} onClick={() => void update()}>{checking ? '正在更新…' : '检查并更新'}</Button></div></CardContent></Card>
+    <Card><CardContent className="space-y-4 pt-6"><div><Label>目录白名单</Label><p className="text-xs text-muted-foreground">列表中的目录允许沙箱进程读取和写入，不限制用户选择范围。</p></div><List items={policy.directory_allowlist} remove={(index) => void save({ ...policy, directory_allowlist: policy.directory_allowlist.filter((_, i) => i !== index) })} /><div className="flex gap-2"><Input value={directoryInput} onChange={(e) => setDirectoryInput(e.target.value)} placeholder="输入目录路径" onKeyDown={(e) => { if (e.key === 'Enter') void addDirectory(); }} /><Button variant="outline" onClick={() => void chooseDirectory()}><FolderOpen className="mr-1 h-4 w-4" />浏览</Button><Button onClick={() => void addDirectory()}><Plus className="mr-1 h-4 w-4" />添加</Button></div></CardContent></Card>
+    <Card><CardContent className="space-y-4 pt-6"><div><Label>环境变量黑名单</Label><p className="text-xs text-muted-foreground">列表中的变量不会传给沙箱进程；名称不区分大小写。</p></div><List items={policy.environment_blocklist} remove={(index) => void save({ ...policy, environment_blocklist: policy.environment_blocklist.filter((_, i) => i !== index) })} /><div className="flex gap-2"><Input value={environmentInput} onChange={(e) => setEnvironmentInput(e.target.value)} placeholder="例如 MY_SECRET_TOKEN" onKeyDown={(e) => { if (e.key === 'Enter') void addEnvironment(); }} /><Button onClick={() => void addEnvironment()}><Plus className="mr-1 h-4 w-4" />添加</Button></div></CardContent></Card>
+    <p className="text-xs text-muted-foreground">沙箱管理面仍由宿主强制隔离，目录白名单不能覆盖管理项保护。</p>
+    <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>关闭按需进程沙箱？</DialogTitle><DialogDescription>关闭后按需进程以完整用户权限运行。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setConfirmDisable(false)}>取消</Button><Button variant="destructive" onClick={() => void toggle(true)}>关闭沙箱</Button></DialogFooter></DialogContent></Dialog>
+  </div>;
+}
 
 type LLMSubTab = 'providers' | 'routing';
-
 function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
   const [modelsConfig, setModelsConfig] = useState<ModelsConfigView>({

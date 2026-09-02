@@ -10,23 +10,15 @@ on:
     branches: [main]
     paths:
       - "crates/tiangong-sandbox/**"
-      - "xtask/Cargo.toml"
-      - "xtask/src/main.rs"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
       - ".github/workflows/publish-sandbox.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
   pull_request:
     paths:
       - "crates/tiangong-sandbox/**"
-      - "xtask/Cargo.toml"
-      - "xtask/src/main.rs"
       - ".github/actions/prepare-sandbox-key/**"
       - ".github/workflows/sandbox-ci.yml"
       - ".github/workflows/publish-sandbox.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
 
 concurrency:
   group: sandbox-${{ github.ref }}
@@ -36,6 +28,39 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect Sandbox Release Changes
+    runs-on: ubuntu-22.04
+    outputs:
+      release_artifact: ${{ steps.resolve.outputs.release_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve release artifact scope
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          release_artifact=false
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            release_artifact=true
+          elif [[ -n "$PR_BASE" ]]; then
+            mapfile -t files < <(git diff --name-only "$PR_BASE...HEAD")
+            for file in "${files[@]}"; do
+              case "$file" in
+                crates/tiangong-sandbox/*|.github/actions/prepare-sandbox-key/*|.github/workflows/publish-sandbox.yml)
+                  release_artifact=true
+                  break
+                  ;;
+              esac
+            done
+          fi
+          echo "Sandbox release artifact: $release_artifact"
+          echo "release_artifact=$release_artifact" >> "$GITHUB_OUTPUT"
+
   linux:
     name: Sandbox (Linux x86_64)
     runs-on: ubuntu-22.04
@@ -156,6 +181,9 @@ jobs:
 
   release-artifact:
     name: Sandbox release artifact (${{ matrix.label }})
+    needs: changes
+    # main push/手动运行始终执行；PR 仅在 Sandbox 或发布链真实变化时执行。
+    if: needs.changes.outputs.release_artifact == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:

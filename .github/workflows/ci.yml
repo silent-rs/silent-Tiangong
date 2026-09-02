@@ -201,7 +201,9 @@ jobs:
     name: App Rust nextest
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
-    runs-on: ubuntu-latest
+    # Plugin Runtime 测试会真实启动 bubblewrap；24.04 Hosted Runner 禁止
+    # 所需 uid map，固定到与 Sandbox CI 相同且已验证的 22.04 环境。
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - id: setup
@@ -209,6 +211,19 @@ jobs:
         with:
           matrix: ${{ needs.changes.outputs.matrix }}
           install-nextest: true
+      - name: Prepare plugin runtime sandbox tests
+        if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-runtime')
+        env:
+          CARGO_BUILD_JOBS: "1"
+          RUSTFLAGS: "-C linker-features=-lld"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          test_node="${RUNNER_TEMP}/node"
+          cp "$(command -v node)" "$test_node"
+          chmod 0755 "$test_node"
+          echo "TIANGONG_NODE_PATH=$test_node" >> "$GITHUB_ENV"
+          cargo build -p tiangong-sandbox --bin tiangong-sandbox
       - name: Test crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
@@ -229,7 +244,8 @@ jobs:
     name: Interpreter Release E2E
     needs: changes
     if: needs.changes.outputs.interpreter_e2e == 'true'
-    runs-on: ubuntu-latest
+    # 真实 Sidecar 调用经 bubblewrap；与 Sandbox Linux 原生验收环境保持一致。
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -238,7 +254,7 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler bubblewrap
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -261,6 +277,14 @@ jobs:
           cargo run -p xtask -- generate-plugin-test-key "$key_path"
           test -f "${key_path}.pub"
           export TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH="$key_path"
+          # Hosted Node 位于共享 toolcache，权限形态不满足 Launcher 的目标程序
+          # 门禁。复制到本次 job 私有目录并收紧权限后显式指定解释器。
+          test_node="${RUNNER_TEMP}/node"
+          cp "$(command -v node)" "$test_node"
+          chmod 0755 "$test_node"
+          export TIANGONG_NODE_PATH="$test_node"
+          echo "TIANGONG_NODE_PATH=$test_node" >> "$GITHUB_ENV"
+          cargo build -p tiangong-sandbox --bin tiangong-sandbox
           cargo run -p xtask -- build-plugin plugin-creator
           version="$(jq -er '.version' plugins/tiangong-plugin-creator/plugin.json)"
           # 断言发布产物齐备（测试必跑的先决条件）。

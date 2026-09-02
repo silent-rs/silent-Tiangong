@@ -10,21 +10,21 @@
 
 天工内置嵌入式浏览器，Agent 可自主打开网页、读取页面内容、点击元素和填写表单，同时感知用户在浏览器中的操作行为，实现人机协同浏览；通过飞书、微信、QQ 等 IM 平台接入移动端控制，可随时随地远程驱动 Agent，配合定时任务和 Webhook 实现按计划或按事件自动执行。
 
-模型方面，天工完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度；DeepSeek 适配已跟进 V4 新版接口（`deepseek-v4-pro` / `deepseek-v4-flash`），支持思考模式（`reasoning_effort` 分档控制）、结构化与文本协议双通道工具调用解析，以及流式 KV cache 命中率统计。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 的 kimi-k3 和 [智谱](https://www.bigmodel.cn/) 的 GLM5.2，其他模型可以通过自定义供应商接入。
+模型方面，天工完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度；DeepSeek 适配已跟进 V4 新版接口（`deepseek-v4-pro` / `deepseek-v4-flash`），支持思考模式（`reasoning_effort` 分档控制）、结构化与文本协议双通道工具调用解析，以及流式 KV cache 命中率统计。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 和 [智谱](https://www.bigmodel.cn/)，其他模型可以通过自定义供应商接入。
 
-> 安全提示：天工当前未使用沙箱技术隔离工具执行环境。如果你对本地文件访问、命令执行或自动化操作的隔离要求较高，建议暂时考虑其他软件。
+> 安全提示：天工默认通过独立 Sandbox Launcher 隔离插件 Sidecar 和按需命令进程。Launcher 分别使用 macOS Seatbelt、Linux bubblewrap、Windows AppContainer 与 Job Object 施加系统级边界；程序缺失、签名无效、自检失败或协议不兼容时拒绝启动受保护进程，不会静默降级。用户可以在「设置 → 沙箱管理」中查看状态、更新 Launcher，并按需配置额外允许目录和环境变量黑名单。关闭按需进程沙箱后，对应进程将以当前用户权限运行，请谨慎操作。
 
 ![多智能体协作示例](docs/readme/sub_agent.png)
 
 ## 项目起源
 
-天工的出发点很简单：让 AI 不只是聊天，而是能真正帮你干活。遇到需要读文件、跑命令、查资料、操作网页这类实际工作，当前体验最好的是 Claude、Codex、OpenCode 这类 CLI 终端工具，但它们受限于终端环境，无法提供可视化的操作界面和交互反馈。
+天工源于一个朴素的想法：让 AI 从对话工具成长为真正参与个人工作流的智能终端。它不仅理解需求，也能围绕真实工作区读取资料、规划步骤、调用工具、操作网页、执行任务，并把过程和结果清晰地呈现给用户。
 
-主流大厂的产品则集中在两个方向：Claude 桌面端资源消耗巨大，ChatGPT 桌面端只有搜索能力，而且它们的核心场景都是 coding。对于普通用户来说，这些产品对接其他平台模型也不够直观，需要一定的折腾能力。更重要的是，现有工具在浏览网页等交互式场景中人的参与度过低——提交任务后只能等待结果，或者直接打断再继续和 Agent 沟通，缺乏实时协同的能力。
+我们希望人与 Agent 不是简单的“下达任务并等待”，而是在同一个工作环境中持续协作。用户可以随时观察进度、接管操作、补充信息或调整方向；Agent 也能感知这些变化并继续推进。嵌入式浏览器、可视化工具过程和多智能体协作，都是这一理念的自然延伸。
 
-天工的答案是内置嵌入式浏览器：用户和 Agent 可以同时操作同一个页面，Agent 自主完成任务的同时能感知用户的操作行为，实现真正的人机协同。再加上多智能体协作、长期记忆、多媒体生成等能力，不限于写代码，而是覆盖日常工作全场景的个人智能终端。
+天工面向的不只是编程，而是资料整理、研究分析、内容创作、网页操作、日常自动化和远程协作等广泛场景。能力通过插件持续扩展，模型可以自由配置，重要数据保存在本地，执行过程由明确的权限和沙箱边界约束。
 
-整个项目用 Rust 构建，单机运行，数据本地存储，不依赖云服务。
+整个项目以 Rust 为基础，优先追求本地运行、可扩展、可治理和长期可维护，让个人能够建立属于自己的 AI 工作中枢。
 
 ## 核心能力
 
@@ -37,6 +37,7 @@
 | 移动端控制    | 通过独立 Bot 制品接入飞书、微信、QQ，支持扫码配置、运行托管、日志查看和图片/文件收发         |
 | DeepSeek V4   | 适配 V4 新版接口，支持思考模式分档、结构化与文本协议双通道工具调用解析、流式 KV cache 统计   |
 | 权限治理      | 桌面会话可在监督模式和信任模式之间切换，无界面运行时使用受控的远程角色边界                    |
+| 跨平台沙箱    | Sidecar 与按需命令默认经独立 Launcher 隔离，支持目录授权、环境变量屏蔽、签名自检和进程树清理 |
 | 发布更新      | GitHub Release 分发安装包，桌面设置页和 `tiangong update` 共用在线更新链路                   |
 
 ## 插件系统
@@ -51,11 +52,26 @@
 | 混合插件             | UI 挂载 + WASM/sidecar 能力组合                              |
 
 - **人机协同**：插件延续天工的人机协同理念，同一个插件既可以向 Agent 声明工具能力，也可以向用户贡献界面与交互（拓展区 App、输入区动作、审批与用户征询），让创建的插件成为人与 Agent 共用的协作界面，而不是单向的自动化工具。
-- **权限与能力声明**：插件在清单中声明 `entrypoints`、`permissions` 与 `capabilities`，主程序按声明路由请求。
+- **权限与能力声明**：插件在清单中声明 `entrypoints`、`permissions` 与 `capabilities`，主程序按声明路由请求；实际会话工作区和执行策略由宿主根据调用上下文确定，插件载荷不能自行扩大权限。
+- **进程隔离**：WASM 逻辑由 Wasmtime 能力边界约束，Sidecar 默认通过 stdio 与宿主通信并由 Sandbox Launcher 启动；命令名称、参数文本不再作为安全边界，最终访问范围由操作系统沙箱实施。
 - **独立签名发布**：每个插件单独构建、签名和发布，CI 校验签名清单与目录结构，支持默认插件推荐、安装进度展示、按需启停与更新，失败不影响主进程稳定性。
 - **自建插件**：提供脚手架与工程模板（ui-app / ts-tool / ts-npx / node-sidecar），可通过 `cargo run -p xtask -- new-plugin <id>` 或 [`@silent-ai/plugin-creator`](plugins/devkit) 初始化；构建产物经「设置 → 插件管理 → 导入本地插件」走正式安装链路（清单校验 → 事务安装 → 注册表加载），官方 Creator 插件还支持在天工内直接创建、签名并安装插件。
 
 插件源码位于根目录 [`plugins/`](plugins/)，编写自己的插件请参考 [插件开发指南](docs/plugin-development.md)。
+
+## 沙箱与执行边界
+
+天工将“执行命令”和“限制命令能做什么”拆成两个职责：Command 插件负责参数解析、受控环境、超时取消、进程清理和输出处理；Runtime 根据权威会话工作区和用户设置生成策略，独立 Sandbox Launcher 负责验证并施加操作系统隔离。这样不依赖命令名称白名单或 Shell 文本猜测，脚本和子进程也会继承同一执行边界。
+
+- **跨平台实现**：macOS 使用 Seatbelt，Linux 使用 bubblewrap，Windows 使用 AppContainer 与 Job Object。
+- **默认开启**：按需 Sidecar 默认进入沙箱；用户可显式关闭按需进程沙箱，变更在下次创建进程时生效。预加载的常驻服务不接受该开关降级。
+- **工作区隔离**：Runtime 按工具调用所属会话读取真实工作区，不信任插件页面或调用参数自行声明的工作区。
+- **用户授权**：在「设置 → 沙箱管理」中可以增加任意目录白名单，并维护不传给进程的环境变量黑名单。
+- **管理面保护**：应用配置、签名密钥、信任库、Launcher 程序与授权配置由宿主强制保护，用户目录白名单不能覆盖这些保护项。
+- **可信启动**：Launcher 在线安装并独立更新，每次使用前检查签名、自检结果及协议兼容性；不满足要求时受保护进程拒绝启动，但对话和浏览等不依赖 Launcher 的功能仍可使用。
+- **必要例外**：官方签名的 Terminal 和 Command 可获得完成 Git 工作流所需的凭据只读能力；macOS 官方 `computer-use` 为继承应用辅助功能授权采用受控直启。第三方或同名自签插件不能获得这些例外。
+
+Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和更新方式见 [`tiangong-sandbox` 说明](crates/tiangong-sandbox/README.md)。
 
 ## 多智能体协作
 
@@ -128,6 +144,9 @@ crates/
   tiangong-entry/       统一命令入口
   tiangong-server/      HTTP REST + WebSocket Server
   tiangong-media/       图片、视频、语音等多媒体能力
+  tiangong-plugin-runtime/ 插件注册、宿主策略、Sidecar 路由与 Launcher 管理
+  tiangong-sandbox/      跨平台 Sandbox Launcher、策略、验签、自检与更新
+  tiangong-toolkit/      插件共享的路径、进程和输出辅助能力
   plugins/              可插拔能力（fs/command/fetch/mcp/skill/memory/
                         scheduler/index/media/prompt/coding/computer-use/
                         browser/terminal/interaction 等，含 WASM 与
@@ -145,7 +164,11 @@ src-tauri/              Tauri 桌面壳
 会话与工作区上下文装配
   ↓
 ReAct 循环：推理、工具调用、观察、继续执行
+  ↓ 工具调用
+Runtime 根据所属会话和用户设置生成执行策略
   ↓
+Sidecar 经 Launcher 进入系统沙箱并通过 stdio 与宿主通信
+  ↓ 工具结果返回 ReAct 循环
 默认由主 Agent 直接完成；用户要求分工时招募 Sub Agent 协作
   ↓
 结构化事件实时推送到桌面界面与无界面入口
@@ -208,7 +231,7 @@ Windows 可将安装目录加入 `PATH`。Linux 安装包通常会直接提供�
 
 ## 使用
 
-天工以桌面应用为主要使用方式，模型配置、插件安装与会话管理均可在设置页完成。源码运行时默认启动桌面应用：
+天工以桌面应用为主要使用方式，模型配置、插件安装、会话管理与沙箱管理均可在设置页完成。首次启动时若 Sandbox Launcher 尚未就绪，应用会尝试从官方清单安装并验证；安装失败不会阻塞对话，但依赖沙箱的工具会拒绝执行，可稍后在「设置 → 沙箱管理」中重试。源码运行时默认启动桌面应用：
 
 ```bash
 cargo run --release
@@ -255,6 +278,7 @@ tiangong doctor                          # 环境诊断
   logs/                 运行日志
   media/                生成或归档的媒体文件
   memory/               长期记忆数据（含独立 config.json）
+  sandbox/              Sandbox Launcher 与伴生签名
 ```
 
 模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可通过 `tiangong prompt` 命令管理。
@@ -292,6 +316,7 @@ yarn --cwd frontend dev
 ## 文档
 
 - [插件开发指南](docs/plugin-development.md)
+- [Sandbox Launcher 使用说明](crates/tiangong-sandbox/README.md)
 - [CLI 配置指南](docs/cli-configuration-guide.md)
 - [Server API](docs/server-api.md)
 - [Linux 服务器部署指南](docs/linux-server-deployment.md)
