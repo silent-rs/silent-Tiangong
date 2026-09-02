@@ -963,6 +963,12 @@ fn installed_plugin_states(storage_root: &Path) -> HashMap<String, InstalledPlug
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let manifest = PluginManifest::load(&entry.path().join(MANIFEST_FILE)).ok()?;
+            // 只认目录名与清单 ID 一致的正式目录：本地部署中断残留的
+            // `.{id}-staging-{pid}` 同样带清单，混入会以同 ID 覆盖正式目录
+            // 的版本，让升级判定与安装校验读到的"当前版本"不一致。
+            if *entry.file_name() != *manifest.id {
+                return None;
+            }
             let enabled = !entry.path().join(DISABLED_MARKER_FILE).is_file();
             Some((
                 manifest.id,
@@ -1108,6 +1114,32 @@ mod tests {
                 .is_file()
         );
         assert!(!staged.path().join("templates/ui-app/node_modules").exists());
+    }
+
+    /// 升级判定只认目录名与清单 ID 一致的正式目录：本地部署中断残留的
+    /// `.{id}-staging-{pid}` 带同 ID 清单，不得覆盖正式目录的版本。
+    #[test]
+    fn installed_plugin_states_忽略staging残留目录() {
+        let root = tempfile::tempdir().expect("临时目录");
+        let plugins = root.path().join("plugins");
+        std::fs::create_dir_all(plugins.join("demo")).expect("正式目录");
+        std::fs::write(
+            plugins.join("demo").join(MANIFEST_FILE),
+            r#"{"schema_version":2,"id":"demo","version":"0.3.2","permissions":[],"capabilities":{"prompt":true}}"#,
+        )
+        .expect("正式清单");
+        std::fs::create_dir_all(plugins.join(".demo-staging-123")).expect("残留目录");
+        std::fs::write(
+            plugins.join(".demo-staging-123").join(MANIFEST_FILE),
+            r#"{"schema_version":2,"id":"demo","version":"0.3.1","permissions":[],"capabilities":{"prompt":true}}"#,
+        )
+        .expect("残留清单");
+
+        let states = installed_plugin_states(root.path());
+        assert_eq!(
+            states.get("demo").expect("正式插件应被识别").version,
+            "0.3.2"
+        );
     }
 }
 
