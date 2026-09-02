@@ -1,21 +1,28 @@
 # 终端插件（Terminal）
 
-终端能力的 manifest v2 插件化（参考 `plugins/tiangong-plugin-interaction` 模式）：
-工具声明与 prompt 引导来自本清单，
-经 TsPluginAdapter 注入 Core；工具执行策略在 `src/shell.ts`（TS 壳）——
-收到 tool.requested 后创建长期交互 PTY，在后台建立对应终端 App，在该 shell 内执行命令并等待真实输出、退出状态后回传，不自动展开拓展区。
+终端能力的 manifest v2 插件化。工具声明与 prompt 引导来自本清单，经
+TsPluginAdapter 注入 Core。
 
-`run_command` / `run_shell` 不接收终端编号：插件优先复用当前会话的第一个
-空闲终端，没有可用终端时自动新建并在后台建立标签。工具结果会返回实际终端编号；
-`terminal_send` / `terminal_close` 必须用该编号精确操作，避免多终端时误选。
+工具执行策略在 sidecar（`sidecar/src/service.rs`，Rust 进程）：plugin.json
+声明 `sidecar.tools_direct`，宿主把工具调用直连 sidecar，并随请求注入
+宿主权威会话上下文（`session_id` 与会话工作目录，来自 Session 真相源）。
+每个会话的终端编排（选终端、新建、开标签、执行、收结果）由 sidecar 内
+对应会话作用域唯一完成；页面实例（`src/main.ts` + `terminal-view.ts`）
+只承担显示与输入，不参与工具调度，也无 `tool.requested` 竞争接应。
 
-终端面板为宿主原生容器（xterm 渲染与 PTY 会话管理不在插件沙箱内），
-本插件的 UI 入口承载工具壳逻辑与 extension.tab 声明。
+`run_command` / `run_shell` 不接收终端编号：优先复用当前会话的第一个
+空闲终端，没有可用终端时自动新建并静默建立标签（不展开拓展区）。
+工具结果会返回实际终端编号；`terminal_send` / `terminal_close` 必须用
+该编号精确操作，且目标终端必须属于当前会话——跨会话操作明确拒绝，
+不回退当前可见会话。
+
+sidecar 执行中经进度帧请求宿主 App 原语（`host_action`，白名单
+`app.open` / `app.close`）：长任务执行期间终端标签即时建立，用户可
+实时查看输出。
 
 顶部标签切换或拓展区暂时隐藏时保留当前终端；明确关闭终端 App 标签时
-结束该终端并清除恢复记录，再次打开会创建全新终端。
-`run_command` / `run_shell` 创建 PTY 后会通过公共 SDK 在后台建立对应终端标签，
-不会自动展开拓展区；用户主动打开后可查看执行内容。多个前后台插件实例只允许一个实例处理同一工具调用。
+结束该终端并清除恢复记录，再次打开会创建全新终端。Sub Agent / Bot
+等后台会话无需任何页面实例即可独立执行终端工具。
 
 ## 开发循环
 
@@ -35,6 +42,10 @@ sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` �
 
 ## 与宿主的协议
 
-- 权限：`terminal.use`（原生服务）+ `tool.provide`（工具结果提交）
-- 桥接方法：`terminal.runCommand` / `terminal.runShell` / `terminal.send`
-- 工具超时：run 系 600s、terminal_send 120s（宿主 ts_tools 兜底）
+- 权限：`tool.provide`（工具结果提交）+ `sidecar.invoke`（视图直调
+  sidecar 操作）+ `app.use`（App 标签原语）
+- 工具直连：宿主经 `invoke_with_context` 调用，operation 为工具名；
+  请求帧携带 `context`（session_id / invocation_id / 权威 workspace），
+  缺失即拒绝执行
+- 工具超时：run 系 300s、terminal_send 120s、面板操作 30s（清单
+  `timeout_ms`，宿主工具级超时；会话取消按 session_id 定向取消请求）

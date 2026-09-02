@@ -3,7 +3,8 @@ import { createTerminalView, type TerminalViewHandle } from './terminal-view';
 import { sidecarCall, terminalSessions } from './shell';
 
 /**
- * 入口：初始化桥接 → 工具壳（shell.ts 静态导入即完成订阅）→ 终端视图。
+ * 入口：初始化桥接 → 终端视图（纯显示与输入）。
+ * 工具执行由宿主直连 sidecar（tools_direct），页面不参与调度。
  * shadow 容器把页面元素注入 ShadowRoot：挂载点必须经宿主注入的
  * pluginRoot 查询（document 查不到 shadow 内元素）。
  *
