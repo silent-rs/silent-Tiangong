@@ -175,6 +175,7 @@ impl TerminalLineProcessor {
 struct LineBuildHandler {
     line: Vec<char>,
     cursor: usize,
+    row: usize,
     complete_lines: Vec<String>,
 }
 
@@ -183,6 +184,7 @@ impl LineBuildHandler {
         Self {
             line: Vec::new(),
             cursor: 0,
+            row: 1,
             complete_lines: Vec::new(),
         }
     }
@@ -190,6 +192,25 @@ impl LineBuildHandler {
     /// 从 vte Params 提取第一个参数值（默认 0）。
     fn first_param(params: &vte::Params) -> usize {
         params.iter().next().map(|p| p[0]).unwrap_or(0) as usize
+    }
+
+    fn param(params: &vte::Params, index: usize, default: usize) -> usize {
+        params
+            .iter()
+            .nth(index)
+            .and_then(|param| param.first())
+            .copied()
+            .map(usize::from)
+            .unwrap_or(default)
+    }
+
+    fn finish_line(&mut self) {
+        let line: String = self.line.iter().collect();
+        if !line.trim().is_empty() {
+            self.complete_lines.push(line);
+        }
+        self.line.clear();
+        self.cursor = 0;
     }
 }
 
@@ -206,12 +227,8 @@ impl vte::Perform for LineBuildHandler {
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' => {
-                let line: String = self.line.iter().collect();
-                if !line.trim().is_empty() {
-                    self.complete_lines.push(line);
-                }
-                self.line.clear();
-                self.cursor = 0;
+                self.finish_line();
+                self.row = self.row.saturating_add(1);
             }
             b'\r' => self.cursor = 0,
             b'\x08' => self.cursor = self.cursor.saturating_sub(1),
@@ -227,6 +244,19 @@ impl vte::Perform for LineBuildHandler {
         c: char,
     ) {
         match c {
+            // ConPTY 经虚拟终端序列移动到下一输出行，不一定发送 CRLF。
+            'H' | 'f' => {
+                let row = Self::param(params, 0, 1).max(1);
+                let col = Self::param(params, 1, 1).max(1);
+                if row != self.row {
+                    self.finish_line();
+                    self.row = row;
+                }
+                self.cursor = col - 1;
+                while self.line.len() < self.cursor {
+                    self.line.push(' ');
+                }
+            }
             // ESC[K — 清行
             'K' => match Self::first_param(params) {
                 0 => self.line.truncate(self.cursor),

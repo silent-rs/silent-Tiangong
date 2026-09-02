@@ -158,6 +158,17 @@ fn login_shell_args(shell: &str) -> Vec<&'static str> {
     }
 }
 
+fn shell_ready_probe(marker: &str) -> String {
+    if cfg!(windows) {
+        // cmd.exe 会把单引号当普通字符，且 ConPTY 会回显输入。用 ^ 拆开
+        // 输入中的 marker；cmd 输出时会去掉 ^，因此完整 marker 只来自结果。
+        let suffix = marker.strip_prefix(MARKER_PREFIX).unwrap_or(marker);
+        format!("echo {MARKER_PREFIX}^{suffix}\r")
+    } else {
+        format!("echo '{marker}'\r")
+    }
+}
+
 fn default_cols() -> u16 {
     80
 }
@@ -521,6 +532,7 @@ impl TerminalService {
         // 等待线程：退出通知 + 会话出表（find 不再命中死会话，
         // write/resize 自然返回「会话不存在」）。
         let exit_session = session_id.clone();
+        let exit_sequence = sequence;
         let exit_sessions = Arc::clone(&self.sessions);
         std::thread::spawn(move || {
             let status = child.wait();
@@ -531,10 +543,13 @@ impl TerminalService {
             })
             .unwrap_or_default();
             emit_notification(CHANNEL_EXIT, payload);
-            exit_sessions
-                .lock()
-                .expect("会话表锁损坏")
-                .remove(&exit_session);
+            let mut sessions = exit_sessions.lock().expect("会话表锁损坏");
+            if sessions
+                .get(&exit_session)
+                .is_some_and(|session| session.sequence == exit_sequence)
+            {
+                sessions.remove(&exit_session);
+            }
         });
 
         Ok(SpawnResponse {
@@ -771,6 +786,9 @@ impl TerminalService {
         {
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
+        // ConPTY 可能先交付半段提示符；此时立即写入 Ctrl+C 会让刚启动的
+        // cmd.exe 退出。等待一个短稳定窗口后再清理残留输入。
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
         let marker = format!("__TIANGONG_READY_{}__", scru128::new());
         let start_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
@@ -797,7 +815,7 @@ impl TerminalService {
         self.with_session(session_id, |session| {
             session
                 .writer
-                .write_all(format!("echo '{}'\r", marker).as_bytes())
+                .write_all(shell_ready_probe(&marker).as_bytes())
                 .context("发送 Shell 就绪探针失败")?;
             session.writer.flush().context("刷新 Shell 就绪探针失败")
         })?;
@@ -811,11 +829,27 @@ impl TerminalService {
             if !current.trim().is_empty() {
                 lines.push(current);
             }
-            if lines.iter().any(|line| line.trim() == marker) {
+            let probe_completed = if cfg!(windows) {
+                String::from_utf8_lossy(&raw).contains(&marker)
+            } else {
+                lines.iter().any(|line| line.trim() == marker)
+            };
+            if probe_completed {
                 return Ok(());
             }
             if Instant::now() >= probe_deadline {
-                bail!("等待 Shell 就绪超时");
+                let output = String::from_utf8_lossy(&raw);
+                let reversed_tail = output.chars().rev().take(2048).collect::<String>();
+                let output_tail = reversed_tail.chars().rev().collect::<String>();
+                tracing::warn!(
+                    session_id,
+                    probe_output = ?output_tail,
+                    "等待 Shell 就绪超时，关闭失效终端会话"
+                );
+                let _ = self.kill_session(SessionIdRequest {
+                    session_id: session_id.to_string(),
+                });
+                bail!("等待 Shell 就绪超时，已关闭失效终端");
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
@@ -1077,26 +1111,36 @@ fn contains_marker(text: &str) -> bool {
 /// 行级 marker 过滤器：内部 wrapper 的 shell 回显和边界行不进入 UI。
 struct RawOutputFilter {
     pending: String,
+    suppress_until_newline: bool,
 }
 
 impl RawOutputFilter {
     fn new() -> Self {
         Self {
             pending: String::new(),
+            suppress_until_newline: false,
         }
     }
 
     fn filter(&mut self, chunk: &str) -> String {
         self.pending.push_str(chunk);
         let mut result = String::new();
-        while let Some(pos) = self.pending.find('\n') {
-            let line = self.pending[..=pos].to_string();
-            self.pending.drain(..=pos);
-            if !contains_marker(&line) {
-                result.push_str(&line);
+        while let Some((end, newline)) = next_output_boundary(&self.pending) {
+            let segment = self.pending[..end].to_string();
+            self.pending.drain(..end);
+            if contains_marker(&segment) {
+                self.suppress_until_newline = !newline;
+            } else if !self.suppress_until_newline {
+                result.push_str(&segment);
+            }
+            if newline {
+                self.suppress_until_newline = false;
             }
         }
         if self.pending.is_empty() {
+            return result;
+        }
+        if self.suppress_until_newline {
             return result;
         }
         if contains_marker(&self.pending) {
@@ -1112,6 +1156,37 @@ impl RawOutputFilter {
             self.pending.drain(..split);
         }
         result
+    }
+}
+
+fn next_output_boundary(value: &str) -> Option<(usize, bool)> {
+    let newline = value.find('\n').map(|index| (index + 1, true));
+    let bytes = value.as_bytes();
+    let mut cursor = None;
+    let mut index = 0;
+    while index + 2 < bytes.len() {
+        if bytes[index] != b'\x1b' || bytes[index + 1] != b'[' {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 2;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+            end += 1;
+        }
+        if end < bytes.len() && matches!(bytes[end], b'H' | b'f') {
+            cursor = Some((end + 1, false));
+            break;
+        }
+        index += 1;
+    }
+    match (newline, cursor) {
+        (Some(newline), Some(cursor)) => Some(if newline.0 <= cursor.0 {
+            newline
+        } else {
+            cursor
+        }),
+        (Some(boundary), None) | (None, Some(boundary)) => Some(boundary),
+        (None, None) => None,
     }
 }
 
@@ -1389,12 +1464,22 @@ fn prepare_non_interactive_command(
     command: &str,
     markers: &CommandMarkers,
 ) -> Result<PreparedCommand> {
+    let script = format!(
+        "@echo off\r\necho {}\r\n{}\r\nset \"__TIANGONG_RC_VALUE=%errorlevel%\"\r\necho {}\r\necho %cd%\r\necho {}%__TIANGONG_RC_VALUE%\r\necho {}\r\n",
+        markers.start, command, markers.cwd, markers.exit_code, markers.end,
+    );
+    let mut file = tempfile::Builder::new()
+        .prefix(&markers.start)
+        .suffix(".cmd")
+        .tempfile()
+        .context("创建 Windows 终端命令临时文件失败")?;
+    file.write_all(script.as_bytes())
+        .context("写入 Windows 终端命令临时文件失败")?;
+    file.flush().context("刷新 Windows 终端命令临时文件失败")?;
+    let path = file.path().to_string_lossy();
     Ok(PreparedCommand {
-        input: format!(
-            "echo {}\r\n{}\r\nset __TIANGONG_RC_VALUE=%errorlevel%\r\necho {}%cd%\r\necho {}%__TIANGONG_RC_VALUE%\r\necho {}\r\n",
-            markers.start, command, markers.cwd, markers.exit_code, markers.end,
-        ),
-        _file: None,
+        input: format!("echo {}>nul & call {}\r", markers.start, shell_quote(&path)),
+        _file: Some(file),
     })
 }
 
@@ -1407,6 +1492,7 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
     }
 
     let mut start_seen = false;
+    let mut collecting_cwd = false;
     let mut output = Vec::new();
     let mut parsed = ParsedCommandOutput::default();
     for line in lines {
@@ -1415,17 +1501,28 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
             start_seen = true;
             continue;
         }
+        if trimmed == markers.cwd {
+            parsed.cwd_after.clear();
+            collecting_cwd = true;
+            continue;
+        }
         if let Some(value) = trimmed.strip_prefix(&markers.cwd) {
             parsed.cwd_after = value.trim().to_string();
+            collecting_cwd = true;
             continue;
         }
         if let Some(value) = trimmed.strip_prefix(&markers.exit_code) {
+            collecting_cwd = false;
             parsed.exit_code = value.trim().parse().ok();
             continue;
         }
         if trimmed == markers.end {
             parsed.completed = start_seen;
             break;
+        }
+        if collecting_cwd {
+            parsed.cwd_after.push_str(trimmed);
+            continue;
         }
         if start_seen && !contains_marker(trimmed) {
             output.push(line.trim_end().to_string());
@@ -1972,6 +2069,15 @@ mod tests {
         assert!(args.is_empty());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn shell_ready_probe_uses_cmd_syntax() {
+        assert_eq!(
+            shell_ready_probe("__TIANGONG_READY_test__"),
+            "echo __TIANGONG_^READY_test__\r"
+        );
+    }
+
     #[test]
     fn marker_filter_hides_wrapper_and_keeps_command_output() {
         let mut filter = RawOutputFilter::new();
@@ -1981,6 +2087,15 @@ mod tests {
              __TIANGONG_RC_x__0\r\n",
         );
         assert_eq!(visible, "Cargo.toml\r\n");
+    }
+
+    #[test]
+    fn marker_filter_handles_windows_cursor_moves_and_wrapping() {
+        let mut filter = RawOutputFilter::new();
+        let visible = filter.filter(
+            "__TIANGONG_START_x__\x1b[10;1HC:\\work>echo __TIANGONG_STA\x1b[11;80HRT_x__>nul & dir /b\r\nresult.txt\x1b[13;1HC:\\work>set __TIANGONG_RC_VALUE=0\x1b[14;1H",
+        );
+        assert_eq!(visible, "result.txt\x1b[13;1H");
     }
 
     #[test]
@@ -1994,6 +2109,18 @@ mod tests {
         assert_eq!(parsed.stdout, "one\ntwo");
         assert_eq!(parsed.exit_code, Some(7));
         assert_eq!(parsed.cwd_after, "/tmp");
+    }
+
+    #[test]
+    fn command_parser_joins_wrapped_cwd_without_polluting_stdout() {
+        let markers = CommandMarkers::new("x");
+        let parsed = parse_command_output(
+            b"__TIANGONG_START_x__\r\nagain\r\n__TIANGONG_CWD_x__\r\nC:\\Users\\Test\\very-long\r\n                                                                               path\r\n__TIANGONG_RC_x__0\r\n__TIANGONG_END_x__\r\n",
+            &markers,
+        );
+        assert!(parsed.completed);
+        assert_eq!(parsed.stdout, "again");
+        assert_eq!(parsed.cwd_after, r"C:\Users\Test\very-longpath");
     }
 
     #[cfg(unix)]
@@ -2208,6 +2335,90 @@ mod tests {
                 session_id: terminal,
             })
             .expect("清理测试终端失败");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_windows_首次执行并复用同一终端() {
+        let cwd = tempfile::tempdir().expect("创建 Windows 测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        std::fs::write(cwd.path().join("terminal-ready-windows.txt"), "ok")
+            .expect("写 Windows 测试文件失败");
+        let service = TerminalService::new();
+
+        let first = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "dir", "args": []}),
+                    Some(("windows-session", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(first["ok"], true, "首次执行结果: {first}");
+        assert_eq!(first["exit_code"], 0, "首次执行结果: {first}");
+        assert!(
+            first["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("terminal-ready-windows.txt"),
+            "首次执行未返回目录内容: {first}"
+        );
+        let terminal = first["summary"]
+            .as_str()
+            .and_then(|summary| {
+                summary
+                    .split("终端 ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('（').next())
+            })
+            .expect("首次执行摘要应含终端编号")
+            .to_string();
+
+        let second = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["again"]}),
+                    Some(("windows-session", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(second["ok"], true, "第二次执行结果: {second}");
+        assert_eq!(second["exit_code"], 0, "第二次执行结果: {second}");
+        let raw = service
+            .with_session(&terminal, |session| {
+                Ok(String::from_utf8_lossy(&session.raw_history).to_string())
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            second["stdout"], "again",
+            "第二次执行结果: {second}\nraw={raw:?}"
+        );
+        assert!(
+            second["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("复用空闲终端"),
+            "第二次执行未复用终端: {second}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let display = service
+            .with_session(&terminal, |session| {
+                Ok(String::from_utf8_lossy(&session.display_history).to_string())
+            })
+            .expect("读取 Windows 终端可见历史失败");
+        assert!(display.contains("terminal-ready-windows.txt"));
+        assert!(
+            !contains_marker(&display),
+            "可见输出泄露内部标记: {display:?}"
+        );
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理 Windows 测试终端失败");
     }
 
     #[cfg(unix)]
