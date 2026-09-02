@@ -434,14 +434,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             invocation_id: call.id.clone(),
             workspace: session.cwd.trim().to_string(),
             actor_id: actor_id.to_string(),
-            deadline_ms: Some(
-                chrono::Local::now()
-                    .naive_local()
-                    .and_utc()
-                    .timestamp_millis()
-                    .saturating_add(self.config.epoch_deadline.as_millis() as i64)
-                    .max(0) as u64,
-            ),
+            deadline_ms: None,
         };
         let Some(inner) = self.current_inner() else {
             return Box::pin(async { None });

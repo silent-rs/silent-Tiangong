@@ -26,6 +26,7 @@ const UI_LAUNCH_COOLDOWN: Duration = Duration::from_secs(3);
 /// 隐藏挂载，不建可见标签；CLI / Server 未注入处理器时退化为等待超时。
 /// 插件 UI 挂载完成订阅后由重放机制继续执行调用，工具随后携带精确实例
 /// 编号再次 `app.open` 建立可见标签（是否展开面板由其 showPanel 决定）。
+/// Handler 等待不设时限，只由调用取消、插件卸载或宿主退出闭合。
 fn request_plugin_ui(plugin_id: &str, session_id: &str) {
     let cooldowns = UI_LAUNCH_LAST.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut last_by_plugin) = cooldowns.lock() else {
@@ -67,8 +68,6 @@ pub struct TsToolInvocation {
     pub workspace: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub actor_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,7 +109,6 @@ struct TsToolClosed {
 struct PendingCall {
     invocation: TsToolInvocation,
     plugin_id: String,
-    deadline: NaiveDateTime,
     sender: oneshot::Sender<TsToolResolution>,
 }
 
@@ -144,13 +142,12 @@ pub async fn execute(
     plugin_id: String,
     session_id: String,
     call: ToolCall,
-    timeout_ms: u64,
+    _timeout_ms: u64,
     workspace: String,
     actor_id: String,
 ) -> ToolResult {
     let invocation_id = scru128::new().to_string();
     let created_at = Local::now().naive_local();
-    let deadline = created_at + chrono::Duration::milliseconds(timeout_ms as i64);
     let invocation = TsToolInvocation {
         invocation_id: invocation_id.clone(),
         session_id: session_id.clone(),
@@ -160,7 +157,6 @@ pub async fn execute(
         created_at: format_time(created_at),
         workspace,
         actor_id,
-        deadline_ms: Some(deadline.and_utc().timestamp_millis().max(0) as u64),
     };
     let (sender, receiver) = oneshot::channel();
     pending_calls().lock().expect("TS 工具等待表锁损坏").insert(
@@ -168,7 +164,6 @@ pub async fn execute(
         PendingCall {
             invocation: invocation.clone(),
             plugin_id: plugin_id.clone(),
-            deadline,
             sender,
         },
     );
@@ -212,24 +207,14 @@ pub async fn execute(
         request_plugin_ui(&plugin_id, &session_id);
     }
 
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), receiver).await {
-        Ok(Ok(resolution)) => {
+    match receiver.await {
+        Ok(resolution) => {
             let status = resolution.status;
             let result = resolution.result.into_tool_result();
             emit_closed(&plugin_id, &invocation_id, status);
             result
         }
-        Ok(Err(_)) => failure_result("TypeScript 插件工具调用已取消"),
-        Err(_) => {
-            let removed = pending_calls()
-                .lock()
-                .ok()
-                .and_then(|mut pending| pending.remove(&invocation_id));
-            if removed.is_some() {
-                emit_closed(&plugin_id, &invocation_id, TsToolCloseStatus::Expired);
-            }
-            failure_result("TypeScript 插件工具调用超时")
-        }
+        Err(_) => failure_result("TypeScript 插件工具调用已取消"),
     }
 }
 
@@ -243,22 +228,10 @@ pub fn resolve(plugin_id: &str, payload: &str) -> Result<String> {
             .lock()
             .map_err(|_| anyhow::anyhow!("TS 工具等待表已损坏"))?;
         let Some(call) = calls.get(&resolution.invocation_id) else {
-            bail!("TS 工具调用不存在、已闭合或已过期");
+            bail!("TS 工具调用不存在或已闭合");
         };
         if call.plugin_id != plugin_id {
             bail!("TS 工具调用不属于插件 {plugin_id}");
-        }
-        if Local::now().naive_local() >= call.deadline {
-            let expired = calls.remove(&resolution.invocation_id);
-            drop(calls);
-            if let Some(expired) = expired {
-                emit_closed(
-                    &expired.plugin_id,
-                    &resolution.invocation_id,
-                    TsToolCloseStatus::Expired,
-                );
-            }
-            bail!("TS 工具调用已过期");
         }
         calls
             .remove(&resolution.invocation_id)

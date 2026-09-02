@@ -990,6 +990,12 @@ impl ProcessSidecarConnection {
     ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
         let mut stream = connect(&endpoint, self.config.request_timeout)?;
+        stream
+            .set_read_timeout(None)
+            .with_context(|| "取消 sidecar Handler 读取时限失败")?;
+        stream
+            .set_write_timeout(Some(self.config.request_timeout))
+            .with_context(|| "设置 sidecar 写入保护时限失败")?;
         write_frame(
             &mut stream,
             &IpcFrame::Auth(IpcAuth {

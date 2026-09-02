@@ -15,7 +15,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::protocol::{
     HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcFrame, IpcRequest, PROTOCOL_VERSION,
@@ -803,24 +803,12 @@ impl StdioSidecarConnection {
             return Err(SidecarInvokeError::Unavailable(error.to_string()).into());
         }
 
-        let deadline = Instant::now() + self.config.request_timeout;
         loop {
-            // 先排空进度，再等响应。
+            // Handler 不设时限；每 200ms 唤醒仅用于排空进度和感知进程断开。
             while let Ok(message) = progress_rx.try_recv() {
                 on_progress(message);
             }
-            let now = Instant::now();
-            let remain = if deadline > now {
-                deadline - now
-            } else {
-                Duration::ZERO
-            };
-            if remain.is_zero() {
-                remove_pending(process, &request_id);
-                return Err(SidecarInvokeError::Timeout)
-                    .with_context(|| format!("等待 stdio sidecar 响应超时：{operation}"));
-            }
-            match response_rx.recv_timeout(remain.min(Duration::from_millis(200))) {
+            match response_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(result) => {
                     return result.map_err(|message| {
                         let message = if message == "stdio sidecar 已关闭" {
@@ -1126,8 +1114,8 @@ impl WindowsStopEvent {
         unsafe {
             SetEvent(self.handle.as_raw_handle());
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             if child.try_wait().is_ok_and(|status| status.is_some()) {
                 return;
             }
