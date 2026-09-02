@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use portable_pty::{ChildKiller, CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
 use tiangong_plugin_runtime::protocol::{
-    ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, Response,
+    ErrorCode, HANDSHAKE_OPERATION, PROTOCOL_VERSION, Request, RequestInvocationContext, Response,
 };
 use tiangong_plugin_sidecar::server::emit_notification;
 
@@ -358,11 +358,14 @@ impl TerminalService {
             }
         }
 
+        // 编号全局唯一（scru128）：sidecar 换代（崩溃重启/空闲退出/升级）
+        // 后序号不回卷，Agent 持有的旧编号只会明确失败，不会误命中新终端。
+        // sequence 与编号身份无关，仅用于同 scope 多终端时分辨最新。
         let (sequence, session_id) = loop {
             let sequence = self.next_sequence();
             let session_id = requested_session_id
                 .clone()
-                .unwrap_or_else(|| format!("tty-{sequence}"));
+                .unwrap_or_else(|| format!("tty-{}", scru128::new()));
             if !self
                 .sessions
                 .lock()
@@ -1432,6 +1435,351 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
     parsed
 }
 
+// ── Agent 工具入口（宿主直连；每会话唯一调度者在本进程内）─────────────
+//
+// 工具编排（选终端、新建、开标签、执行、收结果）全部在 sidecar 内完成：
+// 会话归属与权威工作目录来自请求帧携带的宿主上下文（Session.cwd 真相源），
+// 不接受插件页面上下文；terminal_id 归属 scope 校验在操作内完成。
+
+/// 工具调用的宿主权威会话上下文（请求帧 context，缺省拒绝执行）。
+struct ToolScope {
+    session_id: String,
+    workspace: String,
+}
+
+fn tool_scope(context: Option<&RequestInvocationContext>) -> Result<ToolScope> {
+    let context = context.ok_or_else(|| {
+        anyhow::anyhow!("终端工具调用缺少宿主会话上下文（session_id 与工作目录由宿主注入）")
+    })?;
+    Ok(ToolScope {
+        session_id: context.session_id.clone(),
+        workspace: context.workspace.clone(),
+    })
+}
+
+/// 工具结果（对齐宿主 ToolOutcome 形状）。
+#[derive(Debug, Serialize)]
+struct ToolOutcome {
+    ok: bool,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr: Option<String>,
+    exit_code: i32,
+}
+
+impl ToolOutcome {
+    fn ok(summary: String) -> Self {
+        Self {
+            ok: true,
+            summary,
+            stdout: None,
+            stderr: None,
+            exit_code: 0,
+        }
+    }
+
+    fn fail(summary: String) -> Self {
+        Self {
+            ok: false,
+            summary,
+            stdout: None,
+            stderr: None,
+            exit_code: 1,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RunCommandArgs {
+    cmd: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunShellArgs {
+    script: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default)]
+    interactive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalSendArgs {
+    input: String,
+    terminal_id: String,
+    #[serde(default)]
+    wait: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalCloseArgs {
+    terminal_id: String,
+}
+
+/// 经进度帧请求宿主执行 App 原语（建立/收起本插件标签）。
+async fn request_host_app_open(scope_id: &str, instance_id: &str, focus: bool) {
+    let mut payload = serde_json::json!({
+        "session_id": scope_id,
+        "instance_id": instance_id,
+    });
+    if !focus {
+        // 静默建标签（不弹面板）与 shell 时代 showPanel:false 对齐；
+        // 用户明确请求展示的 terminal_open 才展开面板。
+        payload["mode"] = serde_json::json!("background");
+    }
+    let message = serde_json::json!({
+        "host_action": {
+            "method": "app.open",
+            "payload": payload,
+        }
+    });
+    tiangong_plugin_sidecar::emit_progress(message.to_string()).await;
+}
+
+async fn request_host_app_close(scope_id: &str, instance_id: &str) {
+    let message = serde_json::json!({
+        "host_action": {
+            "method": "app.close",
+            "payload": {
+                "session_id": scope_id,
+                "instance_id": instance_id,
+            },
+        }
+    });
+    tiangong_plugin_sidecar::emit_progress(message.to_string()).await;
+}
+
+impl TerminalService {
+    /// run_command / run_shell：优先复用当前会话的空闲长期终端，没有则
+    /// 新建；终端对用户可见可关，实例编号与 PTY 一致，幂等聚焦同一标签。
+    async fn tool_run_command(
+        &self,
+        scope: &ToolScope,
+        is_shell: bool,
+        payload: serde_json::Value,
+    ) -> ToolOutcome {
+        // run_command 与 run_shell 共用执行链，仅命令形态不同：前者是
+        // cmd + args，后者是 script + interactive。
+        let (command, args, cwd_arg, timeout, interactive) = if is_shell {
+            match serde_json::from_value::<RunShellArgs>(payload) {
+                Ok(parsed) => (
+                    parsed.script,
+                    Vec::new(),
+                    parsed.cwd,
+                    parsed.timeout,
+                    parsed.interactive,
+                ),
+                Err(error) => return ToolOutcome::fail(format!("run_shell 参数无效：{error}")),
+            }
+        } else {
+            match serde_json::from_value::<RunCommandArgs>(payload) {
+                Ok(parsed) => (parsed.cmd, parsed.args, parsed.cwd, parsed.timeout, false),
+                Err(error) => return ToolOutcome::fail(format!("run_command 参数无效：{error}")),
+            }
+        };
+
+        let acquired = self.acquire_session(AcquireRequest {
+            scope_id: scope.session_id.clone(),
+        });
+        let mut session_id = acquired.session_id;
+        let created_new = session_id.is_none();
+        // cwd 优先级：Agent 显式指定 > 宿主权威会话工作目录。
+        let workspace = cwd_arg
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let workspace = scope.workspace.trim();
+                (!workspace.is_empty()).then(|| workspace.to_string())
+            });
+        if session_id.is_none() {
+            let spawned = self.spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: workspace.clone(),
+                scope_id: Some(scope.session_id.clone()),
+                reserve: true,
+                cols: default_cols(),
+                rows: default_rows(),
+            });
+            match spawned {
+                Ok(spawned) => session_id = Some(spawned.session_id),
+                Err(error) => return ToolOutcome::fail(format!("终端会话创建失败：{error:#}")),
+            }
+        }
+        let session_id = match session_id {
+            Some(session_id) => session_id,
+            None => return ToolOutcome::fail("终端会话创建失败".to_string()),
+        };
+
+        // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
+        // 重复调用幂等聚焦同一标签。经进度帧即时请求，长任务执行期间
+        // 用户即可看到输出。
+        request_host_app_open(&scope.session_id, &session_id, false).await;
+
+        let executed = self
+            .exec_in_session(ExecRequest {
+                session_id: session_id.clone(),
+                cmd: if is_shell {
+                    String::new()
+                } else {
+                    command.clone()
+                },
+                args: if is_shell { Vec::new() } else { args.clone() },
+                script: if is_shell {
+                    Some(command.clone())
+                } else {
+                    None
+                },
+                timeout,
+                interactive,
+                cwd: workspace.filter(|value| !value.is_empty()),
+            })
+            .await;
+        let executed = match executed {
+            Ok(executed) => executed,
+            Err(error) => {
+                // 执行失败时释放预留（幂等；会话已退出则忽略）。
+                let _ = self.release_session(SessionIdRequest {
+                    session_id: session_id.clone(),
+                });
+                return ToolOutcome::fail(format!("终端执行失败：{error:#}"));
+            }
+        };
+        let exit_code = executed.exit_code;
+        let cwd_note = if executed.cwd_after.is_empty() {
+            String::new()
+        } else {
+            format!("，cwd: {}", executed.cwd_after)
+        };
+        let reason = if acquired.reason == "all_busy" {
+            "当前会话已有终端都在忙"
+        } else {
+            "当前会话没有可用终端"
+        };
+        let selection = if created_new {
+            format!("新终端 {session_id}（{reason}，没有写入旧终端）")
+        } else {
+            format!("终端 {session_id}（复用空闲终端）")
+        };
+        let summary = if executed.interactive_mode {
+            format!("命令已在{selection}进入交互状态")
+        } else if executed.timed_out {
+            format!("命令在{selection}执行超时{cwd_note}")
+        } else if exit_code == 0 {
+            format!("命令已在{selection}执行完成{cwd_note}")
+        } else {
+            format!("命令已在{selection}结束，退出码 {exit_code}{cwd_note}")
+        };
+        ToolOutcome {
+            ok: true,
+            summary,
+            stdout: Some(executed.stdout),
+            stderr: Some(executed.stderr),
+            exit_code,
+        }
+    }
+
+    /// terminal_open：创建独立编号的终端并展开面板聚焦（用户明确请求
+    /// 展示时使用）。
+    async fn tool_terminal_open(&self, scope: &ToolScope) -> ToolOutcome {
+        let instance_id = format!("terminal-{}", scru128::new());
+        let spawned = self.spawn_session(SpawnRequest {
+            session_id: Some(instance_id.clone()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: (!scope.workspace.trim().is_empty()).then(|| scope.workspace.trim().to_string()),
+            scope_id: Some(scope.session_id.clone()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        });
+        if let Err(error) = spawned {
+            return ToolOutcome::fail(format!("终端面板操作失败：{error:#}"));
+        }
+        request_host_app_open(&scope.session_id, &instance_id, true).await;
+        ToolOutcome::ok(format!("已打开终端 {instance_id}"))
+    }
+
+    /// terminal_send：向指定终端发送输入；目标必须属于当前会话。
+    async fn tool_terminal_send(
+        &self,
+        scope: &ToolScope,
+        payload: serde_json::Value,
+    ) -> ToolOutcome {
+        let parsed = match serde_json::from_value::<TerminalSendArgs>(payload) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolOutcome::fail(format!("terminal_send 参数无效：{error}")),
+        };
+        let target = parsed.terminal_id.trim().to_string();
+        if target.is_empty() {
+            return ToolOutcome::fail("terminal_send 缺少 terminal_id".to_string());
+        }
+        let sent = self
+            .send_to_session(SendRequest {
+                scope_id: scope.session_id.clone(),
+                session_id: target,
+                input: parsed.input,
+                wait: parsed.wait,
+            })
+            .await;
+        match sent {
+            Ok(sent) => ToolOutcome {
+                ok: true,
+                summary: format!("终端 {} 已更新，当前内容见 stdout", sent.session_id),
+                stdout: Some(sent.stdout),
+                stderr: None,
+                exit_code: sent.exit_code,
+            },
+            Err(error) => ToolOutcome::fail(format!("{error:#}")),
+        }
+    }
+
+    /// terminal_close：精确关闭指定终端及其面板（归属校验在关闭操作内）。
+    async fn tool_terminal_close(
+        &self,
+        scope: &ToolScope,
+        payload: serde_json::Value,
+    ) -> ToolOutcome {
+        let parsed = match serde_json::from_value::<TerminalCloseArgs>(payload) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolOutcome::fail(format!("terminal_close 参数无效：{error}")),
+        };
+        let target = parsed.terminal_id.trim().to_string();
+        if target.is_empty() {
+            return ToolOutcome::fail(
+                "terminal_close 缺少 terminal_id，未关闭任何终端".to_string(),
+            );
+        }
+        // App 标签可能先于 PTY 退出被用户关闭，关闭操作幂等；但归属
+        // 校验失败（终端属于其他会话）必须明确拒绝，不回退当前可见会话。
+        match self.close_session(CloseRequest {
+            session_id: Some(target.clone()),
+            scope_id: scope.session_id.clone(),
+        }) {
+            Ok(_) => {}
+            Err(error) => return ToolOutcome::fail(format!("终端面板操作失败：{error:#}")),
+        }
+        // 标签已不在前台时仍保证收起；操作幂等。
+        request_host_app_close(&scope.session_id, &target).await;
+        ToolOutcome::ok(format!("已关闭终端 {target}"))
+    }
+}
+
 #[async_trait::async_trait]
 impl tiangong_plugin_sidecar::SidecarService for TerminalService {
     async fn dispatch(&self, request: Request) -> Response {
@@ -1450,7 +1798,14 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         if request.operation != HANDSHAKE_OPERATION {
             self.mark_activity();
         }
-        let payload = match dispatch_operation(self, &request.operation, request.payload).await {
+        let payload = match dispatch_operation(
+            self,
+            &request.operation,
+            request.payload.clone(),
+            request.context.as_ref(),
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 return Response::error(
@@ -1469,7 +1824,24 @@ async fn dispatch_operation(
     service: &TerminalService,
     operation: &str,
     payload: serde_json::Value,
+    context: Option<&RequestInvocationContext>,
 ) -> Result<serde_json::Value> {
+    // Agent 工具入口（宿主直连）：会话归属来自宿主注入的请求上下文，
+    // 缺失即拒绝——不允许脱离会话真相源执行终端操作。
+    if matches!(
+        operation,
+        "run_command" | "run_shell" | "terminal_open" | "terminal_send" | "terminal_close"
+    ) {
+        let scope = tool_scope(context)?;
+        let outcome = match operation {
+            "run_command" => service.tool_run_command(&scope, false, payload).await,
+            "run_shell" => service.tool_run_command(&scope, true, payload).await,
+            "terminal_open" => service.tool_terminal_open(&scope).await,
+            "terminal_send" => service.tool_terminal_send(&scope, payload).await,
+            _ => service.tool_terminal_close(&scope, payload).await,
+        };
+        return Ok(serde_json::to_value(outcome)?);
+    }
     match operation {
         HANDSHAKE_OPERATION => Ok(serde_json::json!({
             "plugin_id": "terminal",
@@ -1568,6 +1940,7 @@ fn _pty_system_type_check(_: &dyn PtySystem) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiangong_plugin_sidecar::SidecarService as _;
 
     #[test]
     fn split_command_拆分含参数的cmd() {
@@ -1715,5 +2088,311 @@ mod tests {
                 session_id: spawned.session_id,
             })
             .expect("清理测试终端失败");
+    }
+
+    /// 构造带宿主权威上下文的工具请求（scope 为 None 即缺上下文场景）。
+    fn tool_request(
+        operation: &str,
+        payload: serde_json::Value,
+        scope: Option<(&str, &str)>,
+    ) -> Request {
+        Request {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            request_id: format!("test-{}", scru128::new()),
+            operation: operation.to_string(),
+            payload,
+            context: scope.map(|(session_id, workspace)| RequestInvocationContext {
+                session_id: session_id.to_string(),
+                invocation_id: "test-invocation".to_string(),
+                workspace: workspace.to_string(),
+            }),
+        }
+    }
+
+    fn outcome_of(response: Response) -> serde_json::Value {
+        assert!(response.success, "工具调用失败: {response:?}");
+        response.payload.expect("成功响应必须带 payload")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 工具调用缺少宿主上下文被拒绝() {
+        let service = TerminalService::new();
+        let response = service
+            .dispatch(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "ls"}),
+                None,
+            ))
+            .await;
+        assert!(!response.success, "缺上下文必须拒绝: {response:?}");
+        let message = response.error_message.unwrap_or_default();
+        assert!(message.contains("宿主会话上下文"), "拒绝原因: {message}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_建立会话终端_复用空闲终端() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        std::fs::write(cwd.path().join("marker.txt"), "ok").expect("写测试文件失败");
+        let service = TerminalService::new();
+
+        let first = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "ls", "args": []}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(first["ok"], true, "首次执行结果: {first}");
+        assert_eq!(first["exit_code"], 0);
+        assert_eq!(first["stdout"], "marker.txt");
+        let terminal = first["summary"]
+            .as_str()
+            .and_then(|summary| {
+                summary
+                    .split("终端 ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('（').next())
+            })
+            .expect("summary 应含终端编号")
+            .to_string();
+        assert!(!terminal.is_empty());
+
+        let second = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["again"]}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(second["ok"], true);
+        assert!(
+            second["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("复用空闲终端"),
+            "第二次应复用空闲终端: {}",
+            second["summary"]
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 跨会话操作被明确拒绝() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        let first = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "sleep", "args": ["30"], "timeout": 60}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        // 长命令超时返回 ok（命令状态），终端保留运行中。
+        assert_eq!(first["ok"], true);
+        let terminal = first["summary"]
+            .as_str()
+            .and_then(|summary| {
+                summary
+                    .split("终端 ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('（').next())
+            })
+            .expect("summary 应含终端编号")
+            .to_string();
+
+        // 会话 B 不得发送输入或关闭 A 的终端。
+        let sent = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_send",
+                    serde_json::json!({"terminal_id": terminal, "input": "ls"}),
+                    Some(("session-b", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(sent["ok"], false, "跨会话 terminal_send 必须拒绝");
+        let closed = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_close",
+                    serde_json::json!({"terminal_id": terminal}),
+                    Some(("session-b", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(closed["ok"], false, "跨会话 terminal_close 必须拒绝");
+
+        // 归属会话关闭正常，且关闭未知终端幂等成功。
+        let closed_by_owner = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_close",
+                    serde_json::json!({"terminal_id": terminal}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(closed_by_owner["ok"], true);
+        let closed_missing = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_close",
+                    serde_json::json!({"terminal_id": "tty-not-exist"}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(closed_missing["ok"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 多会话各自持有独立终端() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        std::fs::write(cwd.path().join("shared.txt"), "ok").expect("写测试文件失败");
+        let service = TerminalService::new();
+
+        let (a, b) = tokio::join!(
+            service.dispatch(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "ls"}),
+                Some(("session-a", workspace.as_str())),
+            )),
+            service.dispatch(tool_request(
+                "run_command",
+                serde_json::json!({"cmd": "ls"}),
+                Some(("session-b", workspace.as_str())),
+            )),
+        );
+        let (a, b) = (outcome_of(a), outcome_of(b));
+        assert_eq!(a["ok"], true);
+        assert_eq!(b["ok"], true);
+        let terminal_of = |value: &serde_json::Value| {
+            value["summary"]
+                .as_str()
+                .and_then(|summary| {
+                    summary
+                        .split("终端 ")
+                        .nth(1)
+                        .and_then(|rest| rest.split('（').next())
+                })
+                .expect("summary 应含终端编号")
+                .to_string()
+        };
+        let (terminal_a, terminal_b) = (terminal_of(&a), terminal_of(&b));
+        assert_ne!(terminal_a, terminal_b, "两个会话必须各建独立终端");
+
+        // 关闭 A 的终端不影响 B 的终端继续执行。
+        let closed = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_close",
+                    serde_json::json!({"terminal_id": terminal_a}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(closed["ok"], true);
+        let b_again = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["still"]}),
+                    Some(("session-b", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(b_again["ok"], true);
+        assert!(
+            b_again["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("复用空闲终端"),
+            "B 的终端不受 A 关闭影响: {}",
+            b_again["summary"]
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal_b,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_open_返回独立编号终端() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+        let opened = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_open",
+                    serde_json::json!({}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(opened["ok"], true, "terminal_open 结果: {opened}");
+        let terminal = opened["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches("已打开终端 ")
+            .to_string();
+        assert!(
+            terminal.starts_with("terminal-"),
+            "terminal_open 应返回独立编号: {terminal}"
+        );
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_send_close_缺少terminal_id明确失败() {
+        let service = TerminalService::new();
+        let scope = Some(("session-a", "/tmp"));
+        let sent = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_send",
+                    serde_json::json!({"input": "ls"}),
+                    scope,
+                ))
+                .await,
+        );
+        assert_eq!(sent["ok"], false);
+        assert!(
+            sent["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("terminal_id")
+        );
+        let closed = outcome_of(
+            service
+                .dispatch(tool_request("terminal_close", serde_json::json!({}), scope))
+                .await,
+        );
+        assert_eq!(closed["ok"], false);
     }
 }
