@@ -1924,6 +1924,15 @@ async fn dispatch_operation(
                 serde_json::from_value(payload).context("terminalClose 参数无效")?;
             Ok(serde_json::to_value(service.close_session(request)?)?)
         }
+        // 宿主实例移除兜底：前端标签关闭时若插件页面未就绪（冷启动窗口）
+        // 或已卸载，关闭前通知无人接收；宿主在移除标签后对本操作补发一次，
+        // 保证终端被回收。幂等（页面已关闭过则无副作用），归属校验同
+        // terminalClose——实例编号与终端编号一一对应。
+        "instanceClosed" => {
+            let request: CloseRequest =
+                serde_json::from_value(payload).context("instanceClosed 参数无效")?;
+            Ok(serde_json::to_value(service.close_session(request)?)?)
+        }
         "terminalFind" => {
             let request: FindRequest =
                 serde_json::from_value(payload).context("terminalFind 参数无效")?;
@@ -2527,5 +2536,69 @@ mod tests {
                 .await,
         );
         assert_eq!(closed["ok"], false);
+    }
+
+    /// 宿主实例移除兜底（instanceClosed）：页面未就绪时由宿主补发；
+    /// 幂等（重复/未知编号成功）、跨会话拒绝，与 terminal_close 一致。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn instanceClosed_兜底回收幂等且校验归属() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        // 模拟手动新建标签：终端编号由调用方指定（tab 编号）。
+        let opened = outcome_of(
+            service
+                .dispatch(tool_request(
+                    "terminal_open",
+                    serde_json::json!({}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        let terminal = opened["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches("已打开终端 ")
+            .to_string();
+
+        // 实例通知不携带工具上下文（宿主生命周期操作）。
+        let host_notice = |scope_id: &str| Request {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            request_id: format!("test-{}", scru128::new()),
+            operation: "instanceClosed".to_string(),
+            payload: serde_json::json!({
+                "scope_id": scope_id,
+                "session_id": terminal,
+            }),
+            context: None,
+        };
+        // 跨会话兜底通知：拒绝（终端不属于该会话）。
+        let denied = service.dispatch(host_notice("session-b")).await;
+        assert!(!denied.success, "跨会话兜底必须拒绝: {denied:?}");
+
+        // 归属会话：回收成功；重复补发与未知编号幂等成功。
+        let closed = service.dispatch(host_notice("session-a")).await;
+        assert!(closed.success, "归属会话兜底应成功: {closed:?}");
+        assert!(
+            service.with_session(&terminal, |_| Ok(())).is_err(),
+            "终端应已被兜底回收"
+        );
+        let again = service.dispatch(host_notice("session-a")).await;
+        assert!(again.success, "重复兜底应幂等成功");
+        let unknown = service
+            .dispatch(Request {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                request_id: format!("test-{}", scru128::new()),
+                operation: "instanceClosed".to_string(),
+                payload: serde_json::json!({
+                    "scope_id": "session-a",
+                    "session_id": "tty-not-exist",
+                }),
+                context: None,
+            })
+            .await;
+        assert!(unknown.success, "未知编号兜底应幂等成功");
     }
 }

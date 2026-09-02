@@ -56,18 +56,6 @@ function makeRuntime(context: Record<string, unknown>) {
   };
 }
 
-function makeBridge(terminalFindSessionId: string | null) {
-  return {
-    call: vi.fn(async (method: string) => {
-      if (method === 'sidecar.terminalFind') {
-        return JSON.stringify({ session_id: terminalFindSessionId, history: '' });
-      }
-      return '{}';
-    }),
-    on: vi.fn(() => () => {}),
-  };
-}
-
 /** 挂载带真实尺寸的 #terminal-root（waitSized 依赖 clientWidth/Height）。 */
 function mountRoot() {
   document.body.innerHTML = '<div id="terminal-root"></div>';
@@ -75,6 +63,22 @@ function mountRoot() {
   Object.defineProperty(host, 'clientWidth', { value: 800, configurable: true });
   Object.defineProperty(host, 'clientHeight', { value: 600, configurable: true });
   return host;
+}
+
+/** bridge 桩：terminalFind 按 session_id 精确查找，不中返回 null。 */
+function makeBridge(findSessionId: string | null, spawnSessionId = 'spawned-new') {
+  return {
+    call: vi.fn(async (method: string) => {
+      if (method === 'sidecar.terminalFind') {
+        return JSON.stringify({ session_id: findSessionId, history: '' });
+      }
+      if (method === 'sidecar.terminalSpawn') {
+        return JSON.stringify({ session_id: spawnSessionId, boot_output: '' });
+      }
+      return '{}';
+    }),
+    on: vi.fn(() => () => {}),
+  };
 }
 
 beforeEach(() => {
@@ -132,5 +136,29 @@ describe('tab 关闭通知插件并释放终端', () => {
     expect(
       bridge.call.mock.calls.some(([method]: [string]) => method === 'sidecar.terminalClose'),
     ).toBe(false);
+  });
+
+  it('新建标签（编号无对应终端）按编号新建终端而非附着旧终端', async () => {
+    mountRoot();
+    // 终端精确查找不中：手动新建标签的编号（plugin-uuid）没有对应终端。
+    const bridge = makeBridge(null, 'spawned-new');
+    sdk.bridge = bridge as unknown as typeof sdk.bridge;
+    const { runtime } = makeRuntime({
+      session: { id: 'session-a', workspace: '/tmp' },
+      app: { instance_id: 'plugin-manual-tab', visible: true },
+    });
+    sdk.runtime = runtime;
+
+    const main = await import('./src/main');
+    await vi.waitFor(() => {
+      expect(main.terminalView?.sessionId()).toBe('spawned-new');
+    });
+
+    // 新建终端的 spawn 必须携带标签编号（App 实例与 PTY 一一对应）。
+    const spawn = bridge.call.mock.calls.find(
+      ([method]: [string]) => method === 'sidecar.terminalSpawn',
+    );
+    expect(spawn).toBeDefined();
+    expect(JSON.parse(spawn![1]).session_id).toBe('plugin-manual-tab');
   });
 });
