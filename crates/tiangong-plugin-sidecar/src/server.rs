@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode as PluginErrorCode, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
-    Request as PluginRequest, Response as PluginResponse,
+    Request as PluginRequest, RequestInvocationContext, Response as PluginResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -22,6 +22,53 @@ use tokio::sync::watch;
 use crate::endpoint;
 use crate::identity::SidecarConfig;
 use crate::singleton::SidecarService;
+
+tokio::task_local! {
+    static REQUEST_PROGRESS: ProgressHandle;
+    static REQUEST_CONTEXT: Option<RequestInvocationContext>;
+}
+
+#[derive(Clone)]
+struct ProgressHandle {
+    writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    request_id: String,
+}
+
+/// 向当前请求发送进度或 Runtime 控制反馈。TCP 与 stdio 使用同一 API；
+/// 不在请求上下文中调用时静默忽略，兼容普通测试和后台通知。
+pub async fn emit_progress(message: impl Into<String>) {
+    let Ok(handle) = REQUEST_PROGRESS.try_with(Clone::clone) else {
+        return;
+    };
+    let frame = IpcFrame::Progress {
+        request_id: handle.request_id,
+        message: message.into(),
+    };
+    let _ = write_shared_frame(&handle.writer, &frame).await;
+}
+
+/// 当前请求的宿主权威上下文。旧宿主或非工具调用返回 None。
+pub fn invocation_context() -> Option<RequestInvocationContext> {
+    REQUEST_CONTEXT.try_with(Clone::clone).ok().flatten()
+}
+
+async fn write_shared_frame(
+    writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    frame: &IpcFrame,
+) -> Result<()> {
+    let line = serde_json::to_string(frame).with_context(|| "序列化 IPC 帧失败")?;
+    let mut writer = writer.lock().await;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .with_context(|| "写入 IPC 帧失败")?;
+    writer
+        .write_all(b"\n")
+        .await
+        .with_context(|| "写入 IPC 换行失败")?;
+    writer.flush().await.with_context(|| "刷新 IPC 帧失败")?;
+    Ok(())
+}
 
 /// 监听中的 IPC 服务端。
 struct IpcServer {
@@ -33,7 +80,7 @@ struct IpcServer {
 /// 已建立的双向连接。
 struct IpcConnection {
     reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
 }
 
 /// 运行中的 IPC bridge 守卫。drop 时触发后台服务退出。
@@ -268,7 +315,23 @@ async fn serve_connection(
             .to_string();
         let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone())
         {
-            Ok(plugin_request) => service_obj.dispatch(plugin_request).await,
+            Ok(plugin_request) => {
+                let progress = ProgressHandle {
+                    writer: Arc::clone(&connection.writer),
+                    request_id: request.request_id.clone(),
+                };
+                let context = request
+                    .payload
+                    .get("context")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                REQUEST_PROGRESS
+                    .scope(
+                        progress,
+                        REQUEST_CONTEXT.scope(context, service_obj.dispatch(plugin_request)),
+                    )
+                    .await
+            }
             Err(error) => PluginResponse::error(
                 &request.request_id,
                 PluginErrorCode::BadRequest,
@@ -301,7 +364,7 @@ impl IpcConnection {
         let (read_half, write_half) = stream.into_split();
         Self {
             reader: BufReader::new(read_half),
-            writer: write_half,
+            writer: Arc::new(tokio::sync::Mutex::new(write_half)),
         }
     }
 
@@ -318,20 +381,7 @@ impl IpcConnection {
     }
 
     async fn write_frame(&mut self, frame: &IpcFrame) -> Result<()> {
-        let line = serde_json::to_string(frame).with_context(|| "序列化 IPC 帧失败")?;
-        self.writer
-            .write_all(line.as_bytes())
-            .await
-            .with_context(|| "写入 IPC 帧失败")?;
-        self.writer
-            .write_all(b"\n")
-            .await
-            .with_context(|| "写入 IPC 换行失败")?;
-        self.writer
-            .flush()
-            .await
-            .with_context(|| "刷新 IPC 帧失败")?;
-        Ok(())
+        write_shared_frame(&self.writer, frame).await
     }
 
     async fn read_frame(&mut self) -> Result<IpcFrame> {

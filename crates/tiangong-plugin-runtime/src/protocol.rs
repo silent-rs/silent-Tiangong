@@ -12,6 +12,22 @@ pub const PROTOCOL_VERSION: &str = "0.1.0";
 /// 由运行时发起的健康检查操作。
 pub const HANDSHAKE_OPERATION: &str = "runtime.handshake";
 
+/// 随工具请求透传的宿主权威调用上下文。
+///
+/// 字段均由宿主调用边界产生。sidecar 不应从页面状态或工具参数推断会话
+/// 归属。该字段是可选扩展，旧 sidecar 会忽略，新 Runtime 也接受缺失。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestInvocationContext {
+    pub session_id: String,
+    pub invocation_id: String,
+    #[serde(default)]
+    pub workspace: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+}
+
 /// 运行时发送给 sidecar 的请求信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -101,6 +117,7 @@ pub struct HandshakeResponse {
     pub plugin_version: String,
     pub sidecar_version: String,
     pub protocol_version: String,
+    /// 旧 sidecar 的诊断字段。Runtime 不再用它判断插件内部业务兼容性。
     #[serde(default)]
     pub business_protocol: u32,
     #[serde(default)]
@@ -195,5 +212,24 @@ mod tests {
         let decoded: Response = serde_json::from_slice(&encoded).unwrap();
         assert!(decoded.success);
         assert_eq!(decoded.request_id, request.request_id);
+    }
+
+    #[test]
+    fn invocation_context_is_optional_transport_metadata() {
+        let context = RequestInvocationContext {
+            session_id: "session-a".into(),
+            invocation_id: "call-a".into(),
+            workspace: "/tmp/workspace".into(),
+            actor_id: "agent-a".into(),
+            deadline_ms: Some(123),
+        };
+        let value = serde_json::to_value(&context).expect("序列化上下文");
+        assert_eq!(value["session_id"], "session-a");
+        assert_eq!(value["actor_id"], "agent-a");
+        assert_eq!(value["deadline_ms"], 123);
+
+        let request = Request::new("demo", serde_json::json!({}));
+        let value = serde_json::to_value(request).expect("序列化旧请求");
+        assert!(value.get("context").is_none(), "业务 Request 结构保持不变");
     }
 }

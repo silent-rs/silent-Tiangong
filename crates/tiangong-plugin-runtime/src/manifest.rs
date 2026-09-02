@@ -6,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::PROTOCOL_VERSION;
 use crate::slots::{OPEN_MODE_SLOT, OpenMode, SandboxKind, SlotRegistry, UiContribution};
 
 pub const MANIFEST_FILE: &str = "plugin.json";
@@ -223,10 +222,12 @@ pub struct SidecarManifest {
     /// sidecar 为常驻，解释器脚本为按需；command 始终按调用独立运行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<SidecarLifecycle>,
-    #[serde(default = "default_transport_protocol")]
-    pub transport_protocol: String,
-    #[serde(default)]
-    pub business_protocol: u32,
+    #[serde(default, skip_serializing)]
+    pub transport_protocol: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub business_protocol: Option<u32>,
+    #[serde(default, skip_serializing)]
+    pub tools_direct: Option<bool>,
     #[serde(default = "default_startup_timeout_ms")]
     pub startup_timeout_ms: u64,
     #[serde(default = "default_request_timeout_ms")]
@@ -323,9 +324,6 @@ impl PluginManifest {
             }
         }
         if let Some(sidecar) = &self.sidecar {
-            if sidecar.transport_protocol.trim().is_empty() {
-                bail!("插件 {} sidecar transport 版本为空", self.id);
-            }
             if sidecar.startup_timeout_ms == 0 || sidecar.request_timeout_ms == 0 {
                 bail!("插件 {} sidecar 超时时间必须大于 0", self.id);
             }
@@ -770,10 +768,6 @@ impl PluginManifest {
             .filter(|cap| !configured.contains(cap))
             .collect()
     }
-}
-
-fn default_transport_protocol() -> String {
-    PROTOCOL_VERSION.to_string()
 }
 
 const fn default_startup_timeout_ms() -> u64 {
@@ -1224,6 +1218,22 @@ mod tests {
         resident.validate().expect("有界面常驻不受限");
         assert_eq!(resident.sidecar_lifecycle(), SidecarLifecycle::Resident);
         assert!(!resident.should_preload_sidecar());
+    }
+
+    #[test]
+    fn sidecar旧路由字段兼容解析但不再参与序列化() {
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"legacy.sidecar","version":"1.0.0","permissions":["sidecar.invoke"],"ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]},"sidecar":{"runtime":"node","entry":"sidecar/main.mjs","transport_protocol":"0.1.0","business_protocol":2,"tools_direct":true}}"#,
+        )
+        .expect("旧清单字段应继续解析");
+        let sidecar = manifest.sidecar.expect("sidecar");
+        assert_eq!(sidecar.transport_protocol.as_deref(), Some("0.1.0"));
+        assert_eq!(sidecar.business_protocol, Some(2));
+        assert_eq!(sidecar.tools_direct, Some(true));
+        let serialized = serde_json::to_string(&sidecar).expect("序列化");
+        assert!(!serialized.contains("transport_protocol"));
+        assert!(!serialized.contains("business_protocol"));
+        assert!(!serialized.contains("tools_direct"));
     }
 
     #[test]

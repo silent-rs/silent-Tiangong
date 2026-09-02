@@ -33,8 +33,7 @@ pub struct HostState {
     feedback: Option<PluginFeedbackTx>,
     /// 当前同步工具调用的宿主权威上下文；调用返回后立即清空。
     invocation_context: Option<SidecarInvocationContext>,
-    /// 插件 ID（构造时用于 preopen 插件配置目录）。
-    #[allow(dead_code)]
+    /// 插件 ID（用于权限隔离和 Runtime 控制反馈归属）。
     plugin_id: String,
 }
 
@@ -115,9 +114,13 @@ impl SidecarHost for HostState {
         // 在独立 OS 线程上执行，避免 tokio worker 线程嵌套。
         let feedback = self.feedback.clone();
         let invocation_context = self.invocation_context.clone();
+        let plugin_id = self.plugin_id.clone();
         std::thread::scope(|s| {
             s.spawn(move || {
                 let mut on_progress = |event_json: String| {
+                    if crate::bridge::handle_runtime_feedback(&plugin_id, &event_json) {
+                        return;
+                    }
                     let Some(feedback) = &feedback else {
                         return;
                     };

@@ -62,6 +62,13 @@ pub struct TsToolInvocation {
     pub name: String,
     pub arguments: serde_json::Value,
     pub created_at: String,
+    /// 新 Runtime 注入的宿主权威上下文；旧 UI Handler 会安全忽略。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub actor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +145,8 @@ pub async fn execute(
     session_id: String,
     call: ToolCall,
     timeout_ms: u64,
+    workspace: String,
+    actor_id: String,
 ) -> ToolResult {
     let invocation_id = scru128::new().to_string();
     let created_at = Local::now().naive_local();
@@ -149,6 +158,9 @@ pub async fn execute(
         name: call.name,
         arguments: call.arguments,
         created_at: format_time(created_at),
+        workspace,
+        actor_id,
+        deadline_ms: Some(deadline.and_utc().timestamp_millis().max(0) as u64),
     };
     let (sender, receiver) = oneshot::channel();
     pending_calls().lock().expect("TS 工具等待表锁损坏").insert(

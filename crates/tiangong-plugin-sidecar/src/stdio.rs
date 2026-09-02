@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode as PluginErrorCode, IpcFrame, IpcResponse, Request as PluginRequest,
-    Response as PluginResponse,
+    RequestInvocationContext, Response as PluginResponse,
 };
 #[cfg(target_os = "macos")]
 use tiangong_plugin_runtime::sidecar::stdio::HOST_PID_ENV;
@@ -23,6 +23,35 @@ const TRANSPORT_ENV: &str = "TIANGONG_PLUGIN_TRANSPORT";
 const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
 const TRANSPORT_STDIO: &str = "stdio";
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 16;
+
+tokio::task_local! {
+    static REQUEST_PROGRESS: ProgressHandle;
+    static REQUEST_CONTEXT: Option<RequestInvocationContext>;
+}
+
+#[derive(Clone)]
+struct ProgressHandle {
+    writer: Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
+    request_id: String,
+}
+
+pub(crate) async fn emit_progress(message: String) {
+    let Ok(handle) = REQUEST_PROGRESS.try_with(Clone::clone) else {
+        return;
+    };
+    let _ = write_frame(
+        &handle.writer,
+        &IpcFrame::Progress {
+            request_id: handle.request_id,
+            message,
+        },
+    )
+    .await;
+}
+
+pub(crate) fn invocation_context() -> Option<RequestInvocationContext> {
+    REQUEST_CONTEXT.try_with(Clone::clone).ok().flatten()
+}
 
 /// 宿主是否要求以 stdio 模式运行。
 pub fn stdio_requested() -> bool {
@@ -115,6 +144,11 @@ where
                     .await;
                     bail!("stdio sidecar 在认证前收到请求");
                 }
+                let context = request
+                    .payload
+                    .get("context")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
                 let plugin_request = match serde_json::from_value::<PluginRequest>(request.payload)
                 {
                     Ok(plugin_request) => plugin_request,
@@ -148,10 +182,18 @@ where
                         Ok(permit) => permit,
                         Err(_) => return,
                     };
-                    let response = tokio::select! {
-                        response = service_for_task.dispatch(plugin_request) => Some(response),
-                        _ = cancel_rx => None,
+                    let progress = ProgressHandle {
+                        writer: Arc::clone(&writer_for_task),
+                        request_id: request_id.clone(),
                     };
+                    let response = REQUEST_PROGRESS
+                        .scope(progress, REQUEST_CONTEXT.scope(context, async {
+                            tokio::select! {
+                                response = service_for_task.dispatch(plugin_request) => Some(response),
+                                _ = cancel_rx => None,
+                            }
+                        }))
+                        .await;
                     active_for_task.lock().await.remove(&request_id);
                     drop(permit);
                     if let Some(response) = response

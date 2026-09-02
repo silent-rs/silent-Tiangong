@@ -114,7 +114,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
         &self,
         call: &ToolCall,
         session: &mut Session,
-        _actor_id: &str,
+        actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         if !self.is_enabled() {
             return Box::pin(async { None });
@@ -125,30 +125,78 @@ impl ToolOverrideHandler for TsPluginAdapter {
         let plugin_id = self.id.clone();
         let call = call.clone();
         let session_id = session.id.clone();
-        if self.sidecar_direct.load(Ordering::Acquire) {
-            let tool_timeout_ms = tool.timeout_ms;
-            let workspace = std::path::PathBuf::from(session.cwd.trim());
-            Box::pin(async move {
+        let actor_id = actor_id.to_string();
+        let legacy_sidecar_direct = self.sidecar_direct.load(Ordering::Acquire);
+        let tool_timeout_ms = tool.timeout_ms;
+        let workspace = std::path::PathBuf::from(session.cwd.trim());
+        Box::pin(async move {
+            // 兼容规则：无 UI sidecar 维持既有直连；有 UI 的插件先查询后端
+            // 是否明确注册目标工具。未注册才启动旧 UI Handler，避免后端
+            // 自管理插件为了“找接应者”先被错误拉起页面。
+            let ui_ready = crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested");
+            let backend_declared = legacy_sidecar_direct
+                || (!ui_ready
+                    && sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path()))
+                        .await);
+            if backend_declared {
                 Some(
                     invoke_sidecar_tool(
                         &plugin_id,
                         call,
                         tool_timeout_ms,
-                        Some((session_id, workspace)),
+                        Some((session_id, workspace, actor_id)),
                     )
                     .await,
                 )
-            })
-        } else {
-            Box::pin(async move {
-                Some(crate::ts_tools::execute(plugin_id, session_id, call, tool.timeout_ms).await)
-            })
-        }
+            } else {
+                Some(
+                    crate::ts_tools::execute(
+                        plugin_id,
+                        session_id,
+                        call,
+                        tool_timeout_ms,
+                        workspace.to_string_lossy().into_owned(),
+                        actor_id,
+                    )
+                    .await,
+                )
+            }
+        })
     }
 }
 
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
     manifest.ui_contributions().is_empty() && manifest.sidecar.is_some()
+}
+
+/// 查询 UI 插件绑定的 sidecar 是否明确注册目标工具。没有 sidecar、旧
+/// sidecar 未声明能力或探测失败均回退 UI Handler，保证已发布插件零迁移。
+async fn sidecar_handles_tool(
+    plugin_id: &str,
+    tool_name: &str,
+    workspace: Option<&std::path::Path>,
+) -> bool {
+    let plugin_id = plugin_id.to_string();
+    let tool_name = tool_name.to_string();
+    let workspace = workspace.map(std::path::Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        let directory = crate::registry::plugin_install_directory(&plugin_id)?;
+        let storage_root = directory.parent()?.parent()?.to_path_buf();
+        let installed = crate::registry::find_installed_plugin(&storage_root, &plugin_id).ok()?;
+        installed.manifest.sidecar.as_ref()?;
+        let connection = crate::registry::sidecar_connection_with_workspace(
+            &storage_root,
+            &installed,
+            false,
+            workspace.as_deref(),
+        )
+        .ok()?;
+        connection.handles_tool(&tool_name).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false)
 }
 
 /// 无界面 sidecar 型插件的工具直达：宿主内置桥接，语义与 memory 等官方
@@ -162,7 +210,7 @@ async fn invoke_sidecar_tool(
     plugin_id: &str,
     call: ToolCall,
     timeout_ms: u64,
-    session_context: Option<(String, std::path::PathBuf)>,
+    session_context: Option<(String, std::path::PathBuf, String)>,
 ) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
@@ -185,17 +233,17 @@ async fn invoke_sidecar_tool(
         installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
     let session_id = session_context
         .as_ref()
-        .map(|(session_id, _)| session_id.clone());
+        .map(|(session_id, _, _)| session_id.clone());
     let authoritative_workspace = session_context
         .as_ref()
-        .map(|(_, workspace)| workspace.clone())
+        .map(|(_, workspace, _)| workspace.clone())
         .unwrap_or_default();
     let session_workspace = if installed.manifest.should_preload_sidecar() {
         None
     } else {
         session_context
             .as_ref()
-            .map(|(_, workspace)| workspace.as_path())
+            .map(|(_, workspace, _)| workspace.as_path())
     };
     let connection = if on_demand {
         crate::registry::ephemeral_sidecar_connection_with_workspace(
@@ -235,13 +283,22 @@ async fn invoke_sidecar_tool(
             authoritative_workspace,
         });
     let blocking = connection.clone();
+    let plugin_id_for_feedback = plugin_id.to_string();
     let invoked = tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms),
         tokio::task::spawn_blocking(move || {
             let payload = serde_json::to_string(&arguments).unwrap_or_default();
+            let mut on_progress = |message: String| {
+                crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message);
+            };
             match invocation_context {
-                Some(context) => blocking.invoke_with_context(&operation, &payload, &context),
-                None => blocking.invoke(&operation, &payload),
+                Some(context) => blocking.invoke_with_context_and_progress(
+                    &operation,
+                    &payload,
+                    &context,
+                    &mut on_progress,
+                ),
+                None => blocking.invoke_with_progress(&operation, &payload, &mut on_progress),
             }
         }),
     )
@@ -508,5 +565,22 @@ mod tests {
                 .sidecar_direct
                 .load(std::sync::atomic::Ordering::Acquire)
         );
+    }
+
+    #[test]
+    fn runtime反馈只识别受控app原语() {
+        assert!(!crate::bridge::handle_runtime_feedback("demo", "普通进度"));
+        assert!(!crate::bridge::handle_runtime_feedback(
+            "demo",
+            r#"{"type":"progress","message":"50%"}"#,
+        ));
+        assert!(crate::bridge::handle_runtime_feedback(
+            "demo",
+            r#"{"type":"app.open","payload":{"instance_id":"a"}}"#,
+        ));
+        assert!(crate::bridge::handle_runtime_feedback(
+            "demo",
+            r#"{"host_action":{"method":"app.close","payload":{"instance_id":"a"}}}"#,
+        ));
     }
 }

@@ -57,6 +57,37 @@ pub struct SidecarInvocationContext {
     pub authoritative_workspace: PathBuf,
 }
 
+impl SidecarInvocationContext {
+    pub fn new(
+        session_id: impl Into<String>,
+        invocation_id: impl Into<String>,
+        authoritative_workspace: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            invocation_id: invocation_id.into(),
+            authoritative_workspace: authoritative_workspace.into(),
+        }
+    }
+}
+
+/// 将宿主权威上下文转换为通用请求信封。TCP 与 stdio 共用此入口，避免
+/// 传输方式改变会话归属语义。
+fn request_invocation_context(
+    context: &SidecarInvocationContext,
+) -> crate::protocol::RequestInvocationContext {
+    crate::protocol::RequestInvocationContext {
+        session_id: context.session_id.clone(),
+        invocation_id: context.invocation_id.clone(),
+        workspace: context
+            .authoritative_workspace
+            .to_string_lossy()
+            .into_owned(),
+        actor_id: String::new(),
+        deadline_ms: None,
+    }
+}
+
 #[derive(Debug)]
 pub enum SidecarInvokeError {
     Unavailable(String),
@@ -115,6 +146,12 @@ pub trait SidecarConnection: Send + Sync {
     ) -> Result<String> {
         let _ = context;
         self.invoke_with_progress(operation, payload, on_progress)
+    }
+
+    /// sidecar 握手声明的工具 Handler。能力名使用 `tool:<name>`；旧 sidecar
+    /// 没有声明时返回 false，由兼容适配层继续使用既有 UI/WASM 路径。
+    fn handles_tool(&self, _tool_name: &str) -> Result<bool> {
+        Ok(false)
     }
 
     /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
@@ -198,8 +235,6 @@ pub struct SidecarConfig {
     pub user_credential_reads: crate::host_policy::UserCredentialReadAccess,
     /// 是否允许写入当前用户的 `~/.cache`。
     pub sandbox_user_cache_write: bool,
-    pub transport_protocol: String,
-    pub business_protocol: u32,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
     /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
@@ -265,8 +300,6 @@ impl SidecarConfig {
             sensitive_storage: SensitiveStorageAccess::default(),
             user_credential_reads: crate::host_policy::UserCredentialReadAccess::default(),
             sandbox_user_cache_write: false,
-            transport_protocol: PROTOCOL_VERSION.to_string(),
-            business_protocol: 0,
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             server_url: None,
@@ -427,13 +460,13 @@ impl SidecarConfig {
         Ok(())
     }
 
+    /// 旧调用方兼容入口。通用传输版本与插件内部业务版本不再由 Runtime
+    /// 配置或比较，参数仅为保持源码兼容而接收。
     pub fn with_protocols(
-        mut self,
-        transport_protocol: impl Into<String>,
-        business_protocol: u32,
+        self,
+        _transport_protocol: impl Into<String>,
+        _business_protocol: u32,
     ) -> Self {
-        self.transport_protocol = transport_protocol.into();
-        self.business_protocol = business_protocol;
         self
     }
 
@@ -677,13 +710,6 @@ impl ProcessSidecarConnection {
     }
 
     pub fn health_check(&self) -> Result<()> {
-        if self.config.transport_protocol != PROTOCOL_VERSION {
-            return Err(SidecarInvokeError::ProtocolMismatch(format!(
-                "清单 transport 版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
-                self.config.transport_protocol
-            ))
-            .into());
-        }
         let payload = self
             .invoke_protocol_once(
                 HANDSHAKE_OPERATION,
@@ -710,13 +736,6 @@ impl ProcessSidecarConnection {
             return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                 handshake.protocol_version
-            ))
-            .into());
-        }
-        if handshake.business_protocol != self.config.business_protocol {
-            return Err(SidecarInvokeError::ProtocolMismatch(format!(
-                "sidecar 业务协议版本不匹配: expected={}, actual={}",
-                self.config.business_protocol, handshake.business_protocol
             ))
             .into());
         }
@@ -879,13 +898,23 @@ impl ProcessSidecarConnection {
         operation: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        self.invoke_protocol_once_with_progress(operation, payload, &mut |_| {})
+        self.invoke_protocol_once_inner(operation, payload, None, &mut |_| {})
     }
 
     fn invoke_protocol_once_with_progress(
         &self,
         operation: &str,
         payload: serde_json::Value,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<serde_json::Value> {
+        self.invoke_protocol_once_inner(operation, payload, None, on_progress)
+    }
+
+    fn invoke_protocol_once_inner(
+        &self,
+        operation: &str,
+        payload: serde_json::Value,
+        invocation: Option<&SidecarInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
@@ -899,12 +928,21 @@ impl ProcessSidecarConnection {
 
         let request = Request::new(operation, payload);
         let request_id = request.request_id.clone();
+        let mut envelope =
+            serde_json::to_value(request).with_context(|| "序列化 sidecar 协议请求失败")?;
+        if let Some(context) = invocation.map(request_invocation_context)
+            && let Some(object) = envelope.as_object_mut()
+        {
+            object.insert(
+                "context".to_string(),
+                serde_json::to_value(context).with_context(|| "序列化 sidecar 调用上下文失败")?,
+            );
+        }
         write_frame(
             &mut stream,
             &IpcFrame::Request(IpcRequest {
                 request_id: request_id.clone(),
-                payload: serde_json::to_value(request)
-                    .with_context(|| "序列化 sidecar 协议请求失败")?,
+                payload: envelope,
             }),
         )?;
 
@@ -1001,6 +1039,41 @@ impl SidecarConnection for ProcessSidecarConnection {
             .invoke_protocol_once_with_progress(operation, payload, on_progress)
             .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
+    fn invoke_with_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &SidecarInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        self.ensure_running().map_err(|error| {
+            if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                error
+            } else {
+                SidecarInvokeError::Unavailable(error.to_string()).into()
+            }
+        })?;
+        let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
+        let response = self
+            .invoke_protocol_once_inner(operation, payload, Some(context), on_progress)
+            .map_err(classify_transport_error)?;
+        serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
+    fn handles_tool(&self, tool_name: &str) -> Result<bool> {
+        self.ensure_running()?;
+        let payload = self.invoke_protocol_once(
+            HANDSHAKE_OPERATION,
+            serde_json::json!({"plugin_id": self.config.plugin_id}),
+        )?;
+        let handshake: HandshakeResponse =
+            serde_json::from_value(payload).with_context(|| "解析 sidecar 握手响应失败")?;
+        Ok(handshake
+            .capabilities
+            .iter()
+            .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*"))
     }
 
     fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
