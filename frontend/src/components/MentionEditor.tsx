@@ -34,6 +34,11 @@ import { cn } from '@/lib/utils';
 // 序列化时剥离（见 stripZwsp）。这是 Slack/Notion/ProseMirror 的通用做法。
 const ZWSP = '\u200b';
 
+// execCommand('insertHTML') 的内容按 HTML 解析，粘贴文本必须先转义
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export interface MentionEditorHandle {
   /** 聚焦编辑器并把光标置于文本末尾 */
   focus(): void;
@@ -719,11 +724,44 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     };
 
     // 仅插入文本与换行节点，避免富文本样式污染，同时保留多行粘贴语义。
+    // 优先走 execCommand('insertHTML')：Range.insertNode 这类脚本 DOM 变更
+    // 不进入浏览器原生撤销栈，Ctrl+Z 撤不掉粘贴内容、只能撤销键盘输入；
+    // execCommand 的事务会入栈，且 undo/redo 以 historyUndo/historyRedo
+    // 触发 input 事件，外部受控 value 能随之同步。
     function insertPlainText(text: string) {
       const root = rootRef.current;
       const selection = window.getSelection();
       if (!root || !selection) return;
 
+      const lines = normalizePastedText(text).split('\n');
+      if (lines.length === 1 && lines[0] === '') return;
+
+      if (selection.rangeCount === 0
+        || !root.contains(selection.getRangeAt(0).commonAncestorContainer)) {
+        restoreCaretEnd();
+      }
+      root.focus();
+
+      let inserted = false;
+      try {
+        inserted = document.execCommand(
+          'insertHTML',
+          false,
+          lines.map((line) => escapeHtml(line)).join('<br>'),
+        );
+      } catch {
+        inserted = false;
+      }
+      if (inserted) {
+        if (hasChip()) {
+          normalizeSentinels();
+          normalizeMentionBoundaries();
+        }
+        commit();
+        return;
+      }
+
+      // WebView 不支持 execCommand 时退回直接 DOM 插入（撤销栈不可用，行为同旧实现）
       const range = selection.rangeCount > 0
         ? selection.getRangeAt(0)
         : document.createRange();
@@ -734,7 +772,6 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       range.deleteContents();
 
       const fragment = document.createDocumentFragment();
-      const lines = normalizePastedText(text).split('\n');
       lines.forEach((line, index) => {
         if (index > 0) fragment.appendChild(document.createElement('br'));
         if (line) fragment.appendChild(document.createTextNode(line));
