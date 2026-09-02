@@ -615,7 +615,9 @@ export interface ServerConfig {
   host: string;
   port: number;
   auth_token_masked: string;
+  enabled: boolean;
   running: boolean;
+  status: 'stopped' | 'running' | 'error';
 }
 
 // 模型配置（Provider + Model + Routing 三层架构）

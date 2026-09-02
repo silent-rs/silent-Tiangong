@@ -241,7 +241,12 @@ pub struct ServerConfigView {
     pub host: String,
     pub port: u16,
     pub auth_token_masked: String,
+    /// 用户保存的持续开启意图。
+    pub enabled: bool,
+    /// 实时健康检查是否正常。
     pub running: bool,
+    /// stopped / running / error。
+    pub status: String,
 }
 
 /// 模型能力（前端使用）
