@@ -349,7 +349,52 @@ pub fn set_app_handler(handler: NativeServiceHandler) {
 /// 不经 `bridge.call` 权限校验（宿主可信调用），直接路由到注入的
 /// `app.open` 原生服务；插件侧主动调用应走 `bridge_call`。
 pub(crate) fn open_app_for_plugin(plugin_id: &str, payload: &str) -> Result<String> {
-    native_service_call(&APP_HANDLER, "app", plugin_id, "app.open", payload)
+    app_primitive_for_plugin(plugin_id, "app.open", payload)
+}
+
+/// 执行插件在工具反馈中请求的 App 原语。只能操作调用插件自己的 App，且
+/// 方法限制为打开和关闭；贡献、会话与实例归属继续由宿主处理器校验。
+pub(crate) fn app_primitive_for_plugin(
+    plugin_id: &str,
+    method: &str,
+    payload: &str,
+) -> Result<String> {
+    if !matches!(method, "app.open" | "app.close") {
+        bail!("不支持的 App 原语 {method}");
+    }
+    native_service_call(&APP_HANDLER, "app", plugin_id, method, payload)
+}
+
+/// 处理 Handler 经统一进度通道发回的 Runtime 控制反馈。返回 true 表示消息
+/// 已被 Runtime 消费；false 表示普通业务进度，应继续交给原有反馈消费者。
+pub(crate) fn handle_runtime_feedback(plugin_id: &str, message: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
+        return false;
+    };
+    let (action, method) = if let Some(method) = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|method| matches!(*method, "app.open" | "app.close"))
+    {
+        (&value, method)
+    } else if let Some(action) = value.get("host_action")
+        && let Some(method) = action.get("method").and_then(serde_json::Value::as_str)
+    {
+        (action, method)
+    } else {
+        return false;
+    };
+    let payload = action
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Ok(payload) = serde_json::to_string(&payload) else {
+        return true;
+    };
+    if let Err(error) = app_primitive_for_plugin(plugin_id, method, &payload) {
+        tracing::warn!(plugin_id, method, %error, "插件 App 反馈执行失败");
+    }
+    true
 }
 
 fn native_service_call(

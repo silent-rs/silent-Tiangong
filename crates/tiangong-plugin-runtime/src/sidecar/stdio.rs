@@ -735,19 +735,11 @@ impl StdioSidecarConnection {
             ))
             .into());
         }
-        // 对齐 TCP health_check：插件版本与业务协议版本一并校验，旧制品在
-        // 握手阶段即明确拒绝，不留到业务调用以不确定方式失败。
+        // 插件整体版本必须一致，避免连接到升级前残留的旧进程。
         if handshake.plugin_version != self.config.plugin_version {
             return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "stdio sidecar 插件版本不匹配: expected={}, actual={}",
                 self.config.plugin_version, handshake.plugin_version
-            ))
-            .into());
-        }
-        if handshake.business_protocol != self.config.business_protocol {
-            return Err(SidecarInvokeError::ProtocolMismatch(format!(
-                "stdio sidecar 业务协议版本不匹配: expected={}, actual={}",
-                self.config.business_protocol, handshake.business_protocol
             ))
             .into());
         }
@@ -841,9 +833,31 @@ impl StdioSidecarConnection {
             write_line(&mut stdin, &frame)?;
             process.authenticated.store(true, Ordering::Release);
         }
+        let mut payload = serde_json::to_value(request).context("序列化 sidecar 请求失败")?;
+        if let Some(context) = process.pending.lock().ok().and_then(|pending| {
+            pending
+                .get(&request.request_id)
+                .and_then(|waiter| waiter.invocation.clone())
+        }) && let Some(object) = payload.as_object_mut()
+        {
+            object.insert(
+                "context".to_string(),
+                serde_json::to_value(crate::protocol::RequestInvocationContext {
+                    session_id: context.session_id,
+                    invocation_id: context.invocation_id,
+                    workspace: context
+                        .authoritative_workspace
+                        .to_string_lossy()
+                        .into_owned(),
+                    actor_id: String::new(),
+                    deadline_ms: None,
+                })
+                .context("序列化 sidecar 调用上下文失败")?,
+            );
+        }
         let frame = IpcFrame::Request(IpcRequest {
             request_id: request.request_id.clone(),
-            payload: serde_json::to_value(request).context("序列化 sidecar 请求失败")?,
+            payload,
         });
         write_line(&mut stdin, &frame)
     }
@@ -1399,6 +1413,47 @@ impl SidecarConnection for StdioSidecarConnection {
             }
         };
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
+    fn handles_tool(&self, tool_name: &str) -> Result<bool> {
+        let payload = match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => {
+                let process = Arc::new(self.spawn()?);
+                let result = self.round_trip(
+                    &process,
+                    HANDSHAKE_OPERATION,
+                    Value::Null,
+                    None,
+                    &mut |_| {},
+                );
+                if let Ok(mut child) = process.child.lock() {
+                    terminate_process_tree(&process, &mut child);
+                }
+                result?
+            }
+            crate::manifest::SidecarLifecycle::Resident => {
+                let process = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+                    self.ensure_running(&mut state)?
+                };
+                self.round_trip(
+                    &process,
+                    HANDSHAKE_OPERATION,
+                    Value::Null,
+                    None,
+                    &mut |_| {},
+                )?
+            }
+        };
+        let handshake: HandshakeResponse =
+            serde_json::from_value(payload).context("解析 stdio sidecar 握手响应失败")?;
+        Ok(handshake
+            .capabilities
+            .iter()
+            .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*"))
     }
 
     fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {

@@ -44,6 +44,18 @@ pub use model::{ModelInfo, mask_sensitive};
 pub use server::IpcBridge;
 pub use singleton::{SidecarService, SingletonError, SingletonGuard, start};
 
+/// 向当前 sidecar 请求发送进度或 Runtime 控制反馈，自动适配 TCP/stdio。
+pub async fn emit_progress(message: impl Into<String>) {
+    let message = message.into();
+    server::emit_progress(message.clone()).await;
+    stdio::emit_progress(message).await;
+}
+
+/// 获取当前工具请求的宿主权威上下文。TCP 与 stdio 一致；旧宿主调用返回 None。
+pub fn invocation_context() -> Option<tiangong_plugin_runtime::protocol::RequestInvocationContext> {
+    server::invocation_context().or_else(stdio::invocation_context)
+}
+
 use std::sync::Arc;
 
 use anyhow::Result;

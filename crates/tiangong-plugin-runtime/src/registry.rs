@@ -2942,7 +2942,6 @@ fn sidecar_connection_inner(
         data_dir,
         storage_root,
     )
-    .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),

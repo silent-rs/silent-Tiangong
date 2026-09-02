@@ -189,8 +189,6 @@ example-plugin/
   },
   "sidecar": {
     "binary": "example-sidecar",
-    "transport_protocol": "0.1.0",
-    "business_protocol": 1,
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 30000
   },
