@@ -236,11 +236,40 @@ impl WasmPlugin {
         self.handle_tool_inner(call, limits, Some(invocation_context))
     }
 
+    pub fn handle_tool_with_full_context(
+        &mut self,
+        call: ToolCall,
+        limits: &PluginRuntimeConfig,
+        invocation_context: crate::protocol::RequestInvocationContext,
+    ) -> Result<Outcome> {
+        self.handle_tool_inner_full(call, limits, Some(invocation_context))
+    }
+
     fn handle_tool_inner(
         &mut self,
         call: ToolCall,
         limits: &PluginRuntimeConfig,
         invocation_context: Option<SidecarInvocationContext>,
+    ) -> Result<Outcome> {
+        let invocation_context =
+            invocation_context.map(|context| crate::protocol::RequestInvocationContext {
+                session_id: context.session_id,
+                invocation_id: context.invocation_id,
+                workspace: context
+                    .authoritative_workspace
+                    .to_string_lossy()
+                    .into_owned(),
+                actor_id: String::new(),
+                deadline_ms: None,
+            });
+        self.handle_tool_inner_full(call, limits, invocation_context)
+    }
+
+    fn handle_tool_inner_full(
+        &mut self,
+        call: ToolCall,
+        limits: &PluginRuntimeConfig,
+        invocation_context: Option<crate::protocol::RequestInvocationContext>,
     ) -> Result<Outcome> {
         // 单次调用前重置 fuel 与 epoch deadline。
         // set_fuel 仅在未开启 consume_fuel 时返回 Err，配置已开启，安全忽略。
@@ -255,7 +284,7 @@ impl WasmPlugin {
 
         self.store
             .data_mut()
-            .set_invocation_context(invocation_context);
+            .set_full_invocation_context(invocation_context);
         let result = match self
             .instance
             .tiangong_plugin_plugin()
@@ -279,7 +308,7 @@ impl WasmPlugin {
             Ok(Err(e)) => Err(plugin_err(e)),
             Err(e) => Err(anyhow::anyhow!("handle-tool 调用失败: {e}")),
         };
-        self.store.data_mut().set_invocation_context(None);
+        self.store.data_mut().set_full_invocation_context(None);
         result
     }
 

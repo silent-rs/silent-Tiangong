@@ -32,7 +32,7 @@ pub struct HostState {
     /// 当前 turn 的插件反馈通道。
     feedback: Option<PluginFeedbackTx>,
     /// 当前同步工具调用的宿主权威上下文；调用返回后立即清空。
-    invocation_context: Option<SidecarInvocationContext>,
+    invocation_context: Option<crate::protocol::RequestInvocationContext>,
     /// 插件 ID（用于权限隔离和 Runtime 控制反馈归属）。
     plugin_id: String,
 }
@@ -66,6 +66,23 @@ impl HostState {
     }
 
     pub fn set_invocation_context(&mut self, context: Option<SidecarInvocationContext>) {
+        self.invocation_context =
+            context.map(|context| crate::protocol::RequestInvocationContext {
+                session_id: context.session_id,
+                invocation_id: context.invocation_id,
+                workspace: context
+                    .authoritative_workspace
+                    .to_string_lossy()
+                    .into_owned(),
+                actor_id: String::new(),
+                deadline_ms: None,
+            });
+    }
+
+    pub fn set_full_invocation_context(
+        &mut self,
+        context: Option<crate::protocol::RequestInvocationContext>,
+    ) {
         self.invocation_context = context;
     }
 }
@@ -130,7 +147,7 @@ impl SidecarHost for HostState {
                     }
                 };
                 match invocation_context {
-                    Some(context) => conn.invoke_with_context_and_progress(
+                    Some(context) => conn.invoke_with_invocation_context_and_progress(
                         &operation,
                         &payload,
                         &context,

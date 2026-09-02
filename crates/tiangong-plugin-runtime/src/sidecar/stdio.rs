@@ -69,6 +69,7 @@ struct PendingWaiter {
     response: SyncSender<Result<Value, String>>,
     progress: SyncSender<String>,
     invocation: Option<crate::sidecar::SidecarInvocationContext>,
+    invocation_context: Option<crate::protocol::RequestInvocationContext>,
 }
 
 impl StdioSidecarConnection {
@@ -190,6 +191,7 @@ impl StdioSidecarConnection {
         operation: &str,
         payload: Value,
         invocation: Option<crate::sidecar::SidecarInvocationContext>,
+        invocation_context: Option<crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
         let process = {
@@ -202,7 +204,14 @@ impl StdioSidecarConnection {
             }
             self.start_fresh(&mut state)?
         };
-        let result = self.round_trip(&process, operation, payload, invocation, on_progress);
+        let result = self.round_trip(
+            &process,
+            operation,
+            payload,
+            invocation,
+            invocation_context,
+            on_progress,
+        );
         // 先清理进程，再获取 state 锁；读线程在发送关闭错误时可能短暂持有
         // pending 锁，反向持锁会让请求收尾与取消互相等待。
         let mut state = self
@@ -717,6 +726,7 @@ impl StdioSidecarConnection {
             HANDSHAKE_OPERATION,
             serde_json::Value::Null,
             None,
+            None,
             &mut |_| {},
         )?;
         let handshake: HandshakeResponse =
@@ -753,6 +763,7 @@ impl StdioSidecarConnection {
         operation: &str,
         payload: Value,
         invocation: Option<crate::sidecar::SidecarInvocationContext>,
+        invocation_context: Option<crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
         let request = Request::new(operation, payload);
@@ -768,6 +779,20 @@ impl StdioSidecarConnection {
                 PendingWaiter {
                     response: response_tx,
                     progress: progress_tx,
+                    invocation_context: invocation_context.or_else(|| {
+                        invocation.as_ref().map(|context| {
+                            crate::protocol::RequestInvocationContext {
+                                session_id: context.session_id.clone(),
+                                invocation_id: context.invocation_id.clone(),
+                                workspace: context
+                                    .authoritative_workspace
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                actor_id: String::new(),
+                                deadline_ms: None,
+                            }
+                        })
+                    }),
                     invocation,
                 },
             );
@@ -837,22 +862,12 @@ impl StdioSidecarConnection {
         if let Some(context) = process.pending.lock().ok().and_then(|pending| {
             pending
                 .get(&request.request_id)
-                .and_then(|waiter| waiter.invocation.clone())
+                .and_then(|waiter| waiter.invocation_context.clone())
         }) && let Some(object) = payload.as_object_mut()
         {
             object.insert(
                 "context".to_string(),
-                serde_json::to_value(crate::protocol::RequestInvocationContext {
-                    session_id: context.session_id,
-                    invocation_id: context.invocation_id,
-                    workspace: context
-                        .authoritative_workspace
-                        .to_string_lossy()
-                        .into_owned(),
-                    actor_id: String::new(),
-                    deadline_ms: None,
-                })
-                .context("序列化 sidecar 调用上下文失败")?,
+                serde_json::to_value(context).context("序列化 sidecar 调用上下文失败")?,
             );
         }
         let frame = IpcFrame::Request(IpcRequest {
@@ -1338,7 +1353,7 @@ impl SidecarConnection for StdioSidecarConnection {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => self
-                .invoke_on_demand(operation, payload, None, on_progress)
+                .invoke_on_demand(operation, payload, None, None, on_progress)
                 .map_err(|error| {
                     if error.downcast_ref::<SidecarInvokeError>().is_some() {
                         error
@@ -1361,7 +1376,7 @@ impl SidecarConnection for StdioSidecarConnection {
                         }
                     })?
                 };
-                self.round_trip(&process, operation, payload, None, on_progress)
+                self.round_trip(&process, operation, payload, None, None, on_progress)
                     .map_err(|error| {
                         if error.downcast_ref::<SidecarInvokeError>().is_some() {
                             error
@@ -1393,7 +1408,7 @@ impl SidecarConnection for StdioSidecarConnection {
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => {
-                self.invoke_on_demand(operation, payload, Some(context.clone()), on_progress)?
+                self.invoke_on_demand(operation, payload, Some(context.clone()), None, on_progress)?
             }
             crate::manifest::SidecarLifecycle::Resident => {
                 let process = {
@@ -1407,6 +1422,40 @@ impl SidecarConnection for StdioSidecarConnection {
                     &process,
                     operation,
                     payload,
+                    Some(context.clone()),
+                    None,
+                    on_progress,
+                )?
+            }
+        };
+        serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
+    fn invoke_with_invocation_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &crate::protocol::RequestInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
+        let response = match self.config.lifecycle {
+            crate::manifest::SidecarLifecycle::OnDemand => {
+                self.invoke_on_demand(operation, payload, None, Some(context.clone()), on_progress)?
+            }
+            crate::manifest::SidecarLifecycle::Resident => {
+                let process = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
+                    self.ensure_running(&mut state)?
+                };
+                self.round_trip(
+                    &process,
+                    operation,
+                    payload,
+                    None,
                     Some(context.clone()),
                     on_progress,
                 )?
@@ -1423,6 +1472,7 @@ impl SidecarConnection for StdioSidecarConnection {
                     &process,
                     HANDSHAKE_OPERATION,
                     Value::Null,
+                    None,
                     None,
                     &mut |_| {},
                 );
@@ -1443,6 +1493,7 @@ impl SidecarConnection for StdioSidecarConnection {
                     &process,
                     HANDSHAKE_OPERATION,
                     Value::Null,
+                    None,
                     None,
                     &mut |_| {},
                 )?
@@ -1532,6 +1583,7 @@ mod cancel_order_tests {
                 response: response_tx,
                 progress: progress_tx,
                 invocation: None,
+                invocation_context: None,
             }),
             "request-cancel",
             || {
