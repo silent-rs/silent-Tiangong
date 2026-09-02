@@ -47,7 +47,6 @@ jobs:
 
           check_all=false
           fallback_all=false
-          fallback_frontend=false
           scoped_change=false
           frontend=false
           interpreter_e2e=false
@@ -64,10 +63,6 @@ jobs:
                 ;;
               Cargo.toml|Cargo.lock|.github/actions/setup-rust/*)
                 fallback_all=true
-                ;;
-              .github/workflows/ci.yml)
-                fallback_all=true
-                fallback_frontend=true
                 ;;
             esac
             case "$file" in
@@ -89,9 +84,6 @@ jobs:
 
           if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
             check_all=true
-            if [[ "$fallback_frontend" == "true" ]]; then
-              frontend=true
-            fi
           fi
 
           workspace="$(pwd)/"
