@@ -16,6 +16,16 @@ use std::path::{Path, PathBuf};
 fn workspace_target_dist() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugin-dist")
 }
+fn plugin_creator_version() -> String {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../plugins/tiangong-plugin-creator/plugin.json"
+    ))
+    .expect("解析 Plugin Creator 清单");
+    manifest["version"]
+        .as_str()
+        .expect("Plugin Creator 清单缺少版本")
+        .to_string()
+}
 
 fn copy_tree(source: &Path, target: &Path) {
     std::fs::create_dir_all(target).unwrap();
@@ -37,8 +47,10 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
     let dist = std::env::var_os("TIANGONG_PLUGIN_E2E_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(workspace_target_dist);
-    let archive = dist.join("plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst");
-    let release_json = dist.join("plugins/plugin-creator/0.2.0/release.json");
+    let version = plugin_creator_version();
+    let release_dir = dist.join(format!("plugins/plugin-creator/{version}"));
+    let archive = release_dir.join(format!("plugin-creator-{version}.tar.zst"));
+    let release_json = release_dir.join("release.json");
     if !archive.is_file() || !release_json.is_file() {
         let reason = format!(
             "缺少发布产物（archive={} release.json={}）",
@@ -130,7 +142,7 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
                     minisign::KeyPair::generate_unencrypted_keypair().expect("生成三方密钥");
                 let release_path = dist_copy
                     .path()
-                    .join("plugins/plugin-creator/0.2.0/release.json");
+                    .join(format!("plugins/plugin-creator/{version}/release.json"));
                 let mut release: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(&release_path).unwrap()).unwrap();
                 release["publisher"] = serde_json::Value::String("acme-dev".to_string());
@@ -148,7 +160,7 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
                 std::fs::write(
                     dist_copy
                         .path()
-                        .join("plugins/plugin-creator/0.2.0/release.json.sig"),
+                        .join(format!("plugins/plugin-creator/{version}/release.json.sig")),
                     base64::engine::general_purpose::STANDARD.encode(signature.into_string()),
                 )
                 .unwrap();
@@ -170,7 +182,7 @@ fn 官方目录_测试密钥冒充官方被拒_三方签名完整链路与卸载
                     staged.path(),
                 )
                 .expect("三方签名插件安装");
-                assert_eq!(status.manifest_version, "0.2.0");
+                assert_eq!(status.manifest_version, version);
                 tiangong_plugin_runtime::registry::preload_installed_plugins(storage.path());
                 let response = tiangong_plugin_runtime::registry::invoke_sidecar(
                     storage.path(),
