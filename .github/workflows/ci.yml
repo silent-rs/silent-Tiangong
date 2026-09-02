@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.resolve.outputs.frontend }}
+      interpreter_e2e: ${{ steps.resolve.outputs.interpreter_e2e }}
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
@@ -46,12 +47,13 @@ jobs:
 
           check_all=false
           fallback_all=false
-          fallback_frontend=false
           scoped_change=false
           frontend=false
+          interpreter_e2e=false
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
             check_all=true
             frontend=true
+            interpreter_e2e=true
           fi
 
           for file in "${files[@]}"; do
@@ -61,10 +63,6 @@ jobs:
                 ;;
               Cargo.toml|Cargo.lock|.github/actions/setup-rust/*)
                 fallback_all=true
-                ;;
-              .github/workflows/ci.yml)
-                fallback_all=true
-                fallback_frontend=true
                 ;;
             esac
             case "$file" in
@@ -77,13 +75,15 @@ jobs:
                 frontend=true
                 ;;
             esac
+            case "$file" in
+              plugins/tiangong-plugin-creator/*|xtask/*|.github/workflows/ci.yml|crates/tiangong-plugin-runtime/src/artifacts.rs|crates/tiangong-plugin-runtime/src/registry.rs|crates/tiangong-plugin-runtime/src/signature.rs|crates/tiangong-plugin-runtime/tests/official_catalog_e2e.rs)
+                interpreter_e2e=true
+                ;;
+            esac
           done
 
           if [[ "$fallback_all" == "true" && "$scoped_change" != "true" ]]; then
             check_all=true
-            if [[ "$fallback_frontend" == "true" ]]; then
-              frontend=true
-            fi
           fi
 
           workspace="$(pwd)/"
@@ -129,8 +129,10 @@ jobs:
 
           echo "App crates: $affected"
           echo "Frontend: $frontend"
+          echo "Interpreter E2E: $interpreter_e2e"
           echo "matrix=$affected" >> "$GITHUB_OUTPUT"
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "interpreter_e2e=$interpreter_e2e" >> "$GITHUB_OUTPUT"
 
   rust-fmt:
     name: App Rust fmt
@@ -219,12 +221,14 @@ jobs:
           done < <(jq -r '.[]' <<< "$MATRIX")
           cargo nextest run "${packages[@]}" --no-tests pass
 
-  # 官方解释器发布链端到端（普通 CI 必跑）：Fresh Checkout 完整构建
+  # 官方解释器发布链端到端（相关发布链变更时运行）：Fresh Checkout 完整构建
   # plugin-creator（yarn build + xtask 组装 + 测试密钥签名 + 确定性归档 +
   # any 目录片段），随后经本地 http 目录服务真实走 目录发现 → 下载 → 解包 →
   # 官方验签（内容清单全树校验）→ 安装 → sidecar 调用 → 卸载。
   interpreter-release-e2e:
     name: Interpreter Release E2E
+    needs: changes
+    if: needs.changes.outputs.interpreter_e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -258,10 +262,11 @@ jobs:
           test -f "${key_path}.pub"
           export TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH="$key_path"
           cargo run -p xtask -- build-plugin plugin-creator
+          version="$(jq -er '.version' plugins/tiangong-plugin-creator/plugin.json)"
           # 断言发布产物齐备（测试必跑的先决条件）。
           test -f target/plugin-dist/plugins-index/fragments/plugin-creator-any.json
-          test -f "target/plugin-dist/plugins/plugin-creator/0.2.0/plugin-creator-0.2.0.tar.zst"
-          test -f target/plugin-dist/plugins/plugin-creator/0.2.0/release.json.sig
+          test -f "target/plugin-dist/plugins/plugin-creator/${version}/plugin-creator-${version}.tar.zst"
+          test -f "target/plugin-dist/plugins/plugin-creator/${version}/release.json.sig"
 
       - name: Run catalog install e2e
         env:
