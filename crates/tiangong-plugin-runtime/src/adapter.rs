@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::sidecar::SidecarConnection;
-use crate::sidecar::SidecarInvocationContext;
 use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
@@ -419,7 +418,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         &self,
         call: &ToolCall,
         session: &mut tiangong_core::session::Session,
-        _actor_id: &str,
+        actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         if !self.is_enabled() {
             return Box::pin(async { None });
@@ -430,10 +429,19 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             name: call.name.clone(),
             arguments,
         };
-        let invocation_context = SidecarInvocationContext {
+        let invocation_context = crate::protocol::RequestInvocationContext {
             session_id: session.id.clone(),
             invocation_id: call.id.clone(),
-            authoritative_workspace: std::path::PathBuf::from(session.cwd.trim()),
+            workspace: session.cwd.trim().to_string(),
+            actor_id: actor_id.to_string(),
+            deadline_ms: Some(
+                chrono::Local::now()
+                    .naive_local()
+                    .and_utc()
+                    .timestamp_millis()
+                    .saturating_add(self.config.epoch_deadline.as_millis() as i64)
+                    .max(0) as u64,
+            ),
         };
         let Some(inner) = self.current_inner() else {
             return Box::pin(async { None });
@@ -442,7 +450,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         Box::pin(async move {
             let result = task::spawn_blocking(move || {
                 call_wasm_off_runtime(inner, move |plugin| {
-                    plugin.handle_tool_with_context(wit_call, &config, invocation_context)
+                    plugin.handle_tool_with_full_context(wit_call, &config, invocation_context)
                 })
             })
             .await

@@ -73,6 +73,13 @@ impl SidecarInvocationContext {
 
 /// 将宿主权威上下文转换为通用请求信封。TCP 与 stdio 共用此入口，避免
 /// 传输方式改变会话归属语义。
+fn handshake_handles_tool(handshake: &HandshakeResponse, tool_name: &str) -> bool {
+    handshake
+        .capabilities
+        .iter()
+        .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*")
+}
+
 fn request_invocation_context(
     context: &SidecarInvocationContext,
 ) -> crate::protocol::RequestInvocationContext {
@@ -146,6 +153,27 @@ pub trait SidecarConnection: Send + Sync {
     ) -> Result<String> {
         let _ = context;
         self.invoke_with_progress(operation, payload, on_progress)
+    }
+
+    /// 带完整统一调用元数据的入口。旧连接实现无需调整，默认退化为原有
+    /// SidecarInvocationContext；Runtime 自带连接覆写后透传 actor/deadline。
+    fn invoke_with_invocation_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &crate::protocol::RequestInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        self.invoke_with_context_and_progress(
+            operation,
+            payload,
+            &SidecarInvocationContext::new(
+                &context.session_id,
+                &context.invocation_id,
+                &context.workspace,
+            ),
+            on_progress,
+        )
     }
 
     /// sidecar 握手声明的工具 Handler。能力名使用 `tool:<name>`；旧 sidecar
@@ -569,12 +597,54 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+struct ActiveTcpRequestGuard {
+    active: Arc<Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
+    session_id: String,
+    request_id: String,
+}
+
+impl ActiveTcpRequestGuard {
+    fn new(
+        active: Arc<Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
+        session_id: String,
+        request_id: String,
+    ) -> Self {
+        if let Ok(mut requests) = active.lock() {
+            requests
+                .entry(session_id.clone())
+                .or_default()
+                .insert(request_id.clone());
+        }
+        Self {
+            active,
+            session_id,
+            request_id,
+        }
+    }
+}
+
+impl Drop for ActiveTcpRequestGuard {
+    fn drop(&mut self) {
+        let Ok(mut requests) = self.active.lock() else {
+            return;
+        };
+        if let Some(ids) = requests.get_mut(&self.session_id) {
+            ids.remove(&self.request_id);
+            if ids.is_empty() {
+                requests.remove(&self.session_id);
+            }
+        }
+    }
+}
+
 /// 通过 endpoint 文件连接本地 sidecar，并在不可用时负责启动。
 pub struct ProcessSidecarConnection {
     config: SidecarConfig,
     start_lock: Mutex<()>,
     exec_env: Mutex<std::collections::BTreeMap<String, String>>,
     notification_token: Arc<Mutex<Option<String>>>,
+    active_requests:
+        Arc<Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
 }
 
 impl ProcessSidecarConnection {
@@ -584,6 +654,7 @@ impl ProcessSidecarConnection {
             start_lock: Mutex::new(()),
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
             notification_token: Arc::new(Mutex::new(None)),
+            active_requests: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -914,7 +985,7 @@ impl ProcessSidecarConnection {
         &self,
         operation: &str,
         payload: serde_json::Value,
-        invocation: Option<&SidecarInvocationContext>,
+        invocation: Option<&crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
@@ -928,9 +999,16 @@ impl ProcessSidecarConnection {
 
         let request = Request::new(operation, payload);
         let request_id = request.request_id.clone();
+        let _active_guard = invocation.map(|context| {
+            ActiveTcpRequestGuard::new(
+                Arc::clone(&self.active_requests),
+                context.session_id.clone(),
+                request_id.clone(),
+            )
+        });
         let mut envelope =
             serde_json::to_value(request).with_context(|| "序列化 sidecar 协议请求失败")?;
-        if let Some(context) = invocation.map(request_invocation_context)
+        if let Some(context) = invocation.cloned()
             && let Some(object) = envelope.as_object_mut()
         {
             object.insert(
@@ -1048,6 +1126,17 @@ impl SidecarConnection for ProcessSidecarConnection {
         context: &SidecarInvocationContext,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<String> {
+        let context = request_invocation_context(context);
+        self.invoke_with_invocation_context_and_progress(operation, payload, &context, on_progress)
+    }
+
+    fn invoke_with_invocation_context_and_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        context: &crate::protocol::RequestInvocationContext,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
         self.ensure_running().map_err(|error| {
             if error.downcast_ref::<SidecarInvokeError>().is_some() {
                 error
@@ -1070,10 +1159,32 @@ impl SidecarConnection for ProcessSidecarConnection {
         )?;
         let handshake: HandshakeResponse =
             serde_json::from_value(payload).with_context(|| "解析 sidecar 握手响应失败")?;
-        Ok(handshake
-            .capabilities
-            .iter()
-            .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*"))
+        Ok(handshake_handles_tool(&handshake, tool_name))
+    }
+
+    fn cancel_session(&self, session_id: &str) -> Result<()> {
+        let request_ids = self
+            .active_requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TCP sidecar 活跃请求表已损坏"))?
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        if request_ids.is_empty() {
+            return Ok(());
+        }
+        let endpoint = load_endpoint(&self.config.endpoint)?;
+        for request_id in request_ids {
+            let mut stream = connect(&endpoint, self.config.request_timeout)?;
+            write_frame(
+                &mut stream,
+                &IpcFrame::Auth(IpcAuth {
+                    token: endpoint.token.clone(),
+                }),
+            )?;
+            write_frame(&mut stream, &IpcFrame::Cancel { request_id })?;
+        }
+        Ok(())
     }
 
     fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
@@ -1490,5 +1601,26 @@ mod sandbox_switch_tests {
         let unsandboxed = config().with_sandbox(false).with_sandbox_user_switch(true);
         assert!(!unsandboxed.sandbox_enabled_for_spawn(false));
         assert!(!unsandboxed.sandbox_enabled_for_spawn(true));
+    }
+
+    #[test]
+    fn handler_capability_matches_exact_tool_or_wildcard() {
+        let handshake = HandshakeResponse {
+            plugin_id: "demo".into(),
+            plugin_version: "1.0.0".into(),
+            sidecar_version: "1.0.0".into(),
+            protocol_version: PROTOCOL_VERSION.into(),
+            business_protocol: 0,
+            capabilities: vec!["tool:run_command".into()],
+            instance_id: "instance".into(),
+            status: crate::protocol::ServiceStatus::Ready,
+        };
+        assert!(handshake_handles_tool(&handshake, "run_command"));
+        assert!(!handshake_handles_tool(&handshake, "terminal_open"));
+        let wildcard = HandshakeResponse {
+            capabilities: vec!["tool:*".into()],
+            ..handshake
+        };
+        assert!(handshake_handles_tool(&wildcard, "terminal_open"));
     }
 }

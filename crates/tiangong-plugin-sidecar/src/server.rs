@@ -3,6 +3,7 @@
 //! 帧层复用 `tiangong_plugin_runtime::protocol` 的通用类型，不重新定义。
 //! 各 sidecar 通过实现 [`SidecarService`] trait 提供请求分发。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -11,8 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tiangong_plugin_runtime::protocol::{
-    ErrorCode as PluginErrorCode, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
-    Request as PluginRequest, RequestInvocationContext, Response as PluginResponse,
+    ErrorCode as PluginErrorCode, IpcEndpoint, IpcFrame, IpcResponse, Request as PluginRequest,
+    RequestInvocationContext, Response as PluginResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -268,6 +269,18 @@ fn notification_sender() -> &'static tokio::sync::broadcast::Sender<(String, Str
     NOTIFICATIONS.get_or_init(|| tokio::sync::broadcast::channel(256).0)
 }
 
+struct ActiveTcpRequest {
+    request: PluginRequest,
+    cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+static ACTIVE_REQUESTS: once_link::OnceLock<tokio::sync::Mutex<HashMap<String, ActiveTcpRequest>>> =
+    once_link::OnceLock::new();
+
+fn active_requests() -> &'static tokio::sync::Mutex<HashMap<String, ActiveTcpRequest>> {
+    ACTIVE_REQUESTS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
 /// 通知广播订阅入口（stdio 模式的通知写出任务使用）。
 pub(crate) fn notification_broadcast() -> &'static tokio::sync::broadcast::Sender<(String, String)>
 {
@@ -286,8 +299,8 @@ async fn serve_connection(
 ) -> Result<()> {
     let mut notifications = notification_sender().subscribe();
     loop {
-        let request = tokio::select! {
-            request = connection.read_request() => request?,
+        let frame = tokio::select! {
+            frame = connection.read_frame() => frame?,
             notification = notifications.recv() => {
                 match notification {
                     Ok((channel, payload)) => {
@@ -307,6 +320,35 @@ async fn serve_connection(
                 }
             }
         };
+        let request = match frame {
+            IpcFrame::Request(request) => request,
+            IpcFrame::Cancel { request_id } => {
+                let target = active_requests().lock().await.remove(&request_id);
+                if let Some(target) = target {
+                    let _ = target.cancel.send(());
+                    if let Err(error) = service_obj.cancel(&target.request).await {
+                        tracing::warn!(%request_id, %error, "TCP sidecar 取消清理失败");
+                    }
+                }
+                let response = PluginResponse::error(
+                    &request_id,
+                    PluginErrorCode::Cancelled,
+                    "请求已取消",
+                    false,
+                );
+                let payload = serde_json::to_value(response)
+                    .with_context(|| "序列化 TCP sidecar 取消响应失败")?;
+                connection
+                    .write_response(IpcResponse {
+                        request_id,
+                        payload,
+                    })
+                    .await?;
+                continue;
+            }
+            IpcFrame::Error { message } => bail!("IPC 对端返回错误: {message}"),
+            other => bail!("期望 Request/Cancel 帧，实际收到: {other:?}"),
+        };
         let operation = request
             .payload
             .get("operation")
@@ -325,12 +367,32 @@ async fn serve_connection(
                     .get("context")
                     .cloned()
                     .and_then(|value| serde_json::from_value(value).ok());
-                REQUEST_PROGRESS
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                active_requests().lock().await.insert(
+                    request.request_id.clone(),
+                    ActiveTcpRequest {
+                        request: plugin_request.clone(),
+                        cancel: cancel_tx,
+                    },
+                );
+                let response = REQUEST_PROGRESS
                     .scope(
                         progress,
-                        REQUEST_CONTEXT.scope(context, service_obj.dispatch(plugin_request)),
+                        REQUEST_CONTEXT.scope(context, async {
+                            tokio::select! {
+                                response = service_obj.dispatch(plugin_request) => response,
+                                _ = cancel_rx => PluginResponse::error(
+                                    &request.request_id,
+                                    PluginErrorCode::Cancelled,
+                                    "请求已取消",
+                                    false,
+                                ),
+                            }
+                        }),
                     )
-                    .await
+                    .await;
+                active_requests().lock().await.remove(&request.request_id);
+                response
             }
             Err(error) => PluginResponse::error(
                 &request.request_id,
@@ -368,14 +430,6 @@ impl IpcConnection {
         }
     }
 
-    async fn read_request(&mut self) -> Result<IpcRequest> {
-        match self.read_frame().await? {
-            IpcFrame::Request(req) => Ok(req),
-            IpcFrame::Error { message } => bail!("IPC 对端返回错误: {message}"),
-            frame => bail!("期望 Request 帧，实际收到: {:?}", frame),
-        }
-    }
-
     async fn write_response(&mut self, response: IpcResponse) -> Result<()> {
         self.write_frame(&IpcFrame::Response(response)).await
     }
@@ -406,5 +460,71 @@ mod notification_tests {
     fn emit_notification_available_without_subscriber() {
         // 无订阅者时发送静默丢弃，不 panic（背压安全）
         emit_notification("terminal.output", "hello");
+    }
+
+    #[derive(Default)]
+    struct CancelProbe {
+        cancelled: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SidecarService for CancelProbe {
+        async fn dispatch(&self, request: PluginRequest) -> PluginResponse {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            PluginResponse::success(request.request_id, serde_json::Value::Null)
+        }
+
+        async fn cancel(&self, _request: &PluginRequest) -> Result<()> {
+            self.cancelled
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_cancel_frame_runs_request_cancel_hook() {
+        let service = Arc::new(CancelProbe::default());
+        let service_obj: Arc<dyn SidecarService> = service.clone();
+        let request = PluginRequest::new("slow", serde_json::Value::Null);
+        let request_id = request.request_id.clone();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        active_requests().lock().await.insert(
+            request_id.clone(),
+            ActiveTcpRequest {
+                request: request.clone(),
+                cancel: cancel_tx,
+            },
+        );
+        let target = active_requests().lock().await.remove(&request_id);
+        let target = target.expect("请求应已登记");
+        let _ = target.cancel.send(());
+        service_obj.cancel(&target.request).await.unwrap();
+        assert_eq!(
+            service.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(cancel_rx.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn request_context_is_available_inside_dispatch_scope() {
+        let context = RequestInvocationContext {
+            session_id: "session-a".into(),
+            invocation_id: "call-a".into(),
+            workspace: "/workspace".into(),
+            actor_id: "agent-a".into(),
+            deadline_ms: Some(42),
+        };
+        REQUEST_CONTEXT
+            .scope(Some(context), async {
+                let current = invocation_context().expect("请求上下文应可读");
+                assert_eq!(current.session_id, "session-a");
+                assert_eq!(current.invocation_id, "call-a");
+                assert_eq!(current.workspace, "/workspace");
+                assert_eq!(current.actor_id, "agent-a");
+                assert_eq!(current.deadline_ms, Some(42));
+            })
+            .await;
+        assert!(invocation_context().is_none(), "请求结束后上下文不得泄漏");
     }
 }

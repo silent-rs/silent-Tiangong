@@ -31,6 +31,7 @@ pub struct TsPluginAdapter {
     id: String,
     state: RwLock<TsPluginState>,
     enabled: AtomicBool,
+    feedback_tx: RwLock<Option<tiangong_core::core::plugin::PluginFeedbackTx>>,
     /// 无界面且声明 sidecar：工具由宿主直连 sidecar 执行（不进页面接应
     /// 协议）。有界面的插件照旧走页面路径（页面可深度参与执行）。
     sidecar_direct: AtomicBool,
@@ -46,6 +47,7 @@ impl TsPluginAdapter {
                 mention: mention_candidate_parts(manifest),
             }),
             enabled: AtomicBool::new(enabled),
+            feedback_tx: RwLock::new(None),
             sidecar_direct: AtomicBool::new(sidecar_direct_of(manifest)),
         }
     }
@@ -88,6 +90,12 @@ impl Plugin for TsPluginAdapter {
     fn id(&self) -> &str {
         &self.id
     }
+
+    fn set_feedback_tx(&self, tx: tiangong_core::core::plugin::PluginFeedbackTx) {
+        if let Ok(mut feedback) = self.feedback_tx.write() {
+            *feedback = Some(tx);
+        }
+    }
 }
 
 impl ToolSpecProvider for TsPluginAdapter {
@@ -129,15 +137,17 @@ impl ToolOverrideHandler for TsPluginAdapter {
         let legacy_sidecar_direct = self.sidecar_direct.load(Ordering::Acquire);
         let tool_timeout_ms = tool.timeout_ms;
         let workspace = std::path::PathBuf::from(session.cwd.trim());
+        let feedback = self
+            .feedback_tx
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         Box::pin(async move {
             // 兼容规则：无 UI sidecar 维持既有直连；有 UI 的插件先查询后端
             // 是否明确注册目标工具。未注册才启动旧 UI Handler，避免后端
             // 自管理插件为了“找接应者”先被错误拉起页面。
-            let ui_ready = crate::bridge::plugin_has_subscriber(&plugin_id, "tool.requested");
             let backend_declared = legacy_sidecar_direct
-                || (!ui_ready
-                    && sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path()))
-                        .await);
+                || sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path())).await;
             if backend_declared {
                 Some(
                     invoke_sidecar_tool(
@@ -145,6 +155,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                         call,
                         tool_timeout_ms,
                         Some((session_id, workspace, actor_id)),
+                        feedback,
                     )
                     .await,
                 )
@@ -211,6 +222,7 @@ async fn invoke_sidecar_tool(
     call: ToolCall,
     timeout_ms: u64,
     session_context: Option<(String, std::path::PathBuf, String)>,
+    feedback: Option<tiangong_core::core::plugin::PluginFeedbackTx>,
 ) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
@@ -276,11 +288,23 @@ async fn invoke_sidecar_tool(
     let operation = call.name.clone();
     let timeout_operation = operation.clone();
     let arguments = call.arguments.clone();
+    let actor_id = session_context
+        .as_ref()
+        .map(|(_, _, actor_id)| actor_id.clone())
+        .unwrap_or_default();
+    let deadline_ms = chrono::Local::now()
+        .naive_local()
+        .and_utc()
+        .timestamp_millis()
+        .saturating_add(timeout_ms as i64)
+        .max(0) as u64;
     let invocation_context =
-        session_id.map(|session_id| crate::sidecar::SidecarInvocationContext {
+        session_id.map(|session_id| crate::protocol::RequestInvocationContext {
             session_id,
             invocation_id: call.id.clone(),
-            authoritative_workspace,
+            workspace: authoritative_workspace.to_string_lossy().into_owned(),
+            actor_id,
+            deadline_ms: Some(deadline_ms),
         });
     let blocking = connection.clone();
     let plugin_id_for_feedback = plugin_id.to_string();
@@ -289,10 +313,22 @@ async fn invoke_sidecar_tool(
         tokio::task::spawn_blocking(move || {
             let payload = serde_json::to_string(&arguments).unwrap_or_default();
             let mut on_progress = |message: String| {
-                crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message);
+                if crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message) {
+                    return;
+                }
+                let Some(feedback) = &feedback else {
+                    return;
+                };
+                match serde_json::from_str::<tiangong_types::StreamEvent>(&message) {
+                    Ok(event) => feedback.send_stream_event(event),
+                    Err(_) => feedback.send_stream_event(tiangong_types::StreamEvent::ReactText {
+                        message_id: call.id.clone(),
+                        content: message,
+                    }),
+                }
             };
             match invocation_context {
-                Some(context) => blocking.invoke_with_context_and_progress(
+                Some(context) => blocking.invoke_with_invocation_context_and_progress(
                     &operation,
                     &payload,
                     &context,
@@ -386,7 +422,7 @@ pub(crate) async fn invoke_sidecar_tool_for_test(
     call: ToolCall,
     timeout_ms: u64,
 ) -> ToolResult {
-    invoke_sidecar_tool(plugin_id, call, timeout_ms, None).await
+    invoke_sidecar_tool(plugin_id, call, timeout_ms, None, None).await
 }
 
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {
