@@ -613,7 +613,19 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     std::fs::create_dir_all(&plugins_dir)?;
     let staging = plugins_dir.join(format!(".{}-staging-{}", config.id, std::process::id()));
     let destination = plugins_dir.join(config.id);
-    remove_dir_if_exists(&staging)?;
+    // 部署中断会留下旧 staging（含清单，会被 App 误读为已装版本），
+    // 每次部署前清掉同插件的全部历史 staging（含本进程旧目录）。
+    let staging_prefix = format!(".{}-staging-", config.id);
+    for entry in std::fs::read_dir(&plugins_dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(&staging_prefix)
+        {
+            remove_dir_if_exists(&entry.path())?;
+        }
+    }
     std::fs::create_dir_all(&staging)?;
 
     if let (Some(wasm), Some(wasm_artifact)) = (&wasm, config.wasm_artifact) {
