@@ -121,8 +121,8 @@ fn new_path_system_prompt_includes_all_sections() {
     assert!(text.contains("通用规则段"), "应包含通用规则段");
     assert!(text.contains("自定义指令段"), "应包含自定义指令段");
     // 环境段
-    assert!(text.contains("当前会话"), "应包含会话标题");
     assert!(text.contains("当前工作目录"), "应包含工作目录");
+    assert!(!text.contains("测试会话"), "会话标题不应进入 system prompt");
     // 各能力插件段落
     assert!(text.contains("test-skill"), "应包含 Skills 列表");
     assert!(text.contains("团队协作"), "应包含团队协作");
