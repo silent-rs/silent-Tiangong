@@ -44,8 +44,8 @@ sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` �
 
 - 权限：`tool.provide`（工具结果提交）+ `sidecar.invoke`（视图直调
   sidecar 操作）+ `app.use`（App 标签原语）
-- 工具直连：宿主经 `invoke_with_context` 调用，operation 为工具名；
-  请求帧携带 `context`（session_id / invocation_id / 权威 workspace），
-  缺失即拒绝执行
-- 工具超时：run 系 300s、terminal_send 120s、面板操作 30s（清单
-  `timeout_ms`，宿主工具级超时；会话取消按 session_id 定向取消请求）
+- 工具直连：sidecar 握手以 `tool:<name>` 注册 Handler；宿主通过统一
+  Runtime 调用，sidecar 从运行库读取 session_id、invocation_id 和权威
+  workspace，缺失即拒绝执行
+- 调用闭合：Handler 不设统一时限，由会话取消或宿主退出闭合；
+  `run_command` / `run_shell` 仅在调用参数显式提供 `timeout` 时中断命令
