@@ -13,9 +13,8 @@ import {
  * shadow 容器把页面元素注入 ShadowRoot：挂载点必须经宿主注入的
  * pluginRoot 查询（document 查不到 shadow 内元素）。
  *
- * 终端跟会话走（对齐内置终端面板）：宿主上下文的会话变化驱动切换，
- * 每个会话一个独立 PTY；切走再切回保持原终端，明确关闭 App 标签时
- * 结束旧终端并清除恢复记录。
+ * 终端跟会话走：宿主上下文的会话变化驱动切换，切走再切回保持同一
+ * 存活 PTY；明确关闭 App 标签时由 Terminal GC 回收对应终端。
  */
 
 let bridgeRef: HostBridge | null = null;
@@ -90,10 +89,25 @@ async function spawnDefault(
   return { sessionId, boot: spawned.boot_output };
 }
 
+/** 视图已完成事件订阅与 PTY 绑定后再通知 sidecar 放行 Agent 命令。 */
+async function attachTerminalView(
+  bridge: HostBridge,
+  view: TerminalViewHandle,
+  scopeId: string,
+  sessionId: string,
+  history?: string,
+): Promise<void> {
+  view.attach(sessionId, history);
+  await sidecarCall(bridge, 'terminalAttach', {
+    scope_id: scopeId,
+    session_id: sessionId,
+  }).catch((error) => console.warn('[terminal] 确认终端附着失败:', error));
+}
+
 /**
  * 跟随会话切换终端：
  * 1. 本视图已知的该会话终端直接附着（内存缓存完整重放）；
- * 2. sidecar 仍有该会话的存活终端时恢复（UI 重开场景，历史由 sidecar 缓冲重放）；
+ * 2. sidecar 仍有同编号存活终端时重新附着（页面重挂时由内存缓冲补齐）；
  * 3. 都没有则新建（cwd 为该会话工作目录，无会话时为全局工作区）。
  */
 async function switchScope(
@@ -129,7 +143,7 @@ async function switchScope(
         isCurrent,
       );
       if (!spawned || !isCurrent()) return;
-      view.attach(spawned.sessionId, spawned.boot);
+      await attachTerminalView(bridge, view, scopeId, spawned.sessionId, spawned.boot);
       return;
     }
 
@@ -148,12 +162,11 @@ async function switchScope(
         scope_id: scopeId,
         created_at: Date.now(),
       });
-      view.attach(found.session_id, found.history);
+      await attachTerminalView(bridge, view, scopeId, found.session_id, found.history);
       return;
     }
-    // 新建 shell（无存活会话——sidecar 重启过）：磁盘历史（若有）作为
-    // 回填基线显示在上方（对齐内置终端的应用重启恢复）。
-    await spawnAndAttach(found.history || undefined);
+    // 精确编号不存在时创建全新 PTY，不回放同会话其他终端的旧日志。
+    await spawnAndAttach();
   } catch (error) {
     if (!isCurrent() || isDisposedBridgeError(error)) return;
     console.warn('[terminal] 恢复会话失败，转新建：', error);
@@ -167,9 +180,8 @@ async function switchScope(
     }
   }
 
-  /** 新建会话并附着：历史基线在前、新 shell 首批输出在后；无可重放
-   * 内容时视图自身显示启动占位（见 terminal-view attach）。 */
-  async function spawnAndAttach(baseline?: string): Promise<void> {
+  /** 新建会话并附着；无首批输出时视图自身显示启动占位。 */
+  async function spawnAndAttach(): Promise<void> {
     const spawned = await spawnDefault(
       bridge,
       view,
@@ -189,7 +201,7 @@ async function switchScope(
       await sidecarCall(bridge, 'terminalKill', { session_id: sessionId }).catch(() => {});
       return;
     }
-    view.attach(sessionId, [baseline, boot].filter(Boolean).join('') || undefined);
+    await attachTerminalView(bridge, view, scopeId, sessionId, boot);
   }
 }
 
@@ -257,12 +269,14 @@ async function bootstrap() {
     if (!active) return;
     const scopeId = context.session?.id ?? GLOBAL_SCOPE;
     const appInstance = context.app?.instance_id ?? '';
-    registerFrontendTerminalTab(bridge, scopeId, appInstance);
-    // 带精确实例编号的后台标签虽不创建 xterm，仍记录其归属；用户未激活
-    // 就强制关闭时可登记 GC。无实例编号的通用隐藏壳不会关联任何 PTY。
-    if (!terminalView && context.app?.visible === false) {
-      currentScope = scopeId;
-      currentAppInstance = appInstance;
+    const genericBackgroundShell = context.app?.visible === false
+      && (!appInstance || appInstance === 'bg-terminal');
+    if (!genericBackgroundShell) {
+      registerFrontendTerminalTab(bridge, scopeId, appInstance);
+    }
+    // 无精确终端编号的通用后台壳不创建 xterm。Agent 已创建的精确标签即使
+    // 暂时隐藏也必须立即建立事件订阅并附着，命令随后才可开始输出。
+    if (!terminalView && genericBackgroundShell) {
       return;
     }
     if (!terminalView) {
