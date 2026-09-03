@@ -321,6 +321,21 @@ fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
     LOADED_PLUGINS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 测试辅助：读取已加载插件的验证能力快照，供安装/升级后内存状态
+/// 立即可见性的断言使用（严格安装语义）。
+#[cfg(test)]
+pub(crate) fn loaded_verified_sidecar(plugin_id: &str) -> Option<Vec<String>> {
+    loaded_plugins()
+        .lock()
+        .ok()
+        .and_then(|plugins| {
+            plugins
+                .get(plugin_id)
+                .map(|loaded| loaded.verified_sidecar.clone())
+        })
+        .flatten()
+}
+
 fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
     INVALID_PLUGINS.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -1791,9 +1806,20 @@ fn install_staged_plugin_inner(
                 );
             }
             ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
-            replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
+            replace_installed_plugin(
+                storage_root,
+                staged_path,
+                &current,
+                staged.manifest.clone(),
+                verification.as_ref(),
+            )
         } else {
-            install_new_plugin(storage_root, staged_path, staged.manifest.clone())
+            install_new_plugin(
+                storage_root,
+                staged_path,
+                staged.manifest.clone(),
+                verification.as_ref(),
+            )
         }
     })();
     let switch_ms = switch_started.elapsed().as_millis() as u64;
@@ -1801,21 +1827,6 @@ fn install_staged_plugin_inner(
     // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
     // 业务调用（打开终端 / 首次工具执行）上。
     if status.is_ok() {
-        // 验证记录与安装事务一起生效：仅提交成功后落盘（升级失败回滚
-        // 时旧记录与旧制品保持匹配）。保存失败不阻断安装——后台补验证
-        // 会重建记录。
-        if let Some(record) = verification
-            && let Err(error) = crate::verification::save_verification(
-                &plugin_directory(storage_root, &staged.manifest.id),
-                &record,
-            )
-        {
-            tracing::warn!(
-                plugin_id = %staged.manifest.id,
-                %error,
-                "保存 sidecar 验证记录失败，将由后台补验证重建"
-            );
-        }
         prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
     }
     tracing::info!(
@@ -2220,6 +2231,7 @@ fn install_new_plugin(
     storage_root: &Path,
     staged_path: &Path,
     manifest: PluginManifest,
+    verification: Option<&crate::verification::SidecarVerification>,
 ) -> Result<PluginStatus> {
     let destination = plugin_directory(storage_root, &manifest.id);
     // 目录已存在但插件未被注册（如签名校验失败被忽略的旧版残留）：
@@ -2233,7 +2245,13 @@ fn install_new_plugin(
                     enabled: true,
                     signed_release: None,
                 };
-                return replace_installed_plugin(storage_root, staged_path, &existing, manifest);
+                return replace_installed_plugin(
+                    storage_root,
+                    staged_path,
+                    &existing,
+                    manifest,
+                    verification,
+                );
             }
             Err(_) => {
                 // 无法解析的坏残留：经事务目录中转后删除，再全新安装。
@@ -2293,10 +2311,39 @@ fn install_new_plugin(
         }
         bail!("安装插件 {} 失败: {error}", manifest.id);
     }
+    // 验证记录是安装事务的一部分（严格安装语义）：保存失败必须让安装
+    // 失败——无 UI 插件唯一执行通道依赖验证记录，"安装成功但记录缺失"
+    // 会让它进入不可用状态。
+    if let Some(record) = verification
+        && let Err(error) = crate::verification::save_verification(&destination, record)
+    {
+        let _ = stop_connection_for_directory(&destination);
+        let rollback = std::fs::rename(&destination, staged_path);
+        if let (Ok(()), Some(retained)) = (&rollback, &retained) {
+            let _ = move_entry(staged_path, retained, "data");
+            let _ = std::fs::rename(retained, &destination);
+        }
+        if let Err(rename_error) = rollback {
+            bail!(
+                "安装插件 {} 失败: 保存 sidecar 验证记录失败: {error}; 回滚目录也失败: {rename_error}",
+                manifest.id
+            );
+        }
+        bail!(
+            "安装插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}",
+            manifest.id
+        );
+    }
+    let verified_capabilities = verification.map(|record| record.capabilities.clone());
     loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
         .insert(manifest.id.clone(), loaded);
+    // 安装成功立即刷新内存能力快照：当前进程的混合插件路由不再等待
+    // 后台补验证或重启。
+    if let Some(capabilities) = verified_capabilities {
+        refresh_verified_sidecar(&manifest.id, capabilities);
+    }
     if let Some(retained) = retained
         && let Err(error) = remove_directory_if_exists(&retained)
     {
@@ -2311,6 +2358,7 @@ fn replace_installed_plugin(
     staged_path: &Path,
     current: &InstalledPlugin,
     manifest: PluginManifest,
+    verification: Option<&crate::verification::SidecarVerification>,
 ) -> Result<PluginStatus> {
     stop_loaded_sidecar(&current.manifest.id)?;
     // 升级同样补齐连接表兜底，确保旧 sidecar 进程被停止后再替换二进制文件，
@@ -2368,10 +2416,36 @@ fn replace_installed_plugin(
         set_last_error(&current.manifest.id, error.to_string());
         return Err(error).with_context(|| format!("升级插件 {} 失败", current.manifest.id));
     }
+    // 验证记录是升级事务的一部分：保存失败必须恢复旧版本——新版本
+    // 制品缺记录（无 UI 插件不可用）或与旧记录不匹配都不能算升级成功。
+    if let Some(record) = verification
+        && let Err(error) = crate::verification::save_verification(&current.directory, record)
+    {
+        tracing::error!(plugin_id = %current.manifest.id, %error, "保存 sidecar 验证记录失败，恢复旧版本");
+        let _ = stop_connection_for_directory(&current.directory);
+        let restore_result =
+            restore_upgrade_directories(staged_path, &current.directory, &rollback)
+                .and_then(|()| restore_saved_rollback(&rollback, saved_rollback.as_deref()))
+                .and_then(|()| reload_plugin_inner(storage_root, current));
+        if let Err(restore_error) = restore_result {
+            bail!(
+                "升级插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}; 恢复旧版本失败: {restore_error}",
+                current.manifest.id
+            );
+        }
+        bail!(
+            "升级插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}",
+            current.manifest.id
+        );
+    }
     if let Some(saved) = saved_rollback
         && let Err(error) = remove_directory_if_exists(&saved)
     {
         tracing::warn!(path = %saved.display(), %error, "插件已升级，但清理旧回滚目录失败");
+    }
+    // 升级成功立即刷新内存能力快照，路由不再等待后台补验证或重启。
+    if let Some(record) = verification {
+        refresh_verified_sidecar(&manifest.id, record.capabilities.clone());
     }
     list_plugin_status_without_preload(&manifest)
         .ok_or_else(|| anyhow::anyhow!("插件 {} 升级后状态丢失", manifest.id))
@@ -2924,6 +2998,16 @@ pub(crate) fn sidecar_connection_with_workspace(
         .map(canonicalize_session_workspace)
         .transpose()?;
     sidecar_connection_inner(storage_root, installed, refresh, false, session_workspace)
+}
+
+/// 临时验证连接（安装期完整验证用）：与按需直连同样不进入共享连接表，
+/// 连接及其进程完全归属验证流程——成功与失败路径都必须显式停止，
+/// 避免验证失败后把坏连接或存活进程留给业务调用与后续安装。
+pub(crate) fn ephemeral_sidecar_connection(
+    storage_root: &Path,
+    installed: &InstalledPlugin,
+) -> Result<Arc<dyn SidecarConnection>> {
+    sidecar_connection_inner(storage_root, installed, false, true, None)
 }
 
 fn canonicalize_session_workspace(workspace: &Path) -> Result<PathBuf> {

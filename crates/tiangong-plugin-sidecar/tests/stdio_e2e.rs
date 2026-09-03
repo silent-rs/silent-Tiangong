@@ -49,6 +49,7 @@ fn connection(tag: &str) -> StdioSidecarConnection {
 }
 
 #[test]
+#[serial_test::serial]
 fn stdio_roundtrip_and_restart() {
     let connection = connection("roundtrip");
 
@@ -69,6 +70,7 @@ fn stdio_roundtrip_and_restart() {
 }
 
 #[test]
+#[serial_test::serial]
 fn resident_process_handshakes_once_across_calls() {
     let (endpoint, log, data_dir) = temp_paths("handshake-once");
     let config = SidecarConfig::new(
@@ -99,11 +101,12 @@ fn resident_process_handshakes_once_across_calls() {
 }
 
 #[test]
+#[serial_test::serial]
 fn unresponsive_handshake_fails_within_start_timeout() {
     // 协议沉默对端：进程存活但不应答握手，验证启动/握手有限时限
     //（导入验证与就绪握手共用该保护）。
-    // SAFETY: 测试进程内、并发子进程 spawn 之前设置；nextest 每测试
-    // 独立进程，不影响其他用例。
+    // SAFETY: 本测试与所有会 spawn echo 子进程的测试经 #[serial] 互斥，
+    // 设置与清除期间无并发 spawn，避免 MUTE 泄漏污染其他用例。
     unsafe { std::env::set_var("TIANGONG_TEST_STDIO_MUTE", "1") };
     let (endpoint, log, data_dir) = temp_paths("mute");
     let config = SidecarConfig::new(
@@ -131,9 +134,13 @@ fn unresponsive_handshake_fails_within_start_timeout() {
         "错误应指向就绪握手：{error:#}"
     );
     connection.stop().unwrap();
+    // SAFETY: 与 spawn 类测试经 #[serial] 互斥，此处清除不会与其他
+    // 测试的子进程环境竞争。
+    unsafe { std::env::remove_var("TIANGONG_TEST_STDIO_MUTE") };
 }
 
 #[test]
+#[serial_test::serial]
 fn stdio_handshake_reports_identity() {
     let connection = connection("handshake");
     // 握手经 runtime.handshake 完成（ensure_running 内部调用）；
@@ -149,6 +156,7 @@ fn stdio_handshake_reports_identity() {
 }
 
 #[test]
+#[serial_test::serial]
 fn resident_request_cancel_returns_immediately_and_keeps_sidecar_running() {
     let (endpoint, log, data_dir) = temp_paths("request-cancel");
     let config = SidecarConfig::new(
@@ -204,6 +212,7 @@ fn resident_request_cancel_returns_immediately_and_keeps_sidecar_running() {
 ///（含新版统一调用上下文的请求）一起取消；其他会话不受影响；常驻进程
 /// 继续服务后续调用。
 #[test]
+#[serial_test::serial]
 fn session_cancel_cascades_within_session_across_context_forms() {
     let (endpoint, log, data_dir) = temp_paths("session-cascade");
     let config = SidecarConfig::new(
@@ -298,11 +307,30 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     std::mem::forget(connection);
 }
 
+/// 当前环境无法应用原生沙箱时的跳过原因（None 表示可用）。
+///
+/// 外层 Seatbelt（天工终端/受限 CI）内 kill 子进程被拒且 Launcher 无法
+/// 再次嵌套应用沙箱：依赖信号终止进程的测试在此类环境必然失败或
+/// 卡死，统一跳过并打印原因。
+fn native_sandbox_skip_reason() -> Option<String> {
+    match tiangong_sandbox::sandbox::availability() {
+        tiangong_sandbox::sandbox::SandboxAvailability::Available => None,
+        tiangong_sandbox::sandbox::SandboxAvailability::EnvironmentRestricted(reason)
+        | tiangong_sandbox::sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
+#[serial_test::serial]
 fn macos_host_crash_kills_busy_sidecar_process_group() {
     use std::process::{Command, Stdio};
     use std::time::Instant;
+
+    if let Some(reason) = native_sandbox_skip_reason() {
+        eprintln!("跳过：当前环境无法应用原生沙箱（kill 会被拒）：{reason}");
+        return;
+    }
 
     let base =
         std::env::temp_dir().join(format!("tiangong-stdio-host-crash-{}", std::process::id()));

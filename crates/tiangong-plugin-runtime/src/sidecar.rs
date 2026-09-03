@@ -16,6 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -681,6 +682,12 @@ pub struct ProcessSidecarConnection {
     notification_token: Arc<Mutex<Option<String>>>,
     active_requests:
         Arc<Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
+    /// 当前 endpoint 上的进程是否由本连接启动。
+    ///
+    /// `ensure_running` 命中已有健康进程时本连接只是复用（安装验证的
+    /// 临时连接即此形态）：stop 不得终止复用来的进程或删除其 endpoint，
+    /// 清理责任归属启动它的连接。
+    owns_process: AtomicBool,
 }
 
 impl ProcessSidecarConnection {
@@ -691,6 +698,7 @@ impl ProcessSidecarConnection {
             exec_env: Mutex::new(std::collections::BTreeMap::new()),
             notification_token: Arc::new(Mutex::new(None)),
             active_requests: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            owns_process: AtomicBool::new(false),
         }
     }
 
@@ -873,6 +881,12 @@ impl ProcessSidecarConnection {
     /// Windows 上进程卡住、IPC 挂掉时常见这种状态，若不杀掉会持续占用二进制文件，
     /// 导致后续删除/升级失败。仅当身份明确不匹配（防 PID 复用误伤）时才放过。
     pub fn stop(&self) -> Result<()> {
+        // 复用运行中进程的连接（如安装验证的临时连接命中已启动的常驻
+        // sidecar）不拥有该进程：既不终止也不删除其 endpoint。
+        if !self.owns_process.load(Ordering::Acquire) {
+            self.invalidate_notification_listener();
+            return Ok(());
+        }
         let endpoint = match load_endpoint(&self.config.endpoint) {
             Ok(endpoint) => endpoint,
             Err(error)
@@ -907,6 +921,7 @@ impl ProcessSidecarConnection {
             wait_for_process_exit(endpoint.pid, Duration::from_secs(5))?;
         }
         let _ = std::fs::remove_file(&self.config.endpoint);
+        self.owns_process.store(false, Ordering::Release);
         self.invalidate_notification_listener();
         Ok(())
     }
@@ -991,6 +1006,7 @@ impl ProcessSidecarConnection {
         let mut child = command
             .spawn()
             .with_context(|| format!("启动 sidecar 失败: {}", self.config.binary.display()))?;
+        self.owns_process.store(true, Ordering::Release);
         let pid = child.id();
         tracing::info!(
             plugin_id = %self.config.plugin_id,
