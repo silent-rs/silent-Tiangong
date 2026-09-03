@@ -2,16 +2,17 @@
 
 > 来源参考：`/Users/hubertshelley/Documents/silent/tiangong-tabs-session/docs/tabs-session-binding.md`
 >
-> 当前分支：`feature/unified-tabs-session-binding`
+> 当前分支：`feature/ephemeral-extension-tabs`
 
-> 2026-07-12 后续收敛：工作区 Tab 元数据已从 Core Session 迁回 Browser/Terminal 插件自治存储；Desktop 只保存跨插件顺序和活跃项的 `{kind, id}` 引用。本文中将 Session 作为 Tab 持久化边界的旧描述仅用于记录最初设计。
+> 2026-09-03 最新决策：拓展区 Tab 不再写入会话记录，应用重启后不恢复。切换会话仍沿用隐藏语义，浏览器页面可在当前进程内按会话继续存活。本文后续旧持久化与跨重启恢复描述仅保留为历史设计记录。
 
 ## 完成标准
 
 本功能完成时必须同时满足：
 
 - 浏览器和终端共用一个工作区面板，同一条 Tab 栏内可以混排浏览器 Tab 与终端 Tab。
-- 每个对话会话拥有自己的工作区 Tab 列表，切换会话后恢复该会话的 Tab 集合和活跃 Tab。
+- 应用重启后打开任意会话时拓展区从空状态开始，浏览器也不得从磁盘恢复旧页面。
+- 切换会话时收起原会话浏览器；切回后允许继续使用当前进程内仍存活的页面。
 - 同一会话内可以打开多个终端 Tab，每个终端 Tab 拥有独立 PTY、cwd、输出历史和日志文件。
 - 浏览器 Tab 只在需要真实页面时创建 WebView，`about:blank` 空白 Tab 不提前创建 WebView。
 - `run_command` / `run_shell` 保持通过终端执行；执行前先检测当前会话终端状态，优先选择已打开且空闲的终端。
@@ -21,10 +22,9 @@
 
 ## 设计原则
 
-- **元数据和运行实例分离**：会话文件只保存 Tab 元数据，不保存 PTY、WebView、xterm 实例等运行对象。
-- **插件按会话自治**：Browser/Terminal 插件分别保存自己拥有的 Tab 元数据，不进入 Core Session；切换会话时不得复用旧会话的 Tab 状态。
-- **宿主只协调布局**：Desktop 仅保存跨插件排列顺序和当前活跃项的 `{kind, id}` 引用，不复制插件元数据；终端插件管理 PTY，浏览器插件管理 WebView。
-- **前端只协调，不成为事实源**：前端负责展示、触发命令和防抖持久化；真实运行对象以后端插件状态为准。
+- **拓展区状态仅驻留内存**：收起再展开及进程内会话切换可以继续使用内存状态；应用退出后不保存、不恢复。
+- **插件运行实例独立管理**：宿主不再根据会话记录重建顶部 Tab；终端插件管理 PTY，浏览器插件管理 WebView。
+- **前端只协调**：前端负责当前进程内的展示、切换和关闭，不承担跨会话持久化。
 - **Agent 命令落在可见终端**：Desktop 模式下普通命令执行优先落在当前会话的存活终端里，用户可以看到命令过程。
 
 ## 范围
@@ -47,13 +47,14 @@
 - 不重写浏览器全局历史能力。
 - 不重写终端底层 PTY 协议。
 
-## 当前持久化边界
+## 当前状态边界
 
-- Browser 插件以 `browser-sessions/<session_id>.json` 保存浏览器 Tab 元数据与插件内活跃项。
-- Terminal 插件以 `terminal-sessions/<session_id>.json` 保存终端 Tab 元数据与插件内活跃项；PTY、cwd、shell、存活状态和协作阶段仅存在于运行时。
-- Desktop 以 `workspace-tab-layouts/<session_id>.json` 只保存 `{kind, id}` 的混排顺序和 UI 活跃引用。
-- `get_session_tabs` 合并两个插件存储并按薄布局排序；`set_session_tabs` 只更新薄布局，不替插件写元数据。
-- 应用必须在 Core/App State 恢复前把旧 Session 中的 `tabs` / `active_tab_id` 一次性迁入上述三个边界；任一迁移失败时停止启动，保留旧数据供重试。
+- Browser 标签和 WebView 只在当前进程内按会话保存，不再读取或写入 `browser-sessions`。
+- 切换会话只隐藏原会话浏览器，不销毁当前进程中的页面。
+- Terminal 标签不进入会话记录，后台残留由 Terminal 自身 GC 处理。
+- Desktop 不再读取或写入 `workspace-tab-layouts`，也不提供会话标签读写接口。
+- 浏览器全局历史和缩放设置属于独立功能，继续按原规则保存。
+- 物理删除会话时仍清理旧版 `browser-sessions` 文件，避免遗留数据长期占用空间。
 
 ## 原始数据模型（已废弃，仅保留设计沿革）
 
@@ -172,7 +173,7 @@ SessionPty
 
 - `BrowserManager` 记录当前绑定的 `active_session_id`。
 - 切换会话时关闭旧会话 WebView，清理页面快照和待消费事件。
-- 按新会话的 Tab 元数据恢复浏览器 Tab 状态。
+- 浏览器页面仅可从当前进程内的对应会话状态继续使用，不从磁盘恢复。
 - `about:blank` 只恢复元数据，不提前创建 WebView。
 - 首次真实导航时再创建 WebView。
 
@@ -230,7 +231,7 @@ interface TabState {
 
 关键规则：
 
-- hydrate 期间不得触发空列表持久化覆盖已有会话。
+- 不读取会话标签记录，也不执行标签 hydrate。
 - 关闭最后一个 Tab 时关闭工作区面板。
 - 新建 Tab 后立即设为活跃。
 - 切换 Tab 时先同步后端活跃 Tab，再更新前端活跃状态。
@@ -306,7 +307,8 @@ interface TabState {
 - [ ] 新会话打开浏览器按钮后出现一个浏览器 Tab。
 - [ ] 浏览器 `about:blank` 不提前创建 WebView，输入 URL 后正常打开页面。
 - [ ] 同一个 Tab 栏内可以混排浏览器和终端。
-- [ ] 切换对话后恢复各自 Tab 列表和活跃 Tab。
+- [x] 切换对话时收起原会话浏览器，当前进程内页面仍可继续使用。
+- [ ] 重启应用后打开同一会话的浏览器，不出现旧页面。
 - [ ] `run_command` / `run_shell` 在已有空闲终端时复用该终端执行。
 - [ ] 当前会话没有可用终端时，`run_command` / `run_shell` 会先创建终端再执行。
 - [ ] 当前会话所有终端繁忙时，`run_command` / `run_shell` 会新建终端执行。

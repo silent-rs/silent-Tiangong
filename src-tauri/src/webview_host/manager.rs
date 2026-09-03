@@ -272,7 +272,7 @@ pub struct BrowserState {
     /// 每个标签页当前在历史栈中的位置
     pub tab_history_indices: HashMap<String, usize>,
     /// 该 state 所属的 session id（registry 创建时注入，不可变，作为可靠标识）。
-    /// 用于 create_webview 的 data_dir、webview label、持久化、global_history 路由。
+    /// 用于 create_webview 的 data_dir、webview label 和 global_history 路由。
     pub session_id: String,
     /// 当前浏览器运行时绑定的对话会话 ID（兼容旧字段，T5 后由 registry.active_session_id 取代）
     pub active_session_id: Option<String>,
@@ -390,56 +390,6 @@ impl BrowserManager {
         Self { state }
     }
 
-    /// 持久化当前 session 的 tab 状态（tab/url/title/active 变化时调用）。
-    ///
-    /// 从 state 读出 session_id + tabs + active_tab_id，写入 per-session store。
-    /// 用于应用重启后恢复各 session 上次的浏览器页面（review #6）。
-    /// 从 BrowserState 持久化（静态 helper，供闭包/轮询线程使用）。
-    /// `about:blank` 也属于浏览器插件的恢复元数据，只延迟创建 WebView，不得丢弃。
-    pub(crate) fn persist_from_state(state: &BrowserState) {
-        if state.session_id.is_empty() {
-            return;
-        }
-        let tabs = state.tabs.clone();
-        let active_tab_id = state
-            .active_tab_id
-            .as_ref()
-            .filter(|id| tabs.iter().any(|t| &t.id == *id))
-            .cloned();
-        if let Err(error) = crate::webview_host::session_store::BrowserSessionStore::save(
-            &state.session_id,
-            &crate::webview_host::session_store::BrowserSessionPersisted {
-                tabs,
-                active_tab_id,
-            },
-        ) {
-            warn!(%error, session_id = %state.session_id, "持久化浏览器会话状态失败");
-        }
-    }
-
-    pub(crate) fn persist_session_tabs(&self) {
-        if let Ok(s) = self.state.lock() {
-            if s.session_id.is_empty() {
-                return;
-            }
-            let tabs = s.tabs.clone();
-            let active_tab_id = s
-                .active_tab_id
-                .as_ref()
-                .filter(|id| tabs.iter().any(|t| &t.id == *id))
-                .cloned();
-            if let Err(error) = crate::webview_host::session_store::BrowserSessionStore::save(
-                &s.session_id,
-                &crate::webview_host::session_store::BrowserSessionPersisted {
-                    tabs,
-                    active_tab_id,
-                },
-            ) {
-                warn!(%error, session_id = %s.session_id, "持久化浏览器会话状态失败");
-            }
-        }
-    }
-
     /// 浏览器是否已初始化（有标签即为已打开，包括 about:blank 延迟创建 WebView 的情况）
     pub fn is_open(&self) -> bool {
         self.state
@@ -553,7 +503,6 @@ impl BrowserManager {
                     events: Vec::new(),
                 },
             );
-            Self::persist_from_state(&state);
             (state.session_id.clone(), navigation_id)
         };
 
@@ -646,7 +595,6 @@ impl BrowserManager {
                     events: Vec::new(),
                 },
             );
-            Self::persist_from_state(&state);
             (
                 state.session_id.clone(),
                 requested_url,
@@ -975,8 +923,6 @@ impl BrowserManager {
                     events: Vec::new(),
                 },
             );
-            Self::persist_from_state(&state);
-
             let shared = state.shared.clone();
             let should_persist_history = is_recordable_history_url(&final_url);
             if should_persist_history {
@@ -1462,8 +1408,6 @@ impl BrowserManager {
                             {
                                 tab.url = current_url.clone();
                             }
-                            // url_poll 检测到 URL 变化，走统一过滤持久化
-                            Self::persist_from_state(&s);
                         }
                         let _ = app.emit(
                             "browser:page_loaded",
@@ -2623,14 +2567,12 @@ impl BrowserManager {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab_id.clone(), webview);
         }
-        self.persist_session_tabs();
         Ok(tab_id)
     }
 
     /// 实例直达原语：把指定标签的 webview 显示到给定矩形并置为活跃
     /// （阶段 2 插件编排用——显示语义天然互斥，切换时隐藏原活跃实例）。
-    /// 恢复场景（应用重启后从持久化还原的标签）无 webview 实例，此处
-    /// 按需创建（与内置面板切换路径同机制）。
+    /// 标签已有元数据但尚未创建 webview 实例时，此处按需创建。
     pub fn show_tab_at(
         &self,
         app: &AppHandle<Wry>,
@@ -2647,7 +2589,7 @@ impl BrowserManager {
                 .ok_or_else(|| format!("标签 {tab_id} 不存在"))?;
             (tab, state.webviews.contains_key(tab_id))
         };
-        // 恢复的标签尚无实例（非空白页）：先创建再显示
+        // 标签尚无实例（非空白页）时先创建再显示。
         if !has_webview && !tab.url.starts_with("about:") {
             let webview = Self::create_webview_for_tab(
                 app,
@@ -2671,7 +2613,6 @@ impl BrowserManager {
             }
             self.start_url_poll(app, &tab.url);
             self.start_event_poll(app);
-            self.persist_session_tabs();
             return Ok(());
         }
         let is_active = {
@@ -2744,7 +2685,6 @@ impl BrowserManager {
 
         state.active_tab_id = Some(tab_id.to_string());
         drop(state);
-        self.persist_session_tabs();
         Ok(())
     }
 
@@ -2812,7 +2752,6 @@ impl BrowserManager {
                 state.active_tab_id = Some(new_id);
             }
         }
-        self.persist_session_tabs();
         Ok(())
     }
 

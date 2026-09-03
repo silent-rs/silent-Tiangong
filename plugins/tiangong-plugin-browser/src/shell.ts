@@ -55,7 +55,7 @@ function releaseInvocation(invocationId: string): void {
   window.setTimeout(() => claims?.delete(invocationId), 5_000);
 }
 
-/** 打开浏览器插件 App（app.open 宿主原语，聚焦/恢复本会话面板实例）。 */
+/** 打开浏览器插件 App（app.open 宿主原语，聚焦本进程内的会话实例）。 */
 async function requestOpenInstance(
   bridge: HostBridge,
   sessionId: string,

@@ -1,6 +1,6 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '@/api/tauri';
 
 const mocks = vi.hoisted(() => {
@@ -10,16 +10,10 @@ const mocks = vi.hoisted(() => {
     setSize: vi.fn(() => Promise.resolve()),
     onResized: vi.fn(() => Promise.resolve(() => {})),
   };
-  let sessionTabs: { tabs: Array<{ id: string; kind: string; title: string; url: string; created_at: string }>; active_tab_id: string | null } = {
-    tabs: [],
-    active_tab_id: null,
-  };
   const api = {
     getSessions: vi.fn(() => Promise.resolve([] as Session[])),
     getReasoningEffort: vi.fn(() => Promise.resolve('medium')),
     getWorkspaceDir: vi.fn(() => Promise.resolve('/workspace')),
-    getSessionTabs: vi.fn(() => Promise.resolve(sessionTabs)),
-    setSessionTabs: vi.fn(() => Promise.resolve()),
     browserHide: vi.fn(() => Promise.resolve()),
     browserSwitchSession: vi.fn(() => Promise.resolve({ session_id: null, tabs: [], active_tab_id: null })),
     listExtensionApps: vi.fn(() => Promise.resolve([
@@ -54,10 +48,6 @@ const mocks = vi.hoisted(() => {
     api,
     appWindow,
     listen,
-    getSessionTabsValue: () => sessionTabs,
-    setSessionTabsValue: (value: typeof sessionTabs) => {
-      sessionTabs = value;
-    },
   };
 });
 
@@ -143,7 +133,6 @@ afterEach(() => {
   container = null;
   root = null;
   vi.clearAllMocks();
-  mocks.setSessionTabsValue({ tabs: [], active_tab_id: null });
 });
 
 const click = async (selector: string) => {
@@ -156,10 +145,6 @@ const click = async (selector: string) => {
 };
 
 describe('拓展区三态状态机（T008）', () => {
-  beforeEach(() => {
-    mocks.setSessionTabsValue({ tabs: [], active_tab_id: null });
-  });
-
   it('无已打开 tab：点击拓展按钮进入矩阵态，可从矩阵打开官方 App', async () => {
     await renderMainApp();
 
@@ -189,26 +174,17 @@ describe('拓展区三态状态机（T008）', () => {
     expect(tabs!.getAttribute('data-kind')).toBe('plugin');
   });
 
-  it('App 态点启动台回矩阵态（tab 栏保留），再点拓展按钮收起面板', async () => {
-    mocks.setSessionTabsValue({
-      tabs: [{ id: 't1', kind: 'terminal', title: '终端', url: '', created_at: '2026-08-17T00:00:00Z' }],
-      active_tab_id: 't1',
-    });
+  it('历史会话不恢复拓展区 tab，打开后直接进入矩阵态并可收起', async () => {
     useStore.setState({ activeSessionId: 'session-1' });
     await renderMainApp();
 
-    // 有已打开 tab：点击进入上次 App 态
+    // 即使是历史会话，拓展区也不读取旧 tab，直接进入矩阵态。
     await click('[data-testid="extension-toggle"]');
     const tabsHost = container!.querySelector('[data-testid="tabs-container"]')!;
-    expect(tabsHost.getAttribute('data-mode')).toBe('app');
+    expect(tabsHost.getAttribute('data-mode')).toBe('matrix');
+    expect(tabsHost.textContent).toContain('浏览器');
 
-    // 启动台 → 矩阵态：容器保留、模式切换、矩阵内容出现（官方 App 卡片）
-    await click('[data-testid="show-matrix"]');
-    const matrixHost = container!.querySelector('[data-testid="tabs-container"]')!;
-    expect(matrixHost.getAttribute('data-mode')).toBe('matrix');
-    expect(matrixHost.textContent).toContain('浏览器');
-
-    // 矩阵态再点拓展按钮 → 收起（关闭态）
+    // 矩阵态再点拓展按钮 → 收起（关闭态）。
     await click('[data-testid="extension-toggle"]');
     await act(async () => {
       await flushMicrotasks();
