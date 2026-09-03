@@ -281,7 +281,12 @@ struct LoadedPlugin {
     sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
     verified_sidecar: Option<Vec<String>>,
-    last_error: Option<String>,
+    /// 数据/制品/逻辑层加载错误（解释器不可发现、WASM 无法编译等）：
+    /// 插件不满足安装条件，安装路径据此回滚。
+    load_error: Option<String>,
+    /// 启动/握手/运行检查错误（常驻 sidecar 起不来、验证失败、记录保存
+    /// 失败等）：插件保留安装，插件管理显示启动异常，重试验证成功后清除。
+    runtime_error: Option<String>,
     enabled: bool,
 }
 
@@ -336,13 +341,13 @@ pub(crate) fn loaded_verified_sidecar(plugin_id: &str) -> Option<Vec<String>> {
         .flatten()
 }
 
-/// 测试辅助：读取已加载插件的异常信息（运行检查失败时登记）。
+/// 测试辅助：读取已加载插件的运行异常信息（启动/运行检查失败时登记）。
 #[cfg(test)]
-pub(crate) fn loaded_last_error(plugin_id: &str) -> Option<String> {
+pub(crate) fn loaded_runtime_error(plugin_id: &str) -> Option<String> {
     loaded_plugins().lock().ok().and_then(|plugins| {
         plugins
             .get(plugin_id)
-            .and_then(|loaded| loaded.last_error.clone())
+            .and_then(|loaded| loaded.runtime_error.clone())
     })
 }
 
@@ -588,7 +593,10 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 manifest,
                 loaded.enabled,
                 loaded.ui_plugin.is_some(),
-                loaded.last_error.as_deref(),
+                loaded
+                    .load_error
+                    .as_deref()
+                    .or(loaded.runtime_error.as_deref()),
             );
             PluginStatus {
                 unavailable_reason: if loaded.enabled {
@@ -613,7 +621,10 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                 can_rollback: rollback_directory(&loaded.directory, &manifest.id).is_dir(),
                 has_sidecar: manifest.sidecar.is_some(),
                 sidecar_running,
-                last_error: loaded.last_error.clone(),
+                last_error: loaded
+                    .load_error
+                    .clone()
+                    .or_else(|| loaded.runtime_error.clone()),
             }
         })
         .collect::<Vec<_>>();
@@ -699,11 +710,17 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
     // 仅预热原生常驻 sidecar。解释器即使脚本声明常驻，也等首次实际
     // 使用时才启动；command 继续由每次调用的独立连接承载。
+    // 启动失败是运行异常：不阻断重载/升级（安装前提类失败已在上方
+    // read_wasm_bytes/resolve_sidecar 以 Err 返回），登记后由插件管理
+    // 显示启动异常。
+    let mut preload_error = None;
     if installed.enabled
         && installed.manifest.should_preload_sidecar()
         && let Some(connection) = &sidecar
+        && let Err(error) = connection.ensure_running()
     {
-        connection.ensure_running()?;
+        tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
+        preload_error = Some(error.to_string());
     }
     let (instances, next_generation) = {
         let plugins = loaded_plugins()
@@ -768,7 +785,8 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.generation = next_generation;
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
-    loaded.last_error = None;
+    loaded.load_error = None;
+    loaded.runtime_error = preload_error;
     loaded.enabled = installed.enabled;
     tracing::info!(
         plugin_id = %installed.manifest.id,
@@ -1438,8 +1456,10 @@ pub fn load_wasm_plugin_at(
 }
 
 fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> LoadedPlugin {
+    // 连接构造失败（解释器不可发现、签名/信任/权限不合法）属于安装
+    // 前提类错误：写入 load_error，安装路径据此回滚。
     let sidecar_result = resolve_sidecar(storage_root, &installed, false);
-    let (sidecar, mut last_error) = match sidecar_result {
+    let (sidecar, load_error) = match sidecar_result {
         Ok(connection) => (connection, None),
         Err(error) => (None, Some(error.to_string())),
     };
@@ -1447,13 +1467,16 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
     // 缺失或失效不在加载路径启动 sidecar 补验证——后台补验证负责恢复。
     let verified_sidecar =
         crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
+    // 常驻 sidecar 启动失败是运行异常：保留安装，插件管理显示启动异常
+    //（重试验证/修复环境后恢复），不作为安装回滚条件。
+    let mut runtime_error = None;
     if installed.enabled
         && installed.manifest.should_preload_sidecar()
         && let Some(connection) = &sidecar
         && let Err(error) = connection.ensure_running()
     {
         tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
-        last_error = Some(error.to_string());
+        runtime_error = Some(error.to_string());
     }
     // 纯 UI 插件（wasm 省略）：无逻辑层，直接构造已加载记录
     let load_result = if installed.manifest.wasm_binary().is_some() {
@@ -1488,7 +1511,8 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
-                last_error,
+                load_error,
+                runtime_error,
                 enabled: installed.enabled,
             }
         }
@@ -1506,7 +1530,8 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 ts_instances: Vec::new(),
                 sidecar,
                 verified_sidecar,
-                last_error: Some(error.to_string()),
+                load_error: load_error.or_else(|| Some(error.to_string())),
+                runtime_error,
                 enabled: installed.enabled,
             }
         }
@@ -1658,11 +1683,13 @@ fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
+/// 登记插件运行异常（启动/握手/运行检查/停用失败等）：插件保持安装，
+/// 插件管理显示启动异常；运行检查重新成功后由 clear_runtime_error 清除。
 pub(crate) fn set_last_error(plugin_id: &str, error: String) {
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(plugin) = plugins.get_mut(plugin_id)
     {
-        plugin.last_error = Some(error);
+        plugin.runtime_error = Some(error);
     }
 }
 
@@ -1670,14 +1697,14 @@ fn plugin_state(
     manifest: &PluginManifest,
     enabled: bool,
     has_wasm_ui: bool,
-    last_error: Option<&str>,
+    error: Option<&str>,
 ) -> &'static str {
     // 未运行的 sidecar 可能仍在等待首次调用，只有已记录的错误才影响插件状态。
     if !enabled {
         "disabled"
     } else if !has_wasm_ui && manifest.wasm_binary().is_some() {
         "error"
-    } else if last_error.is_some() {
+    } else if error.is_some() {
         "degraded"
     } else {
         "loaded"
@@ -1685,14 +1712,15 @@ fn plugin_state(
 }
 
 fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<PluginStatus> {
-    let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = {
+    let (descriptor, generation, sidecar, load_error, runtime_error, has_ui, enabled, directory) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(&manifest.id)?;
         (
             loaded.descriptor.clone(),
             loaded.generation,
             loaded.sidecar.clone(),
-            loaded.last_error.clone(),
+            loaded.load_error.clone(),
+            loaded.runtime_error.clone(),
             loaded.ui_plugin.is_some(),
             loaded.enabled,
             loaded.directory.clone(),
@@ -1701,6 +1729,7 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     let sidecar_running = sidecar
         .as_ref()
         .is_some_and(|connection| connection.has_runtime_endpoint());
+    let last_error = load_error.or(runtime_error);
     let state = plugin_state(manifest, enabled, has_ui, last_error.as_deref());
     let configured = configured_model_capabilities();
     Some(PluginStatus {
@@ -1946,7 +1975,8 @@ pub fn set_plugin_enabled(
             .filter_map(Weak::upgrade)
             .collect::<Vec<_>>();
         loaded.enabled = enabled;
-        loaded.last_error = None;
+        loaded.load_error = None;
+        loaded.runtime_error = None;
         drop(plugins);
         for adapter in ts_instances {
             adapter.set_enabled(enabled);
@@ -1974,7 +2004,8 @@ pub fn set_plugin_enabled(
                 .get_mut(plugin_id)
                 .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
             loaded.enabled = false;
-            loaded.last_error = None;
+            loaded.load_error = None;
+            loaded.runtime_error = None;
             let instances = loaded
                 .instances
                 .iter()
@@ -2006,7 +2037,7 @@ pub fn set_plugin_enabled(
                 && let Some(loaded) = plugins.get_mut(plugin_id)
             {
                 loaded.enabled = true;
-                loaded.last_error = Some(error.to_string());
+                loaded.runtime_error = Some(error.to_string());
             }
             remove_file_if_exists(&marker)?;
             return Err(error).with_context(|| format!("停用插件 {plugin_id} 失败"));
@@ -2030,6 +2061,9 @@ pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String
             return;
         };
         loaded.verified_sidecar = Some(capabilities.clone());
+        // 运行检查重新成功：sidecar 已可真实握手，清除此前登记的启动
+        // 异常（load_error 属安装前提类，不受影响）。
+        loaded.runtime_error = None;
         (
             loaded.manifest.clone(),
             loaded.enabled,
@@ -2306,11 +2340,14 @@ fn install_new_plugin(
         signed_release: verify_signed_release(&destination, &manifest)?,
     };
     let loaded = load_plugin_record(storage_root, installed);
+    // 回滚只针对安装前提类失败：逻辑制品无法加载、解释器不可发现、
+    // 签名/信任构造失败（load_error）。常驻 sidecar 启动失败属于运行
+    // 异常（runtime_error）——保留安装，插件管理显示启动异常。
     if (loaded.ui_plugin.is_none() && manifest.wasm_binary().is_some())
-        || loaded.last_error.is_some()
+        || loaded.load_error.is_some()
     {
         let error = loaded
-            .last_error
+            .load_error
             .unwrap_or_else(|| "WASM 插件加载失败".to_string());
         let _ = stop_connection_for_directory(&destination);
         std::fs::rename(&destination, staged_path)?;

@@ -955,11 +955,11 @@ await runSidecar({
             crate::registry::loaded_verified_sidecar(id).is_none(),
             "记录保存失败时不得有内存能力快照"
         );
-        let last_error =
-            crate::registry::loaded_last_error(id).expect("运行检查失败应登记插件异常状态");
+        let runtime_error =
+            crate::registry::loaded_runtime_error(id).expect("运行检查失败应登记插件异常状态");
         assert!(
-            last_error.contains("验证记录"),
-            "异常状态应指向记录保存失败: {last_error}"
+            runtime_error.contains("验证记录"),
+            "异常状态应指向记录保存失败: {runtime_error}"
         );
 
         // 恢复可写后重新验证：记录恢复，能力快照立即生效。
@@ -971,6 +971,10 @@ await runSidecar({
             crate::registry::loaded_verified_sidecar(id),
             Some(Vec::new()),
             "重新验证后内存能力快照应立即可见"
+        );
+        assert!(
+            crate::registry::loaded_runtime_error(id).is_none(),
+            "运行检查重新成功后应清除启动异常状态"
         );
     }
 
