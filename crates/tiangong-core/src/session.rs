@@ -1046,7 +1046,7 @@ impl Session {
 
     /// 重建 system prompt 消息
     ///
-    /// 从 session 数据（title, cwd, context_summary）和外部配置构建完整的 system prompt，
+    /// 从 session 数据（cwd, context_summary）和外部配置构建完整的 system prompt，
     /// 存为 `Message { role: System }`，供 `context()` 返回。
     ///
     /// 应在以下时机调用：

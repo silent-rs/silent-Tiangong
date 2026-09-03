@@ -3,7 +3,7 @@
 //! 验证插件注册后 system prompt 的组装顺序：
 //! - 多个插件的 PromptSectionProvider 按注册顺序追加
 //! - 产品文案插件注册在最前时，身份 / 规则段排在 prompt 开头
-//! - 插件段后接环境段（会话标题 / 工作目录 / 文件根）与摘要段
+//! - 插件段后接环境段（工作目录 / 文件根）与摘要段
 //! - 空白段落被过滤；无插件时仍能构建合法 prompt
 
 use std::sync::Arc;
@@ -114,7 +114,7 @@ fn product_copy_precedes_capability_sections() {
 
     // 产品身份段应出现在 prompt 最前面的区域（在环境段之前）
     let id_idx = text.find("【产品身份】").expect("应包含产品身份段");
-    let env_idx = text.find("当前会话").expect("应包含环境段");
+    let env_idx = text.find("当前工作目录").expect("应包含环境段");
     assert!(
         id_idx < env_idx,
         "产品身份段应排在环境段之前（保证在 prompt 开头）"
@@ -134,7 +134,7 @@ fn environment_and_summary_sections_appended_after_plugins() {
 
     // 顺序：插件段 → 环境段 → 摘要段
     let plugin_idx = text.find("【产品身份】").unwrap();
-    let env_idx = text.find("当前会话：环境摘要测试").unwrap();
+    let env_idx = text.find("当前工作目录").unwrap();
     let summary_idx = text.find("此前对话摘要").unwrap();
 
     assert!(plugin_idx < env_idx, "插件段应在环境段前");
@@ -168,9 +168,13 @@ fn empty_plugins_still_produces_valid_prompt() {
     let session = Session::new("空插件测试");
     let text = build_prompt_text(&engine, &session);
 
-    // 无插件段时，prompt 仍应包含环境段，是合法的非空 system prompt
-    assert!(text.contains("当前会话：空插件测试"));
+    // 无插件段时，prompt 仍应包含环境段，是合法的非空 system prompt；
+    // 标题不进入 system prompt（保持 KV cache 前缀稳定）。
     assert!(text.contains("当前工作目录"));
+    assert!(
+        !text.contains("空插件测试"),
+        "会话标题不应进入 system prompt"
+    );
     assert!(!text.trim().is_empty(), "空插件时 prompt 不应为空");
 }
 
@@ -195,7 +199,7 @@ fn plugin_sections_appear_between_identity_and_environment() {
         "【通用规则】",
         "【能力】技能摘要",
         "有效段",
-        "当前会话",
+        "当前工作目录",
         "此前对话摘要",
     ]
     .iter()

@@ -27,7 +27,7 @@ impl SystemPromptConfig {
 /// 构建完整的 system prompt 消息
 ///
 /// 组装顺序：插件段（含产品身份 / 通用规则 / 自定义指令 / 各能力说明）
-/// → 环境段（会话标题 / 工作目录 / 文件根）→ 摘要段。
+/// → 环境段（工作目录 / 文件根）→ 摘要段。
 /// 返回 `Message { role: System }`，由 `build_provider_messages()` 提取到 system prompt。
 pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
     let mut parts = Vec::new();
@@ -49,11 +49,14 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
     assemble_system_message(parts)
 }
 
-/// 收集环境段（会话标题、工作目录、文件根）
+/// 收集环境段（工作目录、文件根）
+///
+/// 会话标题不进入 system prompt：标题随 lite 自动起名 / 用户改名变化，
+/// 拼进 prompt 会在每次变化后破坏 KV cache 前缀（system prompt 是请求最前缀，
+/// 一变则其后全部对话历史缓存作废）。
 fn collect_environment_parts(session: &Session) -> Vec<String> {
     let mut parts = Vec::new();
     let workspace = session_working_directory(session);
-    parts.push(format!("当前会话：{}", session.title));
     parts.push(format!("当前工作目录：{}", workspace));
     // 允许文件操作目录：工作空间 + 应用存储根（由 toolkit 硬编码为始终允许）。
     parts.push(format!(
@@ -129,8 +132,9 @@ mod tests {
         let msg = build_full_system_prompt(&session, &config);
         assert_eq!(msg.role, MessageRole::System);
         let text = msg.content.first().unwrap().as_text().unwrap_or_default();
-        assert!(text.contains("当前会话：测试会话"));
         assert!(text.contains("当前工作目录"));
+        // 标题不进入 system prompt（保持 KV cache 前缀稳定）
+        assert!(!text.contains("测试会话"));
     }
 
     #[test]
