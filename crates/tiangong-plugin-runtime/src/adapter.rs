@@ -429,42 +429,58 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             name: call.name.clone(),
             arguments,
         };
-        let invocation_context = crate::protocol::RequestInvocationContext {
-            session_id: session.id.clone(),
-            invocation_id: call.id.clone(),
-            workspace: session.cwd.trim().to_string(),
-            actor_id: actor_id.to_string(),
-            deadline_ms: None,
-        };
+        let feedback = self
+            .feedback_tx
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let invocation = crate::invocation::RuntimeInvocation::new(
+            &self.id,
+            call.clone(),
+            &session.id,
+            session.cwd.trim(),
+            actor_id,
+            feedback,
+        );
+        if let Some(sidecar) = &self.sidecar {
+            let sidecar = sidecar.clone();
+            let session_id = session.id.clone();
+            invocation.on_cancel(move || {
+                let _ = sidecar.cancel_session(&session_id);
+            });
+        }
         let Some(inner) = self.current_inner() else {
             return Box::pin(async { None });
         };
         let config = self.config.clone();
-        Box::pin(async move {
-            let result = task::spawn_blocking(move || {
-                call_wasm_off_runtime(inner, move |plugin| {
-                    plugin.handle_tool_with_full_context(wit_call, &config, invocation_context)
+        Box::pin(crate::invocation::dispatch(
+            invocation.clone(),
+            async move {
+                let result = task::spawn_blocking(move || {
+                    call_wasm_off_runtime(inner, move |plugin| {
+                        plugin.handle_tool_with_runtime_invocation(wit_call, &config, invocation)
+                    })
                 })
-            })
-            .await
-            .ok()?
-            .ok()?;
-            Some(ToolResult {
-                ok: result.ok,
-                summary: result.summary,
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                execution: result.execution.map(|execution| ToolExecutionRecord {
-                    tool_name: execution.tool_name,
-                    args: execution.args,
-                    duration_ms: execution.duration_ms,
-                    ok: execution.ok,
-                    exit_code: execution.exit_code,
-                    summary: execution.summary,
-                }),
-            })
-        })
+                .await
+                .ok()?
+                .ok()?;
+                Some(ToolResult {
+                    ok: result.ok,
+                    summary: result.summary,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    exit_code: result.exit_code,
+                    execution: result.execution.map(|execution| ToolExecutionRecord {
+                        tool_name: execution.tool_name,
+                        args: execution.args,
+                        duration_ms: execution.duration_ms,
+                        ok: execution.ok,
+                        exit_code: execution.exit_code,
+                        summary: execution.summary,
+                    }),
+                })
+            },
+        ))
     }
 }
 

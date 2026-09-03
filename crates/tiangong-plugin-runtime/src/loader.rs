@@ -245,6 +245,21 @@ impl WasmPlugin {
         self.handle_tool_inner_full(call, limits, Some(invocation_context))
     }
 
+    pub(crate) fn handle_tool_with_runtime_invocation(
+        &mut self,
+        call: ToolCall,
+        limits: &PluginRuntimeConfig,
+        invocation: crate::invocation::RuntimeInvocation,
+    ) -> Result<Outcome> {
+        let context = invocation.context().clone();
+        self.store
+            .data_mut()
+            .set_runtime_invocation(Some(invocation));
+        let result = self.handle_tool_inner_full(call, limits, Some(context));
+        self.store.data_mut().set_runtime_invocation(None);
+        result
+    }
+
     fn handle_tool_inner(
         &mut self,
         call: ToolCall,

@@ -140,13 +140,25 @@ impl Drop for PendingGuard {
 
 pub async fn execute(
     plugin_id: String,
-    session_id: String,
     call: ToolCall,
     _timeout_ms: u64,
-    workspace: String,
-    actor_id: String,
+    runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
 ) -> ToolResult {
-    let invocation_id = scru128::new().to_string();
+    let context = runtime_invocation
+        .as_ref()
+        .map(|invocation| invocation.context());
+    let invocation_id = context
+        .map(|context| context.invocation_id.clone())
+        .unwrap_or_else(|| scru128::new().to_string());
+    let session_id = context
+        .map(|context| context.session_id.clone())
+        .unwrap_or_default();
+    let workspace = context
+        .map(|context| context.workspace.clone())
+        .unwrap_or_default();
+    let actor_id = context
+        .map(|context| context.actor_id.clone())
+        .unwrap_or_default();
     let created_at = Local::now().naive_local();
     let invocation = TsToolInvocation {
         invocation_id: invocation_id.clone(),
@@ -170,6 +182,10 @@ pub async fn execute(
     let _guard = PendingGuard {
         invocation_id: invocation_id.clone(),
     };
+    if let Some(runtime_invocation) = &runtime_invocation {
+        let invocation_id = invocation_id.clone();
+        runtime_invocation.on_cancel(move || cancel_invocation(&invocation_id));
+    }
     emit_requested(&plugin_id, &invocation);
 
     // 无人接应时请求宿主后台挂载插件实例（通用能力，不区分官方与三方
@@ -270,6 +286,16 @@ pub fn replay_pending(plugin_id: &str, channel: &str) {
     });
     for invocation in invocations {
         emit_requested(plugin_id, &invocation);
+    }
+}
+
+fn cancel_invocation(invocation_id: &str) {
+    let removed = pending_calls()
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.remove(invocation_id));
+    if let Some(call) = removed {
+        emit_closed(&call.plugin_id, invocation_id, TsToolCloseStatus::Cancelled);
     }
 }
 

@@ -142,37 +142,48 @@ impl ToolOverrideHandler for TsPluginAdapter {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        Box::pin(async move {
-            // 兼容规则：无 UI sidecar 维持既有直连；有 UI 的插件先查询后端
-            // 是否明确注册目标工具。未注册才启动旧 UI Handler，避免后端
-            // 自管理插件为了“找接应者”先被错误拉起页面。
-            let backend_declared = legacy_sidecar_direct
-                || sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path())).await;
-            if backend_declared {
-                Some(
-                    invoke_sidecar_tool(
-                        &plugin_id,
-                        call,
-                        tool_timeout_ms,
-                        Some((session_id, workspace, actor_id)),
-                        feedback,
-                    )
-                    .await,
+        let invocation = crate::invocation::RuntimeInvocation::new(
+            &plugin_id,
+            call.clone(),
+            &session_id,
+            workspace.to_string_lossy().into_owned(),
+            &actor_id,
+            feedback.clone(),
+        );
+        Box::pin(crate::invocation::dispatch(
+            invocation.clone(),
+            async move {
+                // 兼容规则：无 UI sidecar 维持既有直连；有 UI 的插件先查询后端
+                // 是否明确注册目标工具。未注册才启动旧 UI Handler，避免后端
+                // 自管理插件为了“找接应者”先被错误拉起页面。
+                let handler = crate::invocation::select_ts_handler(
+                    legacy_sidecar_direct,
+                    sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path())),
                 )
-            } else {
-                Some(
-                    crate::ts_tools::execute(
-                        plugin_id,
-                        session_id,
-                        call,
-                        tool_timeout_ms,
-                        workspace.to_string_lossy().into_owned(),
-                        actor_id,
+                .await;
+                if handler == crate::invocation::HandlerKind::Sidecar {
+                    Some(
+                        invoke_sidecar_tool(
+                            &plugin_id,
+                            call,
+                            tool_timeout_ms,
+                            Some(invocation.clone()),
+                        )
+                        .await,
                     )
-                    .await,
-                )
-            }
-        })
+                } else {
+                    Some(
+                        crate::ts_tools::execute(
+                            plugin_id,
+                            call,
+                            tool_timeout_ms,
+                            Some(invocation.clone()),
+                        )
+                        .await,
+                    )
+                }
+            },
+        ))
     }
 }
 
@@ -221,8 +232,7 @@ async fn invoke_sidecar_tool(
     plugin_id: &str,
     call: ToolCall,
     _timeout_ms: u64,
-    session_context: Option<(String, std::path::PathBuf, String)>,
-    feedback: Option<tiangong_core::core::plugin::PluginFeedbackTx>,
+    runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
 ) -> ToolResult {
     let Some(directory) = crate::registry::plugin_install_directory(plugin_id) else {
         return sidecar_tool_failure(plugin_id, "插件未加载");
@@ -243,19 +253,18 @@ async fn invoke_sidecar_tool(
     // 复用），守卫取消当前共享进程（换代重启，常驻语义的单进程权衡）。
     let on_demand =
         installed.manifest.sidecar_lifecycle() == crate::manifest::SidecarLifecycle::OnDemand;
-    let session_id = session_context
+    let context = runtime_invocation
         .as_ref()
-        .map(|(session_id, _, _)| session_id.clone());
-    let authoritative_workspace = session_context
+        .map(|invocation| invocation.context().clone());
+    let session_id = context.as_ref().map(|context| context.session_id.clone());
+    let authoritative_workspace = context
         .as_ref()
-        .map(|(_, workspace, _)| workspace.clone())
+        .map(|context| std::path::PathBuf::from(&context.workspace))
         .unwrap_or_default();
     let session_workspace = if installed.manifest.should_preload_sidecar() {
         None
     } else {
-        session_context
-            .as_ref()
-            .map(|(_, workspace, _)| workspace.as_path())
+        Some(authoritative_workspace.as_path())
     };
     let connection = if on_demand {
         crate::registry::ephemeral_sidecar_connection_with_workspace(
@@ -277,45 +286,35 @@ async fn invoke_sidecar_tool(
         Ok(connection) => connection,
         Err(error) => return sidecar_tool_failure(plugin_id, format!("{error:#}")),
     };
+    if let Some(invocation) = &runtime_invocation {
+        let connection = connection.clone();
+        let session_id = invocation.context().session_id.clone();
+        invocation.on_cancel(move || {
+            let _ = connection.cancel_session(&session_id);
+        });
+    }
     // 进程守卫：调用完成（disarm）前，超时返回、panic 或会话取消（drop）
     // 都终止本次调用的进程——后台 spawn_blocking 里的调用随进程断开而失败，
     // 不再运行到 sidecar 总超时。
     let mut guard = SidecarProcessGuard {
-        connection: Some(connection.clone()),
+        // 新统一路径的取消由 RuntimeInvocation 唯一触发；旧测试/兼容入口
+        // 仍使用进程守卫，避免没有统一对象时遗留 sidecar。
+        connection: runtime_invocation.is_none().then(|| connection.clone()),
         stop_on_drop: on_demand,
         session_id: session_id.clone(),
     };
     let operation = call.name.clone();
     let arguments = call.arguments.clone();
-    let actor_id = session_context
-        .as_ref()
-        .map(|(_, _, actor_id)| actor_id.clone())
-        .unwrap_or_default();
-    let invocation_context =
-        session_id.map(|session_id| crate::protocol::RequestInvocationContext {
-            session_id,
-            invocation_id: call.id.clone(),
-            workspace: authoritative_workspace.to_string_lossy().into_owned(),
-            actor_id,
-            deadline_ms: None,
-        });
+    let invocation_context = context;
     let blocking = connection.clone();
     let plugin_id_for_feedback = plugin_id.to_string();
     let invoked = tokio::task::spawn_blocking(move || {
         let payload = serde_json::to_string(&arguments).unwrap_or_default();
         let mut on_progress = |message: String| {
-            if crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message) {
-                return;
-            }
-            let Some(feedback) = &feedback else {
-                return;
-            };
-            match serde_json::from_str::<tiangong_types::StreamEvent>(&message) {
-                Ok(event) => feedback.send_stream_event(event),
-                Err(_) => feedback.send_stream_event(tiangong_types::StreamEvent::ReactText {
-                    message_id: call.id.clone(),
-                    content: message,
-                }),
+            if let Some(invocation) = &runtime_invocation {
+                invocation.progress(message);
+            } else {
+                crate::bridge::handle_runtime_feedback(&plugin_id_for_feedback, &message);
             }
         };
         match invocation_context {
@@ -408,7 +407,7 @@ pub(crate) async fn invoke_sidecar_tool_for_test(
     call: ToolCall,
     timeout_ms: u64,
 ) -> ToolResult {
-    invoke_sidecar_tool(plugin_id, call, timeout_ms, None, None).await
+    invoke_sidecar_tool(plugin_id, call, timeout_ms, None).await
 }
 
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {

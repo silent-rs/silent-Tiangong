@@ -33,6 +33,8 @@ pub struct HostState {
     feedback: Option<PluginFeedbackTx>,
     /// 当前同步工具调用的宿主权威上下文；调用返回后立即清空。
     invocation_context: Option<crate::protocol::RequestInvocationContext>,
+    /// Runtime 统一调用生命周期；仅 Runtime Adapter 的新路径注入。
+    runtime_invocation: Option<crate::invocation::RuntimeInvocation>,
     /// 插件 ID（用于权限隔离和 Runtime 控制反馈归属）。
     plugin_id: String,
 }
@@ -52,6 +54,7 @@ impl HostState {
             sidecar,
             feedback: None,
             invocation_context: None,
+            runtime_invocation: None,
             plugin_id,
         }
     }
@@ -84,6 +87,13 @@ impl HostState {
         context: Option<crate::protocol::RequestInvocationContext>,
     ) {
         self.invocation_context = context;
+    }
+
+    pub(crate) fn set_runtime_invocation(
+        &mut self,
+        invocation: Option<crate::invocation::RuntimeInvocation>,
+    ) {
+        self.runtime_invocation = invocation;
     }
 }
 
@@ -131,10 +141,15 @@ impl SidecarHost for HostState {
         // 在独立 OS 线程上执行，避免 tokio worker 线程嵌套。
         let feedback = self.feedback.clone();
         let invocation_context = self.invocation_context.clone();
+        let runtime_invocation = self.runtime_invocation.clone();
         let plugin_id = self.plugin_id.clone();
         std::thread::scope(|s| {
             s.spawn(move || {
                 let mut on_progress = |event_json: String| {
+                    if let Some(invocation) = &runtime_invocation {
+                        invocation.progress(event_json);
+                        return;
+                    }
                     if crate::bridge::handle_runtime_feedback(&plugin_id, &event_json) {
                         return;
                     }
