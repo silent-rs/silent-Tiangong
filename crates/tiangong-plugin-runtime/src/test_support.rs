@@ -111,3 +111,34 @@ pub fn native_sandbox_skip_reason() -> Option<String> {
         | tiangong_sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
     }
 }
+
+/// 当前测试环境能否终止自己创建的子进程。
+///
+/// 与 `native_sandbox_skip_reason` 是两个不同能力：外层受限沙箱可能
+/// 允许启动子进程但拒绝 process-signal。依赖严格进程回收断言的测试
+/// 应根据本结果决定收尾是否执行严格断言——探测失败时打印原因并
+/// 返回 false（探测子进程只睡 0.1s，无法终止也不会长期残留）。
+#[cfg(unix)]
+pub fn can_terminate_child_processes() -> bool {
+    let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("0.1").spawn() else {
+        return false;
+    };
+
+    match child.kill() {
+        Ok(()) => {
+            let _ = child.wait();
+            true
+        }
+        Err(error) => {
+            eprintln!("当前测试环境不能终止子进程，跳过严格清理断言：{error}");
+            false
+        }
+    }
+}
+
+/// Windows 无 Seatbelt 式信号过滤，子进程终止能力始终可用；进程组
+/// 清理回归由既有 Job Object 测试覆盖。
+#[cfg(not(unix))]
+pub fn can_terminate_child_processes() -> bool {
+    true
+}
