@@ -12,21 +12,6 @@ use tiangong_plugin_runtime::sidecar::{
 };
 
 /// 在 PATH 中查找 node；找不到返回 None（测试跳过）。
-/// 测试连接收尾：能终止子进程的环境必须严格断言真实清理成功；受限
-/// 环境（外层沙箱拒进程信号）允许收尾失败但打印明确原因——业务断言
-/// 已全部通过，不因收尾误报。
-fn finish_connection(connection: &StdioSidecarConnection, can_terminate: bool) {
-    match connection.stop() {
-        Ok(()) => {}
-        Err(error) if !can_terminate => {
-            eprintln!("跳过严格进程清理断言：当前环境不允许终止子进程：{error:#}");
-        }
-        Err(error) => {
-            panic!("停止 Node sidecar 失败：{error:#}");
-        }
-    }
-}
-
 fn find_node() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TIANGONG_NODE_PATH") {
         let path = PathBuf::from(path);
@@ -146,7 +131,7 @@ fn node_interpreter_roundtrip_and_restart() {
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(response["text"], "again");
 
-    finish_connection(&connection, can_terminate);
+    tiangong_plugin_runtime::test_support::finish_stdio_connection(&connection, can_terminate);
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -173,7 +158,7 @@ fn node_interpreter_lifecycle_on_demand_vs_resident() {
         let second: serde_json::Value =
             serde_json::from_str(&connection.invoke("demo.echo", r#"{"text":"b"}"#).unwrap())
                 .unwrap();
-        finish_connection(&connection, can_terminate);
+        tiangong_plugin_runtime::test_support::finish_stdio_connection(&connection, can_terminate);
         let _ = std::fs::remove_dir_all(&base);
         (
             first["pid"].as_i64().unwrap(),

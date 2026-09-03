@@ -51,6 +51,7 @@ fn connection(tag: &str) -> StdioSidecarConnection {
 #[test]
 #[serial_test::serial]
 fn stdio_roundtrip_and_restart() {
+    let can_terminate = tiangong_plugin_runtime::test_support::can_terminate_child_processes();
     let connection = connection("roundtrip");
 
     // 请求往返：echo 原样回显。
@@ -66,12 +67,13 @@ fn stdio_roundtrip_and_restart() {
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(response["after"], "restart");
 
-    connection.stop().unwrap();
+    tiangong_plugin_runtime::test_support::finish_stdio_connection(&connection, can_terminate);
 }
 
 #[test]
 #[serial_test::serial]
 fn resident_process_handshakes_once_across_calls() {
+    let can_terminate = tiangong_plugin_runtime::test_support::can_terminate_child_processes();
     let (endpoint, log, data_dir) = temp_paths("handshake-once");
     let config = SidecarConfig::new(
         "test-stdio",
@@ -97,13 +99,18 @@ fn resident_process_handshakes_once_across_calls() {
     let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(response["count"], 1, "常驻进程多次调用不得重复握手");
 
-    connection.stop().unwrap();
+    tiangong_plugin_runtime::test_support::finish_stdio_connection(&connection, can_terminate);
 }
 
 #[test]
 #[serial_test::serial]
 fn unresponsive_handshake_fails_within_start_timeout() {
     // 协议沉默对端：进程存活但不应答握手，验证启动/握手有限时限
+    // 执行路径包含临时验证进程的强制清理：不能终止子进程的环境里
+    // 清理错误会优先于握手错误返回，错误形态无法稳定断言——整体跳过。
+    if !tiangong_plugin_runtime::test_support::can_terminate_child_processes() {
+        return;
+    }
     //（导入验证与就绪握手共用该保护）。
     // SAFETY: 本测试与所有会 spawn echo 子进程的测试经 #[serial] 互斥，
     // 设置与清除期间无并发 spawn，避免 MUTE 泄漏污染其他用例。
@@ -142,6 +149,7 @@ fn unresponsive_handshake_fails_within_start_timeout() {
 #[test]
 #[serial_test::serial]
 fn stdio_handshake_reports_identity() {
+    let can_terminate = tiangong_plugin_runtime::test_support::can_terminate_child_processes();
     let connection = connection("handshake");
     // 握手经 runtime.handshake 完成（ensure_running 内部调用）；
     // 随后正常请求可用即证明身份校验通过。
@@ -152,7 +160,7 @@ fn stdio_handshake_reports_identity() {
     let error = connection.invoke("no-such-op", "{}").unwrap_err();
     assert!(error.to_string().contains("未知操作"));
     let _ = PROTOCOL_VERSION;
-    connection.stop().unwrap();
+    tiangong_plugin_runtime::test_support::finish_stdio_connection(&connection, can_terminate);
 }
 
 #[test]

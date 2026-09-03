@@ -549,6 +549,12 @@ fn sandbox_disabled_runs_command_without_launcher() {
     );
 
     // 进程树清理：短超时 + 后台 sleep，超时后整组终止、无遗留进程。
+    //（清理依赖向子进程发送信号：不能终止子进程的环境该段不可验证，
+    // 前半段的命令执行与环境变量清理断言不受影响。）
+    if !tiangong_plugin_runtime::test_support::can_terminate_child_processes() {
+        restore_default_config();
+        return;
+    }
     let sleeper = format!(
         "/bin/sleep 30 & echo $! > {ws}/sleep.pid; wait",
         ws = fixture.workspace.display(),
@@ -1557,6 +1563,11 @@ fn execution_without_invocation_context_is_rejected() {
 #[cfg(any(unix, windows))]
 #[test]
 fn stdio_stop_kills_background_process_tree() {
+    // 断言依赖真实终止进程树：不能终止子进程的环境（外层受限沙箱拒
+    // 信号）无法验证清理语义，整体跳过。
+    if !tiangong_plugin_runtime::test_support::can_terminate_child_processes() {
+        return;
+    }
     let Some(binary) = command_sidecar_binary() else {
         eprintln!("跳过进程组测试：target/debug/tiangong-command-sidecar 尚未构建");
         return;
@@ -1641,6 +1652,11 @@ fn stdio_stop_kills_background_process_tree() {
 #[cfg(any(unix, windows))]
 #[test]
 fn repeated_stdio_start_stop_does_not_leak_host_resources() {
+    // 每轮 stop 都必须真实终止常驻进程（stop 失败即测试失败）：
+    // 不能终止子进程的环境整体跳过。
+    if !tiangong_plugin_runtime::test_support::can_terminate_child_processes() {
+        return;
+    }
     let Some(binary) = command_sidecar_binary() else {
         eprintln!("跳过资源泄漏测试：target/debug/tiangong-command-sidecar 尚未构建");
         return;

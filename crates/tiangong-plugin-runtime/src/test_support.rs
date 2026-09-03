@@ -142,3 +142,21 @@ pub fn can_terminate_child_processes() -> bool {
 pub fn can_terminate_child_processes() -> bool {
     true
 }
+
+/// stdio 测试连接的条件收尾：能终止子进程的环境必须严格断言真实清理
+/// 成功（失败即测试失败）；受限环境（外层沙箱拒进程信号）允许收尾
+/// 失败但打印明确原因——业务断言已全部通过，不因收尾误报。
+pub fn finish_stdio_connection(
+    connection: &crate::sidecar::StdioSidecarConnection,
+    can_terminate: bool,
+) {
+    match connection.stop() {
+        Ok(()) => {}
+        Err(error) if !can_terminate => {
+            eprintln!("跳过严格进程清理断言：当前环境不允许终止子进程：{error:#}");
+        }
+        Err(error) => {
+            panic!("停止 stdio sidecar 失败：{error:#}");
+        }
+    }
+}
