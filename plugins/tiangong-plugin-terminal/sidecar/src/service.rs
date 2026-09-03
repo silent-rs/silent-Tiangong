@@ -38,7 +38,7 @@ pub struct TerminalService {
     last_activity: Arc<Mutex<Option<Instant>>>,
     sequence: Mutex<u64>,
     spawn_lock: Mutex<()>,
-    /// 进行中的 Agent 工具调用（invocation_id → 执行终端）：宿主超时或
+    /// 进行中的 Agent 工具调用（sidecar request_id → 执行终端）：宿主超时或
     /// 会话取消时经 Cancel 帧中断等待，本表把取消定位到具体 PTY。
     active_tools: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -301,14 +301,14 @@ impl TerminalService {
 
     /// 登记一次执行中的工具调用；返回的守卫在正常完成或 future 被丢弃
     /// （宿主超时/取消后的 select 中断）时移除登记。
-    fn track_active_tool(&self, invocation_id: &str, terminal_id: &str) -> ActiveToolGuard {
+    fn track_active_tool(&self, request_id: &str, terminal_id: &str) -> ActiveToolGuard {
         self.active_tools
             .lock()
             .expect("活动工具表锁损坏")
-            .insert(invocation_id.to_string(), terminal_id.to_string());
+            .insert(request_id.to_string(), terminal_id.to_string());
         ActiveToolGuard {
             active_tools: Arc::clone(&self.active_tools),
-            invocation_id: invocation_id.to_string(),
+            request_id: request_id.to_string(),
         }
     }
 
@@ -1559,32 +1559,32 @@ fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOu
 struct ToolScope {
     session_id: String,
     workspace: String,
-    invocation_id: String,
+    request_id: String,
 }
 
 /// 活动工具登记守卫：dispatch future 被取消（select 丢弃）时随栈展开
 /// 自动移除，与 cancel 钩子的移除幂等互备。
 struct ActiveToolGuard {
     active_tools: Arc<Mutex<HashMap<String, String>>>,
-    invocation_id: String,
+    request_id: String,
 }
 
 impl Drop for ActiveToolGuard {
     fn drop(&mut self) {
         if let Ok(mut active) = self.active_tools.lock() {
-            active.remove(&self.invocation_id);
+            active.remove(&self.request_id);
         }
     }
 }
 
-fn tool_scope(context: Option<&RequestInvocationContext>) -> Result<ToolScope> {
+fn tool_scope(request_id: &str, context: Option<&RequestInvocationContext>) -> Result<ToolScope> {
     let context = context.ok_or_else(|| {
         anyhow::anyhow!("终端工具调用缺少宿主会话上下文（session_id 与工作目录由宿主注入）")
     })?;
     Ok(ToolScope {
         session_id: context.session_id.clone(),
         workspace: context.workspace.clone(),
-        invocation_id: context.invocation_id.clone(),
+        request_id: request_id.to_string(),
     })
 }
 
@@ -1763,7 +1763,7 @@ impl TerminalService {
 
         // 登记执行中的调用：宿主超时/会话取消经 Cancel 帧中断等待时，
         // cancel 钩子据此定位终端并发送 Ctrl+C，命令不会脱离调用方控制。
-        let _active = self.track_active_tool(&scope.invocation_id, &session_id);
+        let _active = self.track_active_tool(&scope.request_id, &session_id);
 
         let executed = self
             .exec_in_session(ExecRequest {
@@ -1916,9 +1916,12 @@ impl TerminalService {
     }
 }
 
-#[async_trait::async_trait]
-impl tiangong_plugin_sidecar::SidecarService for TerminalService {
-    async fn dispatch(&self, request: Request) -> Response {
+impl TerminalService {
+    async fn dispatch_with_context(
+        &self,
+        request: Request,
+        context: Option<RequestInvocationContext>,
+    ) -> Response {
         let request_id = request.request_id.clone();
         if request.protocol_version != PROTOCOL_VERSION {
             return Response::error(
@@ -1936,9 +1939,10 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         }
         let payload = match dispatch_operation(
             self,
+            &request_id,
             &request.operation,
             request.payload.clone(),
-            request.context.as_ref(),
+            context.as_ref(),
         )
         .await
         {
@@ -1954,19 +1958,25 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         };
         Response::success(&request_id, payload)
     }
+}
+
+#[async_trait::async_trait]
+impl tiangong_plugin_sidecar::SidecarService for TerminalService {
+    async fn dispatch(&self, request: Request) -> Response {
+        let context = tiangong_plugin_sidecar::invocation_context();
+        self.dispatch_with_context(request, context).await
+    }
 
     /// 请求级取消：宿主工具超时或会话取消经 Cancel 帧到达（stdio runner
     /// 已丢弃等待 future），把取消落到具体 PTY——发送 Ctrl+C 中断正在
     /// 执行的命令并复位执行状态，命令不会脱离调用方无限运行。
     async fn cancel(&self, request: &Request) -> Result<()> {
-        let Some(context) = request.context.as_ref() else {
-            return Ok(());
-        };
+        let request_id = request.request_id.as_str();
         let terminal_id = self
             .active_tools
             .lock()
             .expect("活动工具表锁损坏")
-            .remove(&context.invocation_id);
+            .remove(request_id);
         let Some(terminal_id) = terminal_id else {
             // 非执行型调用（send 的画面等待等）：等待 future 已被 runner
             // 丢弃，无 PTY 资源需要释放。
@@ -1985,14 +1995,14 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         });
         match interrupted {
             Ok(()) => tracing::info!(
-                invocation_id = %context.invocation_id,
+                request_id,
                 terminal = %terminal_id,
                 "已按取消请求中断终端命令"
             ),
             Err(error) => {
                 // 终端已退出（会话结束）等场景：无需中断，登记已清除。
                 tracing::debug!(
-                    invocation_id = %context.invocation_id,
+                    request_id,
                     terminal = %terminal_id,
                     %error,
                     "取消时终端已不可写"
@@ -2005,6 +2015,7 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
 
 async fn dispatch_operation(
     service: &TerminalService,
+    request_id: &str,
     operation: &str,
     payload: serde_json::Value,
     context: Option<&RequestInvocationContext>,
@@ -2015,7 +2026,7 @@ async fn dispatch_operation(
         operation,
         "run_command" | "run_shell" | "terminal_open" | "terminal_send" | "terminal_close"
     ) {
-        let scope = tool_scope(context)?;
+        let scope = tool_scope(request_id, context)?;
         let outcome = match operation {
             "run_command" => service.tool_run_command(&scope, false, payload).await,
             "run_shell" => service.tool_run_command(&scope, true, payload).await,
@@ -2319,21 +2330,39 @@ mod tests {
             .expect("清理测试终端失败");
     }
 
+    #[derive(Clone)]
+    struct ScopedRequest {
+        request: Request,
+        context: Option<RequestInvocationContext>,
+    }
+
+    impl TerminalService {
+        async fn dispatch_test(&self, scoped: ScopedRequest) -> Response {
+            self.dispatch_with_context(scoped.request, scoped.context)
+                .await
+        }
+    }
+
     /// 构造带宿主权威上下文的工具请求（scope 为 None 即缺上下文场景）。
     fn tool_request(
         operation: &str,
         payload: serde_json::Value,
         scope: Option<(&str, &str)>,
-    ) -> Request {
-        Request {
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            request_id: format!("test-{}", scru128::new()),
-            operation: operation.to_string(),
-            payload,
+    ) -> ScopedRequest {
+        let request_id = format!("test-{}", scru128::new());
+        ScopedRequest {
+            request: Request {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                request_id: request_id.clone(),
+                operation: operation.to_string(),
+                payload,
+            },
             context: scope.map(|(session_id, workspace)| RequestInvocationContext {
                 session_id: session_id.to_string(),
-                invocation_id: "test-invocation".to_string(),
+                invocation_id: request_id,
                 workspace: workspace.to_string(),
+                actor_id: "test-agent".to_string(),
+                deadline_ms: None,
             }),
         }
     }
@@ -2347,7 +2376,7 @@ mod tests {
     async fn 工具调用缺少宿主上下文被拒绝() {
         let service = TerminalService::new();
         let response = service
-            .dispatch(tool_request(
+            .dispatch_test(tool_request(
                 "run_command",
                 serde_json::json!({"cmd": "ls"}),
                 None,
@@ -2368,7 +2397,7 @@ mod tests {
 
         let first = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "ls", "args": []}),
                     Some(("session-a", workspace.as_str())),
@@ -2406,7 +2435,7 @@ mod tests {
 
         let second = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "echo", "args": ["again"]}),
                     Some(("session-a", workspace.as_str())),
@@ -2441,7 +2470,7 @@ mod tests {
 
         let first = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "dir", "args": []}),
                     Some(("windows-session", workspace.as_str())),
@@ -2470,7 +2499,7 @@ mod tests {
 
         let second = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "echo", "args": ["again"]}),
                     Some(("windows-session", workspace.as_str())),
@@ -2523,7 +2552,7 @@ mod tests {
 
         let first = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "echo", "args": ["ready"]}),
                     Some(("session-a", workspace.as_str())),
@@ -2547,7 +2576,7 @@ mod tests {
         // 原始输出回显——测试无视图，验证回显路径）。
         let sent = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_send",
                     serde_json::json!({
                         "terminal_id": terminal,
@@ -2584,7 +2613,7 @@ mod tests {
 
         let opened = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_open",
                     serde_json::json!({}),
                     Some(("session-a", workspace.as_str())),
@@ -2605,7 +2634,7 @@ mod tests {
         // 空闲终端建立后即可按编号发送输入（用户面板的等价路径）。
         let sent = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_send",
                     serde_json::json!({
                         "terminal_id": terminal,
@@ -2642,7 +2671,7 @@ mod tests {
 
         let first = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "sleep", "args": ["30"], "timeout": 60}),
                     Some(("session-a", workspace.as_str())),
@@ -2665,7 +2694,7 @@ mod tests {
         // 会话 B 不得发送输入或关闭 A 的终端。
         let sent = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_send",
                     serde_json::json!({"terminal_id": terminal, "input": "ls"}),
                     Some(("session-b", workspace.as_str())),
@@ -2675,7 +2704,7 @@ mod tests {
         assert_eq!(sent["ok"], false, "跨会话 terminal_send 必须拒绝");
         let closed = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_close",
                     serde_json::json!({"terminal_id": terminal}),
                     Some(("session-b", workspace.as_str())),
@@ -2687,7 +2716,7 @@ mod tests {
         // 归属会话关闭正常，且关闭未知终端幂等成功。
         let closed_by_owner = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_close",
                     serde_json::json!({"terminal_id": terminal}),
                     Some(("session-a", workspace.as_str())),
@@ -2697,7 +2726,7 @@ mod tests {
         assert_eq!(closed_by_owner["ok"], true);
         let closed_missing = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_close",
                     serde_json::json!({"terminal_id": "tty-not-exist"}),
                     Some(("session-a", workspace.as_str())),
@@ -2716,12 +2745,12 @@ mod tests {
         let service = TerminalService::new();
 
         let (a, b) = tokio::join!(
-            service.dispatch(tool_request(
+            service.dispatch_test(tool_request(
                 "run_command",
                 serde_json::json!({"cmd": "ls"}),
                 Some(("session-a", workspace.as_str())),
             )),
-            service.dispatch(tool_request(
+            service.dispatch_test(tool_request(
                 "run_command",
                 serde_json::json!({"cmd": "ls"}),
                 Some(("session-b", workspace.as_str())),
@@ -2748,7 +2777,7 @@ mod tests {
         // 关闭 A 的终端不影响 B 的终端继续执行。
         let closed = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_close",
                     serde_json::json!({"terminal_id": terminal_a}),
                     Some(("session-a", workspace.as_str())),
@@ -2758,7 +2787,7 @@ mod tests {
         assert_eq!(closed["ok"], true);
         let b_again = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "echo", "args": ["still"]}),
                     Some(("session-b", workspace.as_str())),
@@ -2790,7 +2819,7 @@ mod tests {
         let service = TerminalService::new();
         let opened = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_open",
                     serde_json::json!({}),
                     Some(("session-a", workspace.as_str())),
@@ -2834,16 +2863,16 @@ mod tests {
         let task_service = std::sync::Arc::clone(&service_for_task);
         let task_request = request.clone();
         let running = tokio::spawn(async move {
-            task_service.dispatch(task_request).await;
+            task_service.dispatch_test(task_request).await;
         });
         // 等待命令进入执行（登记出现）。
         let terminal = {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if let Ok(active) = service_for_task.active_tools.lock() {
-                    if let Some((_, terminal)) = active.iter().next() {
-                        break terminal.clone();
-                    }
+                if let Ok(active) = service_for_task.active_tools.lock()
+                    && let Some((_, terminal)) = active.iter().next()
+                {
+                    break terminal.clone();
                 }
                 assert!(Instant::now() < deadline, "长命令应登记为活动工具调用");
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2853,7 +2882,7 @@ mod tests {
         // 模拟宿主超时：先执行取消钩子（此时等待 future 仍挂起，与
         // stdio runner 的顺序一致），再丢弃等待 future。
         service_for_task
-            .cancel(&request)
+            .cancel(&request.request)
             .await
             .expect("取消钩子不应失败");
         running.abort();
@@ -2861,7 +2890,7 @@ mod tests {
         // 终端 phase 已复位：后续调用可立即复用该终端并成功执行。
         let after = outcome_of(
             service_for_task
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "run_command",
                     serde_json::json!({"cmd": "echo", "args": ["recovered"]}),
                     Some(("session-a", workspace.as_str())),
@@ -2896,7 +2925,7 @@ mod tests {
         let scope = Some(("session-a", "/tmp"));
         let sent = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_send",
                     serde_json::json!({"input": "ls"}),
                     scope,
@@ -2912,7 +2941,7 @@ mod tests {
         );
         let closed = outcome_of(
             service
-                .dispatch(tool_request("terminal_close", serde_json::json!({}), scope))
+                .dispatch_test(tool_request("terminal_close", serde_json::json!({}), scope))
                 .await,
         );
         assert_eq!(closed["ok"], false);
@@ -2922,7 +2951,7 @@ mod tests {
     /// 幂等（重复/未知编号成功）、跨会话拒绝，与 terminal_close 一致。
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn instanceClosed_兜底回收幂等且校验归属() {
+    async fn instance_closed_兜底回收幂等且校验归属() {
         let cwd = tempfile::tempdir().expect("创建测试目录失败");
         let workspace = cwd.path().to_string_lossy().to_string();
         let service = TerminalService::new();
@@ -2930,7 +2959,7 @@ mod tests {
         // 模拟手动新建标签：终端编号由调用方指定（tab 编号）。
         let opened = outcome_of(
             service
-                .dispatch(tool_request(
+                .dispatch_test(tool_request(
                     "terminal_open",
                     serde_json::json!({}),
                     Some(("session-a", workspace.as_str())),
@@ -2952,7 +2981,6 @@ mod tests {
                 "scope_id": scope_id,
                 "session_id": terminal,
             }),
-            context: None,
         };
         // 跨会话兜底通知：拒绝（终端不属于该会话）。
         let denied = service.dispatch(host_notice("session-b")).await;
@@ -2976,7 +3004,6 @@ mod tests {
                     "scope_id": "session-a",
                     "session_id": "tty-not-exist",
                 }),
-                context: None,
             })
             .await;
         assert!(unknown.success, "未知编号兜底应幂等成功");
