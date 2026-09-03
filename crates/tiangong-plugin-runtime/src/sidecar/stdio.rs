@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -126,7 +127,7 @@ impl StdioSidecarConnection {
                 }
                 // 临时校验进程完全不经过共享 state：按需调用可能正在进行
                 //（state.process 是其活跃进程），经 state 启停会误杀它。
-                let process = Arc::new(self.spawn()?);
+                let process = Arc::new(self.spawn(None)?);
                 let result = self.handshake(&process);
                 if let Ok(mut child) = process.child.lock() {
                     terminate_process_tree(&process, &mut child);
@@ -154,18 +155,22 @@ impl StdioSidecarConnection {
             }
             tracing::warn!(plugin_id = %self.config.plugin_id, "stdio sidecar 已退出，准备重启");
         }
-        self.start_fresh(state)
+        self.start_fresh(state, None)
     }
 
     /// 启动全新进程并完成握手（写入 state.process）。
     /// 覆盖前先终止旧进程——预热残留或异常路径留下的进程不允许失去管理引用。
-    fn start_fresh(&self, state: &mut StdioState) -> Result<Arc<StdioProcess>> {
+    fn start_fresh(
+        &self,
+        state: &mut StdioState,
+        sandbox_workspace: Option<&Path>,
+    ) -> Result<Arc<StdioProcess>> {
         if let Some(process) = state.process.take()
             && let Ok(mut child) = process.child.lock()
         {
             terminate_process_tree(&process, &mut child);
         }
-        let process = Arc::new(self.spawn()?);
+        let process = Arc::new(self.spawn(sandbox_workspace)?);
         state.process = Some(Arc::clone(&process));
         if let Err(error) = self.handshake(&process) {
             state.process = None;
@@ -194,6 +199,10 @@ impl StdioSidecarConnection {
         invocation_context: Option<crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
+        let sandbox_workspace = invocation
+            .as_ref()
+            .map(|context| validate_invocation_workspace(&context.authoritative_workspace))
+            .transpose()?;
         let process = {
             let mut state = self
                 .state
@@ -202,7 +211,7 @@ impl StdioSidecarConnection {
             if self.stopped.load(Ordering::Acquire) {
                 bail!("stdio sidecar 已停止");
             }
-            self.start_fresh(&mut state)?
+            self.start_fresh(&mut state, sandbox_workspace.as_deref())?
         };
         let result = self.round_trip(
             &process,
@@ -314,8 +323,8 @@ impl StdioSidecarConnection {
         }
     }
 
-    fn spawn(&self) -> Result<StdioProcess> {
-        match self.spawn_once() {
+    fn spawn(&self, sandbox_workspace: Option<&Path>) -> Result<StdioProcess> {
+        match self.spawn_once(sandbox_workspace) {
             Ok(process) => Ok(process),
             Err(SpawnAttemptError::Preparation(error)) => Err(error),
             Err(SpawnAttemptError::ProcessCreation { program, source }) => {
@@ -332,7 +341,7 @@ impl StdioSidecarConnection {
                 {
                     // 第二次失败返回真实错误，不再第三次恢复；若仍是
                     // 解释器创建失败，清掉刚恢复的新缓存（已知坏路径）。
-                    return match self.spawn_once() {
+                    return match self.spawn_once(sandbox_workspace) {
                         Ok(process) => Ok(process),
                         Err(SpawnAttemptError::Preparation(error)) => Err(error),
                         Err(SpawnAttemptError::ProcessCreation {
@@ -357,7 +366,10 @@ impl StdioSidecarConnection {
     /// 解释器形态每次启动都经缓存入口解析程序路径（命中只做一次
     /// `is_file` 校验，不触发目录扫描），不在配置中保存可能过期的
     /// 解释器路径副本。
-    fn spawn_once(&self) -> std::result::Result<StdioProcess, SpawnAttemptError> {
+    fn spawn_once(
+        &self,
+        sandbox_workspace: Option<&Path>,
+    ) -> std::result::Result<StdioProcess, SpawnAttemptError> {
         if let Some(parent) = self.config.log.parent() {
             preparation(
                 std::fs::create_dir_all(parent)
@@ -466,14 +478,10 @@ impl StdioSidecarConnection {
         // sidecar 属按需进程时直接启动目标程序。解释器形态把解释器作为
         // 目标程序，入口脚本和固定参数作为参数。
         let launch_policy = if sandbox_enabled {
-            // 统一写域模型：会话工作区（config 显式传入，未传时默认存储根
-            // ——常驻插件在 registry 侧已用全局默认工作区覆盖）+ 存储根；
-            // 敏感清单读写双禁，其余目录只读。
-            let workspace = self
-                .config
-                .sandbox_workspace
-                .clone()
-                .unwrap_or_else(|| self.config.storage_root.clone());
+            // 统一写域模型：按需调用优先采用本次宿主权威会话工作区；
+            // 无调用上下文和常驻进程继续使用连接配置中的固定工作区，最后
+            // 才回退存储根。敏感清单读写双禁，其余目录只读。
+            let workspace = sandbox_workspace_for_spawn(&self.config, sandbox_workspace);
             let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write(workspace);
             policy.extra_writable = self.config.sandbox_extra_writable.clone();
             // 存储根统一并入可写域（显式 workspace 即存储根时自然去重）。
@@ -1541,9 +1549,99 @@ impl SidecarConnection for StdioSidecarConnection {
     }
 }
 
+fn sandbox_workspace_for_spawn(
+    config: &SidecarConfig,
+    invocation_workspace: Option<&Path>,
+) -> PathBuf {
+    invocation_workspace
+        .map(PathBuf::from)
+        .or_else(|| config.sandbox_workspace.clone())
+        .unwrap_or_else(|| config.storage_root.clone())
+}
+
+fn validate_invocation_workspace(workspace: &Path) -> Result<PathBuf> {
+    if !workspace.is_absolute() {
+        bail!(
+            "本次 sidecar 调用的工作区必须是绝对路径: {}",
+            workspace.display()
+        );
+    }
+    let workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("解析本次 sidecar 调用的工作区失败: {}", workspace.display()))?;
+    if !workspace.is_dir() {
+        bail!("本次 sidecar 调用的工作区不是目录: {}", workspace.display());
+    }
+    Ok(workspace)
+}
+
 impl Drop for StdioSidecarConnection {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod invocation_workspace_tests {
+    use super::*;
+
+    #[test]
+    fn invocation_workspace_overrides_connection_default_for_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let connection_workspace = root.path().join("connection");
+        let invocation_workspace = root.path().join("invocation");
+        std::fs::create_dir(&connection_workspace).unwrap();
+        std::fs::create_dir(&invocation_workspace).unwrap();
+        let config = SidecarConfig::new(
+            "fs",
+            "0.0.0",
+            root.path().join("missing-sidecar"),
+            root.path().join("endpoint.json"),
+            root.path().join("sidecar.log"),
+            root.path().join("data"),
+            root.path(),
+        )
+        .with_sandbox_workspace(Some(connection_workspace.clone()));
+
+        assert_eq!(
+            sandbox_workspace_for_spawn(&config, Some(&invocation_workspace)),
+            invocation_workspace
+        );
+        assert_eq!(
+            sandbox_workspace_for_spawn(&config, None),
+            connection_workspace
+        );
+    }
+
+    #[test]
+    fn invocation_workspace_must_be_an_existing_absolute_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        assert_eq!(
+            validate_invocation_workspace(&workspace).unwrap(),
+            std::fs::canonicalize(&workspace).unwrap()
+        );
+        assert!(
+            validate_invocation_workspace(Path::new("relative-workspace"))
+                .unwrap_err()
+                .to_string()
+                .contains("必须是绝对路径")
+        );
+        assert!(
+            validate_invocation_workspace(&root.path().join("missing"))
+                .unwrap_err()
+                .to_string()
+                .contains("解析本次 sidecar 调用的工作区失败")
+        );
+        let file = root.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        assert!(
+            validate_invocation_workspace(&file)
+                .unwrap_err()
+                .to_string()
+                .contains("不是目录")
+        );
     }
 }
 
