@@ -24,7 +24,7 @@ use crate::protocol::{
 };
 use crate::sidecar::{
     EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
-    STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
+    ResponseWait, STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
@@ -59,6 +59,9 @@ struct StdioProcess {
     token: String,
     /// 本进程是否已发送过 Auth 首帧。
     authenticated: AtomicBool,
+    /// 本进程代次就绪握手的结果（身份已校验；capabilities 仅供诊断）。
+    /// 进程启动后只握手一次，换代重建时随之失效。
+    readiness: Mutex<Option<HandshakeResponse>>,
     /// stdout 读线程观察到 EOF/错误后置位；并发请求据此无阻塞换代。
     closed: Arc<AtomicBool>,
     #[cfg(windows)]
@@ -71,6 +74,40 @@ struct PendingWaiter {
     progress: SyncSender<String>,
     invocation: Option<crate::sidecar::SidecarInvocationContext>,
     invocation_context: Option<crate::protocol::RequestInvocationContext>,
+}
+
+impl PendingWaiter {
+    /// 请求是否属于目标会话。新版统一调用上下文与旧版 sidecar 上下文都
+    /// 参与判断；同一会话在两种上下文形态下发起的请求都会被会话级
+    /// 联取消命中。
+    fn belongs_to_session(&self, session_id: &str) -> bool {
+        self.invocation_context
+            .as_ref()
+            .is_some_and(|context| context.session_id == session_id)
+            || self
+                .invocation
+                .as_ref()
+                .is_some_and(|context| context.session_id == session_id)
+    }
+}
+
+/// 提取本次调用的宿主权威工作区。
+///
+/// 新版 Runtime 调用优先使用 RequestInvocationContext；旧版 sidecar
+/// 调用继续兼容 SidecarInvocationContext。两者都不存在时，由调用方
+/// 回退到连接配置中的默认工作区。
+///
+/// SidecarInvocationContext 将在现有插件全部迁移到统一调用上下文后
+/// 再评估淘汰，当前不得删除（兼容层约定见 issue #479）。
+fn invocation_workspace<'a>(
+    legacy_context: Option<&'a crate::sidecar::SidecarInvocationContext>,
+    runtime_context: Option<&'a crate::protocol::RequestInvocationContext>,
+) -> Option<&'a Path> {
+    runtime_context
+        .map(|context| context.workspace.trim())
+        .filter(|workspace| !workspace.is_empty())
+        .map(Path::new)
+        .or_else(|| legacy_context.map(|context| context.authoritative_workspace.as_path()))
 }
 
 impl StdioSidecarConnection {
@@ -111,11 +148,13 @@ impl StdioSidecarConnection {
         Ok(())
     }
 
-    /// 确保进程存活并完成握手（安装验证 / 预热用）。
+    /// 确保进程存活并完成就绪握手，返回本代次握手声明的能力列表
+    /// （安装验证 / 预热 / 诊断用）。
     ///
     /// 按需生命周期不保留进程：临时启动、握手校验后立即清理——预热/安装
-    /// 验证仍确认可达性，但不留下任何存活进程。
-    pub fn ensure_running_checked(&self) -> Result<()> {
+    /// 验证仍确认可达性，但不留下任何存活进程。常驻进程复用同一代次的
+    /// 就绪握手结果，不重复握手。
+    pub fn ensure_running_checked(&self) -> Result<Vec<String>> {
         let mut state = self
             .state
             .lock()
@@ -128,14 +167,21 @@ impl StdioSidecarConnection {
                 // 临时校验进程完全不经过共享 state：按需调用可能正在进行
                 //（state.process 是其活跃进程），经 state 启停会误杀它。
                 let process = Arc::new(self.spawn(None)?);
-                let result = self.handshake(&process);
+                let result = self.handshake_exchange(&process);
                 if let Ok(mut child) = process.child.lock() {
                     terminate_process_tree(&process, &mut child);
                 }
-                result.map(|_| ())
+                result.map(|handshake| handshake.capabilities)
             }
             crate::manifest::SidecarLifecycle::Resident => {
-                self.ensure_running(&mut state).map(|_| ())
+                let process = self.ensure_running(&mut state)?;
+                process
+                    .readiness
+                    .lock()
+                    .map_err(|_| anyhow!("stdio sidecar 就绪状态锁已损坏"))?
+                    .clone()
+                    .map(|handshake| handshake.capabilities)
+                    .ok_or_else(|| anyhow!("stdio sidecar 就绪握手结果丢失"))
             }
         }
     }
@@ -158,7 +204,7 @@ impl StdioSidecarConnection {
         self.start_fresh(state, None)
     }
 
-    /// 启动全新进程并完成握手（写入 state.process）。
+    /// 启动全新进程并完成就绪握手（写入 state.process）。
     /// 覆盖前先终止旧进程——预热残留或异常路径留下的进程不允许失去管理引用。
     fn start_fresh(
         &self,
@@ -172,12 +218,20 @@ impl StdioSidecarConnection {
         }
         let process = Arc::new(self.spawn(sandbox_workspace)?);
         state.process = Some(Arc::clone(&process));
-        if let Err(error) = self.handshake(&process) {
-            state.process = None;
-            if let Ok(mut child) = process.child.lock() {
-                terminate_process_tree(&process, &mut child);
+        match self.handshake_exchange(&process) {
+            Ok(handshake) => {
+                *process
+                    .readiness
+                    .lock()
+                    .map_err(|_| anyhow!("stdio sidecar 就绪状态锁已损坏"))? = Some(handshake);
             }
-            return Err(error);
+            Err(error) => {
+                state.process = None;
+                if let Ok(mut child) = process.child.lock() {
+                    terminate_process_tree(&process, &mut child);
+                }
+                return Err(error);
+            }
         }
         tracing::info!(
             plugin_id = %self.config.plugin_id,
@@ -189,7 +243,7 @@ impl StdioSidecarConnection {
     /// 按需调用：每次请求独立进程（spawn → 握手 → 请求 → 清理），
     /// 不复用也不保留进程——工具型调用的最小存活窗口。
     ///
-    /// 锁只在起止瞬间持有：round_trip 期间不持锁，工具级超时/会话取消
+    /// 锁只在起止瞬间持有：round_trip 期间不持锁，会话取消
     /// （cancel_current）才能及时终止进行中的进程而不与调用方互等。
     fn invoke_on_demand(
         &self,
@@ -199,10 +253,10 @@ impl StdioSidecarConnection {
         invocation_context: Option<crate::protocol::RequestInvocationContext>,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
-        let sandbox_workspace = invocation
-            .as_ref()
-            .map(|context| validate_invocation_workspace(&context.authoritative_workspace))
-            .transpose()?;
+        let sandbox_workspace =
+            invocation_workspace(invocation.as_ref(), invocation_context.as_ref())
+                .map(validate_invocation_workspace)
+                .transpose()?;
         let process = {
             let mut state = self
                 .state
@@ -219,6 +273,7 @@ impl StdioSidecarConnection {
             payload,
             invocation,
             invocation_context,
+            ResponseWait::UntilCancelled,
             on_progress,
         );
         if let Ok(mut child) = process.child.lock() {
@@ -260,8 +315,11 @@ impl StdioSidecarConnection {
         }
     }
 
-    /// 按宿主会话取消其仍在执行的请求。常驻 sidecar 发送请求级 Cancel，
-    /// 不杀进程；按需 sidecar 每次调用独占进程，直接清理进程树。
+    /// 按宿主会话取消其仍在执行的请求（会话级联取消）。
+    ///
+    /// 常驻 sidecar：取消属于目标会话的全部请求——请求级 Cancel 帧定向
+    /// 取消，进程本身继续服务其他会话；按需 sidecar：每次调用独占进程，
+    /// 直接清理进程树。取消后允许后续调用重新使用或启动 sidecar。
     pub fn cancel_session(&self, session_id: &str) -> Result<()> {
         let process = self
             .state
@@ -281,12 +339,7 @@ impl StdioSidecarConnection {
             .lock()
             .map_err(|_| anyhow!("stdio sidecar pending 锁已损坏"))?
             .iter()
-            .filter(|(_, waiter)| {
-                waiter
-                    .invocation
-                    .as_ref()
-                    .is_some_and(|context| context.session_id == session_id)
-            })
+            .filter(|(_, waiter)| waiter.belongs_to_session(session_id))
             .map(|(request_id, _)| request_id.clone())
             .collect::<Vec<_>>();
         for request_id in request_ids {
@@ -724,22 +777,33 @@ impl StdioSidecarConnection {
             pending,
             token,
             authenticated: AtomicBool::new(false),
+            readiness: Mutex::new(None),
             closed,
             #[cfg(windows)]
             lifecycle,
         })
     }
 
-    /// 握手校验身份（plugin_id / 协议版本），对齐 TCP health_check。
-    fn handshake(&self, process: &Arc<StdioProcess>) -> Result<()> {
-        let payload = self.round_trip(
-            process,
-            HANDSHAKE_OPERATION,
-            serde_json::Value::Null,
-            None,
-            None,
-            &mut |_| {},
-        )?;
+    /// 就绪/验证握手：认证链路可用且进程已进入协议处理状态，校验插件
+    /// ID、版本与协议兼容，返回握手响应（capabilities 仅供诊断）。
+    /// 等待受 `start_timeout` 有限保护。
+    fn handshake_exchange(&self, process: &Arc<StdioProcess>) -> Result<HandshakeResponse> {
+        let payload = self
+            .round_trip(
+                process,
+                HANDSHAKE_OPERATION,
+                serde_json::Value::Null,
+                None,
+                None,
+                ResponseWait::Bounded(self.config.start_timeout),
+                &mut |_| {},
+            )
+            .with_context(|| {
+                format!(
+                    "stdio sidecar 就绪握手失败（时限 {}ms）",
+                    self.config.start_timeout.as_millis()
+                )
+            })?;
         let handshake: HandshakeResponse =
             serde_json::from_value(payload).context("解析 stdio sidecar 握手响应失败")?;
         if handshake.plugin_id != self.config.plugin_id {
@@ -764,10 +828,14 @@ impl StdioSidecarConnection {
             ))
             .into());
         }
-        Ok(())
+        Ok(handshake)
     }
 
     /// 单请求往返：注册 pending → 写帧（新进程首帧前补 Auth）→ 循环收进度/响应。
+    ///
+    /// 等待策略由 `wait` 显式决定：握手类往返使用有限等待；业务 Handler
+    /// 不设自动时限，仅由取消或进程断开终止（每轮唤醒仅排空进度）。
+    #[allow(clippy::too_many_arguments)]
     fn round_trip(
         &self,
         process: &Arc<StdioProcess>,
@@ -775,8 +843,13 @@ impl StdioSidecarConnection {
         payload: Value,
         invocation: Option<crate::sidecar::SidecarInvocationContext>,
         invocation_context: Option<crate::protocol::RequestInvocationContext>,
+        wait: ResponseWait,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
+        let bounded_deadline = match wait {
+            ResponseWait::Bounded(timeout) => Some(std::time::Instant::now() + timeout),
+            ResponseWait::UntilCancelled => None,
+        };
         let request = Request::new(operation, payload);
         let request_id = request.request_id.clone();
         let (response_tx, response_rx) = sync_channel::<Result<Value, String>>(1);
@@ -815,11 +888,11 @@ impl StdioSidecarConnection {
         }
 
         loop {
-            // Handler 不设时限；每 200ms 唤醒仅用于排空进度和感知进程断开。
+            // 业务请求不设时限；周期唤醒仅用于排空进度和感知进程断开。
             while let Ok(message) = progress_rx.try_recv() {
                 on_progress(message);
             }
-            match response_rx.recv_timeout(Duration::from_millis(200)) {
+            match response_rx.recv_timeout(wait.poll_interval()) {
                 Ok(result) => {
                     return result.map_err(|message| {
                         let message = if message == "stdio sidecar 已关闭" {
@@ -830,7 +903,16 @@ impl StdioSidecarConnection {
                         SidecarInvokeError::Internal(message).into()
                     });
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(deadline) = bounded_deadline
+                        && std::time::Instant::now() >= deadline
+                    {
+                        remove_pending(process, &request_id);
+                        return Err(SidecarInvokeError::Timeout)
+                            .with_context(|| format!("stdio sidecar 请求超时: {operation}"));
+                    }
+                    continue;
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // 读线程已退出（进程死亡）：按不可用处理，下次 ensure 重启。
                     remove_pending(process, &request_id);
@@ -845,46 +927,51 @@ impl StdioSidecarConnection {
     }
 
     /// 写请求帧（每个新进程首个请求前补 Auth 首帧，token 与子进程环境一致）。
-    fn write_request(&self, process: &StdioProcess, request: &Request) -> Result<()> {
-        let mut stdin = process
-            .stdin
-            .lock()
-            .map_err(|_| anyhow!("stdio sidecar 写端锁已损坏"))?;
-        if !process.authenticated.load(Ordering::Acquire) {
-            let frame = IpcFrame::Auth(IpcAuth {
-                token: process.token.clone(),
+    /// 管道写入受 `request_timeout` 保护，防止 sidecar 停止读取后宿主永久阻塞。
+    fn write_request(&self, process: &Arc<StdioProcess>, request: &Request) -> Result<()> {
+        write_with_protection(process, self.config.request_timeout, || {
+            let mut stdin = process
+                .stdin
+                .lock()
+                .map_err(|_| anyhow!("stdio sidecar 写端锁已损坏"))?;
+            if !process.authenticated.load(Ordering::Acquire) {
+                let frame = IpcFrame::Auth(IpcAuth {
+                    token: process.token.clone(),
+                });
+                write_line(&mut stdin, &frame)?;
+                process.authenticated.store(true, Ordering::Release);
+            }
+            let mut payload = serde_json::to_value(request).context("序列化 sidecar 请求失败")?;
+            if let Some(context) = process.pending.lock().ok().and_then(|pending| {
+                pending
+                    .get(&request.request_id)
+                    .and_then(|waiter| waiter.invocation_context.clone())
+            }) && let Some(object) = payload.as_object_mut()
+            {
+                object.insert(
+                    "context".to_string(),
+                    serde_json::to_value(context).context("序列化 sidecar 调用上下文失败")?,
+                );
+            }
+            let frame = IpcFrame::Request(IpcRequest {
+                request_id: request.request_id.clone(),
+                payload,
             });
-            write_line(&mut stdin, &frame)?;
-            process.authenticated.store(true, Ordering::Release);
-        }
-        let mut payload = serde_json::to_value(request).context("序列化 sidecar 请求失败")?;
-        if let Some(context) = process.pending.lock().ok().and_then(|pending| {
-            pending
-                .get(&request.request_id)
-                .and_then(|waiter| waiter.invocation_context.clone())
-        }) && let Some(object) = payload.as_object_mut()
-        {
-            object.insert(
-                "context".to_string(),
-                serde_json::to_value(context).context("序列化 sidecar 调用上下文失败")?,
-            );
-        }
-        let frame = IpcFrame::Request(IpcRequest {
-            request_id: request.request_id.clone(),
-            payload,
-        });
-        write_line(&mut stdin, &frame)
+            write_line(&mut stdin, &frame)
+        })
     }
 
-    fn write_frame(&self, process: &StdioProcess, frame: &IpcFrame) -> Result<()> {
-        let mut stdin = process
-            .stdin
-            .lock()
-            .map_err(|_| anyhow!("stdio sidecar 写端锁已损坏"))?;
-        write_line(&mut stdin, frame)
+    fn write_frame(&self, process: &Arc<StdioProcess>, frame: &IpcFrame) -> Result<()> {
+        write_with_protection(process, self.config.request_timeout, || {
+            let mut stdin = process
+                .stdin
+                .lock()
+                .map_err(|_| anyhow!("stdio sidecar 写端锁已损坏"))?;
+            write_line(&mut stdin, frame)
+        })
     }
 
-    fn cancel_request(&self, process: &StdioProcess, request_id: &str) -> Result<()> {
+    fn cancel_request(&self, process: &Arc<StdioProcess>, request_id: &str) -> Result<()> {
         self.write_frame(
             process,
             &IpcFrame::Cancel {
@@ -905,6 +992,49 @@ fn child_status(process: &StdioProcess) -> String {
         Err(std::sync::TryLockError::WouldBlock) => "子进程仍在运行（状态查询忙）".to_string(),
         Err(std::sync::TryLockError::Poisoned(_)) => "无法读取子进程状态".to_string(),
     }
+}
+
+/// 带看门狗的管道写入：写入超过 `timeout` 仍未完成时终止进程树，让
+/// 阻塞在管道上的写立即以错误返回，防止 stdin 写入永久卡死。
+fn write_with_protection<F>(process: &Arc<StdioProcess>, timeout: Duration, write: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let finished = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let watchdog_finished = Arc::clone(&finished);
+    let watchdog_process = Arc::clone(process);
+    let watchdog = std::thread::Builder::new()
+        .name("stdio-sidecar-write-watchdog".to_string())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            let (state, notified) = &*watchdog_finished;
+            let Ok(mut done) = state.lock() else {
+                return;
+            };
+            while !*done {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (updated, _) = notified
+                    .wait_timeout(done, remaining)
+                    .expect("写入看门狗状态锁已损坏");
+                done = updated;
+            }
+            if !*done && let Ok(mut child) = watchdog_process.child.lock() {
+                tracing::warn!("stdio sidecar 管道写入超时，终止进程解除阻塞");
+                terminate_process_tree(&watchdog_process, &mut child);
+            }
+        });
+    let result = write();
+    if let Ok(mut done) = finished.0.lock() {
+        *done = true;
+        finished.1.notify_all();
+    }
+    if let Ok(watchdog) = watchdog {
+        let _ = watchdog.join();
+    }
+    result
 }
 
 /// sidecar 启动尝试的错误分类：只有进程创建失败才允许失效解释器缓存
@@ -1375,14 +1505,22 @@ impl SidecarConnection for StdioSidecarConnection {
                         }
                     })?
                 };
-                self.round_trip(&process, operation, payload, None, None, on_progress)
-                    .map_err(|error| {
-                        if error.downcast_ref::<SidecarInvokeError>().is_some() {
-                            error
-                        } else {
-                            SidecarInvokeError::Internal(error.to_string()).into()
-                        }
-                    })?
+                self.round_trip(
+                    &process,
+                    operation,
+                    payload,
+                    None,
+                    None,
+                    ResponseWait::UntilCancelled,
+                    on_progress,
+                )
+                .map_err(|error| {
+                    if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                        error
+                    } else {
+                        SidecarInvokeError::Internal(error.to_string()).into()
+                    }
+                })?
             }
         };
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
@@ -1423,6 +1561,7 @@ impl SidecarConnection for StdioSidecarConnection {
                     payload,
                     Some(context.clone()),
                     None,
+                    ResponseWait::UntilCancelled,
                     on_progress,
                 )?
             }
@@ -1456,6 +1595,7 @@ impl SidecarConnection for StdioSidecarConnection {
                     payload,
                     None,
                     Some(context.clone()),
+                    ResponseWait::UntilCancelled,
                     on_progress,
                 )?
             }
@@ -1464,46 +1604,16 @@ impl SidecarConnection for StdioSidecarConnection {
     }
 
     fn handles_tool(&self, tool_name: &str) -> Result<bool> {
-        let payload = match self.config.lifecycle {
-            crate::manifest::SidecarLifecycle::OnDemand => {
-                let process = Arc::new(self.spawn(None)?);
-                let result = self.round_trip(
-                    &process,
-                    HANDSHAKE_OPERATION,
-                    Value::Null,
-                    None,
-                    None,
-                    &mut |_| {},
-                );
-                if let Ok(mut child) = process.child.lock() {
-                    terminate_process_tree(&process, &mut child);
-                }
-                result?
-            }
-            crate::manifest::SidecarLifecycle::Resident => {
-                let process = {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-                    self.ensure_running(&mut state)?
-                };
-                self.round_trip(
-                    &process,
-                    HANDSHAKE_OPERATION,
-                    Value::Null,
-                    None,
-                    None,
-                    &mut |_| {},
-                )?
-            }
-        };
-        let handshake: HandshakeResponse =
-            serde_json::from_value(payload).context("解析 stdio sidecar 握手响应失败")?;
-        Ok(handshake
-            .capabilities
+        // 诊断通道：消费进程就绪握手缓存的能力声明，不额外发起往返，
+        // 也不在工具调用热路径启动 sidecar。
+        let capabilities = self.ensure_running_checked()?;
+        Ok(capabilities
             .iter()
             .any(|capability| capability == &format!("tool:{tool_name}") || capability == "tool:*"))
+    }
+
+    fn verify_capabilities(&self) -> Result<Vec<String>> {
+        self.ensure_running_checked()
     }
 
     fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
@@ -1523,7 +1633,7 @@ impl SidecarConnection for StdioSidecarConnection {
     }
 
     fn ensure_running(&self) -> Result<()> {
-        StdioSidecarConnection::ensure_running_checked(self)
+        StdioSidecarConnection::ensure_running_checked(self).map(|_| ())
     }
 
     fn has_runtime_endpoint(&self) -> bool {
@@ -1586,6 +1696,110 @@ impl Drop for StdioSidecarConnection {
 #[cfg(test)]
 mod invocation_workspace_tests {
     use super::*;
+
+    fn runtime_context(workspace: &str) -> crate::protocol::RequestInvocationContext {
+        crate::protocol::RequestInvocationContext {
+            session_id: "session-a".into(),
+            invocation_id: "call-a".into(),
+            workspace: workspace.into(),
+            actor_id: "agent-a".into(),
+            deadline_ms: None,
+        }
+    }
+
+    fn legacy_context(workspace: &Path) -> crate::sidecar::SidecarInvocationContext {
+        crate::sidecar::SidecarInvocationContext::new("session-a", "call-a", workspace)
+    }
+
+    #[test]
+    fn runtime_context_workspace_wins_when_present() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy_ws = root.path().join("legacy");
+        let runtime_ws = root.path().join("runtime");
+        std::fs::create_dir(&legacy_ws).unwrap();
+        std::fs::create_dir(&runtime_ws).unwrap();
+
+        // 仅新版上下文。
+        assert_eq!(
+            invocation_workspace(None, Some(&runtime_context(runtime_ws.to_str().unwrap()))),
+            Some(runtime_ws.as_path())
+        );
+        // 仅旧版上下文。
+        assert_eq!(
+            invocation_workspace(Some(&legacy_context(&legacy_ws)), None),
+            Some(legacy_ws.as_path())
+        );
+        // 新旧同时存在时新版优先。
+        assert_eq!(
+            invocation_workspace(
+                Some(&legacy_context(&legacy_ws)),
+                Some(&runtime_context(runtime_ws.to_str().unwrap()))
+            ),
+            Some(runtime_ws.as_path())
+        );
+        // 新版工作区为空（含空白）时回退旧版。
+        assert_eq!(
+            invocation_workspace(
+                Some(&legacy_context(&legacy_ws)),
+                Some(&runtime_context("  "))
+            ),
+            Some(legacy_ws.as_path())
+        );
+        // 两者均不存在。
+        assert_eq!(invocation_workspace(None, None), None);
+    }
+
+    #[test]
+    fn invalid_workspace_is_rejected_by_validation_not_extraction() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+
+        // 提取层不做校验，交由 validate_invocation_workspace 拒绝。
+        let context = runtime_context(file.to_str().unwrap());
+        let extracted = invocation_workspace(None, Some(&context)).expect("提取层只负责选择");
+        assert!(
+            validate_invocation_workspace(extracted)
+                .unwrap_err()
+                .to_string()
+                .contains("不是目录")
+        );
+        assert!(
+            validate_invocation_workspace(Path::new("relative-workspace"))
+                .unwrap_err()
+                .to_string()
+                .contains("必须是绝对路径")
+        );
+    }
+
+    #[test]
+    fn pending_waiter_session_membership_spans_both_contexts() {
+        let (response_tx, _response_rx) = sync_channel(1);
+        let (progress_tx, _progress_rx) = sync_channel(1);
+        let mk = |invocation, invocation_context| PendingWaiter {
+            response: response_tx.clone(),
+            progress: progress_tx.clone(),
+            invocation,
+            invocation_context,
+        };
+        let legacy = legacy_context(Path::new("/legacy"));
+        let runtime = runtime_context("/runtime");
+
+        // 仅新版上下文：按新版会话命中。
+        let waiter = mk(None, Some(runtime.clone()));
+        assert!(waiter.belongs_to_session("session-a"));
+        assert!(!waiter.belongs_to_session("session-b"));
+        // 仅旧版上下文：仍可取消（兼容已发布插件）。
+        let waiter = mk(Some(legacy.clone()), None);
+        assert!(waiter.belongs_to_session("session-a"));
+        assert!(!waiter.belongs_to_session("session-b"));
+        // 两者都有：任一命中即归属。
+        let waiter = mk(Some(legacy), Some(runtime));
+        assert!(waiter.belongs_to_session("session-a"));
+        // 两者皆无：不属于任何会话。
+        let waiter = mk(None, None);
+        assert!(!waiter.belongs_to_session("session-a"));
+    }
 
     #[test]
     fn invocation_workspace_overrides_connection_default_for_spawn() {
@@ -1785,7 +1999,8 @@ fn resolve_launcher(storage_root: &std::path::Path) -> Option<std::path::PathBuf
 }
 
 /// 天工宿主的 `protected_paths`（读写双禁）组合：存储配置信任件 + 家目录
-/// 凭据。P1 通用化后预设组合归宿主，crate 只提供通用原语。
+/// 凭据 + 宿主验证记录目录（sidecar 能力快照由宿主维护，插件不得读写
+/// 伪造）。P1 通用化后预设组合归宿主，crate 只提供通用原语。
 fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = [
         "keys",
@@ -1795,6 +2010,7 @@ fn tiangong_protected_paths(storage_root: &std::path::Path) -> Vec<std::path::Pa
         "server.json",
         "app.json",
         "sandbox",
+        "plugins/.verifications",
     ]
     .iter()
     .map(|path| storage_root.join(path))
@@ -1877,6 +2093,12 @@ mod sensitive_access_tests {
                 .contains(&storage.join("models.json"))
         );
         assert!(policy.protected_paths.contains(&storage.join("app.json")));
+        // 宿主验证记录目录读写双禁：能力快照由宿主维护，插件不得伪造。
+        assert!(
+            policy
+                .protected_paths
+                .contains(&storage.join("plugins/.verifications"))
+        );
 
         // 未授权插件：不调用豁免，mcp.json 写保护原样保留。
         let mut strict = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");

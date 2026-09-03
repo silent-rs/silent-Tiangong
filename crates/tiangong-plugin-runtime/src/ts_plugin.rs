@@ -35,10 +35,21 @@ pub struct TsPluginAdapter {
     /// 无界面且声明 sidecar：工具由宿主直连 sidecar 执行（不进页面接应
     /// 协议）。有界面的插件照旧走页面路径（页面可深度参与执行）。
     sidecar_direct: AtomicBool,
+    /// 清单声明了 sidecar（与 sidecar_direct 分开记录，供路由组合判断）。
+    has_sidecar: AtomicBool,
+    /// 清单声明了 UI 贡献。
+    has_ui: AtomicBool,
+    /// 安装阶段验证记录中的 sidecar 能力；None 表示记录缺失或失效
+    ///（路由回退 UI 或返回不可用，不做即时探测）。
+    verified_sidecar: RwLock<Option<Vec<String>>>,
 }
 
 impl TsPluginAdapter {
-    pub(crate) fn from_manifest(manifest: &PluginManifest, enabled: bool) -> Self {
+    pub(crate) fn from_manifest(
+        manifest: &PluginManifest,
+        enabled: bool,
+        verified_sidecar: Option<Vec<String>>,
+    ) -> Self {
         Self {
             id: manifest.id.clone(),
             state: RwLock::new(TsPluginState {
@@ -49,10 +60,18 @@ impl TsPluginAdapter {
             enabled: AtomicBool::new(enabled),
             feedback_tx: RwLock::new(None),
             sidecar_direct: AtomicBool::new(sidecar_direct_of(manifest)),
+            has_sidecar: AtomicBool::new(manifest.sidecar.is_some()),
+            has_ui: AtomicBool::new(!manifest.ui_contributions().is_empty()),
+            verified_sidecar: RwLock::new(verified_sidecar),
         }
     }
 
-    pub(crate) fn reconfigure(&self, manifest: &PluginManifest, enabled: bool) {
+    pub(crate) fn reconfigure(
+        &self,
+        manifest: &PluginManifest,
+        enabled: bool,
+        verified_sidecar: Option<Vec<String>>,
+    ) {
         let next = TsPluginState {
             tools: manifest.tools.clone().unwrap_or_default(),
             prompts: manifest.prompt.clone().unwrap_or_default(),
@@ -65,6 +84,14 @@ impl TsPluginAdapter {
         self.set_enabled(enabled);
         self.sidecar_direct
             .store(sidecar_direct_of(manifest), Ordering::Release);
+        self.has_sidecar
+            .store(manifest.sidecar.is_some(), Ordering::Release);
+        self.has_ui
+            .store(!manifest.ui_contributions().is_empty(), Ordering::Release);
+        match self.verified_sidecar.write() {
+            Ok(mut verified) => *verified = verified_sidecar,
+            Err(poisoned) => *poisoned.into_inner() = verified_sidecar,
+        }
     }
 
     pub(crate) fn set_enabled(&self, enabled: bool) {
@@ -134,7 +161,6 @@ impl ToolOverrideHandler for TsPluginAdapter {
         let call = call.clone();
         let session_id = session.id.clone();
         let actor_id = actor_id.to_string();
-        let legacy_sidecar_direct = self.sidecar_direct.load(Ordering::Acquire);
         let tool_timeout_ms = tool.timeout_ms;
         let workspace = std::path::PathBuf::from(session.cwd.trim());
         let feedback = self
@@ -142,6 +168,17 @@ impl ToolOverrideHandler for TsPluginAdapter {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        // 路由只消费安装阶段保存的验证能力，不启动 sidecar 探测。
+        let handler = crate::invocation::select_ts_handler(
+            self.sidecar_direct.load(Ordering::Acquire),
+            self.has_sidecar.load(Ordering::Acquire),
+            self.has_ui.load(Ordering::Acquire),
+            self.verified_sidecar
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_deref(),
+            &call.name,
+        );
         let invocation = crate::invocation::RuntimeInvocation::new(
             &plugin_id,
             call.clone(),
@@ -153,16 +190,8 @@ impl ToolOverrideHandler for TsPluginAdapter {
         Box::pin(crate::invocation::dispatch(
             invocation.clone(),
             async move {
-                // 兼容规则：无 UI sidecar 维持既有直连；有 UI 的插件先查询后端
-                // 是否明确注册目标工具。未注册才启动旧 UI Handler，避免后端
-                // 自管理插件为了“找接应者”先被错误拉起页面。
-                let handler = crate::invocation::select_ts_handler(
-                    legacy_sidecar_direct,
-                    sidecar_handles_tool(&plugin_id, &call.name, Some(workspace.as_path())),
-                )
-                .await;
-                if handler == crate::invocation::HandlerKind::Sidecar {
-                    Some(
+                match handler {
+                    crate::invocation::HandlerKind::Sidecar => Some(
                         invoke_sidecar_tool(
                             &plugin_id,
                             call,
@@ -170,9 +199,11 @@ impl ToolOverrideHandler for TsPluginAdapter {
                             Some(invocation.clone()),
                         )
                         .await,
-                    )
-                } else {
-                    Some(
+                    ),
+                    crate::invocation::HandlerKind::Unavailable => {
+                        Some(sidecar_unverified_failure(&plugin_id))
+                    }
+                    crate::invocation::HandlerKind::Ui => Some(
                         crate::ts_tools::execute(
                             plugin_id,
                             call,
@@ -180,7 +211,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                             Some(invocation.clone()),
                         )
                         .await,
-                    )
+                    ),
                 }
             },
         ))
@@ -189,36 +220,6 @@ impl ToolOverrideHandler for TsPluginAdapter {
 
 fn sidecar_direct_of(manifest: &PluginManifest) -> bool {
     manifest.ui_contributions().is_empty() && manifest.sidecar.is_some()
-}
-
-/// 查询 UI 插件绑定的 sidecar 是否明确注册目标工具。没有 sidecar、旧
-/// sidecar 未声明能力或探测失败均回退 UI Handler，保证已发布插件零迁移。
-async fn sidecar_handles_tool(
-    plugin_id: &str,
-    tool_name: &str,
-    workspace: Option<&std::path::Path>,
-) -> bool {
-    let plugin_id = plugin_id.to_string();
-    let tool_name = tool_name.to_string();
-    let workspace = workspace.map(std::path::Path::to_path_buf);
-    tokio::task::spawn_blocking(move || {
-        let directory = crate::registry::plugin_install_directory(&plugin_id)?;
-        let storage_root = directory.parent()?.parent()?.to_path_buf();
-        let installed = crate::registry::find_installed_plugin(&storage_root, &plugin_id).ok()?;
-        installed.manifest.sidecar.as_ref()?;
-        let connection = crate::registry::sidecar_connection_with_workspace(
-            &storage_root,
-            &installed,
-            false,
-            workspace.as_deref(),
-        )
-        .ok()?;
-        connection.handles_tool(&tool_name).ok()
-    })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(false)
 }
 
 /// 无界面 sidecar 型插件的工具直达：宿主内置桥接，语义与 memory 等官方
@@ -410,10 +411,36 @@ pub(crate) async fn invoke_sidecar_tool_for_test(
     invoke_sidecar_tool(plugin_id, call, timeout_ms, None).await
 }
 
+/// 测试通道：携带统一调用生命周期（含新版权威工作区与取消）的真实
+/// 直连调用，验证按需沙箱写域随会话工作区构造。
+#[cfg(test)]
+pub(crate) async fn invoke_sidecar_tool_with_invocation_for_test(
+    plugin_id: &str,
+    call: ToolCall,
+    invocation: crate::invocation::RuntimeInvocation,
+) -> ToolResult {
+    invoke_sidecar_tool(plugin_id, call, 0, Some(invocation)).await
+}
+
 fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> ToolResult {
     ToolResult {
         ok: false,
         summary: format!("插件 {plugin_id} sidecar 工具执行失败：{message}"),
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 1,
+        execution: None,
+    }
+}
+
+/// 无 UI sidecar 插件缺少有效验证记录时的明确错误。不在工具调用热路径
+/// 同步补验证——由后台补验证或重新验证入口恢复。
+fn sidecar_unverified_failure(plugin_id: &str) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: format!(
+            "插件 {plugin_id} 的 sidecar 尚未完成安装验证或验证已失效，插件暂不可用；请等待后台补验证完成或重新验证插件"
+        ),
         stdout: String::new(),
         stderr: String::new(),
         exit_code: 1,
@@ -528,7 +555,7 @@ mod tests {
     #[test]
     fn mention候选_声明时生成_禁用时为空() {
         let adapter =
-            TsPluginAdapter::from_manifest(&manifest_with_mention(Some("问候能力")), true);
+            TsPluginAdapter::from_manifest(&manifest_with_mention(Some("问候能力")), true, None);
         let candidates = MentionCandidateProvider::mention_candidates(&adapter);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].value, "@plugin:demo");
@@ -540,7 +567,7 @@ mod tests {
         assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
 
         // 未声明 mention：无候选
-        let adapter = TsPluginAdapter::from_manifest(&manifest_with_mention(None), true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest_with_mention(None), true, None);
         assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
     }
 
@@ -548,7 +575,7 @@ mod tests {
     fn mention候选_无ui标题时用插件id() {
         let mut manifest = manifest_with_mention(Some("能力"));
         manifest.ui = None;
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         let candidates = MentionCandidateProvider::mention_candidates(&adapter);
         assert_eq!(candidates[0].label, "demo");
     }
@@ -559,7 +586,7 @@ mod tests {
         manifest.ui = None;
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         assert!(
             adapter
                 .sidecar_direct
@@ -570,7 +597,7 @@ mod tests {
         let mut manifest = manifest_with_mention(None);
         manifest.sidecar =
             Some(serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap());
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         assert!(
             !adapter
                 .sidecar_direct
@@ -580,12 +607,66 @@ mod tests {
         // 无 UI 无 sidecar：也不直连（无接应由 ts_tools 明确报错）
         let mut manifest = manifest_with_mention(None);
         manifest.ui = None;
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         assert!(
             !adapter
                 .sidecar_direct
                 .load(std::sync::atomic::Ordering::Acquire)
         );
+    }
+
+    #[test]
+    fn 路由消费验证能力_缺失时按结构回退() {
+        let sidecar_manifest: serde_json::Value =
+            serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap();
+        // 无 UI + sidecar + 无记录：不可用。
+        let mut manifest = manifest_with_mention(None);
+        manifest.ui = None;
+        manifest.sidecar = Some(serde_json::from_value(sidecar_manifest.clone()).unwrap());
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Unavailable
+        );
+        // 无 UI + sidecar + 有效记录：直连（能力列表可为空——结构即通道）。
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, Some(Vec::new()));
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Sidecar
+        );
+        // 有 UI + sidecar：已验证声明接管才走 sidecar。
+        let mut manifest = manifest_with_mention(None);
+        manifest.sidecar = Some(serde_json::from_value(sidecar_manifest).unwrap());
+        let adapter =
+            TsPluginAdapter::from_manifest(&manifest, true, Some(vec!["tool:demo".to_string()]));
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Sidecar
+        );
+        assert_eq!(
+            adapter_route(&adapter, "other"),
+            crate::invocation::HandlerKind::Ui
+        );
+        // 记录缺失：有 UI 回退 UI。
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Ui
+        );
+    }
+
+    fn adapter_route(adapter: &TsPluginAdapter, tool_name: &str) -> crate::invocation::HandlerKind {
+        crate::invocation::select_ts_handler(
+            adapter
+                .sidecar_direct
+                .load(std::sync::atomic::Ordering::Acquire),
+            adapter
+                .has_sidecar
+                .load(std::sync::atomic::Ordering::Acquire),
+            adapter.has_ui.load(std::sync::atomic::Ordering::Acquire),
+            adapter.verified_sidecar.read().unwrap().as_deref(),
+            tool_name,
+        )
     }
 
     #[test]
