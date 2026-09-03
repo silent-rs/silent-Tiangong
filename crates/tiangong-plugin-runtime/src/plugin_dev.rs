@@ -1639,7 +1639,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 纯ui插件_构建指纹核验() {
         let root = tempfile::tempdir().unwrap();
-        require_native_sandbox!();
+        // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
         init_config_with_launcher(root.path());
         let id = "ui-fp-demo";
         make_project(root.path(), id);
@@ -1748,7 +1748,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 插件图标_安装与读取往返() {
         let root = tempfile::tempdir().unwrap();
-        require_native_sandbox!();
+        // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
         init_config_with_launcher(root.path());
         let id = "icon-demo";
         make_project(root.path(), id);

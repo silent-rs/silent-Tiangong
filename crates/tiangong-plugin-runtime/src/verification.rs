@@ -142,19 +142,29 @@ pub(crate) fn verify_installed_sidecar(
         bail!("插件 {} 未声明 sidecar，无需验证", installed.manifest.id);
     }
     let connection = crate::registry::ephemeral_sidecar_connection(storage_root, installed)?;
-    let capabilities = connection
+    // 清理守卫：验证与停止的结果共同决定成败——严格安装语义下，
+    // 临时验证进程停不干净（残留常驻进程/endpoint/文件占用）同样
+    // 不得放行安装，只记日志会让后续升级或安装冲突。
+    let verification_result = connection
         .verify_capabilities()
         .with_context(|| format!("插件 {} sidecar 完整验证失败", installed.manifest.id));
-    // 清理守卫：无论验证成败都停止验证进程——失败时提前返回的分支
-    // 同样不能把存活进程或 endpoint 文件留给后续安装与调用。
-    if let Err(stop_error) = connection.stop() {
-        tracing::warn!(
-            plugin_id = %installed.manifest.id,
-            %stop_error,
-            "停止 sidecar 验证进程失败"
-        );
-    }
-    let capabilities = capabilities?;
+    let stop_result = connection.stop();
+    let capabilities = match (verification_result, stop_result) {
+        (Ok(capabilities), Ok(())) => capabilities,
+        (Err(verify_error), Ok(())) => return Err(verify_error),
+        (Ok(_), Err(stop_error)) => {
+            return Err(stop_error).context(format!(
+                "插件 {} sidecar 验证成功，但验证进程清理失败",
+                installed.manifest.id
+            ));
+        }
+        (Err(verify_error), Err(stop_error)) => {
+            bail!(
+                "插件 {} sidecar 验证失败：{verify_error:#}；验证进程清理同时失败：{stop_error:#}",
+                installed.manifest.id
+            );
+        }
+    };
     let digest = artifact_digest(&installed.directory)?;
     Ok(SidecarVerification {
         plugin_id: installed.manifest.id.clone(),
@@ -167,6 +177,10 @@ pub(crate) fn verify_installed_sidecar(
 }
 
 /// 保存验证记录（宿主管理目录，随安装事务提交后调用）。
+///
+/// 原子落盘：同目录临时文件写全量内容并落盘后 rename 替换——升级
+/// 保存中途失败（磁盘满/IO 错误/写入中断）不会截断既有记录，回滚到
+/// 旧插件后旧记录依然完整有效。
 pub(crate) fn save_verification(
     plugin_directory: &Path,
     record: &SidecarVerification,
@@ -178,7 +192,36 @@ pub(crate) fn save_verification(
             .with_context(|| format!("创建验证记录目录失败: {}", parent.display()))?;
     }
     let raw = serde_json::to_vec_pretty(record).context("序列化验证记录失败")?;
-    std::fs::write(&path, raw).with_context(|| format!("写入验证记录失败: {}", path.display()))
+    // 临时文件与正式文件同目录（rename 不跨文件系统），随机编号避免
+    // 并发保存互相覆盖临时文件。
+    let temp_path = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "verification".to_string()),
+        scru128::new()
+    ));
+    let write_result = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&temp_path)
+            .with_context(|| format!("创建验证记录临时文件失败: {}", temp_path.display()))?;
+        std::io::Write::write_all(&mut file, &raw)
+            .with_context(|| format!("写入验证记录临时文件失败: {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("落盘验证记录临时文件失败: {}", temp_path.display()))?;
+        // Windows 上 std rename 走 MOVEFILE_REPLACE_EXISTING，可原子覆盖
+        // 已存在记录；正式文件只在完整写入并落盘后才被替换。
+        std::fs::rename(&temp_path, &path).with_context(|| {
+            format!(
+                "替换验证记录失败: {} -> {}",
+                temp_path.display(),
+                path.display()
+            )
+        })
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    write_result
 }
 
 /// 删除验证记录（卸载与回滚时清理）。
@@ -365,6 +408,55 @@ mod tests {
         assert!(
             load_valid_capabilities(&plugin, &manifest("demo", "0.1.0")).is_none(),
             "当前 Runtime 不支持的协议版本应失效"
+        );
+    }
+
+    /// 原子保存语义：保存新记录失败（目录只读）时旧记录必须原样完整，
+    /// 不得被截断或半写——升级回滚后旧插件仍能按旧记录通过校验。
+    #[test]
+    #[cfg(unix)]
+    fn failed_save_keeps_existing_record_intact() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join("demo");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("plugin.json"), "{}").unwrap();
+        let record = SidecarVerification {
+            plugin_id: "demo".into(),
+            plugin_version: "0.1.0".into(),
+            artifact_digest: artifact_digest(&plugin).unwrap(),
+            protocol_version: PROTOCOL_VERSION.into(),
+            capabilities: vec!["tool:demo".into()],
+            verified_at: "2026-09-03 12:00:00".into(),
+        };
+        save_verification(&plugin, &record).unwrap();
+        let before = std::fs::read(verification_path(&plugin).unwrap()).unwrap();
+
+        // 目录只读后保存新版本记录：临时文件创建失败，旧记录不得被碰。
+        let verifications = root.path().join(".verifications");
+        std::fs::set_permissions(&verifications, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let updated = SidecarVerification {
+            plugin_version: "0.2.0".into(),
+            ..record.clone()
+        };
+        assert!(save_verification(&plugin, &updated).is_err());
+        std::fs::set_permissions(&verifications, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let after = std::fs::read(verification_path(&plugin).unwrap()).unwrap();
+        assert_eq!(before, after, "保存失败不得改动既有记录");
+        assert!(
+            load_valid_capabilities(&plugin, &manifest("demo", "0.1.0")).is_some(),
+            "旧记录在失败的保存后依然有效"
+        );
+        // 失败保存不留临时文件残骸。
+        let leftovers: Vec<_> = std::fs::read_dir(&verifications)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "失败保存应清理临时文件: {leftovers:?}"
         );
     }
 }
