@@ -11629,6 +11629,7 @@ dependencies = [
  "sha2 0.11.0",
  "tiangong-config",
  "tiangong-llm",
+ "tiangong-plugin-command-protocol",
  "tiangong-plugin-runtime",
  "tokio",
  "tracing",

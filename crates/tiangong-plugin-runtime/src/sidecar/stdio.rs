@@ -221,6 +221,9 @@ impl StdioSidecarConnection {
             invocation_context,
             on_progress,
         );
+        if let Ok(mut child) = process.child.lock() {
+            terminate_process_tree(&process, &mut child);
+        }
         // 先清理进程，再获取 state 锁；读线程在发送关闭错误时可能短暂持有
         // pending 锁，反向持锁会让请求收尾与取消互相等待。
         let mut state = self
@@ -1463,7 +1466,7 @@ impl SidecarConnection for StdioSidecarConnection {
     fn handles_tool(&self, tool_name: &str) -> Result<bool> {
         let payload = match self.config.lifecycle {
             crate::manifest::SidecarLifecycle::OnDemand => {
-                let process = Arc::new(self.spawn()?);
+                let process = Arc::new(self.spawn(None)?);
                 let result = self.round_trip(
                     &process,
                     HANDSHAKE_OPERATION,

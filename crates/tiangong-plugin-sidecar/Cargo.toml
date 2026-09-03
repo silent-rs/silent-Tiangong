@@ -7,6 +7,7 @@ description = "插件 sidecar 通用运行库（单例选举、IPC server、端�
 publish = false
 
 [dependencies]
+tiangong-plugin-command-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }

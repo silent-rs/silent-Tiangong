@@ -90,6 +90,23 @@ fi
 case "$sub" in
   check)   cargo check "${args[@]}" ;;
   clippy)  cargo clippy "${args[@]}" --all-targets --tests --benches -- -D warnings ;;
-  nextest) cargo nextest run "${args[@]}" --no-tests pass ;;
+  nextest)
+    # Runtime 的真实 Launcher 测试会从 target/debug 直接启动这两个独立程序。
+    # 它们不是 Runtime 的依赖，nextest 不会自动重建；先构建可避免复用旧版
+    # command sidecar 后出现握手版本不一致。
+    prepare_runtime_test_binaries=false
+    for ((i = 0; i < ${#args[@]}; i += 2)); do
+      if [[ "${args[i]}" == "-p" && "${args[i + 1]}" == "tiangong-plugin-runtime" ]]; then
+        prepare_runtime_test_binaries=true
+        break
+      fi
+    done
+    if [[ "$prepare_runtime_test_binaries" == "true" ]]; then
+      cargo build -p tiangong-sandbox --bin tiangong-sandbox \
+        -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
+        -p tiangong-plugin-sidecar --bin test-stdio-host
+    fi
+    cargo nextest run "${args[@]}" --no-tests pass
+    ;;
   *) echo "pre-push: 未知子命令 '$sub'（应为 check/clippy/nextest）" >&2; exit 1 ;;
 esac

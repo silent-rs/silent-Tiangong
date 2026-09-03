@@ -8,14 +8,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use tiangong_plugin_command_protocol::{COMMAND_PROTOCOL_VERSION, PLUGIN_VERSION};
 use tiangong_plugin_runtime::sidecar::{EphemeralCommandConnection, SidecarInvocationContext};
 use tiangong_plugin_runtime::sidecar::{SidecarConfig, SidecarConnection, StdioSidecarConnection};
 
-/// command 沙箱模式的握手身份：与 command 协议 crate 声明保持一致。
-/// 通用 echo 模式使用 SidecarConfig 默认值（版本 0.0.0、业务协议 0）。
-const COMMAND_SIDECAR_VERSION: &str = "0.1.1";
+/// command 沙箱模式的传输协议版本。
 const COMMAND_TRANSPORT_PROTOCOL: &str = "0.1.0";
-const COMMAND_BUSINESS_PROTOCOL: u32 = 1;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
@@ -111,7 +109,7 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
 
     let config = SidecarConfig::new(
         "command",
-        COMMAND_SIDECAR_VERSION,
+        PLUGIN_VERSION,
         installed_sidecar,
         plugin_root.join("endpoint.json"),
         plugin_root.join("sidecar.log"),
@@ -119,7 +117,7 @@ fn run_command_sandbox(sidecar: PathBuf, state_dir: PathBuf) -> Result<()> {
         storage_root,
     )
     .with_timeouts(Duration::from_secs(15), Duration::from_secs(600))
-    .with_protocols(COMMAND_TRANSPORT_PROTOCOL, COMMAND_BUSINESS_PROTOCOL)
+    .with_protocols(COMMAND_TRANSPORT_PROTOCOL, COMMAND_PROTOCOL_VERSION)
     .with_sandbox_program_root(Some(plugin_root));
     let connection = EphemeralCommandConnection::new(config);
     connection.update_exec_env(BTreeMap::from([(
