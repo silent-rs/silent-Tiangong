@@ -223,7 +223,9 @@ jobs:
           cp "$(command -v node)" "$test_node"
           chmod 0755 "$test_node"
           echo "TIANGONG_NODE_PATH=$test_node" >> "$GITHUB_ENV"
-          cargo build -p tiangong-sandbox --bin tiangong-sandbox
+          cargo build -p tiangong-sandbox --bin tiangong-sandbox \
+            -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
+            -p tiangong-plugin-sidecar --bin test-stdio-host
       - name: Test crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}
