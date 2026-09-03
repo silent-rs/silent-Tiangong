@@ -2032,6 +2032,13 @@ async fn dispatch_operation(
             "sidecar_version": env!("CARGO_PKG_VERSION"),
             "protocol_version": PROTOCOL_VERSION,
             "business_protocol": 1,
+            "capabilities": [
+                "tool:run_command",
+                "tool:run_shell",
+                "tool:terminal_open",
+                "tool:terminal_send",
+                "tool:terminal_close",
+            ],
             "instance_id": format!("terminal-sidecar-{}", std::process::id()),
             "status": "ready",
         })),

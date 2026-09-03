@@ -164,7 +164,6 @@
     "business_protocol": 1,
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 300000,
-    "tools_direct": true,
     "lifecycle": "resident"
   }
 }
