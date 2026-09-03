@@ -727,6 +727,169 @@ await runSidecar({
         }
     }
 
+    /// 按需 sidecar 的沙箱写域随新版统一调用上下文的工作区构造：真实
+    /// 插件写会话工作区成功，写存储根之外的路径被沙箱拒绝。
+    #[test]
+    #[serial_test::serial]
+    fn 按需sidecar_新版上下文工作区成为沙箱写域() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        init_config_with_launcher(root.path());
+        let id = "workspace-probe";
+        make_project(root.path(), id);
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"workspace-probe","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"write_probe","description":"写域探测","input_schema":{"type":"object"},"timeout_ms":30000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+        )
+        .unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { writeFileSync } from 'node:fs';
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'workspace-probe',
+  dispatch(operation, payload) {
+    if (operation === 'write_probe') {
+      try {
+        writeFileSync(payload.target, 'probe');
+        return { payload: { ok: true } };
+      } catch (error) {
+        return { payload: { ok: false, error: String(error) } };
+      }
+    }
+    return { payload: {} };
+  },
+});
+"#,
+        )
+        .unwrap();
+        write_content_manifest(&release);
+        install(root.path(), id, None).expect("安装写域探测插件");
+
+        // 会话工作区与外部目录（存储根之外）。
+        let workspace = root.path().join("session-workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let probe_call = |target: &std::path::Path| tiangong_llm::tool::ToolCall {
+            id: "call-probe".to_string(),
+            name: "write_probe".to_string(),
+            arguments: json!({"target": target.display().to_string()}),
+        };
+        let invoke_probe = |call: tiangong_llm::tool::ToolCall| {
+            let invocation = crate::invocation::RuntimeInvocation::new(
+                id,
+                call,
+                "session-e2e",
+                workspace.display().to_string(),
+                "agent",
+                None,
+            );
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(
+                    crate::ts_plugin::invoke_sidecar_tool_with_invocation_for_test(
+                        id,
+                        invocation.call().clone(),
+                        invocation,
+                    ),
+                )
+        };
+
+        let result = invoke_probe(probe_call(&workspace.join("in-session.txt")));
+        assert!(result.ok, "写会话工作区应成功: {}", result.summary);
+        assert!(
+            workspace.join("in-session.txt").is_file(),
+            "真实插件产物应落在当前会话工作区"
+        );
+
+        // 写系统临时目录之外、工作区与存储根之外的路径（卷根目录）：
+        // 沙箱拒绝。系统 temp 目录是既有全局开放域（lance spill 等），
+        // 不作为越界目标。
+        let outside_target = if cfg!(unix) {
+            std::path::PathBuf::from("/tiangong-write-escape-probe.txt")
+        } else {
+            std::path::PathBuf::from("C:\\tiangong-write-escape-probe.txt")
+        };
+        let result = invoke_probe(probe_call(&outside_target));
+        assert!(
+            !result.ok,
+            "写工作区之外的路径应被沙箱拒绝: {}",
+            result.summary
+        );
+        assert!(!outside_target.exists());
+    }
+
+    /// sidecar 验证记录的安装链闭环：安装即生成记录（真实握手采集）、
+    /// 记录缺失时重新验证入口恢复、卸载清理记录。
+    #[test]
+    #[serial_test::serial]
+    fn sidecar验证记录_安装生成_重验恢复_卸载清理() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        init_config_with_launcher(root.path());
+        let id = "verify-record-demo";
+        make_project(root.path(), id);
+        make_node_sidecar_release(root.path(), id);
+        install(root.path(), id, None).expect("安装应完成 sidecar 完整验证并生成记录");
+
+        let plugin_directory = root.path().join("plugins").join(id);
+        let manifest = installed_plugin_manifest(root.path(), id).expect("已安装清单");
+        // 安装阶段的真实握手未声明工具能力：记录有效且能力为空（有 UI
+        // 插件据此保持 UI Handler 路由）。
+        assert_eq!(
+            crate::verification::load_valid_capabilities(&plugin_directory, &manifest),
+            Some(Vec::new()),
+            "安装应生成有效验证记录"
+        );
+
+        // 记录缺失（旧插件/被删除）：加载视为无效，重新验证入口恢复。
+        std::fs::remove_file(
+            plugin_directory
+                .parent()
+                .unwrap()
+                .join(".verifications")
+                .join(format!("{id}.json")),
+        )
+        .unwrap();
+        assert!(
+            crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_none()
+        );
+        crate::registry::reverify_plugin_sidecar(root.path(), id).expect("重新验证应恢复记录");
+        assert!(
+            crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_some(),
+            "重新验证后记录应恢复"
+        );
+
+        // 卸载：记录随插件清理。
+        crate::registry::uninstall_plugin(root.path(), id, false).expect("卸载插件");
+        assert!(
+            !plugin_directory
+                .parent()
+                .unwrap()
+                .join(".verifications")
+                .join(format!("{id}.json"))
+                .exists(),
+            "卸载应删除验证记录"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn 解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {

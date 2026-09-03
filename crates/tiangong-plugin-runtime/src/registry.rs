@@ -262,9 +262,9 @@ fn archive_legacy_directory(storage_root: &Path, legacy_id: &str) {
 
 #[derive(Clone)]
 pub(crate) struct InstalledPlugin {
-    directory: PathBuf,
+    pub(crate) directory: PathBuf,
     pub(crate) manifest: PluginManifest,
-    enabled: bool,
+    pub(crate) enabled: bool,
     pub(crate) signed_release: Option<SignedPluginRelease>,
 }
 
@@ -279,6 +279,8 @@ struct LoadedPlugin {
     instances: Vec<Weak<WasmPluginAdapter>>,
     ts_instances: Vec<Weak<TsPluginAdapter>>,
     sidecar: Option<Arc<dyn SidecarConnection>>,
+    /// 安装阶段验证记录中仍有效的 sidecar 能力（None=记录缺失或失效）。
+    verified_sidecar: Option<Vec<String>>,
     last_error: Option<String>,
     enabled: bool,
 }
@@ -446,6 +448,9 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
             plugins.insert(installed.manifest.id.clone(), loaded);
         }
     }
+    // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
+    // 不阻塞应用启动，也不在工具调用热路径同步执行。
+    crate::verification::reverify_installed_sidecars(storage_root);
 
     installed_plugins.len()
 }
@@ -649,7 +654,11 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
             })
             .unwrap_or_default();
         for adapter in &ts_instances {
-            adapter.reconfigure(&installed.manifest, installed.enabled);
+            let verified_sidecar = crate::verification::load_valid_capabilities(
+                &installed.directory,
+                &installed.manifest,
+            );
+            adapter.reconfigure(&installed.manifest, installed.enabled, verified_sidecar);
         }
         let mut loaded = load_plugin_record(storage_root, installed.clone());
         loaded.ts_instances = ts_instances.iter().map(Arc::downgrade).collect();
@@ -1409,6 +1418,10 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         Ok(connection) => (connection, None),
         Err(error) => (None, Some(error.to_string())),
     };
+    // 读取安装阶段保存的验证记录（校验 ID、版本、制品摘要与协议兼容）；
+    // 缺失或失效不在加载路径启动 sidecar 补验证——后台补验证负责恢复。
+    let verified_sidecar =
+        crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
     if installed.enabled
         && installed.manifest.should_preload_sidecar()
         && let Some(connection) = &sidecar
@@ -1449,6 +1462,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 instances: Vec::new(),
                 ts_instances: Vec::new(),
                 sidecar,
+                verified_sidecar,
                 last_error,
                 enabled: installed.enabled,
             }
@@ -1466,6 +1480,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 instances: Vec::new(),
                 ts_instances: Vec::new(),
                 sidecar,
+                verified_sidecar,
                 last_error: Some(error.to_string()),
                 enabled: installed.enabled,
             }
@@ -1474,7 +1489,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
 }
 
 fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
-    let (manifest, component, descriptor_id, sidecar, enabled, storage_access) = {
+    let (manifest, component, descriptor_id, sidecar, enabled, storage_access, verified_sidecar) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
@@ -1488,6 +1503,7 @@ fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plu
             loaded.sidecar.clone(),
             loaded.enabled,
             loaded.manifest.storage_access,
+            loaded.verified_sidecar.clone(),
         )
     };
 
@@ -1500,7 +1516,11 @@ fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plu
             .as_ref()
             .is_some_and(|prompts| !prompts.is_empty());
     if runtime == RuntimeKind::Desktop && has_ts_contributions {
-        let adapter = Arc::new(TsPluginAdapter::from_manifest(&manifest, enabled));
+        let adapter = Arc::new(TsPluginAdapter::from_manifest(
+            &manifest,
+            enabled,
+            verified_sidecar,
+        ));
         if let Ok(mut plugins) = loaded_plugins().lock()
             && let Some(loaded) = plugins.get_mut(plugin_id)
         {
@@ -1613,7 +1633,7 @@ fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
-fn set_last_error(plugin_id: &str, error: String) {
+pub(crate) fn set_last_error(plugin_id: &str, error: String) {
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(plugin) = plugins.get_mut(plugin_id)
     {
@@ -1719,6 +1739,26 @@ fn install_staged_plugin_inner(
             return Err(error);
         }
     };
+    // sidecar 完整验证（导入/安装/升级统一入口）：临时启动进程完成认证
+    // 握手、校验身份/版本/协议兼容并采集能力，随后立即清理临时进程。
+    // 验证失败则安装中止——新版本不得进入正式目录，升级保留旧版本。
+    let verification = if staged.manifest.sidecar.is_some() {
+        match crate::verification::verify_installed_sidecar(storage_root, &staged) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(
+                    plugin_id = %staged.manifest.id,
+                    lock_wait_ms,
+                    staged_validation_ms,
+                    %error,
+                    "插件 sidecar 完整验证失败，拒绝安装"
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let plugin_id = staged.manifest.id.clone();
     let destination = plugin_directory(storage_root, &staged.manifest.id);
     let lookup_started = Instant::now();
@@ -1761,6 +1801,21 @@ fn install_staged_plugin_inner(
     // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
     // 业务调用（打开终端 / 首次工具执行）上。
     if status.is_ok() {
+        // 验证记录与安装事务一起生效：仅提交成功后落盘（升级失败回滚
+        // 时旧记录与旧制品保持匹配）。保存失败不阻断安装——后台补验证
+        // 会重建记录。
+        if let Some(record) = verification
+            && let Err(error) = crate::verification::save_verification(
+                &plugin_directory(storage_root, &staged.manifest.id),
+                &record,
+            )
+        {
+            tracing::warn!(
+                plugin_id = %staged.manifest.id,
+                %error,
+                "保存 sidecar 验证记录失败，将由后台补验证重建"
+            );
+        }
         prewarm_plugin_sidecar(storage_root, &staged.manifest.id);
     }
     tracing::info!(
@@ -1937,6 +1992,48 @@ pub fn set_plugin_enabled(
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
 }
 
+/// 后台补验证/重新验证成功后，同步刷新注册表与存活 TS 适配器的验证能力
+///（已构建的 Core 实例立即按新能力路由，无需等待下一次 Core 构建）。
+pub(crate) fn refresh_verified_sidecar(plugin_id: &str, capabilities: Vec<String>) {
+    let (manifest, enabled, ts_instances) = {
+        let Ok(mut plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        loaded.verified_sidecar = Some(capabilities.clone());
+        (
+            loaded.manifest.clone(),
+            loaded.enabled,
+            loaded
+                .ts_instances
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .collect::<Vec<_>>(),
+        )
+    };
+    for adapter in ts_instances {
+        adapter.reconfigure(&manifest, enabled, Some(capabilities.clone()));
+    }
+}
+
+/// 重新验证插件 sidecar 并保存记录（后台补验证失败后的重试入口）。
+///
+/// 同步执行完整验证（有限时限），成功后立即刷新运行时能力；失败返回
+/// 具体原因且保留既有记录（若有）。
+pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if installed.manifest.sidecar.is_none() {
+        anyhow::bail!("插件 {plugin_id} 未声明 sidecar，无需验证");
+    }
+    let record = crate::verification::verify_installed_sidecar(storage_root, &installed)?;
+    crate::verification::save_verification(&installed.directory, &record)?;
+    refresh_verified_sidecar(plugin_id, record.capabilities);
+    list_plugin_status_without_preload(&installed.manifest)
+        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
+}
+
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
@@ -1952,6 +2049,11 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
     crate::ts_tools::cancel_plugin_calls(plugin_id);
     let transaction = transaction_directory(storage_root, "rollback")?;
     swap_with_rollback(&current.directory, &rollback, &transaction, current.enabled)?;
+
+    // 回滚后制品变化，现有验证记录（摘要锚定新制品）随之失效；删除记录
+    // 并触发补验证，为回滚版本重建能力快照。
+    crate::verification::remove_verification(&current.directory);
+    crate::verification::reverify_installed_sidecars(storage_root);
 
     let rolled_back = find_installed_plugin(storage_root, plugin_id)?;
     if let Err(error) = reload_plugin_inner(storage_root, &rolled_back) {
@@ -2027,6 +2129,8 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
     if let Err(error) = remove_directory_if_exists(&rollback) {
         tracing::warn!(path = %rollback.display(), %error, "插件已卸载，但清理回滚目录失败");
     }
+    // 验证记录随插件一起删除（记录锚定制品摘要，目录已不存在即失效）。
+    crate::verification::remove_verification(&installed.directory);
     remove_sidecar_connection(&installed.directory);
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.remove(plugin_id)
@@ -2648,7 +2752,7 @@ fn unload_plugin_wasm(plugin_id: &str) {
     std::thread::sleep(Duration::from_millis(50));
 }
 
-fn remove_sidecar_connection(directory: &Path) {
+pub(crate) fn remove_sidecar_connection(directory: &Path) {
     if let Ok(mut connections) = sidecar_connections().lock() {
         connections.retain(|key, _| key.directory != directory);
     }
@@ -2658,7 +2762,7 @@ fn remove_sidecar_connection(directory: &Path) {
 ///
 /// 无效插件不再静默丢弃：签名无效、沙箱声明越权、清单损坏的目录都会登记
 /// （含原因），随 `list_plugins` 展示，并支持经 `uninstall_plugin` 清理。
-fn discover_installed_plugins(
+pub(crate) fn discover_installed_plugins(
     storage_root: &Path,
 ) -> (Vec<InstalledPlugin>, Vec<InvalidPluginEntry>) {
     let plugins_dir = storage_root.join("plugins");

@@ -30,6 +30,30 @@ use crate::protocol::{
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 内部往返的响应等待策略。
+///
+/// 启动、Auth、完整验证握手与进程就绪握手必须使用 [`ResponseWait::Bounded`]；
+/// 业务 Handler 请求使用 [`ResponseWait::UntilCancelled`]——不设自动时限，
+/// 仅由用户取消、会话取消、插件卸载或宿主退出终止。显式策略代替按操作
+/// 名称隐式判断，避免新增调用点时意外引入无限等待。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResponseWait {
+    Bounded(Duration),
+    UntilCancelled,
+}
+
+impl ResponseWait {
+    /// 读取超时时间：无限等待按短轮询间隔唤醒（排空进度、感知断开）。
+    fn poll_interval(self) -> Duration {
+        match self {
+            Self::Bounded(timeout) => timeout.min(POLL_INTERVAL),
+            Self::UntilCancelled => POLL_INTERVAL,
+        }
+    }
+}
+
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 pub const PLUGIN_ID_ENV: &str = "TIANGONG_PLUGIN_ID";
 pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
@@ -179,8 +203,19 @@ pub trait SidecarConnection: Send + Sync {
 
     /// sidecar 握手声明的工具 Handler。能力名使用 `tool:<name>`；旧 sidecar
     /// 没有声明时返回 false，由兼容适配层继续使用既有 UI/WASM 路径。
+    ///
+    /// 仅供诊断；正式工具调用路由必须消费安装阶段保存的验证记录，不得
+    /// 在调用热路径启动 sidecar 探测能力。
     fn handles_tool(&self, _tool_name: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    /// 完整验证（导入/安装/升级/补验证）：确保 sidecar 可启动并完成认证
+    /// 握手，返回其声明的能力列表。身份、版本与协议兼容性校验由各传输
+    /// 实现的握手语义保证。默认实现仅确认进程可达，不采集能力。
+    fn verify_capabilities(&self) -> Result<Vec<String>> {
+        self.ensure_running()?;
+        Ok(Vec::new())
     }
 
     /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
@@ -782,10 +817,17 @@ impl ProcessSidecarConnection {
     }
 
     pub fn health_check(&self) -> Result<()> {
+        self.handshake_exchange().map(|_| ())
+    }
+
+    /// 就绪/验证握手：认证可达并校验身份、版本与协议兼容，返回握手响应
+    ///（含诊断能力列表）。等待受 `start_timeout` 有限保护。
+    fn handshake_exchange(&self) -> Result<HandshakeResponse> {
         let payload = self
             .invoke_protocol_once(
                 HANDSHAKE_OPERATION,
                 serde_json::json!({"plugin_id": self.config.plugin_id}),
+                ResponseWait::Bounded(self.config.start_timeout),
             )
             .map_err(classify_transport_error)?;
         let handshake: HandshakeResponse =
@@ -811,7 +853,7 @@ impl ProcessSidecarConnection {
             ))
             .into());
         }
-        Ok(())
+        Ok(handshake)
     }
 
     /// 只读取 endpoint 文件判断 sidecar 是否已有运行记录，不发起网络连接或健康检查。
@@ -870,10 +912,12 @@ impl ProcessSidecarConnection {
     }
 
     fn verify_plugin_identity(&self) -> Result<()> {
+        // 停止流程的握手只核对插件 ID：版本/协议不一致的旧进程同样要能停止。
         let payload = self
             .invoke_protocol_once(
                 HANDSHAKE_OPERATION,
                 serde_json::json!({"plugin_id": self.config.plugin_id}),
+                ResponseWait::Bounded(self.config.start_timeout),
             )
             .map_err(classify_transport_error)?;
         let handshake: HandshakeResponse =
@@ -969,8 +1013,9 @@ impl ProcessSidecarConnection {
         &self,
         operation: &str,
         payload: serde_json::Value,
+        wait: ResponseWait,
     ) -> Result<serde_json::Value> {
-        self.invoke_protocol_once_inner(operation, payload, None, &mut |_| {})
+        self.invoke_protocol_once_inner(operation, payload, None, wait, &mut |_| {})
     }
 
     fn invoke_protocol_once_with_progress(
@@ -979,21 +1024,34 @@ impl ProcessSidecarConnection {
         payload: serde_json::Value,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<serde_json::Value> {
-        self.invoke_protocol_once_inner(operation, payload, None, on_progress)
+        self.invoke_protocol_once_inner(
+            operation,
+            payload,
+            None,
+            ResponseWait::UntilCancelled,
+            on_progress,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn invoke_protocol_once_inner(
         &self,
         operation: &str,
         payload: serde_json::Value,
         invocation: Option<&crate::protocol::RequestInvocationContext>,
+        wait: ResponseWait,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
         let mut stream = connect(&endpoint, self.config.request_timeout)?;
+        // 等待策略显式作用于读取端：握手类往返有限等待，业务 Handler 由
+        // 取消终止；写入端始终保留 request_timeout 保护，防永久阻塞。
         stream
-            .set_read_timeout(None)
-            .with_context(|| "取消 sidecar Handler 读取时限失败")?;
+            .set_read_timeout(match wait {
+                ResponseWait::Bounded(timeout) => Some(timeout),
+                ResponseWait::UntilCancelled => None,
+            })
+            .with_context(|| "设置 sidecar 读取等待策略失败")?;
         stream
             .set_write_timeout(Some(self.config.request_timeout))
             .with_context(|| "设置 sidecar 写入保护时限失败")?;
@@ -1153,20 +1211,27 @@ impl SidecarConnection for ProcessSidecarConnection {
         })?;
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = self
-            .invoke_protocol_once_inner(operation, payload, Some(context), on_progress)
+            .invoke_protocol_once_inner(
+                operation,
+                payload,
+                Some(context),
+                ResponseWait::UntilCancelled,
+                on_progress,
+            )
             .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }
 
     fn handles_tool(&self, tool_name: &str) -> Result<bool> {
         self.ensure_running()?;
-        let payload = self.invoke_protocol_once(
-            HANDSHAKE_OPERATION,
-            serde_json::json!({"plugin_id": self.config.plugin_id}),
-        )?;
-        let handshake: HandshakeResponse =
-            serde_json::from_value(payload).with_context(|| "解析 sidecar 握手响应失败")?;
+        let handshake = self.handshake_exchange()?;
         Ok(handshake_handles_tool(&handshake, tool_name))
+    }
+
+    fn verify_capabilities(&self) -> Result<Vec<String>> {
+        self.ensure_running()?;
+        let handshake = self.handshake_exchange()?;
+        Ok(handshake.capabilities)
     }
 
     fn cancel_session(&self, session_id: &str) -> Result<()> {

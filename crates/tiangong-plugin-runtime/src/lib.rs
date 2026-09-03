@@ -38,6 +38,7 @@ pub mod slots;
 pub mod trust;
 mod ts_plugin;
 mod ts_tools;
+pub mod verification;
 
 pub use adapter::WasmPluginAdapter;
 pub use bridge::{
