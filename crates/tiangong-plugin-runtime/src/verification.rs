@@ -130,6 +130,10 @@ fn verification_is_valid(
 /// 临时启动 sidecar（或复用常驻进程）完成认证握手，校验身份、版本与
 /// 协议兼容后采集能力列表；随后计算制品摘要组装记录。调用方负责在
 /// 安装事务成功后保存记录。
+///
+/// 验证走专属临时连接，不进入运行时共享连接表：验证失败时坏连接与
+/// 存活进程不会留给业务调用；成功与失败路径都必须停止验证进程（TCP
+/// 形态还负责删除 endpoint）。
 pub(crate) fn verify_installed_sidecar(
     storage_root: &Path,
     installed: &crate::registry::InstalledPlugin,
@@ -137,12 +141,20 @@ pub(crate) fn verify_installed_sidecar(
     if installed.manifest.sidecar.is_none() {
         bail!("插件 {} 未声明 sidecar，无需验证", installed.manifest.id);
     }
-    let connection = crate::registry::sidecar_connection(storage_root, installed, false)?;
+    let connection = crate::registry::ephemeral_sidecar_connection(storage_root, installed)?;
     let capabilities = connection
         .verify_capabilities()
-        .with_context(|| format!("插件 {} sidecar 完整验证失败", installed.manifest.id))?;
-    // 验证连接以插件目录为键进入共享表；验证完成即清理，不留缓存项。
-    crate::registry::remove_sidecar_connection(&installed.directory);
+        .with_context(|| format!("插件 {} sidecar 完整验证失败", installed.manifest.id));
+    // 清理守卫：无论验证成败都停止验证进程——失败时提前返回的分支
+    // 同样不能把存活进程或 endpoint 文件留给后续安装与调用。
+    if let Err(stop_error) = connection.stop() {
+        tracing::warn!(
+            plugin_id = %installed.manifest.id,
+            %stop_error,
+            "停止 sidecar 验证进程失败"
+        );
+    }
+    let capabilities = capabilities?;
     let digest = artifact_digest(&installed.directory)?;
     Ok(SidecarVerification {
         plugin_id: installed.manifest.id.clone(),

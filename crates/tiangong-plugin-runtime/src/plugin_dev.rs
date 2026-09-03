@@ -488,6 +488,30 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 当前环境无法应用原生沙箱时的跳过原因（None 表示可用）。
+    ///
+    /// 天工终端/受限 CI 等外层 Seatbelt 环境内跑测试时，Launcher 无法
+    /// 再次嵌套应用沙箱而拒绝启动（退出码 78，安全设计而非缺陷），
+    /// kill 子进程同样被拒——真实沙箱链路测试在此类环境必然失败或
+    /// 卡死，统一跳过并打印原因。
+    fn native_sandbox_skip_reason() -> Option<String> {
+        match tiangong_sandbox::sandbox::availability() {
+            tiangong_sandbox::sandbox::SandboxAvailability::Available => None,
+            tiangong_sandbox::sandbox::SandboxAvailability::EnvironmentRestricted(reason)
+            | tiangong_sandbox::sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
+        }
+    }
+
+    /// 真实沙箱链路测试的环境门槛：不可用环境跳过当前测试。
+    macro_rules! require_native_sandbox {
+        () => {
+            if let Some(reason) = native_sandbox_skip_reason() {
+                eprintln!("跳过真实沙箱测试：当前环境无法应用原生沙箱：{reason}");
+                return;
+            }
+        };
+    }
+
     /// 初始化测试配置并准备测试 Launcher 信任链：sidecar 恒走沙箱
     ///（策略表不接受关闭输入），本组测试以测试密钥签名的真实 Launcher
     /// 覆盖安装/签名/调用契约的完整链路。
@@ -737,6 +761,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "workspace-probe";
         make_project(root.path(), id);
@@ -843,6 +868,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "verify-record-demo";
         make_project(root.path(), id);
@@ -857,6 +883,13 @@ await runSidecar({
             crate::verification::load_valid_capabilities(&plugin_directory, &manifest),
             Some(Vec::new()),
             "安装应生成有效验证记录"
+        );
+        // 严格安装语义：安装事务提交后当前进程的内存能力快照立即可见，
+        // 不等待应用重启或后台补验证。
+        assert_eq!(
+            crate::registry::loaded_verified_sidecar(id),
+            Some(Vec::new()),
+            "安装成功必须立即刷新当前进程的验证能力"
         );
 
         // 记录缺失（旧插件/被删除）：加载视为无效，重新验证入口恢复。
@@ -892,12 +925,61 @@ await runSidecar({
 
     #[test]
     #[serial_test::serial]
+    #[cfg(unix)]
+    fn 验证记录保存失败_安装失败并回滚() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
+        init_config_with_launcher(root.path());
+        let id = "verify-save-fail-demo";
+        make_project(root.path(), id);
+        make_node_sidecar_release(root.path(), id);
+        // 预先创建只读验证记录目录：sidecar 验证成功但保存必然失败，
+        // 严格安装语义要求整个安装事务失败并回滚插件目录。
+        let verifications = root.path().join("plugins").join(".verifications");
+        std::fs::create_dir_all(&verifications).unwrap();
+        let mut permissions = std::fs::metadata(&verifications).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&verifications, permissions).unwrap();
+
+        let error = install(root.path(), id, None).expect_err("验证记录保存失败必须使安装失败");
+        assert!(
+            error.to_string().contains("验证记录"),
+            "错误应指向验证记录保存失败: {error:#}"
+        );
+        assert!(
+            !root.path().join("plugins").join(id).exists(),
+            "失败安装必须回滚插件目录"
+        );
+        assert!(
+            crate::registry::loaded_verified_sidecar(id).is_none(),
+            "失败安装不得留下内存能力快照"
+        );
+
+        // 恢复可写后重装成功，内存快照立即生效。
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&verifications, permissions).unwrap();
+        install(root.path(), id, None).expect("恢复可写后安装应成功");
+        assert_eq!(
+            crate::registry::loaded_verified_sidecar(id),
+            Some(Vec::new()),
+            "重装成功后内存能力快照应立即可见"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn 解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "node-sc-demo";
         make_project(root.path(), id);
@@ -959,6 +1041,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let caller = "node-sc-auth-caller";
         make_project(root.path(), caller);
@@ -1031,6 +1114,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let caller = "node-sc-fp-caller";
         let target = "node-sc-fp-target";
@@ -1104,6 +1188,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let caller = "node-sc-revoke-caller";
         let target = "node-sc-revoke-target";
@@ -1149,6 +1234,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "node-sc-observer";
         make_project(root.path(), id);
@@ -1192,6 +1278,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "node-sc-third-party";
         make_project(root.path(), id);
@@ -1328,6 +1415,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "node-sc-mixed-trust";
         make_project(root.path(), id);
@@ -1426,6 +1514,7 @@ await runSidecar({
         }
         let root = tempfile::tempdir().unwrap();
         // 安装链的可用性探测读取全局模型配置；测试进程用隔离目录初始化。
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "plugin-creator";
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(id);
@@ -1473,6 +1562,7 @@ await runSidecar({
             return;
         }
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let creator = "plugin-creator";
         let dev_root = root.path().join(PLUGIN_DEV_DIR).join(creator);
@@ -1549,6 +1639,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 纯ui插件_构建指纹核验() {
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "ui-fp-demo";
         make_project(root.path(), id);
@@ -1598,6 +1689,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "pure-tool-demo";
         make_project(root.path(), id);
@@ -1656,6 +1748,7 @@ await runSidecar({
     #[serial_test::serial]
     fn 插件图标_安装与读取往返() {
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "icon-demo";
         make_project(root.path(), id);
@@ -1696,6 +1789,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "blocking-tool";
         make_project(root.path(), id);
@@ -1799,6 +1893,7 @@ await runSidecar({
             return;
         };
         let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
         init_config_with_launcher(root.path());
         let id = "concurrent-tool";
         make_project(root.path(), id);

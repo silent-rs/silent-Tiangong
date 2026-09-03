@@ -25,3 +25,5 @@ chrono = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+tiangong-sandbox = { workspace = true }
+serial_test = { workspace = true }

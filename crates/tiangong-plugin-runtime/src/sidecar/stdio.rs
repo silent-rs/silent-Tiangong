@@ -896,7 +896,7 @@ impl StdioSidecarConnection {
                 Ok(result) => {
                     return result.map_err(|message| {
                         let message = if message == "stdio sidecar 已关闭" {
-                            format!("{message}; {}", child_status(process))
+                            format!("{message}; {}", self.failure_detail(process))
                         } else {
                             message
                         };
@@ -918,7 +918,7 @@ impl StdioSidecarConnection {
                     remove_pending(process, &request_id);
                     return Err(SidecarInvokeError::Unavailable(format!(
                         "stdio sidecar 读通道已关闭; {}",
-                        child_status(process)
+                        self.failure_detail(process)
                     ))
                     .into());
                 }
@@ -992,6 +992,52 @@ fn child_status(process: &StdioProcess) -> String {
         Err(std::sync::TryLockError::WouldBlock) => "子进程仍在运行（状态查询忙）".to_string(),
         Err(std::sync::TryLockError::Poisoned(_)) => "无法读取子进程状态".to_string(),
     }
+}
+
+impl StdioSidecarConnection {
+    /// 进程异常断开时的诊断信息：退出状态 + sidecar 日志尾部。
+    ///
+    /// 子进程 stderr 全量重定向到日志文件——Launcher 拒绝启动（如嵌套
+    /// 沙箱不可用，退出码 78）、解释器启动失败等真实原因都在其中，
+    /// 不带日志尾部时错误只剩"已关闭; exit status: 78"无法归因。
+    fn failure_detail(&self, process: &StdioProcess) -> String {
+        let mut detail = child_status(process);
+        if let Some(tail) = sidecar_log_tail(&self.config.log) {
+            detail.push_str("; 日志尾部: ");
+            detail.push_str(&tail);
+        }
+        detail
+    }
+}
+
+/// 提取 sidecar 日志的最后几行非空内容（截断单行长度），用于错误归因。
+fn sidecar_log_tail(log: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 4096;
+    let mut file = std::fs::File::open(log).ok()?;
+    let size = file.metadata().ok()?.len();
+    let start = size.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut raw = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut raw).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    // 从截断点后半段开始取整行，避免输出半个 JSON。
+    let text = text.strip_prefix('\n').unwrap_or(&text);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail: Vec<String> = lines
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|line| {
+            let line = line.trim();
+            line.chars().take(400).collect::<String>()
+        })
+        .collect();
+    (!tail.is_empty()).then(|| tail.join(" | "))
 }
 
 /// 带看门狗的管道写入：写入超过 `timeout` 仍未完成时终止进程树，让
@@ -1167,12 +1213,18 @@ fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// 终止后等待子进程退出的上限：正常 SIGKILL 后毫秒级完成；超时说明
+/// 信号被外层环境保护拦截或进程陷入不可中断状态，放弃回收防止调用方
+/// 永久阻塞（所有 stop/取消/换代路径都持有 child 锁调用本函数）。
+const TERMINATE_WAIT_LIMIT: Duration = Duration::from_secs(5);
+
 fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
     #[cfg(unix)]
     let pid = child.id();
     #[cfg(unix)]
     unsafe {
         // 进程组 ID 在 spawn 前固定为直接子进程 PID；即使组长先退出，仍可清理后代。
+        // 组信号失败不阻断：直接子进程的回收由下方 child.kill 决定。
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
     // Windows 侧 Job Object 整组终止（KILL_ON_JOB_CLOSE + 显式 Terminate），
@@ -1181,8 +1233,28 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
     process.lifecycle.terminate(child);
     #[cfg(not(windows))]
     let _ = process;
-    let _ = child.kill();
-    let _ = child.wait();
+    // kill 被拒（如外层 Seatbelt 未放行 process-signal）时子进程不会退出，
+    // 此时 wait 必然永久挂起——放弃回收并保留进程状态查询能力。
+    if let Err(error) = child.kill()
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, pid = child.id(), "终止 stdio sidecar 子进程失败（信号可能被外层沙箱拦截），放弃等待其退出");
+        return;
+    }
+    let deadline = std::time::Instant::now() + TERMINATE_WAIT_LIMIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                tracing::warn!(
+                    pid = child.id(),
+                    "stdio sidecar 子进程终止后未在时限内退出，放弃等待"
+                );
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -2208,5 +2280,47 @@ mod sensitive_access_tests {
 
         apply_user_cache_write(&mut strict, true);
         assert!(strict.writable_roots().contains(&cache));
+    }
+}
+
+#[cfg(test)]
+mod log_tail_tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_log_tail_returns_last_nonempty_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("sidecar.log");
+        // 模拟 Launcher 拒绝启动场景：stderr JSON 落在日志末行。
+        std::fs::write(
+            &log,
+            "old line 1\nold line 2\nold line 3\nold line 4\n{\"launcher\":\"tiangong-sandbox\",\"error\":\"嵌套沙箱不可用\"}\n",
+        )
+        .unwrap();
+        let tail = sidecar_log_tail(&log).unwrap();
+        assert!(
+            tail.contains("tiangong-sandbox") && tail.contains("嵌套沙箱不可用"),
+            "尾部应携带最后的可归因内容: {tail}"
+        );
+        assert!(!tail.contains("old line 1"), "不应回溯过旧的行");
+    }
+
+    #[test]
+    fn sidecar_log_tail_handles_missing_and_empty_log() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(sidecar_log_tail(&root.path().join("absent.log")).is_none());
+        let log = root.path().join("empty.log");
+        std::fs::write(&log, "\n\n").unwrap();
+        assert!(sidecar_log_tail(&log).is_none());
+    }
+
+    #[test]
+    fn sidecar_log_tail_truncates_long_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("sidecar.log");
+        let long_line = "x".repeat(2000);
+        std::fs::write(&log, &long_line).unwrap();
+        let tail = sidecar_log_tail(&log).unwrap();
+        assert!(tail.chars().count() <= 400, "超长行应被截断");
     }
 }
