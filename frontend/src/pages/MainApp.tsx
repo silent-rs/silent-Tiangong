@@ -154,6 +154,11 @@ export function MainApp() {
   const programmaticResizeRef = useRef(false);
   const resizeLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    setForegroundPluginApps([]);
+    setWorkspaceMode('matrix');
+  }, [currentSessionId]);
+
   const lockResize = useCallback(() => {
     programmaticResizeRef.current = true;
     if (resizeLockTimerRef.current) clearTimeout(resizeLockTimerRef.current);
@@ -222,30 +227,6 @@ export function MainApp() {
     if (workspaceOpenRequestIdRef.current !== requestId) return;
   }, [ensureWorkspacePanelExpanded, setSidebarOpenByLayout]);
 
-  // 刷新会话内各类 App 的"已打开实例"标记（拓展区按钮绿点 + 矩阵图标绿点）。
-  // 数据源用持久化的 getSessionTabs：历史会话切回来时插件 runtime state 尚未
-  // 重建，持久化数据真实记录了该会话拥有的插件 App 实例。
-  // 拓展区面板挂载期间以 TabsContainer 的内存 tab 集合（onTabKindsChanged）
-  // 为唯一事实源：持久化读取可能撞上落盘竞态（新对话打开/首条消息落盘前
-  // 读到空），用它覆盖会把绿点误灭。本刷新只服务「面板从未挂载」的恢复。
-  const workspacePanelMountedRef = useRef(false);
-  workspacePanelMountedRef.current = workspacePanelMounted;
-  const refreshAgentActiveMarkers = useCallback(async (sessionId: string) => {
-    if (workspacePanelMountedRef.current) return;
-    const pluginApps = new Set<string>();
-    try {
-      const result = await api.getSessionTabs(sessionId);
-      for (const tab of result.tabs) {
-        if (tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id) {
-          pluginApps.add(`${tab.plugin_id}:${tab.contribution_id}`);
-        }
-      }
-    } catch {
-      // 会话 tabs 未就绪时静默
-    }
-    setForegroundPluginApps(Array.from(pluginApps));
-  }, []);
-
   const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
     if (!showWorkspacePanelRef.current) return;
     workspaceOpenRequestIdRef.current += 1;
@@ -269,12 +250,8 @@ export function MainApp() {
       setSidebarOpenByLayout(true);
     }
     workspaceExpandedForBrowserRef.current = false;
-    // 面板关闭后浏览器/终端 tab 仍然存活（仅隐藏），刷新"使用中"标记让圆点重新亮起
-    const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
-    if (sessionId) {
-      void refreshAgentActiveMarkers(sessionId);
-    }
-  }, [lockResize, refreshAgentActiveMarkers, setSidebarOpenByLayout, unlockResize]);
+    // 面板关闭后 tab 仍保存在 TabsContainer 内存中，仅隐藏。
+  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
   /// 拓展区按钮（三态切换，设计文档 6.7.2）：
   /// 面板展开 → 收起；面板收起且有已打开 tab → 回到上次 App 态；否则进入矩阵态。
@@ -283,31 +260,20 @@ export function MainApp() {
       void closeWorkspacePanel();
       return;
     }
-    void (async () => {
-      // 直接查持久化 tabs 判断入口（不依赖 sessionHasTabs 的刷新时机）：
-      // 有 tab → 聚焦上次活跃的 App 态；无 tab → 进入矩阵态。
-      const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
-      let lastKind: TabKind | null = null;
-      if (sessionId) {
-        try {
-          const result = await api.getSessionTabs(sessionId);
-          const activeTab = result.active_tab_id
-            ? result.tabs.find((tab) => tab.id === result.active_tab_id)
-            : undefined;
-          lastKind = activeTab?.kind ?? result.tabs[0]?.kind ?? null;
-        } catch {
-          // 会话 tabs 未就绪时按无已打开 App 处理
-        }
-      }
-      if (lastKind) {
-        void openWorkspacePanel(lastKind);
-      } else {
-        setWorkspaceMode('matrix');
-        setSidebarOpenByLayout(false);
-        void ensureWorkspacePanelExpanded();
-      }
-    })();
-  }, [closeWorkspacePanel, ensureWorkspacePanelExpanded, openWorkspacePanel, setSidebarOpenByLayout]);
+    if (runningPluginApps.length > 0) {
+      void openWorkspacePanel(workspaceTabKindRef.current);
+      return;
+    }
+    setWorkspaceMode('matrix');
+    setSidebarOpenByLayout(false);
+    void ensureWorkspacePanelExpanded();
+  }, [
+    closeWorkspacePanel,
+    ensureWorkspacePanelExpanded,
+    openWorkspacePanel,
+    runningPluginApps.length,
+    setSidebarOpenByLayout,
+  ]);
 
   /// 启动台按钮：App 态切回矩阵态（面板保持展开，App 实例隐藏保活）。
   /// 矩阵态下插件 webview 实例的隐藏由 TabsContainer 的 mode effect 处理。
@@ -362,16 +328,6 @@ export function MainApp() {
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   }, [closeWorkspacePanel]);
-
-  // 会话切换时刷新各 App 的"已打开实例"标记：新切到的会话可能已有 tab；
-  // 离开会话（新对话）时清零，避免绿点残留。
-  useEffect(() => {
-    if (!activeSessionId) {
-      setForegroundPluginApps([]);
-      return;
-    }
-    void refreshAgentActiveMarkers(activeSessionId);
-  }, [activeSessionId, refreshAgentActiveMarkers]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -490,14 +446,6 @@ export function MainApp() {
       }));
       guard();
 
-      // 浏览器 tab 增删/更新时刷新"使用中"标记。
-      // 标记语义：当前会话浏览器存在 tab（即浏览器在使用），且用户尚未打开浏览器面板。
-      track(await listen<{ session_id?: string }>('browser:tab_updated', (event) => {
-        const sessionId = browserPluginSessionId(event.payload?.session_id);
-        if (!sessionId || useStore.getState().activeSessionId !== sessionId) return;
-        void refreshAgentActiveMarkers(sessionId);
-      }));
-      guard();
       // 兼容旧宿主浏览器命令的 browser:open；插件工具（web_fetch / browser_open）
       // 已由浏览器插件通过 SDK 的 app.open 自行决定是否展开拓展区。
       track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
@@ -652,18 +600,6 @@ export function MainApp() {
         });
       }));
       guard();
-      // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
-      track(await listen<{ session_id: string }>('browser:agent_active', (event) => {
-        const { session_id } = event.payload;
-        // 插件面板事件带插件作用域（webview:<插件>:<会话>），反解对话 id
-        const target = session_id.startsWith('webview:')
-          ? session_id.split(':')[2] ?? ''
-          : session_id;
-        if (!target || useStore.getState().activeSessionId !== target) return;
-        void refreshAgentActiveMarkers(target);
-      }));
-      guard();
-
       track(await getCurrentWindow().onResized(async () => {
         if (programmaticResizeRef.current) return;
 
@@ -776,7 +712,6 @@ export function MainApp() {
     closeWorkspacePanel,
     lockResize,
     unlockResize,
-    refreshAgentActiveMarkers,
   ]);
 
   return (

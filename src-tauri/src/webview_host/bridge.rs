@@ -40,7 +40,6 @@ pub fn handle_webview_primitive(
             manager
                 .open(app, url, 60.0, 60.0, 1024.0, 720.0)
                 .map_err(|error| anyhow::anyhow!("创建 webview 失败：{error}"))?;
-            manager.persist_session_tabs();
             let snapshot = manager.snapshot_tabs();
             serde_json::json!({
                 "view_id": scope,
@@ -57,7 +56,6 @@ pub fn handle_webview_primitive(
             manager
                 .navigate_with_app(app, url)
                 .map_err(|error| anyhow::anyhow!("导航失败：{error}"))?;
-            manager.persist_session_tabs();
             let snapshot = manager.snapshot_tabs();
             serde_json::json!({
                 "view_id": scope,
@@ -143,7 +141,6 @@ pub fn handle_webview_primitive(
                     .tab_new(app, url)
                     .map_err(|error| anyhow::anyhow!("新建标签失败：{error}"))?,
             };
-            manager.persist_session_tabs();
             let snapshot = manager.snapshot_tabs();
             serde_json::json!({
                 "view_id": scope,

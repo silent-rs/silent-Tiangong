@@ -288,8 +288,8 @@ describe('MainApp sessions_updated scheduling contract', () => {
     await advance(120);
 
     expect(getSessionsMock).not.toHaveBeenCalled();
-    // 8 个基础监听 + app:open_plugin / app:close_plugin（app 原语落地）。
-    expect(registeredUnlisteners.length).toBe(10);
+    // stream + 6 个事件监听 + resize。
+    expect(registeredUnlisteners.length).toBe(8);
     for (const unlisten of registeredUnlisteners) {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
@@ -303,7 +303,6 @@ describe('MainApp StrictMode 异步监听注册竞态', () => {
     'sessions_updated',
     'desktop_notification_open_session',
     'browser:open',
-    'browser:agent_active',
   ] as const;
 
   function emitStreamDelta(messageId: string, text: string) {
@@ -395,7 +394,7 @@ describe('MainApp StrictMode 异步监听注册竞态', () => {
 
     await resolveAllPending();
 
-    // stream_event（onStreamEvent）+ 4 个 listen 事件，每类恰好一个 handler。
+    // stream_event（onStreamEvent）+ 3 个关键 listen 事件，每类恰好一个 handler。
     // 第一轮的孤儿监听已被 guard 放弃时取消，不会重复消费。
     expect(mocks.streamEventHandlers.size).toBe(1);
     for (const eventName of LISTENED_EVENTS) {

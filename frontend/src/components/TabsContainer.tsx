@@ -25,7 +25,7 @@ interface TabsContainerProps {
   /** 矩阵态下点击顶部标签：请求切回 App 态显示该实例（矩阵不随 active 变化）。 */
   onRequestAppMode?: () => void;
   /** tab 集合（按类型）变化通知：宿主「已打开」绿点的即时数据源，
-   *  覆盖新建/关闭/会话恢复，且不受持久化时序影响（新对话未落盘也生效）。 */
+   *  覆盖新建、关闭和会话切换。 */
   onTabKindsChanged?: (kinds: TabKind[], pluginApps: string[]) => void;
   /** 宿主下发的 App 实例命令（矩阵右键菜单：新建实例/关闭全部实例）。 */
   appCommand?: AppTabCommand | null;
@@ -37,14 +37,13 @@ interface TabsContainerProps {
 }
 
 const DEFAULT_BROWSER_URL = 'about:blank';
-const TABS_PERSIST_DEBOUNCE_MS = 500;
 
 /** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
 export interface AppTabCommand {
   kind: TabKind;
   action: 'close-all' | 'close-plugin' | 'open-plugin';
   version: number;
-  /** 命令所属会话；会话标签完成恢复且仍为当前会话时才执行。 */
+  /** 命令所属会话；仅在该会话仍为当前会话时执行。 */
   sessionId?: string;
   /** open-plugin 携带的三方 App 元数据；close-plugin 仅使用 pluginId。 */
   app?: {
@@ -112,54 +111,6 @@ function createWebviewPluginTab(
   };
 }
 
-async function reconcileWebviewPluginTabs(
-  sessionId: string,
-  sourceTabs: TabState[],
-  sourceActiveTabId: string | null,
-): Promise<{ tabs: TabState[]; activeTabId: string | null }> {
-  let tabs = [...sourceTabs];
-  let activeTabId = sourceActiveTabId;
-  const groups = new Map<string, TabState[]>();
-  for (const tab of sourceTabs.filter(isWebviewPluginTab)) {
-    const key = `${tab.plugin_id}:${tab.contribution_id}`;
-    groups.set(key, [...(groups.get(key) ?? []), tab]);
-  }
-
-  for (const group of groups.values()) {
-    const sample = group[0];
-    if (!sample?.plugin_id || !sample.contribution_id) continue;
-    try {
-      const snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
-        sample.plugin_id,
-        sessionId,
-        'webview.tabs',
-      );
-      const app: NonNullable<AppTabCommand['app']> = {
-        pluginId: sample.plugin_id,
-        contributionId: sample.contribution_id,
-        title: sample.plugin_id === 'browser' ? '浏览器' : sample.title,
-        sandbox: 'webview',
-        multi: true,
-      };
-      const runtimeTabs = (snapshot.tabs ?? []).map((page) => createWebviewPluginTab(page, app));
-      const groupIds = new Set(group.map((tab) => tab.id));
-      const insertAt = Math.max(0, tabs.findIndex((tab) => groupIds.has(tab.id)));
-      tabs = tabs.filter((tab) => !groupIds.has(tab.id));
-      tabs.splice(Math.min(insertAt, tabs.length), 0, ...runtimeTabs);
-      if (activeTabId && groupIds.has(activeTabId)) {
-        activeTabId = snapshot.active_tab_id
-          ?? runtimeTabs[0]?.id
-          ?? tabs[0]?.id
-          ?? null;
-      }
-    } catch (error) {
-      console.warn('恢复 webview 插件顶部标签失败：', error);
-    }
-  }
-
-  return { tabs, activeTabId };
-}
-
 function nowText(): string {
   return new Date().toISOString();
 }
@@ -197,22 +148,17 @@ export function TabsContainer({
   const [reloadGenerations, setReloadGenerations] = useState<Record<string, number>>({});
   const [tabs, setTabs] = useState<TabState[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
-  const [hydrateVersion, setHydrateVersion] = useState(0);
+  const [sessionResetVersion, setSessionResetVersion] = useState(0);
   const [activationRetryVersion, setActivationRetryVersion] = useState(0);
   const tabsRef = useRef<TabState[]>([]);
   const activeTabIdRef = useRef('');
-  const activeSessionIdRef = useRef<string | null>(null);
   const initialTabKindRef = useRef<TabKind>(initialTabKind);
   const isVisibleRef = useRef(isVisible);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
-  const hydratingSessionRef = useRef<string | null>(null);
-  const hydratedSessionRef = useRef<string | null>(null);
-  const persistTimerRef = useRef<number | null>(null);
-  const terminalSessionIdRef = useRef('');
+  const mountedSessionIdRef = useRef('');
   /** tab 栏横向滚动容器：滚轮转横向滚动 + 活跃 tab 自动滚入可视区。 */
   const tabsScrollRef = useRef<HTMLDivElement>(null);
   const terminalSessionId = activeSessionId || newConversationId || '';
-  terminalSessionIdRef.current = terminalSessionId;
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
@@ -224,12 +170,15 @@ export function TabsContainer({
     requestedInstanceId?: string,
   ) => {
     if (app.sandbox !== 'webview') return;
+    const sessionId = terminalSessionId;
+    if (!sessionId || mountedSessionIdRef.current !== sessionId) return;
     try {
       let snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
         app.pluginId,
-        terminalSessionId,
+        sessionId,
         'webview.tabs',
       );
+      if (mountedSessionIdRef.current !== sessionId) return;
       // 已有页面（如 Agent 后台操作中的标签）时直接聚焦（协同观察）；
       // 仅在无页面或矩阵「新建实例」（multi 且非聚焦语义）时新建空白页。
       if (
@@ -238,10 +187,11 @@ export function TabsContainer({
       ) {
         snapshot = await callWebviewPlugin<WebviewPluginSnapshot>(
           app.pluginId,
-          terminalSessionId,
+          sessionId,
           'webview.tabNew',
           { url: DEFAULT_BROWSER_URL },
         );
+        if (mountedSessionIdRef.current !== sessionId) return;
       }
 
       const instanceId = requestedInstanceId
@@ -280,7 +230,7 @@ export function TabsContainer({
     }
   }, [terminalSessionId]);
 
-  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点（即时、无持久化时序依赖）
+  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点。
   const onTabKindsChangedRef = useRef(onTabKindsChanged);
   onTabKindsChangedRef.current = onTabKindsChanged;
   const lastTabKindsRef = useRef<string>('');
@@ -304,23 +254,6 @@ export function TabsContainer({
   initialTabKindRef.current = initialTabKind;
   isVisibleRef.current = isVisible;
 
-  const restoreRuntimeForTabs = useCallback(async (
-    sessionId: string,
-    nextTabs: TabState[],
-    nextActiveTabId: string,
-    visible: boolean,
-  ) => {
-    if (!visible) {
-      hideWebviewPluginTabs(nextTabs, sessionId);
-      return;
-    }
-
-    const activeTab = nextTabs.find((tab) => tab.id === nextActiveTabId);
-    if (!activeTab || !isWebviewPluginTab(activeTab)) {
-      hideWebviewPluginTabs(nextTabs, sessionId);
-    }
-  }, [hideWebviewPluginTabs]);
-
   useEffect(() => {
     if (isVisible && mode === 'app') return;
     hideWebviewPluginTabs(tabsRef.current);
@@ -329,10 +262,6 @@ export function TabsContainer({
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
   }, [activeTabId]);
-
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
 
   // 鼠标滚轮（垂直）转为 tab 栏横向滚动；触控板横向滚动（deltaX）保持原生行为。
   useEffect(() => {
@@ -408,107 +337,29 @@ export function TabsContainer({
     };
   }, [terminalSessionId]);
 
-  const persistTabsNow = useCallback(() => {
-    if (persistTimerRef.current !== null) {
-      window.clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
-    }
-
-    const sessionId = activeSessionIdRef.current;
-    const currentTabs = tabsRef.current;
-    if (hydratingSessionRef.current !== null || !sessionId || currentTabs.length === 0) return;
-    if (hydratedSessionRef.current !== sessionId) return;
-
-    const activeId = activeTabIdRef.current || currentTabs[0]?.id || null;
-    void api.setSessionTabs(sessionId, currentTabs, activeId).catch(console.error);
-  }, []);
-
+  // 拓展区 Tab 仅驻留当前进程。会话变化时通知当前插件实例关闭并清空，
+  // 不读取旧会话记录，也不尝试恢复任何运行实例。
   useEffect(() => {
-    if (!activeSessionId) {
-      if (hydratedSessionRef.current !== newConversationId) {
-        hydratedSessionRef.current = newConversationId;
-        tabsRef.current = [];
-        activeTabIdRef.current = '';
-        setTabs([]);
-        setActiveTabId('');
-      }
-      return;
-    }
+    if (mountedSessionIdRef.current === terminalSessionId) return;
+    const previousSessionId = mountedSessionIdRef.current;
+    const closingTabs = tabsRef.current;
+    mountedSessionIdRef.current = terminalSessionId;
 
-    // 新对话预留 ID 与 Core 创建出的 Session ID 相同，已有本地 Tab 可直接落盘。
-    if (hydratedSessionRef.current === activeSessionId) {
-      if (tabsRef.current.length > 0) {
-        const activeId = activeTabIdRef.current || tabsRef.current[0]?.id || null;
-        void api.setSessionTabs(activeSessionId, tabsRef.current, activeId).catch(console.error);
-      }
-      return;
-    }
+    void Promise.allSettled(
+      closingTabs
+        .filter((tab) => tab.kind === 'plugin')
+        .map((tab) => runPluginBeforeClose(tab.id)),
+    );
+    if (previousSessionId) hideWebviewPluginTabs(closingTabs, previousSessionId);
 
-    if (hydratedSessionRef.current === activeSessionId) return;
-    if (hydratingSessionRef.current === activeSessionId) return;
-
-    const sessionId = activeSessionId;
-    hydratingSessionRef.current = sessionId;
-
-    let cancelled = false;
-    const hydrate = async () => {
-      try {
-        const sessionTabs = await api.getSessionTabs(sessionId);
-        if (cancelled) return;
-        // 丢弃旧内置终端/浏览器时代的 tab（无对应运行时，也不再渲染）。
-        const pluginTabs = sessionTabs.tabs.filter((tab) => tab.kind === 'plugin');
-        const reconciled = await reconcileWebviewPluginTabs(
-          sessionId,
-          pluginTabs,
-          sessionTabs.active_tab_id && pluginTabs.some((tab) => tab.id === sessionTabs.active_tab_id)
-            ? sessionTabs.active_tab_id
-            : null,
-        );
-        if (cancelled) return;
-        const nextTabs = reconciled.tabs;
-        const nextActiveTabId = normalizeActiveTabId(nextTabs, reconciled.activeTabId);
-
-        tabsRef.current = nextTabs;
-        activeTabIdRef.current = nextActiveTabId;
-        setTabs(nextTabs);
-        setActiveTabId(nextActiveTabId);
-
-        // await runtime 恢复完成后再标记已 hydrate（避免 activateOrCreateTab 竞态）
-        await restoreRuntimeForTabs(sessionId, nextTabs, nextActiveTabId, isVisibleRef.current);
-        if (cancelled) return;
-
-        // 只有完整成功后才标记已恢复
-        hydratingSessionRef.current = null;
-        hydratedSessionRef.current = sessionId;
-        setHydrateVersion((version) => version + 1);
-        setActivationRetryVersion((version) => version + 1);
-      } catch (err) {
-        if (cancelled) return;
-        console.error('恢复会话 Tab 失败：', err);
-        tabsRef.current = [];
-        activeTabIdRef.current = '';
-        setTabs([]);
-        setActiveTabId('');
-        // 持久化读取失败时以空标签进入可用态，不能让 App 打开命令永久
-        // 等待；后续新建标签仍会按正常路径重新落盘。
-        if (hydratingSessionRef.current === sessionId) {
-          hydratingSessionRef.current = null;
-        }
-        hydratedSessionRef.current = sessionId;
-        setHydrateVersion((version) => version + 1);
-        setActivationRetryVersion((version) => version + 1);
-      }
-    };
-
-    void hydrate();
-    return () => {
-      cancelled = true;
-      // cleanup：本次未完成，清除 hydrating 允许重试
-      if (hydratingSessionRef.current === sessionId) {
-        hydratingSessionRef.current = null;
-      }
-    };
-  }, [activeSessionId, newConversationId, restoreRuntimeForTabs]);
+    tabsRef.current = [];
+    activeTabIdRef.current = '';
+    setTabs([]);
+    setActiveTabId('');
+    setReloadGenerations({});
+    setSessionResetVersion((version) => version + 1);
+    setActivationRetryVersion((version) => version + 1);
+  }, [hideWebviewPluginTabs, terminalSessionId]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
@@ -531,10 +382,7 @@ export function TabsContainer({
     // （浏览器/终端已插件化，宿主不再默认开原生 App；显式打开走
     // openWorkspacePanel，会切到 App 态并推进 openRequestVersion 再触发本 effect）。
     if (mode === 'matrix') return;
-    if (hydratingSessionRef.current !== null) {
-      return;
-    }
-    const activationKey = `${terminalSessionId}:${hydrateVersion}:${initialTabKind}:${openRequestVersion}`;
+    const activationKey = `${terminalSessionId}:${sessionResetVersion}:${initialTabKind}:${openRequestVersion}`;
     if (lastInitialActivationKeyRef.current === activationKey) {
       return;
     }
@@ -543,7 +391,7 @@ export function TabsContainer({
   }, [
     activateOrCreateTab,
     activationRetryVersion,
-    hydrateVersion,
+    sessionResetVersion,
     initialTabKind,
     isVisible,
     mode,
@@ -607,7 +455,7 @@ export function TabsContainer({
       closedIndex = currentTabs.findIndex((tab) => tab.id === tabId);
       if (closedIndex === -1) return;
     }
-    // 普通 plugin（三方 App）实例无后端运行时，仅移除前端状态与持久化引用。
+    // 普通 plugin（三方 App）实例无后端运行时，仅移除当前内存状态。
 
     const nextTabs = currentTabs.filter((tab) => tab.id !== tabId);
     const currentActiveId = activeTabIdRef.current;
@@ -637,10 +485,6 @@ export function TabsContainer({
     setActiveTabId(nextActiveId);
 
     if (nextTabs.length === 0) {
-      const sessionId = activeSessionIdRef.current;
-      if (sessionId) {
-        void api.setSessionTabs(sessionId, [], null).catch(console.error);
-      }
       // 拓展区三态：全部 tab 关闭后回到 App 矩阵态（面板保持展开）；
       // 未提供矩阵回调时沿用旧行为直接收起。
       if (onShowMatrix) {
@@ -664,11 +508,12 @@ export function TabsContainer({
   const lastAppCommandVersionRef = useRef(0);
   useEffect(() => {
     if (!appCommand || appCommand.version === lastAppCommandVersionRef.current) return;
-    // 首次由工具自动拉起拓展区时，会话切换、标签恢复与 app.open 可能
-    // 同时发生。只在命令所属会话仍为当前会话且恢复完成后消费，避免刚
-    // 创建的 App 标签被稍后到达的恢复结果覆盖。
-    if (appCommand.sessionId && appCommand.sessionId !== terminalSessionId) return;
-    if (!terminalSessionId || hydratedSessionRef.current !== terminalSessionId) return;
+    // 只消费当前会话的命令；切换会话后旧命令不得重新建立标签。
+    if (appCommand.sessionId && appCommand.sessionId !== terminalSessionId) {
+      lastAppCommandVersionRef.current = appCommand.version;
+      return;
+    }
+    if (!terminalSessionId || mountedSessionIdRef.current !== terminalSessionId) return;
     lastAppCommandVersionRef.current = appCommand.version;
     if (appCommand.action === 'open-plugin' && appCommand.app) {
       const { pluginId, contributionId, title, sandbox, multi, instanceId, focusExisting } =
@@ -742,49 +587,10 @@ export function TabsContainer({
     activationRetryVersion,
     appCommand,
     handleCloseTab,
-    hydrateVersion,
+    sessionResetVersion,
     openWebviewPluginTab,
     terminalSessionId,
   ]);
-
-  useEffect(() => {
-    if (persistTimerRef.current !== null) {
-      window.clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
-    }
-
-    if (hydratingSessionRef.current !== null || !activeSessionId) return;
-    if (hydratedSessionRef.current !== activeSessionId) return;
-    if (tabs.length === 0) return;
-
-    const tabsToPersist = tabs;
-    const activeTabIdToPersist = activeTabId || tabsToPersist[0]?.id || null;
-    persistTimerRef.current = window.setTimeout(() => {
-      void api.setSessionTabs(activeSessionId, tabsToPersist, activeTabIdToPersist).catch(console.error);
-      persistTimerRef.current = null;
-    }, TABS_PERSIST_DEBOUNCE_MS);
-
-    return () => {
-      if (persistTimerRef.current !== null) {
-        window.clearTimeout(persistTimerRef.current);
-        persistTimerRef.current = null;
-      }
-    };
-  }, [activeSessionId, activeTabId, tabs]);
-
-  useEffect(() => {
-    const handlePageHide = () => persistTabsNow();
-    window.addEventListener('pagehide', handlePageHide);
-    window.addEventListener('beforeunload', handlePageHide);
-    document.addEventListener('visibilitychange', handlePageHide);
-    return () => {
-      persistTabsNow();
-      window.removeEventListener('pagehide', handlePageHide);
-      window.removeEventListener('beforeunload', handlePageHide);
-      document.removeEventListener('visibilitychange', handlePageHide);
-    };
-  }, [persistTabsNow]);
-
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-background">

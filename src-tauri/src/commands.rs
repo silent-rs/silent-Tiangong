@@ -12,8 +12,6 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::AgentInputKind;
 use tracing::warn;
 
-use crate::workspace_tabs::WorkspaceTabState as TabState;
-
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
 #[allow(dead_code)]
@@ -199,12 +197,6 @@ fn has_capability_in_state(
 // 会话管理
 // ============================================================================
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionTabsView {
-    pub tabs: Vec<TabState>,
-    pub active_tab_id: Option<String>,
-}
-
 /// 获取所有会话列表
 #[tauri::command]
 pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionListItem>, String> {
@@ -239,64 +231,6 @@ pub async fn get_session_meta(
     })
     .await
     .map_err(|error| format!("读取会话元数据失败：{error}"))?
-}
-
-/// 获取指定会话的统一工作区 Tab 元数据
-#[tauri::command]
-pub async fn get_session_tabs(
-    session_id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<SessionTabsView, String> {
-    let manager = state.core_manager.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<SessionTabsView> {
-        if !manager.session_exists(&session_id) {
-            return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-        }
-
-        // 终端/浏览器标签由各自插件持有并恢复；这里只合并布局层的
-        // plugin App 实例元数据（无插件侧存储，布局层是唯一真源）。
-        let layout = crate::workspace_tabs::load_layout(&session_id);
-        let available: Vec<_> = layout
-            .plugin_tabs
-            .iter()
-            .filter(|tab| tab.kind == crate::workspace_tabs::WorkspaceTabKind::Plugin)
-            .cloned()
-            .collect();
-        let (tabs, active_tab_id) = crate::workspace_tabs::reconcile_tabs(available, layout, &[]);
-        if let Err(error) =
-            crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
-        {
-            warn!(%error, session_id, "清理工作区标签页布局失败");
-        }
-
-        Ok(SessionTabsView {
-            tabs,
-            active_tab_id,
-        })
-    })
-    .await
-    .map_err(|error| format!("等待会话标签页加载失败：{error}"))?
-    .map_err(|error| error.to_string())
-}
-
-/// 写入指定会话的统一工作区 Tab 元数据
-#[tauri::command]
-pub async fn set_session_tabs(
-    session_id: String,
-    tabs: Vec<TabState>,
-    active_tab_id: Option<String>,
-    state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    let manager = state.core_manager.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        if !manager.session_exists(&session_id) {
-            return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-        }
-        crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
-    })
-    .await
-    .map_err(|error| format!("等待会话标签页保存失败：{error}"))?
-    .map_err(|error| error.to_string())
 }
 
 /// 切换到指定会话
@@ -2466,27 +2400,12 @@ pub async fn purge_all_deleted_sessions(
         }
 
         // 阶段 2：清理全部资源。
-        let mut error_msg: Option<String> = None;
-
-        // layout
-        if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
-            error_msg = Some(format!("删除布局失败：{e}"));
-        }
-        // webview 引擎
-        if error_msg.is_none() {
-            if let Some(host_state) = app.try_state::<crate::webview_host::WebviewHostState>() {
-                host_state.registry.destroy_session(session_id);
-            }
+        if let Some(host_state) = app.try_state::<crate::webview_host::WebviewHostState>() {
+            host_state.registry.destroy_session(session_id);
         }
         // media/teams（占用空间最大，必须删成功）
-        if error_msg.is_none() {
-            if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
-                error_msg = Some(e);
-            }
-        }
-
-        if let Some(msg) = error_msg {
-            warn!(%msg, session_id, "物理清理失败，保留 purging 记录供重试");
+        if let Err(error) = purge_session_resources(&storage_root, &media_root, session_id) {
+            warn!(%error, session_id, "物理清理失败，保留 purging 记录供重试");
             emit_error(&app_handle, index, total, session_id);
             continue;
         }

@@ -1,6 +1,6 @@
 /**
  * Agent 工具壳使用的宿主页面快照。页面与活跃状态以宿主 webview 原语为准，
- * 可见标签、切换、关闭和持久化统一由 App 拓展区顶部标签处理。
+ * 可见标签、切换和关闭统一由 App 拓展区顶部标签处理，状态仅驻留当前进程。
  */
 import type { HostBridge } from '@tiangong/plugin-sdk';
 

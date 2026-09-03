@@ -87,11 +87,6 @@ export interface TabState {
   sandbox?: SandboxKind;
 }
 
-export interface SessionTabs {
-  tabs: TabState[];
-  active_tab_id: string | null;
-}
-
 /** notice：系统发给用户的通知（如轮次失败原因），仅前端可见，不进模型上下文。 */
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'notice';
 export type MessagePhase = 'normal' | 'react' | 'summary' | 'compressedresume';
@@ -706,12 +701,6 @@ export const api = {
   // ----------------------------------------------------------------
   getSessions: (): Promise<Session[]> =>
     invoke('get_sessions'),
-
-  getSessionTabs: (sessionId: string): Promise<SessionTabs> =>
-    invoke('get_session_tabs', { sessionId }),
-
-  setSessionTabs: (sessionId: string, tabs: TabState[], activeTabId: string | null): Promise<void> =>
-    invoke('set_session_tabs', { sessionId, tabs, activeTabId }),
 
   switchSession: (sessionId: string): Promise<void> =>
     invoke('switch_session', { sessionId }),

@@ -15,7 +15,7 @@ pub struct BrowserTab {
     pub agent_domain: Option<String>,
 }
 
-/// 标签创建来源。旧持久化数据没有该字段时按用户标签处理。
+/// 标签创建来源。调用数据没有该字段时按用户标签处理。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserTabSource {

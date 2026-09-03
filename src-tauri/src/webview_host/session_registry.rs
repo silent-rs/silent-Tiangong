@@ -2,6 +2,7 @@
 //!
 //! 每个 Core（session）拥有独立的 [`BrowserState`]（webview / tab / 历史 / 轮询标志），
 //! 多个 session 的 webview 可并发存活，切换 session 时只切换可见性，不销毁 webview。
+//! 状态仅驻留当前应用进程，不从磁盘恢复标签。
 //!
 //! 设计镜像 terminal 插件的 `SessionPtyRegistry`：`sessions` HashMap 懒创建，
 //! `active_session_id` 跟踪当前可见的 session。`BrowserManager` 的方法通过
@@ -41,35 +42,16 @@ impl BrowserSessionRegistry {
         }
     }
 
-    /// 获取或懒创建指定 session 的 state。
-    ///
-    /// 首次访问时创建 `BrowserState` 并从持久化恢复标签元数据（应用重启
-    /// 后插件作用域经此取状态——此前只有内置面板切换路径会恢复，插件
-    /// 会话重启后标签丢失）。webview 实例不预建，显示时按需创建。
+    /// 获取或懒创建指定 session 的进程内 state。
     pub fn session_state(&self, session_id: &str) -> Arc<Mutex<BrowserState>> {
         let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
         sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
-                let state = Arc::new(Mutex::new(BrowserState::new_empty(
+                Arc::new(Mutex::new(BrowserState::new_empty(
                     session_id.to_string(),
                     self.shared.clone(),
-                )));
-                if let Ok(mut s) = state.lock() {
-                    if s.tabs.is_empty() {
-                        if let Ok(persisted) =
-                            crate::webview_host::session_store::BrowserSessionStore::load(
-                                session_id,
-                            )
-                        {
-                            if !persisted.tabs.is_empty() {
-                                s.tabs = persisted.tabs;
-                                s.active_tab_id = s.tabs.first().map(|tab| tab.id.clone());
-                            }
-                        }
-                    }
-                }
-                state
+                )))
             })
             .clone()
     }
@@ -133,13 +115,18 @@ impl BrowserSessionRegistry {
             .clone()
     }
 
-    /// 销毁指定 session 的全部状态（关闭 webview、清理）。
-    ///
-    /// session 被删除时调用。webview 的实际关闭由调用方在 drop 前显式处理。
-    /// 销毁指定 session：停轮询、关闭 webview、清理 state、删持久化文件。
+    /// 物理删除会话时销毁其全部 WebView 作用域并清理历史持久化文件。
     pub fn destroy_session(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
-        if let Some(state_arc) = sessions.remove(session_id) {
+        let scopes = sessions
+            .keys()
+            .filter(|scope| scope_belongs_to_session(scope, session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for scope in scopes {
+            let Some(state_arc) = sessions.remove(&scope) else {
+                continue;
+            };
             // 停轮询 + 关闭 webview + 清运行时 state
             let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
             s.poll_stop
@@ -156,16 +143,27 @@ impl BrowserSessionRegistry {
             .active_session_id
             .lock()
             .expect("active_session_id poisoned");
-        if active.as_deref() == Some(session_id) {
+        if active
+            .as_deref()
+            .is_some_and(|scope| scope_belongs_to_session(scope, session_id))
+        {
             *active = sessions.keys().next().cloned();
         }
-        // 删除持久化文件
+        // 新版本不再写入这些文件；物理删除会话时仍清理历史版本遗留数据。
         if let Err(error) =
             crate::webview_host::session_store::BrowserSessionStore::remove(session_id)
         {
             warn!(%error, session_id, "删除浏览器会话状态失败");
         }
     }
+}
+
+fn scope_belongs_to_session(scope: &str, session_id: &str) -> bool {
+    scope == session_id
+        || scope
+            .strip_prefix("webview:")
+            .and_then(|value| value.rsplit_once(':'))
+            .is_some_and(|(_, scoped_session_id)| scoped_session_id == session_id)
 }
 
 impl Default for BrowserSessionRegistry {
