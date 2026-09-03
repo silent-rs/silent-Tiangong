@@ -175,9 +175,6 @@ impl Drop for InvocationGuard {
 pub(crate) enum HandlerKind {
     Ui,
     Sidecar,
-    /// 无 UI 的 sidecar 插件缺少有效验证记录：sidecar 是唯一正式通道，
-    /// 未验证时返回明确的插件不可用错误（不在调用热路径补探测）。
-    Unavailable,
 }
 
 /// 验证能力是否声明接管目标工具：精确名 `tool:<name>` 或全量 `tool:*`。
@@ -189,10 +186,10 @@ pub(crate) fn capabilities_handle_tool(capabilities: &[String], tool_name: &str)
 
 /// Runtime 内唯一的 Handler 选择入口（纯同步，不启动进程）。
 ///
-/// 路由只消费安装阶段保存的验证能力：无 UI sidecar 由结构决定直连
-///（记录无效时不可用）；有 UI 的插件仅在已验证 sidecar 声明接管目标
-/// 工具时走 sidecar，否则保持旧 UI Handler——验证记录缺失或失效时
-/// 有 UI 插件回退 UI，无 UI 插件返回不可用。
+/// 路由消费最近一次成功握手保存的验证能力：无 UI sidecar 由结构决定
+/// 直连——记录缺失（安装后运行检查未完成或失败）时仍走 sidecar 真实
+/// 调用，运行异常以真实错误返回；有 UI 的插件仅在已验证 sidecar 声明
+/// 接管目标工具时走 sidecar，记录缺失或未声明时回退 UI Handler。
 pub(crate) fn select_ts_handler(
     sidecar_direct: bool,
     has_sidecar: bool,
@@ -201,10 +198,7 @@ pub(crate) fn select_ts_handler(
     tool_name: &str,
 ) -> HandlerKind {
     if sidecar_direct {
-        return match verified_capabilities {
-            Some(_) => HandlerKind::Sidecar,
-            None => HandlerKind::Unavailable,
-        };
+        return HandlerKind::Sidecar;
     }
     if has_ui
         && has_sidecar
@@ -298,14 +292,15 @@ mod tests {
     #[test]
     fn handler_selection_consumes_verified_capabilities_only() {
         let verified = vec!["tool:demo".to_string()];
-        // 无 UI sidecar：结构直连；无有效记录时不可用。
+        // 无 UI sidecar：结构直连；记录缺失时仍走 sidecar 真实调用，
+        // 运行异常以真实错误呈现（安装后运行检查语义）。
         assert_eq!(
             select_ts_handler(true, true, false, Some(&verified), "demo"),
             HandlerKind::Sidecar
         );
         assert_eq!(
             select_ts_handler(true, true, false, None, "demo"),
-            HandlerKind::Unavailable
+            HandlerKind::Sidecar
         );
         // 有 UI：声明接管走 sidecar，未声明或记录缺失回退 UI。
         assert_eq!(

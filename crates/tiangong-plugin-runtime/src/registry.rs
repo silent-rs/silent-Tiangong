@@ -322,7 +322,7 @@ fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
 }
 
 /// 测试辅助：读取已加载插件的验证能力快照，供安装/升级后内存状态
-/// 立即可见性的断言使用（严格安装语义）。
+/// 立即可见性的断言使用（安装后运行检查语义）。
 #[cfg(test)]
 pub(crate) fn loaded_verified_sidecar(plugin_id: &str) -> Option<Vec<String>> {
     loaded_plugins()
@@ -334,6 +334,16 @@ pub(crate) fn loaded_verified_sidecar(plugin_id: &str) -> Option<Vec<String>> {
                 .map(|loaded| loaded.verified_sidecar.clone())
         })
         .flatten()
+}
+
+/// 测试辅助：读取已加载插件的异常信息（运行检查失败时登记）。
+#[cfg(test)]
+pub(crate) fn loaded_last_error(plugin_id: &str) -> Option<String> {
+    loaded_plugins().lock().ok().and_then(|plugins| {
+        plugins
+            .get(plugin_id)
+            .and_then(|loaded| loaded.last_error.clone())
+    })
 }
 
 fn invalid_plugins() -> &'static Mutex<Vec<InvalidPluginEntry>> {
@@ -1754,26 +1764,10 @@ fn install_staged_plugin_inner(
             return Err(error);
         }
     };
-    // sidecar 完整验证（导入/安装/升级统一入口）：临时启动进程完成认证
-    // 握手、校验身份/版本/协议兼容并采集能力，随后立即清理临时进程。
-    // 验证失败则安装中止——新版本不得进入正式目录，升级保留旧版本。
-    let verification = if staged.manifest.sidecar.is_some() {
-        match crate::verification::verify_installed_sidecar(storage_root, &staged) {
-            Ok(record) => Some(record),
-            Err(error) => {
-                tracing::warn!(
-                    plugin_id = %staged.manifest.id,
-                    lock_wait_ms,
-                    staged_validation_ms,
-                    %error,
-                    "插件 sidecar 完整验证失败，拒绝安装"
-                );
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
+    // sidecar 运行检查移至安装事务之后（尽力而为）：插件包静态校验合法
+    // 即完成安装；解释器/沙箱/握手等运行异常交给插件状态管理——插件
+    // 管理中显示错误、有 UI 回退 UI、无 UI 调用返回真实运行错误，
+    // 用户可重试、停用或删除，不因暂时性运行异常回滚安装。
     let plugin_id = staged.manifest.id.clone();
     let destination = plugin_directory(storage_root, &staged.manifest.id);
     let lookup_started = Instant::now();
@@ -1806,23 +1800,15 @@ fn install_staged_plugin_inner(
                 );
             }
             ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
-            replace_installed_plugin(
-                storage_root,
-                staged_path,
-                &current,
-                staged.manifest.clone(),
-                verification.as_ref(),
-            )
+            replace_installed_plugin(storage_root, staged_path, &current, staged.manifest.clone())
         } else {
-            install_new_plugin(
-                storage_root,
-                staged_path,
-                staged.manifest.clone(),
-                verification.as_ref(),
-            )
+            install_new_plugin(storage_root, staged_path, staged.manifest.clone())
         }
     })();
     let switch_ms = switch_started.elapsed().as_millis() as u64;
+    if status.is_ok() && staged.manifest.sidecar.is_some() {
+        post_install_sidecar_check(storage_root, &plugin_id);
+    }
     // sidecar 二进制是新落盘文件：macOS 首次执行有一次性的安全评估
     // （实测约 1.6s）。导入完成后后台预热，避免这笔开销落到首次
     // 业务调用（打开终端 / 首次工具执行）上。
@@ -1841,6 +1827,36 @@ fn install_staged_plugin_inner(
         "插件安装运行时阶段完成"
     );
     status
+}
+
+/// 安装/升级成功后的 sidecar 运行检查（尽力而为）：临时启动进程完成
+/// 认证握手并采集能力，成功则保存能力记录并刷新当前进程的运行状态；
+/// 失败（解释器缺失、沙箱不可用、握手失败、清理失败等）仅登记插件
+/// 错误状态——插件管理中显示异常，有 UI 插件回退 UI Handler，无 UI
+/// 插件调用返回真实运行错误，用户可重试、停用或删除。不回滚安装。
+fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
+    let Ok(installed) = find_installed_plugin(storage_root, plugin_id) else {
+        return;
+    };
+    let check_result = crate::verification::verify_installed_sidecar(storage_root, &installed)
+        .and_then(|record| {
+            crate::verification::save_verification(&installed.directory, &record)?;
+            Ok(record)
+        });
+    match check_result {
+        Ok(record) => {
+            refresh_verified_sidecar(plugin_id, record.capabilities);
+            tracing::info!(plugin_id, "安装后 sidecar 运行检查完成，能力记录已生效");
+        }
+        Err(error) => {
+            tracing::warn!(
+                plugin_id,
+                %error,
+                "安装后 sidecar 运行检查失败：插件保持安装，标记运行异常（可重试验证）"
+            );
+            set_last_error(plugin_id, error.to_string());
+        }
+    }
 }
 
 /// Launcher 就绪后的常驻 sidecar 补预热：启动期 Launcher 未就绪时预热
@@ -2231,7 +2247,6 @@ fn install_new_plugin(
     storage_root: &Path,
     staged_path: &Path,
     manifest: PluginManifest,
-    verification: Option<&crate::verification::SidecarVerification>,
 ) -> Result<PluginStatus> {
     let destination = plugin_directory(storage_root, &manifest.id);
     // 目录已存在但插件未被注册（如签名校验失败被忽略的旧版残留）：
@@ -2245,13 +2260,7 @@ fn install_new_plugin(
                     enabled: true,
                     signed_release: None,
                 };
-                return replace_installed_plugin(
-                    storage_root,
-                    staged_path,
-                    &existing,
-                    manifest,
-                    verification,
-                );
+                return replace_installed_plugin(storage_root, staged_path, &existing, manifest);
             }
             Err(_) => {
                 // 无法解析的坏残留：经事务目录中转后删除，再全新安装。
@@ -2311,39 +2320,12 @@ fn install_new_plugin(
         }
         bail!("安装插件 {} 失败: {error}", manifest.id);
     }
-    // 验证记录是安装事务的一部分（严格安装语义）：保存失败必须让安装
-    // 失败——无 UI 插件唯一执行通道依赖验证记录，"安装成功但记录缺失"
-    // 会让它进入不可用状态。
-    if let Some(record) = verification
-        && let Err(error) = crate::verification::save_verification(&destination, record)
-    {
-        let _ = stop_connection_for_directory(&destination);
-        let rollback = std::fs::rename(&destination, staged_path);
-        if let (Ok(()), Some(retained)) = (&rollback, &retained) {
-            let _ = move_entry(staged_path, retained, "data");
-            let _ = std::fs::rename(retained, &destination);
-        }
-        if let Err(rename_error) = rollback {
-            bail!(
-                "安装插件 {} 失败: 保存 sidecar 验证记录失败: {error}; 回滚目录也失败: {rename_error}",
-                manifest.id
-            );
-        }
-        bail!(
-            "安装插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}",
-            manifest.id
-        );
-    }
-    let verified_capabilities = verification.map(|record| record.capabilities.clone());
+    // sidecar 运行检查与能力记录由 post_install_sidecar_check 在安装
+    // 事务提交后统一处理（尽力而为，失败不回滚）。
     loaded_plugins()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
         .insert(manifest.id.clone(), loaded);
-    // 安装成功立即刷新内存能力快照：当前进程的混合插件路由不再等待
-    // 后台补验证或重启。
-    if let Some(capabilities) = verified_capabilities {
-        refresh_verified_sidecar(&manifest.id, capabilities);
-    }
     if let Some(retained) = retained
         && let Err(error) = remove_directory_if_exists(&retained)
     {
@@ -2358,7 +2340,6 @@ fn replace_installed_plugin(
     staged_path: &Path,
     current: &InstalledPlugin,
     manifest: PluginManifest,
-    verification: Option<&crate::verification::SidecarVerification>,
 ) -> Result<PluginStatus> {
     stop_loaded_sidecar(&current.manifest.id)?;
     // 升级同样补齐连接表兜底，确保旧 sidecar 进程被停止后再替换二进制文件，
@@ -2416,36 +2397,12 @@ fn replace_installed_plugin(
         set_last_error(&current.manifest.id, error.to_string());
         return Err(error).with_context(|| format!("升级插件 {} 失败", current.manifest.id));
     }
-    // 验证记录是升级事务的一部分：保存失败必须恢复旧版本——新版本
-    // 制品缺记录（无 UI 插件不可用）或与旧记录不匹配都不能算升级成功。
-    if let Some(record) = verification
-        && let Err(error) = crate::verification::save_verification(&current.directory, record)
-    {
-        tracing::error!(plugin_id = %current.manifest.id, %error, "保存 sidecar 验证记录失败，恢复旧版本");
-        let _ = stop_connection_for_directory(&current.directory);
-        let restore_result =
-            restore_upgrade_directories(staged_path, &current.directory, &rollback)
-                .and_then(|()| restore_saved_rollback(&rollback, saved_rollback.as_deref()))
-                .and_then(|()| reload_plugin_inner(storage_root, current));
-        if let Err(restore_error) = restore_result {
-            bail!(
-                "升级插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}; 恢复旧版本失败: {restore_error}",
-                current.manifest.id
-            );
-        }
-        bail!(
-            "升级插件 {} 失败: 保存 sidecar 验证记录失败: {error:#}",
-            current.manifest.id
-        );
-    }
+    // sidecar 运行检查与能力记录由 post_install_sidecar_check 在升级
+    // 提交后统一处理（尽力而为，失败保留新版本并标记运行异常）。
     if let Some(saved) = saved_rollback
         && let Err(error) = remove_directory_if_exists(&saved)
     {
         tracing::warn!(path = %saved.display(), %error, "插件已升级，但清理旧回滚目录失败");
-    }
-    // 升级成功立即刷新内存能力快照，路由不再等待后台补验证或重启。
-    if let Some(record) = verification {
-        refresh_verified_sidecar(&manifest.id, record.capabilities.clone());
     }
     list_plugin_status_without_preload(&manifest)
         .ok_or_else(|| anyhow::anyhow!("插件 {} 升级后状态丢失", manifest.id))
