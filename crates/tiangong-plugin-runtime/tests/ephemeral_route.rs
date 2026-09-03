@@ -1677,6 +1677,11 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
         eprintln!("跳过资源泄漏测试：target/debug/tiangong-command-sidecar 尚未构建");
         return;
     };
+    // 每轮 stop 都必须真实终止常驻进程（stop 失败即测试失败）：
+    // 受限环境拒信号时跳过。
+    if !can_signal_children() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
