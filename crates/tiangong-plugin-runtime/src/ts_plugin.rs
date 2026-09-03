@@ -200,9 +200,6 @@ impl ToolOverrideHandler for TsPluginAdapter {
                         )
                         .await,
                     ),
-                    crate::invocation::HandlerKind::Unavailable => {
-                        Some(sidecar_unverified_failure(&plugin_id))
-                    }
                     crate::invocation::HandlerKind::Ui => Some(
                         crate::ts_tools::execute(
                             plugin_id,
@@ -433,21 +430,6 @@ fn sidecar_tool_failure(plugin_id: &str, message: impl std::fmt::Display) -> Too
     }
 }
 
-/// 无 UI sidecar 插件缺少有效验证记录时的明确错误。不在工具调用热路径
-/// 同步补验证——由后台补验证或重新验证入口恢复。
-fn sidecar_unverified_failure(plugin_id: &str) -> ToolResult {
-    ToolResult {
-        ok: false,
-        summary: format!(
-            "插件 {plugin_id} 的 sidecar 尚未完成安装验证或验证已失效，插件暂不可用；请等待后台补验证完成或重新验证插件"
-        ),
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: 1,
-        execution: None,
-    }
-}
-
 impl PromptSectionProvider for TsPluginAdapter {
     fn prompt_sections(&self) -> Vec<String> {
         if !self.is_enabled() {
@@ -619,14 +601,15 @@ mod tests {
     fn 路由消费验证能力_缺失时按结构回退() {
         let sidecar_manifest: serde_json::Value =
             serde_json::from_str(r#"{"runtime":"node","entry":"sidecar/main.mjs"}"#).unwrap();
-        // 无 UI + sidecar + 无记录：不可用。
+        // 无 UI + sidecar + 无记录：仍走 sidecar 真实调用——运行异常以
+        // 真实错误返回（安装后运行检查语义，不再以记录缺失拒绝执行）。
         let mut manifest = manifest_with_mention(None);
         manifest.ui = None;
         manifest.sidecar = Some(serde_json::from_value(sidecar_manifest.clone()).unwrap());
         let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
         assert_eq!(
             adapter_route(&adapter, "demo"),
-            crate::invocation::HandlerKind::Unavailable
+            crate::invocation::HandlerKind::Sidecar
         );
         // 无 UI + sidecar + 有效记录：直连（能力列表可为空——结构即通道）。
         let adapter = TsPluginAdapter::from_manifest(&manifest, true, Some(Vec::new()));

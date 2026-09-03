@@ -208,9 +208,7 @@ pub(crate) fn save_verification(
             .with_context(|| format!("写入验证记录临时文件失败: {}", temp_path.display()))?;
         file.sync_all()
             .with_context(|| format!("落盘验证记录临时文件失败: {}", temp_path.display()))?;
-        // Windows 上 std rename 走 MOVEFILE_REPLACE_EXISTING，可原子覆盖
-        // 已存在记录；正式文件只在完整写入并落盘后才被替换。
-        std::fs::rename(&temp_path, &path).with_context(|| {
+        replace_verification_file(&temp_path, &path).with_context(|| {
             format!(
                 "替换验证记录失败: {} -> {}",
                 temp_path.display(),
@@ -222,6 +220,56 @@ pub(crate) fn save_verification(
         let _ = std::fs::remove_file(&temp_path);
     }
     write_result
+}
+
+/// 用临时文件原子替换正式记录：Unix rename 即原子覆盖；Windows 走
+/// ReplaceFileW（失败保留原文件，语义与项目内 Launcher 更新的替换
+/// 模式一致）。
+fn replace_verification_file(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::rename(from, to)?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        replace_file_windows(from, to)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (from, to);
+        bail!("当前平台不支持验证记录替换")
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(from: &Path, to: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
+    if !to.exists() {
+        std::fs::rename(from, to)?;
+        return Ok(());
+    }
+    let from_wide = from
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let to_wide = to.as_os_str().encode_wide().chain([0]).collect::<Vec<_>>();
+    if unsafe {
+        ReplaceFileW(
+            to_wide.as_ptr(),
+            from_wide.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    } == 0
+    {
+        return Err(anyhow!(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// 删除验证记录（卸载与回滚时清理）。
@@ -236,7 +284,7 @@ pub(crate) fn remove_verification(plugin_directory: &Path) {
 
 /// 后台补验证：为有 sidecar 但没有有效验证记录的已安装插件补做完整
 /// 验证。成功保存记录；失败记录插件错误状态（有 UI 的插件运行时回退
-/// UI Handler，无 UI 的插件调用时返回不可用错误）。
+/// UI Handler，无 UI 的插件调用时返回真实运行错误）。
 ///
 /// 不阻塞调用方；并发调用由全局防抖合并。
 pub fn reverify_installed_sidecars(storage_root: &Path) {

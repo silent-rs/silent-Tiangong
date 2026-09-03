@@ -926,7 +926,7 @@ await runSidecar({
     #[test]
     #[serial_test::serial]
     #[cfg(unix)]
-    fn 验证记录保存失败_安装失败并回滚() {
+    fn 验证记录保存失败_插件保留并标记异常() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -937,37 +937,40 @@ await runSidecar({
         let id = "verify-save-fail-demo";
         make_project(root.path(), id);
         make_node_sidecar_release(root.path(), id);
-        // 预先创建只读验证记录目录：sidecar 验证成功但保存必然失败，
-        // 严格安装语义要求整个安装事务失败并回滚插件目录。
+        // 预先创建只读验证记录目录：sidecar 运行检查成功但记录保存必然
+        // 失败。运行异常不回滚安装——插件保留、标记异常，用户可重试。
         let verifications = root.path().join("plugins").join(".verifications");
         std::fs::create_dir_all(&verifications).unwrap();
         let mut permissions = std::fs::metadata(&verifications).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&verifications, permissions).unwrap();
 
-        let error = install(root.path(), id, None).expect_err("验证记录保存失败必须使安装失败");
+        let result = install(root.path(), id, None).expect("记录保存失败不得回滚安装");
+        assert_eq!(result.plugin_id, id);
         assert!(
-            error.to_string().contains("验证记录"),
-            "错误应指向验证记录保存失败: {error:#}"
-        );
-        assert!(
-            !root.path().join("plugins").join(id).exists(),
-            "失败安装必须回滚插件目录"
+            root.path().join("plugins").join(id).exists(),
+            "插件目录必须保留"
         );
         assert!(
             crate::registry::loaded_verified_sidecar(id).is_none(),
-            "失败安装不得留下内存能力快照"
+            "记录保存失败时不得有内存能力快照"
+        );
+        let last_error =
+            crate::registry::loaded_last_error(id).expect("运行检查失败应登记插件异常状态");
+        assert!(
+            last_error.contains("验证记录"),
+            "异常状态应指向记录保存失败: {last_error}"
         );
 
-        // 恢复可写后重装成功，内存快照立即生效。
+        // 恢复可写后重新验证：记录恢复，能力快照立即生效。
         use std::os::unix::fs::PermissionsExt;
         let permissions = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(&verifications, permissions).unwrap();
-        install(root.path(), id, None).expect("恢复可写后安装应成功");
+        crate::registry::reverify_plugin_sidecar(root.path(), id).expect("重新验证应恢复记录");
         assert_eq!(
             crate::registry::loaded_verified_sidecar(id),
             Some(Vec::new()),
-            "重装成功后内存能力快照应立即可见"
+            "重新验证后内存能力快照应立即可见"
         );
     }
 
