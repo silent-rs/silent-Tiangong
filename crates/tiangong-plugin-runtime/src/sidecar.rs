@@ -132,8 +132,9 @@ pub trait SidecarConnection: Send + Sync {
         self.invoke(operation, payload)
     }
 
-    /// 带宿主权威调用上下文的请求。普通 sidecar 忽略上下文；command 的
-    /// 一次性连接覆写本方法，并拒绝缺少上下文的执行请求。
+    /// 带宿主权威调用上下文的请求。Runtime 的 stdio 按需连接会在启动沙箱时
+    /// 使用其中的工作区；command 的一次性连接还会据此构造完整执行封套。
+    /// 其他普通连接默认忽略上下文。
     fn invoke_with_context(
         &self,
         operation: &str,
