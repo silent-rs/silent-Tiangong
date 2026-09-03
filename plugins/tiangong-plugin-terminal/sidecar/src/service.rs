@@ -1,6 +1,6 @@
 //! PTY 会话服务：请求-响应操作 + 输出流通知。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -265,6 +265,13 @@ struct CloseRequest {
     #[serde(default)]
     session_id: Option<String>,
     scope_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalGcRequest {
+    session_id: String,
+    live_terminal_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -625,6 +632,68 @@ impl TerminalService {
         }
         if !has_other_scope_sessions {
             persist::clear_scope_log(&request.scope_id).context("清理终端恢复记录失败")?;
+        }
+        Ok(OkResponse { ok: true })
+    }
+
+    /// 前端在标签新建或关闭后提交当前会话的完整存活集合；当次回收集合外
+    /// 的 PTY。调用只影响指定 scope，不增加后台周期任务。
+    fn gc_terminals(&self, request: TerminalGcRequest) -> Result<OkResponse> {
+        let scope_id = request.session_id.trim();
+        if scope_id.is_empty() {
+            bail!("terminalGc 需要有效的 session_id");
+        }
+        if request.live_terminal_ids.len() > 1024 {
+            bail!("terminalGc 的 live_terminal_ids 数量超过上限 1024");
+        }
+        let mut live = HashSet::with_capacity(request.live_terminal_ids.len());
+        for terminal_id in request.live_terminal_ids {
+            let terminal_id = terminal_id.trim();
+            if terminal_id.is_empty() {
+                bail!("terminalGc 的 live_terminal_ids 不能包含空编号");
+            }
+            live.insert(terminal_id.to_string());
+        }
+
+        let (removed, has_remaining) = {
+            let mut sessions = self.sessions.lock().expect("会话表锁损坏");
+            let stale_ids = sessions
+                .iter()
+                .filter(|(session_id, session)| {
+                    session.scope_id.as_deref() == Some(scope_id) && !live.contains(*session_id)
+                })
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            let removed = stale_ids
+                .into_iter()
+                .filter_map(|session_id| {
+                    sessions
+                        .remove(&session_id)
+                        .map(|session| (session_id, session))
+                })
+                .collect::<Vec<_>>();
+            let has_remaining = sessions
+                .values()
+                .any(|session| session.scope_id.as_deref() == Some(scope_id));
+            (removed, has_remaining)
+        };
+
+        let removed_ids = removed
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<HashSet<_>>();
+        if !removed_ids.is_empty() {
+            self.active_tools
+                .lock()
+                .expect("活动工具表锁损坏")
+                .retain(|_, terminal_id| !removed_ids.contains(terminal_id));
+        }
+        for (session_id, mut session) in removed {
+            let _ = session.killer.kill();
+            tracing::info!(session_id, scope_id, "Terminal GC 已回收孤立终端");
+        }
+        if !has_remaining && live.is_empty() {
+            persist::clear_scope_log(scope_id).context("Terminal GC 清理恢复记录失败")?;
         }
         Ok(OkResponse { ok: true })
     }
@@ -2125,6 +2194,11 @@ async fn dispatch_operation(
                 serde_json::from_value(payload).context("terminalClose 参数无效")?;
             Ok(serde_json::to_value(service.close_session(request)?)?)
         }
+        "terminalGc" => {
+            let request: TerminalGcRequest =
+                serde_json::from_value(payload).context("terminalGc 参数无效")?;
+            Ok(serde_json::to_value(service.gc_terminals(request)?)?)
+        }
         // 宿主实例移除兜底：前端标签关闭时若插件页面未就绪（冷启动窗口）
         // 或已卸载，关闭前通知无人接收；宿主在移除标签后对本操作补发一次，
         // 保证终端被回收。幂等（页面已关闭过则无副作用），归属校验同
@@ -3007,5 +3081,74 @@ mod tests {
             })
             .await;
         assert!(unknown.success, "未知编号兜底应幂等成功");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_gc_按前端存活集合回收且不跨会话() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawn = |session_id: &str, scope_id: &str| SpawnRequest {
+            session_id: Some(session_id.to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(cwd.path().to_string_lossy().to_string()),
+            scope_id: Some(scope_id.to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        };
+        service
+            .spawn_session(spawn("terminal-live", "session-a"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-closed", "session-a"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-other-scope", "session-b"))
+            .unwrap();
+        service
+            .with_session("terminal-closed", |session| {
+                session.phase = SessionPhase::Running;
+                Ok(())
+            })
+            .unwrap();
+        service
+            .active_tools
+            .lock()
+            .unwrap()
+            .insert("request-a".to_string(), "terminal-closed".to_string());
+
+        let response = service
+            .dispatch(Request::new(
+                "terminalGc",
+                serde_json::json!({
+                    "session_id": "session-a",
+                    "live_terminal_ids": ["terminal-live"],
+                }),
+            ))
+            .await;
+        assert!(response.success, "Terminal GC 对账失败: {response:?}");
+
+        assert!(service.with_session("terminal-live", |_| Ok(())).is_ok());
+        assert!(service.with_session("terminal-closed", |_| Ok(())).is_err());
+        assert!(
+            service
+                .with_session("terminal-other-scope", |_| Ok(()))
+                .is_ok(),
+            "GC 不得影响其他会话"
+        );
+        assert!(service.active_tools.lock().unwrap().is_empty());
+        service
+            .kill_session(SessionIdRequest {
+                session_id: "terminal-live".to_string(),
+            })
+            .unwrap();
+        service
+            .kill_session(SessionIdRequest {
+                session_id: "terminal-other-scope".to_string(),
+            })
+            .unwrap();
     }
 }

@@ -18,6 +18,8 @@
 - `run_command` / `run_shell` 保持通过终端执行；执行前先检测当前会话终端状态，优先选择已打开且空闲的终端。
 - 当前会话没有可用终端，或所有已打开终端都处于繁忙状态时，系统自动创建新终端执行本次命令。
 - 如果本次命令是在自动新建的终端中执行，工具结果必须明确告知 Agent 没有复用旧终端。
+- 用户关闭终端标签时前端必须立即完成关闭，不等待后台 PTY 退出。
+- Terminal GC 必须回收前端已明确关闭、后台仍存活的终端。
 - 本地验证至少通过 `cargo fmt -- --check`、`cargo check --workspace`、`yarn build`。
 
 ## 设计原则
@@ -26,6 +28,7 @@
 - **插件运行实例独立管理**：宿主不再根据会话记录重建顶部 Tab；终端插件管理 PTY，浏览器插件管理 WebView。
 - **前端只协调**：前端负责当前进程内的展示、切换和关闭，不承担跨会话持久化。
 - **Agent 命令落在可见终端**：Desktop 模式下普通命令执行优先落在当前会话的存活终端里，用户可以看到命令过程。
+- **关闭与回收解耦**：前端标签关闭是用户操作，不能被后台异常阻断；Terminal sidecar 负责最终回收对应 PTY。
 
 ## 范围
 
@@ -253,6 +256,16 @@ interface TabState {
 - xterm 实例可以由组件局部维护，也可以由池按复合 id 缓存。
 - 如果多个终端内容常驻挂载，后端必须使用打开计数而不是布尔值。
 
+### Terminal GC
+
+- GC 请求固定为 `{ session_id: string, live_terminal_ids: string[] }`：`session_id` 是天工会话编号，`live_terminal_ids` 是该会话前端仍存活的终端编号全集。
+- Terminal 页面按会话维护仍存在的终端标签编号集合；新建或关闭标签时向 sidecar 提交 `{ session_id, live_terminal_ids }` 完整集合。
+- 标签切换、会话切换、拓展区隐藏和普通容器卸载不得从存活集合移除终端。
+- sidecar 收到集合后立即结束同一会话中不在集合内的 PTY，并从运行表移除；不增加周期扫描任务。
+- 存活集合只能影响所属会话，不得跨会话关闭终端。
+- GC 完成后若该会话已无其他终端，清理对应恢复日志。
+- 显式 `terminalClose` 仅用于工具主动关闭；前端强制关闭不依赖 GC 请求成功，失败由下一次新建或关闭触发重新对账。
+
 ### BrowserTabContent
 
 位置：`frontend/src/components/BrowserTabContent.tsx`
@@ -314,3 +327,6 @@ interface TabState {
 - [ ] 当前会话所有终端繁忙时，`run_command` / `run_shell` 会新建终端执行。
 - [ ] 新建终端执行时，工具结果会告知 Agent 本次使用了新终端。
 - [ ] `terminal_send` 可以写入当前选中的可用终端。
+- [x] 用户可强制关闭后台异常的终端标签，前端关闭不被 sidecar 错误阻断。
+- [x] Terminal GC 在新建或关闭标签的对账中回收前端已关闭但后台仍存活的 PTY。
+- [x] 切换会话或暂时隐藏标签不会触发 Terminal GC。

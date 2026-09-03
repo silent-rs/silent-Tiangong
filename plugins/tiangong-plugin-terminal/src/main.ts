@@ -1,6 +1,11 @@
 import { createTiangongBridge, getShadowHostRuntime, type HostBridge } from '@tiangong/plugin-sdk';
 import { createTerminalView, type TerminalViewHandle } from './terminal-view';
-import { sidecarCall, terminalSessions } from './shell';
+import {
+  closeFrontendTerminalTab,
+  registerFrontendTerminalTab,
+  sidecarCall,
+  terminalSessions,
+} from './shell';
 
 /**
  * 入口：初始化桥接 → 终端视图（纯显示与输入）。
@@ -212,19 +217,17 @@ async function bootstrap() {
     terminalView = null;
     if (bridgeRef === bridge) bridgeRef = null;
   });
-  runtime?.registerBeforeClose(async () => {
+  runtime?.registerBeforeClose(() => {
     const scopeId = currentScope;
+    const sessionId = terminalView?.sessionId() || currentAppInstance;
     ++switchTicket;
     currentScope = '';
     currentAppInstance = '';
-    await Promise.allSettled([...switchTasks]);
-    const sessionId = terminalView?.sessionId();
-    if (!scopeId) return;
-    await sidecarCall(bridge, 'terminalClose', {
-      scope_id: scopeId,
-      ...(sessionId ? { session_id: sessionId } : {}),
-    });
-    if (sessionId) terminalSessions.delete(sessionId);
+    if (!scopeId || !sessionId) return;
+    terminalSessions.delete(sessionId);
+    // 用户关闭标签必须立即成功。提交剩余存活集合触发 Terminal GC；失败
+    // 不阻断前端移除，下一次标签新建或关闭会重新对账。
+    closeFrontendTerminalTab(bridge, scopeId, sessionId);
   });
 
   // 会话上下文驱动终端跟随：无活跃会话时挂全局终端，会话出现后切换。
@@ -252,9 +255,16 @@ async function bootstrap() {
   };
   const applyContext = (context: NonNullable<typeof runtime>['context']) => {
     if (!active) return;
-    // 后台工具接应实例永远不可见：只执行 shell.ts 的工具订阅，不创建
-    // xterm 或默认 PTY。普通前台标签首次显示时再初始化，之后隐藏保活。
-    if (!terminalView && context.app?.visible === false) return;
+    const scopeId = context.session?.id ?? GLOBAL_SCOPE;
+    const appInstance = context.app?.instance_id ?? '';
+    registerFrontendTerminalTab(bridge, scopeId, appInstance);
+    // 带精确实例编号的后台标签虽不创建 xterm，仍记录其归属；用户未激活
+    // 就强制关闭时可登记 GC。无实例编号的通用隐藏壳不会关联任何 PTY。
+    if (!terminalView && context.app?.visible === false) {
+      currentScope = scopeId;
+      currentAppInstance = appInstance;
+      return;
+    }
     if (!terminalView) {
       terminalView = createTerminalView(host, bridge, {
         onSessionExit(sessionId) {
