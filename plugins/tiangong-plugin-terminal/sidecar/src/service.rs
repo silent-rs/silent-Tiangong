@@ -30,11 +30,18 @@ const COMMAND_POLL_INTERVAL_MS: u64 = 50;
 const SHELL_READY_TIMEOUT_SECS: u64 = 3;
 /// 最后一个 PTY 会话结束后保留短暂窗口，让关闭响应完成并容纳紧邻的新建请求。
 const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
+/// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间。
+const FRONTEND_ATTACH_WAIT_MS: u64 = 1_000;
 /// 内部命令边界标记公共前缀；这些行不得显示给用户。
 const MARKER_PREFIX: &str = "__TIANGONG_";
 
 pub struct TerminalService {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    /// 已完成事件订阅、PTY 绑定并通过 terminalAttach 确认的终端。
+    frontend_attached: Mutex<HashSet<String>>,
+    /// 已被前端至少一次确认存在的标签。并行挂载时集合会逐步变完整，只有
+    /// 曾确认存在、后来消失的终端才允许被 GC 回收。
+    confirmed_frontend_tabs: Mutex<HashMap<String, HashSet<String>>>,
     last_activity: Arc<Mutex<Option<Instant>>>,
     sequence: Mutex<u64>,
     spawn_lock: Mutex<()>,
@@ -57,7 +64,7 @@ struct PtySession {
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// 同一终端内的 Agent 命令串行执行，避免边界标记相互穿插。
     exec_lock: Arc<tokio::sync::Mutex<()>>,
-    /// 宿主会话标识：终端跟会话走与恢复的锚点（同 scope 取最新会话）。
+    /// 宿主会话标识：终端归属与隔离的锚点（同 scope 取最新会话）。
     scope_id: Option<String>,
     /// 创建序号：单调递增，同 scope 多会话时分辨最新。
     sequence: u64,
@@ -276,6 +283,13 @@ struct TerminalGcRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TerminalBindingRequest {
+    scope_id: String,
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FindRequest {
     scope_id: String,
     /// App 工具打开时携带的 PTY 实例编号；存在时必须精确附着。
@@ -299,6 +313,8 @@ impl TerminalService {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            frontend_attached: Mutex::new(HashSet::new()),
+            confirmed_frontend_tabs: Mutex::new(HashMap::new()),
             last_activity: Arc::new(Mutex::new(None)),
             sequence: Mutex::new(0),
             spawn_lock: Mutex::new(()),
@@ -356,6 +372,56 @@ impl TerminalService {
 
     fn mark_activity(&self) {
         *self.last_activity.lock().expect("终端活动时间锁损坏") = Some(Instant::now());
+    }
+
+    fn mark_frontend_attached(&self, session_id: &str) {
+        self.frontend_attached
+            .lock()
+            .expect("前端附着表锁损坏")
+            .insert(session_id.to_string());
+    }
+
+    fn attach_frontend(&self, request: TerminalBindingRequest) -> Result<OkResponse> {
+        let session_id = request.session_id.trim();
+        let scope_id = request.scope_id.trim();
+        if session_id.is_empty() || scope_id.is_empty() {
+            bail!("终端附着状态需要有效的 scope_id 与 session_id");
+        }
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
+        if session.scope_id.as_deref() != Some(scope_id) {
+            bail!("终端 {session_id} 不属于当前会话");
+        }
+        drop(sessions);
+
+        self.mark_frontend_attached(session_id);
+        self.confirmed_frontend_tabs
+            .lock()
+            .expect("前端终端标签表锁损坏")
+            .entry(scope_id.to_string())
+            .or_default()
+            .insert(session_id.to_string());
+        Ok(OkResponse { ok: true })
+    }
+
+    async fn wait_for_frontend_attach(&self, session_id: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(FRONTEND_ATTACH_WAIT_MS);
+        loop {
+            if self
+                .frontend_attached
+                .lock()
+                .expect("前端附着表锁损坏")
+                .contains(session_id)
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn next_sequence(&self) -> u64 {
@@ -463,7 +529,7 @@ impl TerminalService {
         drop(pair.slave);
 
         let killer = child.clone_killer();
-        // 输出持久化（按 scope 分文件）：应用重启后回填该会话的终端历史
+        // 输出持久化（按 scope 分文件）：仅供运行诊断和关闭时清理
         let logger = request
             .scope_id
             .as_deref()
@@ -595,13 +661,18 @@ impl TerminalService {
     }
 
     fn kill_session(&self, request: SessionIdRequest) -> Result<OkResponse> {
+        let session_id = request.session_id;
         let removed = self
             .sessions
             .lock()
             .expect("会话表锁损坏")
-            .remove(&request.session_id);
+            .remove(&session_id);
         match removed {
             Some(mut session) => {
+                self.frontend_attached
+                    .lock()
+                    .expect("前端附着表锁损坏")
+                    .remove(&session_id);
                 let _ = session.killer.kill();
                 Ok(OkResponse { ok: true })
             }
@@ -610,6 +681,7 @@ impl TerminalService {
     }
 
     fn close_session(&self, request: CloseRequest) -> Result<OkResponse> {
+        let closing_session_id = request.session_id.clone();
         let (removed, has_other_scope_sessions) = {
             let mut sessions = self.sessions.lock().expect("会话表锁损坏");
             let removed = if let Some(session_id) = request.session_id.as_deref() {
@@ -628,6 +700,12 @@ impl TerminalService {
             (removed, has_other_scope_sessions)
         };
         if let Some(mut session) = removed {
+            if let Some(session_id) = closing_session_id {
+                self.frontend_attached
+                    .lock()
+                    .expect("前端附着表锁损坏")
+                    .remove(&session_id);
+            }
             let _ = session.killer.kill();
         }
         if !has_other_scope_sessions {
@@ -636,8 +714,9 @@ impl TerminalService {
         Ok(OkResponse { ok: true })
     }
 
-    /// 前端在标签新建或关闭后提交当前会话的完整存活集合；当次回收集合外
-    /// 的 PTY。调用只影响指定 scope，不增加后台周期任务。
+    /// 前端在标签新建或关闭后提交当前会话的存活集合。页面并行挂载期间
+    /// 集合可能暂时不完整，因此只回收曾被确认、后来从集合消失的 PTY。
+    /// 调用只影响指定 scope，不增加后台周期任务。
     fn gc_terminals(&self, request: TerminalGcRequest) -> Result<OkResponse> {
         let scope_id = request.session_id.trim();
         if scope_id.is_empty() {
@@ -655,12 +734,30 @@ impl TerminalService {
             live.insert(terminal_id.to_string());
         }
 
+        let stale_confirmed_ids = {
+            let mut confirmed = self
+                .confirmed_frontend_tabs
+                .lock()
+                .expect("前端终端标签表锁损坏");
+            let stale = confirmed
+                .get(scope_id)
+                .map(|previous| previous.difference(&live).cloned().collect::<HashSet<_>>())
+                .unwrap_or_default();
+            if live.is_empty() {
+                confirmed.remove(scope_id);
+            } else {
+                confirmed.insert(scope_id.to_string(), live.clone());
+            }
+            stale
+        };
+
         let (removed, has_remaining) = {
             let mut sessions = self.sessions.lock().expect("会话表锁损坏");
             let stale_ids = sessions
                 .iter()
                 .filter(|(session_id, session)| {
-                    session.scope_id.as_deref() == Some(scope_id) && !live.contains(*session_id)
+                    session.scope_id.as_deref() == Some(scope_id)
+                        && stale_confirmed_ids.contains(*session_id)
                 })
                 .map(|(session_id, _)| session_id.clone())
                 .collect::<Vec<_>>();
@@ -683,6 +780,10 @@ impl TerminalService {
             .map(|(session_id, _)| session_id.clone())
             .collect::<HashSet<_>>();
         if !removed_ids.is_empty() {
+            self.frontend_attached
+                .lock()
+                .expect("前端附着表锁损坏")
+                .retain(|terminal_id| !removed_ids.contains(terminal_id));
             self.active_tools
                 .lock()
                 .expect("活动工具表锁损坏")
@@ -1081,9 +1182,9 @@ impl TerminalService {
         })
     }
 
-    /// 按宿主会话标识找最近创建的活跃终端：UI 跟随会话切换时先恢复
-    /// 既有 PTY（含最近输出历史），没有再新建。无存活会话时返回磁盘
-    /// 日志尾部（应用重启后回填历史，UI 据此新建 shell 并重放）。
+    /// 按宿主会话标识找活跃终端。精确编号存在时附着同一 PTY；精确编号
+    /// 不存在时返回空结果，由页面创建全新 PTY，不把其他终端的会话日志
+    /// 回放进新标签。
     fn find_by_scope(&self, request: &FindRequest) -> FindResponse {
         let sessions = self.sessions.lock().expect("会话表锁损坏");
         if let Some(session_id) = request.session_id.as_deref()
@@ -1096,14 +1197,9 @@ impl TerminalService {
             };
         }
         if request.session_id.is_some() {
-            drop(sessions);
-            let history = persist::scope_log_path(&request.scope_id)
-                .map(|path| persist::read_log_tail(&path, persist::LOG_TAIL_LINES))
-                .unwrap_or_default()
-                .join("\r\n");
             return FindResponse {
                 session_id: None,
-                history,
+                history: String::new(),
             };
         }
         if let Some((session_id, session)) = sessions
@@ -1116,14 +1212,9 @@ impl TerminalService {
                 history: String::from_utf8_lossy(&session.display_history).to_string(),
             };
         }
-        drop(sessions);
-        let history = persist::scope_log_path(&request.scope_id)
-            .map(|path| persist::read_log_tail(&path, persist::LOG_TAIL_LINES))
-            .unwrap_or_default()
-            .join("\r\n");
         FindResponse {
             session_id: None,
-            history,
+            history: String::new(),
         }
     }
 }
@@ -1826,9 +1917,16 @@ impl TerminalService {
         };
 
         // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
-        // 重复调用幂等聚焦同一标签。经进度帧即时请求，长任务执行期间
-        // 用户即可看到输出。
+        // 重复调用幂等聚焦同一标签。精确页面通过 terminalFind 完成事件
+        // 订阅和附着后才开始输出；后台会话没有前台标签时有限等待后继续。
         request_host_app_open(&scope.session_id, &session_id, false).await;
+        if !self.wait_for_frontend_attach(&session_id).await {
+            tracing::debug!(
+                terminal_id = session_id,
+                scope_id = scope.session_id,
+                "未等待到前端终端附着，按无前台页面的后台会话继续执行"
+            );
+        }
 
         // 登记执行中的调用：宿主超时/会话取消经 Cancel 帧中断等待时，
         // cancel 钩子据此定位终端并发送 Ctrl+C，命令不会脱离调用方控制。
@@ -2162,6 +2260,11 @@ async fn dispatch_operation(
             Ok(serde_json::to_value(
                 service.send_to_session(request).await?,
             )?)
+        }
+        "terminalAttach" => {
+            let request: TerminalBindingRequest =
+                serde_json::from_value(payload).context("终端附着状态参数无效")?;
+            Ok(serde_json::to_value(service.attach_frontend(request)?)?)
         }
         "terminalScreenUpdate" => {
             let request: ScreenUpdateRequest =
@@ -3085,6 +3188,106 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_command_等待前端精确附着后才执行() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = Arc::new(TerminalService::new());
+        let running_service = Arc::clone(&service);
+        let running = tokio::spawn(async move {
+            running_service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "printf", "args": ["attached"]}),
+                    Some(("session-attached", workspace.as_str())),
+                ))
+                .await
+        });
+
+        let terminal_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(terminal_id) = service
+                    .sessions
+                    .lock()
+                    .expect("会话表锁损坏")
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break terminal_id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("等待 Agent 终端创建超时");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!running.is_finished(), "前端尚未附着时命令不应开始并完成");
+
+        let found = service.find_by_scope(&FindRequest {
+            scope_id: "session-attached".to_string(),
+            session_id: Some(terminal_id.clone()),
+        });
+        assert_eq!(found.session_id.as_deref(), Some(terminal_id.as_str()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !running.is_finished(),
+            "仅查到 PTY 不能代替前端完成订阅与附着"
+        );
+        service
+            .attach_frontend(TerminalBindingRequest {
+                scope_id: "session-attached".to_string(),
+                session_id: terminal_id.clone(),
+            })
+            .expect("确认前端附着失败");
+
+        let response = tokio::time::timeout(Duration::from_secs(10), running)
+            .await
+            .expect("前端附着后命令未完成")
+            .expect("命令任务异常");
+        let outcome = outcome_of(response);
+        assert_eq!(outcome["stdout"], "attached");
+        service
+            .kill_session(SessionIdRequest {
+                session_id: terminal_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_find_新编号不继承其他终端输出() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let old = service
+            .spawn_session(SpawnRequest {
+                session_id: Some("terminal-old".to_string()),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("session-fresh".to_string()),
+                reserve: false,
+                cols: default_cols(),
+                rows: default_rows(),
+            })
+            .expect("创建旧终端失败");
+        record_display_output(&service.sessions, &old.session_id, b"old agent output\r\n");
+
+        let found = service.find_by_scope(&FindRequest {
+            scope_id: "session-fresh".to_string(),
+            session_id: Some("terminal-new".to_string()),
+        });
+        assert!(found.session_id.is_none());
+        assert!(found.history.is_empty(), "新终端不得继承旧终端输出");
+        service
+            .kill_session(SessionIdRequest {
+                session_id: old.session_id,
+            })
+            .expect("清理旧终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn terminal_gc_按前端存活集合回收且不跨会话() {
         let cwd = tempfile::tempdir().expect("创建测试目录失败");
         let service = TerminalService::new();
@@ -3107,6 +3310,35 @@ mod tests {
             .unwrap();
         service
             .spawn_session(spawn("terminal-other-scope", "session-b"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-closed-before-gc", "session-a"))
+            .unwrap();
+        service
+            .attach_frontend(TerminalBindingRequest {
+                scope_id: "session-a".to_string(),
+                session_id: "terminal-closed-before-gc".to_string(),
+            })
+            .unwrap();
+
+        let initial = service
+            .dispatch(Request::new(
+                "terminalGc",
+                serde_json::json!({
+                    "session_id": "session-a",
+                    "live_terminal_ids": ["terminal-live", "terminal-closed"],
+                }),
+            ))
+            .await;
+        assert!(initial.success, "首次 Terminal GC 对账失败: {initial:?}");
+        assert!(
+            service
+                .with_session("terminal-closed-before-gc", |_| Ok(()))
+                .is_err(),
+            "已附着终端即使在首次定时对账前关闭也必须被回收"
+        );
+        service
+            .spawn_session(spawn("terminal-mounting", "session-a"))
             .unwrap();
         service
             .with_session("terminal-closed", |session| {
@@ -3135,6 +3367,12 @@ mod tests {
         assert!(service.with_session("terminal-closed", |_| Ok(())).is_err());
         assert!(
             service
+                .with_session("terminal-mounting", |_| Ok(()))
+                .is_ok(),
+            "尚未完成前端挂载的新终端不得被局部存活集合误回收"
+        );
+        assert!(
+            service
                 .with_session("terminal-other-scope", |_| Ok(()))
                 .is_ok(),
             "GC 不得影响其他会话"
@@ -3148,6 +3386,11 @@ mod tests {
         service
             .kill_session(SessionIdRequest {
                 session_id: "terminal-other-scope".to_string(),
+            })
+            .unwrap();
+        service
+            .kill_session(SessionIdRequest {
+                session_id: "terminal-mounting".to_string(),
             })
             .unwrap();
     }

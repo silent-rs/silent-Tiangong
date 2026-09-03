@@ -170,6 +170,37 @@ describe('Terminal GC 前端存活集合对账', () => {
     });
   });
 
+  it('Agent 静默创建的隐藏标签立即订阅并附着精确终端', async () => {
+    mountRoot();
+    const bridge = makeBridge('tty-agent');
+    sdk.bridge = bridge as unknown as typeof sdk.bridge;
+    const { runtime } = makeRuntime({
+      session: { id: 'session-agent', workspace: '/tmp' },
+      app: { instance_id: 'tty-agent', visible: false },
+    });
+    sdk.runtime = runtime;
+
+    const main = await import('./src/main');
+    await vi.waitFor(() => expect(main.terminalView?.sessionId()).toBe('tty-agent'));
+    expect(bridge.on).toHaveBeenCalledWith('sidecar.event', expect.any(Function));
+    const find = bridge.call.mock.calls.find(
+      ([method]: [string]) => method === 'sidecar.terminalFind',
+    );
+    expect(find).toBeDefined();
+    expect(JSON.parse(find![1])).toEqual({
+      scope_id: 'session-agent',
+      session_id: 'tty-agent',
+    });
+    const attach = bridge.call.mock.calls.find(
+      ([method]: [string]) => method === 'sidecar.terminalAttach',
+    );
+    expect(attach).toBeDefined();
+    expect(JSON.parse(attach![1])).toEqual({
+      scope_id: 'session-agent',
+      session_id: 'tty-agent',
+    });
+  });
+
   it('无实例编号的通用隐藏壳不触发 Terminal GC', async () => {
     mountRoot();
     const bridge = makeBridge(null);
@@ -183,6 +214,26 @@ describe('Terminal GC 前端存活集合对账', () => {
     await import('./src/main');
     await vi.waitFor(() => expect(beforeCloseHandlers.length).toBeGreaterThan(0));
     await Promise.all(beforeCloseHandlers.map((handler) => handler()));
+    expect(
+      bridge.call.mock.calls.some(([method]: [string]) => method === 'sidecar.terminalGc'),
+    ).toBe(false);
+  });
+
+  it('通用后台壳不创建终端视图或登记虚假终端', async () => {
+    mountRoot();
+    const bridge = makeBridge(null);
+    sdk.bridge = bridge as unknown as typeof sdk.bridge;
+    const { runtime } = makeRuntime({
+      session: { id: 'session-background', workspace: '/tmp' },
+      app: { instance_id: 'bg-terminal', visible: false },
+    });
+    sdk.runtime = runtime;
+
+    const main = await import('./src/main');
+    await vi.waitFor(() => expect(runtime.onContextChange).toHaveBeenCalled());
+    expect(main.terminalView).toBeNull();
+    expect(bridge.on).not.toHaveBeenCalled();
+    await new Promise((resolve) => window.setTimeout(resolve, 550));
     expect(
       bridge.call.mock.calls.some(([method]: [string]) => method === 'sidecar.terminalGc'),
     ).toBe(false);

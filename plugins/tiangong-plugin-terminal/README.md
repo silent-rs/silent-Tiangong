@@ -18,7 +18,9 @@ sidecar 握手通过 `tool:<name>` capabilities 注册五个工具 Handler，宿
 
 sidecar 执行中经进度帧请求宿主 App 原语（`host_action`，白名单
 `app.open` / `app.close`）：长任务执行期间终端标签即时建立，用户可
-实时查看输出。
+实时查看输出。Agent 新建终端时，隐藏标签先完成输出订阅和精确 PTY
+附着，sidecar 随后才开始命令；历史只用于重新附着同一存活 PTY，不会
+填充到新建终端。
 
 顶部标签切换或拓展区暂时隐藏时保留当前终端；新建或明确关闭终端 App
 标签时，页面按天工会话提交当前仍存活的终端编号全集，sidecar 只回收该

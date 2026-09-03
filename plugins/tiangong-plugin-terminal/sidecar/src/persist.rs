@@ -1,10 +1,8 @@
-//! 终端输出持久化：按会话（scope）追加落盘，应用重启后解析成纯文本行回填。
+//! 终端输出持久化：按会话（scope）追加落盘，供诊断与关闭时清理。
 //!
 //! 移植自内置终端（tiangong-plugin-terminal 的 output_processor.rs）：
 //! - 落盘 xterm 看到的原始输出（含控制序列）；
-//! - 回填必须经行处理器解析成静态文本——原始历史里的颜色/光标查询序列
-//!   （OSC 11、CSI 6n 等）重放时会触发 xterm 响应、把响应写进新 PTY，
-//!   污染下一条命令的输入行；
+//! - 新 PTY 不读取会话级旧日志，避免把其他终端内容串入新标签；
 //! - 日志 1 MiB 上限，超限滚动保留尾部一半。
 //!
 //! 日志位于插件数据目录（`TIANGONG_PLUGIN_DATA_DIR`，宿主启动 sidecar 时
@@ -12,13 +10,11 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// 日志文件大小上限（1 MiB），超过则保留尾部一半后重写，防无限增长
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-/// 回填的最大行数（对齐内置终端 DEFAULT_LOG_TAIL_LINES）
-pub const LOG_TAIL_LINES: usize = 5000;
 
 pub struct OutputLogger {
     file: Arc<Mutex<File>>,
@@ -120,27 +116,6 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
-}
-
-/// 读取日志末尾最多 `max_lines` 行，用于重启后回填。
-///
-/// 日志保存的是曾发给 xterm 的原始输出，含颜色查询、光标位置查询等会触发
-/// 终端响应的控制序列；恢复前必须解析成静态文本行（见模块注释）。
-pub fn read_log_tail(path: &Path, max_lines: usize) -> Vec<String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return Vec::new(),
-    };
-    let mut processor = TerminalLineProcessor::new();
-    let mut lines = processor.process(&content);
-    let current_line = processor.current_line();
-    if !current_line.trim().is_empty() {
-        lines.push(current_line);
-    }
-    if lines.len() > max_lines {
-        lines = lines.split_off(lines.len() - max_lines);
-    }
-    lines
 }
 
 // ── 行处理器（vte 状态机 + 单行光标模拟，移植自内置终端）──
