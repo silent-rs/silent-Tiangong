@@ -664,7 +664,7 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 
     let result = reload_plugin_inner(storage_root, &installed);
     if let Err(error) = &result {
-        set_last_error(plugin_id, error.to_string());
+        set_load_error(plugin_id, error.to_string());
     }
     result?;
 
@@ -992,6 +992,62 @@ mod tests {
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].id, "wrong-directory");
         assert!(invalid[0].reason.contains("目录名"));
+    }
+
+    /// 错误分类保护：sidecar 运行检查重新成功只清除 runtime_error，
+    /// 加载错误（如 WASM 实例创建失败）必须保留——逻辑层仍不可用，
+    /// 插件状态不能被重验成功"洗白"。
+    #[test]
+    fn refresh_verified_sidecar_clears_only_runtime_error() {
+        let manifest = PluginManifest {
+            schema_version: 2,
+            id: "load-error-demo".into(),
+            version: "0.1.0".into(),
+            wasm: None,
+            sidecar: None,
+            permissions: vec![],
+            entrypoints: None,
+            model_requirements: None,
+            storage_access: false,
+            capabilities: None,
+            ui: None,
+            tools: None,
+            prompt: None,
+            resources: None,
+            mention: None,
+        };
+        let record = LoadedPlugin {
+            directory: PathBuf::from("/tmp/load-error-demo"),
+            manifest,
+            wasm_bytes: None,
+            component: None,
+            ui_plugin: None,
+            descriptor: None,
+            generation: 1,
+            instances: Vec::new(),
+            ts_instances: Vec::new(),
+            sidecar: None,
+            verified_sidecar: None,
+            load_error: Some("WASM 实例创建失败".into()),
+            runtime_error: Some("sidecar 启动失败".into()),
+            enabled: true,
+        };
+        loaded_plugins()
+            .lock()
+            .unwrap()
+            .insert("load-error-demo".into(), record);
+        refresh_verified_sidecar("load-error-demo", Vec::new());
+        {
+            let plugins = loaded_plugins().lock().unwrap();
+            let loaded = plugins.get("load-error-demo").unwrap();
+            assert!(loaded.runtime_error.is_none(), "运行检查成功应清除启动异常");
+            assert_eq!(
+                loaded.load_error.as_deref(),
+                Some("WASM 实例创建失败"),
+                "加载错误不得被运行检查成功清除"
+            );
+        }
+        loaded_plugins().lock().unwrap().remove("load-error-demo");
     }
 
     #[test]
@@ -1592,7 +1648,7 @@ fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plu
     ) {
         Ok(plugin) => plugin,
         Err(error) => {
-            set_last_error(plugin_id, error.to_string());
+            set_load_error(plugin_id, error.to_string());
             tracing::warn!(plugin_id, %error, "创建 Core WASM 插件实例失败");
             return None;
         }
@@ -1683,9 +1739,21 @@ fn read_wasm_bytes(installed: &InstalledPlugin) -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| format!("读取插件 WASM 制品失败: {}", path.display()))
 }
 
-/// 登记插件运行异常（启动/握手/运行检查/停用失败等）：插件保持安装，
-/// 插件管理显示启动异常；运行检查重新成功后由 clear_runtime_error 清除。
-pub(crate) fn set_last_error(plugin_id: &str, error: String) {
+/// 登记插件加载错误（WASM 读取/编译/实例化、解释器不可发现、连接构造
+/// 失败、重载逻辑层失败）：插件不满足可用条件，插件管理显示加载异常；
+/// 只能由重新加载成功清除，sidecar 运行检查成功不影响它。
+pub(crate) fn set_load_error(plugin_id: &str, error: String) {
+    if let Ok(mut plugins) = loaded_plugins().lock()
+        && let Some(plugin) = plugins.get_mut(plugin_id)
+    {
+        plugin.load_error = Some(error);
+    }
+}
+
+/// 登记插件运行异常（常驻 sidecar 启动/握手、运行检查、验证记录保存、
+/// 运行期停止失败等）：插件保持安装，插件管理显示启动异常；运行检查
+/// 重新成功后由 refresh_verified_sidecar 清除。
+pub(crate) fn set_runtime_error(plugin_id: &str, error: String) {
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(plugin) = plugins.get_mut(plugin_id)
     {
@@ -1883,7 +1951,7 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
                 %error,
                 "安装后 sidecar 运行检查失败：插件保持安装，标记运行异常（可重试验证）"
             );
-            set_last_error(plugin_id, error.to_string());
+            set_runtime_error(plugin_id, error.to_string());
         }
     }
 }
@@ -1991,7 +2059,7 @@ pub fn set_plugin_enabled(
         enabled_plugin.enabled = true;
         if let Err(error) = reload_plugin_inner(storage_root, &enabled_plugin) {
             create_disabled_marker(&marker)?;
-            set_last_error(plugin_id, error.to_string());
+            set_load_error(plugin_id, error.to_string());
             return Err(error).with_context(|| format!("启用插件 {plugin_id} 失败"));
         }
     } else {
@@ -2130,7 +2198,7 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
         if let Err(restore_error) = restore_result {
             bail!("回滚插件 {plugin_id} 失败: {error}; 恢复当前版本失败: {restore_error}");
         }
-        set_last_error(plugin_id, error.to_string());
+        set_load_error(plugin_id, error.to_string());
         return Err(error).with_context(|| format!("回滚插件 {plugin_id} 失败"));
     }
 
@@ -2431,7 +2499,7 @@ fn replace_installed_plugin(
                 current.manifest.id
             );
         }
-        set_last_error(&current.manifest.id, error.to_string());
+        set_load_error(&current.manifest.id, error.to_string());
         return Err(error).with_context(|| format!("升级插件 {} 失败", current.manifest.id));
     }
     // sidecar 运行检查与能力记录由 post_install_sidecar_check 在升级

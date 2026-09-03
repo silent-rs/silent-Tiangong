@@ -103,29 +103,6 @@ fn sandbox_binaries_ready() -> bool {
     true
 }
 
-/// 当前环境能否向自己启动的子进程发送终止信号。
-///
-/// 外层受限沙箱（如天工终端的 Seatbelt）拒绝 process-signal 时，kill
-/// 返回 EPERM、进程树清理无法真实发生——依赖"停止后进程组死亡"的
-/// 测试在此类环境必须跳过，而不是等待超时失败。
-#[cfg(unix)]
-fn can_signal_children() -> bool {
-    let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("5").spawn() else {
-        return false;
-    };
-    let signallable = child.kill().is_ok();
-    let _ = child.wait();
-    if !signallable {
-        eprintln!("跳过进程树清理测试：当前环境拒绝向子进程发送信号（外层受限沙箱）");
-    }
-    signallable
-}
-
-#[cfg(windows)]
-fn can_signal_children() -> bool {
-    true
-}
-
 #[cfg(any(unix, windows))]
 struct SandboxFixture {
     _root: tempfile::TempDir,
@@ -572,12 +549,6 @@ fn sandbox_disabled_runs_command_without_launcher() {
     );
 
     // 进程树清理：短超时 + 后台 sleep，超时后整组终止、无遗留进程。
-    //（清理依赖向子进程发送信号：外层受限沙箱拒信号时该段不可验证，
-    // 前半段的命令执行与环境变量清理断言不受影响。）
-    if !can_signal_children() {
-        restore_default_config();
-        return;
-    }
     let sleeper = format!(
         "/bin/sleep 30 & echo $! > {ws}/sleep.pid; wait",
         ws = fixture.workspace.display(),
@@ -1586,9 +1557,6 @@ fn execution_without_invocation_context_is_rejected() {
 #[cfg(any(unix, windows))]
 #[test]
 fn stdio_stop_kills_background_process_tree() {
-    if !can_signal_children() {
-        return;
-    }
     let Some(binary) = command_sidecar_binary() else {
         eprintln!("跳过进程组测试：target/debug/tiangong-command-sidecar 尚未构建");
         return;
@@ -1679,9 +1647,6 @@ fn repeated_stdio_start_stop_does_not_leak_host_resources() {
     };
     // 每轮 stop 都必须真实终止常驻进程（stop 失败即测试失败）：
     // 受限环境拒信号时跳过。
-    if !can_signal_children() {
-        return;
-    }
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();

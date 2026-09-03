@@ -336,7 +336,7 @@ fn reverify_installed_sidecars_blocking(storage_root: &Path) {
                     %error,
                     "旧插件 sidecar 补验证失败：有 UI 插件回退 UI Handler，无 UI 插件调用将返回不可用"
                 );
-                crate::registry::set_last_error(&installed.manifest.id, error.to_string());
+                crate::registry::set_runtime_error(&installed.manifest.id, error.to_string());
             }
         }
     }
