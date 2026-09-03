@@ -1350,7 +1350,7 @@ export function MessageInput({
                 )}
                 {sandboxDisabled === true && (
                   <button
-                    onClick={() => setPendingSettingsTab('agent')}
+                    onClick={() => setPendingSettingsTab('sandbox')}
                     className="flex items-center gap-1 text-red-500 transition-colors hover:text-red-400"
                     title="按需进程沙箱已关闭：终端、命令及其他按需 Sidecar 以完整用户权限启动，点击前往设置重新开启"
                   >
