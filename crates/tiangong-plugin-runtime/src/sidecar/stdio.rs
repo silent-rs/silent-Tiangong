@@ -132,7 +132,8 @@ impl StdioSidecarConnection {
         }
     }
 
-    /// 停止子进程（宿主关闭流程调用）。
+    /// 停止子进程（宿主关闭流程调用）。清理失败（信号被拒/限时未退出）
+    /// 返回 Err——严格验证路径据此判定清理未完成。
     pub fn stop(&self) -> Result<()> {
         // stop 是终止语义。先置位可阻止与取消并发的 invoke 在进程被杀后重启。
         self.stopped.store(true, Ordering::Release);
@@ -143,7 +144,7 @@ impl StdioSidecarConnection {
         if let Some(process) = state.process.take()
             && let Ok(mut child) = process.child.lock()
         {
-            terminate_process_tree(&process, &mut child);
+            terminate_process_tree(&process, &mut child)?;
         }
         Ok(())
     }
@@ -168,10 +169,21 @@ impl StdioSidecarConnection {
                 //（state.process 是其活跃进程），经 state 启停会误杀它。
                 let process = Arc::new(self.spawn(None)?);
                 let result = self.handshake_exchange(&process);
-                if let Ok(mut child) = process.child.lock() {
-                    terminate_process_tree(&process, &mut child);
+                let cleanup = process
+                    .child
+                    .lock()
+                    .map_err(|_| anyhow!("stdio sidecar 子进程锁已损坏"))
+                    .and_then(|mut child| terminate_process_tree(&process, &mut child));
+                // 严格验证语义：临时验证进程清理失败时即使握手成功也判失败
+                //（残留进程会与后续安装冲突），与 connection.stop 的判定一致。
+                let capabilities = result.map(|handshake| handshake.capabilities);
+                match (capabilities, cleanup) {
+                    (Ok(capabilities), Ok(())) => Ok(capabilities),
+                    (Err(handshake_error), Ok(())) => Err(handshake_error),
+                    (_, Err(cleanup_error)) => {
+                        Err(cleanup_error).context("stdio sidecar 临时验证进程清理失败")
+                    }
                 }
-                result.map(|handshake| handshake.capabilities)
             }
             crate::manifest::SidecarLifecycle::Resident => {
                 let process = self.ensure_running(&mut state)?;
@@ -197,7 +209,8 @@ impl StdioSidecarConnection {
             }
             let process = state.process.take().expect("已确认存在的进程代次");
             if let Ok(mut child) = process.child.lock() {
-                terminate_process_tree(&process, &mut child);
+                // 已断流进程的回收尽力而为：清理失败不阻塞换代重启。
+                let _ = terminate_process_tree(&process, &mut child);
             }
             tracing::warn!(plugin_id = %self.config.plugin_id, "stdio sidecar 已退出，准备重启");
         }
@@ -214,7 +227,8 @@ impl StdioSidecarConnection {
         if let Some(process) = state.process.take()
             && let Ok(mut child) = process.child.lock()
         {
-            terminate_process_tree(&process, &mut child);
+            // 覆盖清理尽力而为：旧进程已断流，残留不阻塞新代次启动。
+            let _ = terminate_process_tree(&process, &mut child);
         }
         let process = Arc::new(self.spawn(sandbox_workspace)?);
         state.process = Some(Arc::clone(&process));
@@ -227,8 +241,16 @@ impl StdioSidecarConnection {
             }
             Err(error) => {
                 state.process = None;
-                if let Ok(mut child) = process.child.lock() {
-                    terminate_process_tree(&process, &mut child);
+                let cleanup = process
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|mut child| terminate_process_tree(&process, &mut child).ok());
+                if cleanup.is_none() {
+                    tracing::warn!(
+                        plugin_id = %self.config.plugin_id,
+                        "握手失败的进程清理未完成，可能残留"
+                    );
                 }
                 return Err(error);
             }
@@ -277,7 +299,9 @@ impl StdioSidecarConnection {
             on_progress,
         );
         if let Ok(mut child) = process.child.lock() {
-            terminate_process_tree(&process, &mut child);
+            // 业务结果优先：收尾清理尽力而为，失败仅告警（进程可能残留，
+            // 下一次调用不受影响——新代次使用新 token）。
+            let _ = terminate_process_tree(&process, &mut child);
         }
         // 先清理进程，再获取 state 锁；读线程在发送关闭错误时可能短暂持有
         // pending 锁，反向持锁会让请求收尾与取消互相等待。
@@ -375,7 +399,8 @@ impl StdioSidecarConnection {
         if let Some(process) = state.process.take()
             && let Ok(mut child) = process.child.lock()
         {
-            terminate_process_tree(&process, &mut child);
+            // 取消是尽力语义：终止失败不改变取消结果（waiter 已被唤醒）。
+            let _ = terminate_process_tree(&process, &mut child);
         }
     }
 
@@ -1069,7 +1094,9 @@ where
             }
             if !*done && let Ok(mut child) = watchdog_process.child.lock() {
                 tracing::warn!("stdio sidecar 管道写入超时，终止进程解除阻塞");
-                terminate_process_tree(&watchdog_process, &mut child);
+                // 看门狗尽力解除写阻塞：终止失败时写入方仍可能阻塞至
+                // 上层取消，无法在此处进一步兜底。
+                let _ = terminate_process_tree(&watchdog_process, &mut child);
             }
         });
     let result = write();
@@ -1218,8 +1245,12 @@ fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
 /// 永久阻塞（所有 stop/取消/换代路径都持有 child 锁调用本函数）。
 const TERMINATE_WAIT_LIMIT: Duration = Duration::from_secs(5);
 
-fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
-    #[cfg(unix)]
+/// 终止子进程进程树并等待直接子进程退出。
+///
+/// 返回 Err 表示进程未被可靠终止/回收（信号被外层沙箱拒绝、限时内
+/// 未退出）：严格验证路径必须把它当作清理失败；尽力而为的路径
+///（取消、换代覆盖）可以忽略错误但要知道进程可能残留。
+fn terminate_process_tree(process: &StdioProcess, child: &mut Child) -> Result<()> {
     let pid = child.id();
     #[cfg(unix)]
     unsafe {
@@ -1234,23 +1265,24 @@ fn terminate_process_tree(process: &StdioProcess, child: &mut Child) {
     #[cfg(not(windows))]
     let _ = process;
     // kill 被拒（如外层 Seatbelt 未放行 process-signal）时子进程不会退出，
-    // 此时 wait 必然永久挂起——放弃回收并保留进程状态查询能力。
+    // 此时 wait 必然永久挂起——放弃回收并返回清理失败。
     if let Err(error) = child.kill()
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        tracing::warn!(%error, pid = child.id(), "终止 stdio sidecar 子进程失败（信号可能被外层沙箱拦截），放弃等待其退出");
-        return;
+        tracing::warn!(%error, pid, "终止 stdio sidecar 子进程失败（信号可能被外层沙箱拦截），放弃等待其退出");
+        return Err(anyhow!(error).context(format!(
+            "终止 stdio sidecar 子进程失败（pid={pid}，信号可能被外层沙箱拦截）"
+        )));
     }
     let deadline = std::time::Instant::now() + TERMINATE_WAIT_LIMIT;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
+            Ok(Some(_)) | Err(_) => return Ok(()),
             Ok(None) if std::time::Instant::now() >= deadline => {
-                tracing::warn!(
-                    pid = child.id(),
-                    "stdio sidecar 子进程终止后未在时限内退出，放弃等待"
-                );
-                return;
+                tracing::warn!(pid, "stdio sidecar 子进程终止后未在时限内退出，放弃等待");
+                return Err(anyhow!(
+                    "stdio sidecar 子进程终止后未在 {TERMINATE_WAIT_LIMIT:?} 内退出（pid={pid}）"
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
         }
