@@ -98,3 +98,16 @@ fn sign_minisign(launcher: &Path) -> Result<(), String> {
     std::fs::write(&temp, sig_b64).map_err(|e| e.to_string())?;
     std::fs::rename(&temp, &sig_path).map_err(|e| e.to_string())
 }
+
+/// 当前环境无法应用原生沙箱时的跳过原因（None 表示可用）。
+///
+/// 天工终端/受限 CI 等外层 Seatbelt 环境内，Launcher 无法再次嵌套应用
+/// 沙箱而拒绝启动（退出码 78，安全设计而非缺陷）——真实沙箱链路测试
+/// 在此类环境必然失败或卡死，统一跳过并打印原因。
+pub fn native_sandbox_skip_reason() -> Option<String> {
+    match tiangong_sandbox::sandbox::availability() {
+        tiangong_sandbox::SandboxAvailability::Available => None,
+        tiangong_sandbox::SandboxAvailability::EnvironmentRestricted(reason)
+        | tiangong_sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
+    }
+}

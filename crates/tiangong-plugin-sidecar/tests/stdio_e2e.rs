@@ -17,29 +17,6 @@ fn echo_sidecar_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_test-stdio-sidecar"))
 }
 
-/// 当前环境能否向自己启动的子进程发送终止信号。
-///
-/// 外层受限沙箱（如天工终端的 Seatbelt）拒绝 process-signal 时 kill 返回
-/// EPERM：依赖"停止/清理真实杀死进程"的测试在此类环境无法满足严格
-/// 断言（stop 现在如实传播清理失败），统一跳过并说明原因。
-#[cfg(unix)]
-fn can_signal_children() -> bool {
-    let Ok(mut child) = std::process::Command::new("/bin/sleep").arg("5").spawn() else {
-        return false;
-    };
-    let signallable = child.kill().is_ok();
-    let _ = child.wait();
-    if !signallable {
-        eprintln!("跳过进程清理断言测试：当前环境拒绝向子进程发送信号（外层受限沙箱）");
-    }
-    signallable
-}
-
-#[cfg(windows)]
-fn can_signal_children() -> bool {
-    true
-}
-
 #[cfg(target_os = "macos")]
 fn test_host_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_test-stdio-host"))
@@ -95,10 +72,6 @@ fn stdio_roundtrip_and_restart() {
 #[test]
 #[serial_test::serial]
 fn resident_process_handshakes_once_across_calls() {
-    // 收尾 stop 必须真实杀死常驻进程（严格清理断言）：受限环境拒信号时跳过。
-    if !can_signal_children() {
-        return;
-    }
     let (endpoint, log, data_dir) = temp_paths("handshake-once");
     let config = SidecarConfig::new(
         "test-stdio",
@@ -132,11 +105,6 @@ fn resident_process_handshakes_once_across_calls() {
 fn unresponsive_handshake_fails_within_start_timeout() {
     // 协议沉默对端：进程存活但不应答握手，验证启动/握手有限时限
     //（导入验证与就绪握手共用该保护）。
-    // 临时验证进程的清理失败在受限环境（拒信号）优先于握手错误返回
-    //（严格清理语义），错误形态不同：受限环境跳过本用例。
-    if !can_signal_children() {
-        return;
-    }
     // SAFETY: 本测试与所有会 spawn echo 子进程的测试经 #[serial] 互斥，
     // 设置与清除期间无并发 spawn，避免 MUTE 泄漏污染其他用例。
     unsafe { std::env::set_var("TIANGONG_TEST_STDIO_MUTE", "1") };
@@ -339,17 +307,8 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     std::mem::forget(connection);
 }
 
-/// 当前环境无法应用原生沙箱时的跳过原因（None 表示可用）。
-///
-/// 外层 Seatbelt（天工终端/受限 CI）内 kill 子进程被拒且 Launcher 无法
-/// 再次嵌套应用沙箱：依赖信号终止进程的测试在此类环境必然失败或
-/// 卡死，统一跳过并打印原因。
 fn native_sandbox_skip_reason() -> Option<String> {
-    match tiangong_sandbox::sandbox::availability() {
-        tiangong_sandbox::sandbox::SandboxAvailability::Available => None,
-        tiangong_sandbox::sandbox::SandboxAvailability::EnvironmentRestricted(reason)
-        | tiangong_sandbox::sandbox::SandboxAvailability::Unsupported(reason) => Some(reason),
-    }
+    tiangong_plugin_runtime::test_support::native_sandbox_skip_reason()
 }
 
 #[cfg(target_os = "macos")]

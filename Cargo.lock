@@ -11632,7 +11632,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-plugin-command-protocol",
  "tiangong-plugin-runtime",
- "tiangong-sandbox",
  "tokio",
  "tracing",
  "tracing-subscriber",
