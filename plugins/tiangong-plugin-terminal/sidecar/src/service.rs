@@ -45,8 +45,8 @@ pub struct TerminalService {
     last_activity: Arc<Mutex<Option<Instant>>>,
     sequence: Mutex<u64>,
     spawn_lock: Mutex<()>,
-    /// 进行中的 Agent 工具调用（sidecar request_id → 执行终端）：宿主超时或
-    /// 会话取消时经 Cancel 帧中断等待，本表把取消定位到具体 PTY。
+    /// 进行中或等待正式取消处理的 Agent 工具调用（sidecar request_id → 执行终端）。
+    /// 执行 future 可以先被丢弃，本表必须保留到正常完成或 cancel() 主动清除。
     active_tools: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -322,14 +322,14 @@ impl TerminalService {
         }
     }
 
-    /// 登记一次执行中的工具调用；返回的守卫在正常完成或 future 被丢弃
-    /// （宿主超时/取消后的 select 中断）时移除登记。
-    fn track_active_tool(&self, request_id: &str, terminal_id: &str) -> ActiveToolGuard {
+    /// 登记一次执行中的工具调用。正常完成时显式清除；future 被丢弃时
+    /// 保留映射，供随后到达的正式取消处理定位 PTY。
+    fn track_active_tool(&self, request_id: &str, terminal_id: &str) -> ActiveToolRegistration {
         self.active_tools
             .lock()
             .expect("活动工具表锁损坏")
             .insert(request_id.to_string(), terminal_id.to_string());
-        ActiveToolGuard {
+        ActiveToolRegistration {
             active_tools: Arc::clone(&self.active_tools),
             request_id: request_id.to_string(),
         }
@@ -1722,15 +1722,15 @@ struct ToolScope {
     request_id: String,
 }
 
-/// 活动工具登记守卫：dispatch future 被取消（select 丢弃）时随栈展开
-/// 自动移除，与 cancel 钩子的移除幂等互备。
-struct ActiveToolGuard {
+/// 活动工具登记。正常执行结束时由 `complete` 清除；dispatch future 先被
+/// 丢弃时有意保留映射，随后到达的 `cancel()` 仍能定位并中断 PTY。
+struct ActiveToolRegistration {
     active_tools: Arc<Mutex<HashMap<String, String>>>,
     request_id: String,
 }
 
-impl Drop for ActiveToolGuard {
-    fn drop(&mut self) {
+impl ActiveToolRegistration {
+    fn complete(self) {
         if let Ok(mut active) = self.active_tools.lock() {
             active.remove(&self.request_id);
         }
@@ -1916,6 +1916,10 @@ impl TerminalService {
             None => return ToolOutcome::fail("终端会话创建失败".to_string()),
         };
 
+        // 从首次异步等待开始登记取消目标。执行 future 若先被丢弃，登记对象
+        // 虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
+        let active = self.track_active_tool(&scope.request_id, &session_id);
+
         // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
         // 重复调用幂等聚焦同一标签。精确页面通过 terminalFind 完成事件
         // 订阅和附着后才开始输出；后台会话没有前台标签时有限等待后继续。
@@ -1927,10 +1931,6 @@ impl TerminalService {
                 "未等待到前端终端附着，按无前台页面的后台会话继续执行"
             );
         }
-
-        // 登记执行中的调用：宿主超时/会话取消经 Cancel 帧中断等待时，
-        // cancel 钩子据此定位终端并发送 Ctrl+C，命令不会脱离调用方控制。
-        let _active = self.track_active_tool(&scope.request_id, &session_id);
 
         let executed = self
             .exec_in_session(ExecRequest {
@@ -1951,7 +1951,7 @@ impl TerminalService {
                 cwd: workspace.filter(|value| !value.is_empty()),
             })
             .await;
-        drop(_active);
+        active.complete();
         let executed = match executed {
             Ok(executed) => executed,
             Err(error) => {
@@ -2135,8 +2135,8 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
     }
 
     /// 请求级取消：宿主工具超时或会话取消经 Cancel 帧到达（stdio runner
-    /// 已丢弃等待 future），把取消落到具体 PTY——发送 Ctrl+C 中断正在
-    /// 执行的命令并复位执行状态，命令不会脱离调用方无限运行。
+    /// 已丢弃执行 future），从独立保留的映射定位具体 PTY，发送 Ctrl+C
+    /// 中断正在执行的命令并复位执行状态。
     async fn cancel(&self, request: &Request) -> Result<()> {
         let request_id = request.request_id.as_str();
         let terminal_id = self
@@ -3042,7 +3042,7 @@ mod tests {
         let running = tokio::spawn(async move {
             task_service.dispatch_test(task_request).await;
         });
-        // 等待命令进入执行（登记出现）。
+        // 先等待取消目标登记并取得实际终端编号。
         let terminal = {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
@@ -3056,20 +3056,62 @@ mod tests {
             }
         };
 
-        // 模拟宿主超时：先执行取消钩子（此时等待 future 仍挂起，与
-        // stdio runner 的顺序一致），再丢弃等待 future。
+        // 登记发生在前端附着等待之前；继续等到 PTY 已输出命令起始标记，
+        // 确保 sleep 长命令确实开始执行后再模拟宿主终止 future。
+        let command_start_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let started = service_for_task
+                .with_session(&terminal, |session| {
+                    Ok(session.phase == SessionPhase::Running
+                        && String::from_utf8_lossy(&session.raw_history)
+                            .contains("__TIANGONG_START_"))
+                })
+                .unwrap_or(false);
+            if started {
+                break;
+            }
+            assert!(
+                Instant::now() < command_start_deadline,
+                "长命令应在取消前进入 PTY 执行"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 模拟生产顺序：stdio runner 先触发取消信号并丢弃 dispatch
+        // future，随后才调用服务的 cancel 钩子。
+        let request_id = request.request.request_id.clone();
+        running.abort();
+        let aborted = running.await.expect_err("执行任务应被取消");
+        assert!(aborted.is_cancelled(), "执行任务应先于 cancel 钩子终止");
+        assert_eq!(
+            service_for_task
+                .active_tools
+                .lock()
+                .expect("活动工具表锁损坏")
+                .get(&request_id),
+            Some(&terminal),
+            "执行 future 销毁后必须保留取消目标"
+        );
+
         service_for_task
             .cancel(&request.request)
             .await
             .expect("取消钩子不应失败");
-        running.abort();
+        assert!(
+            !service_for_task
+                .active_tools
+                .lock()
+                .expect("活动工具表锁损坏")
+                .contains_key(&request_id),
+            "cancel 完成后应清除取消目标"
+        );
 
         // 终端 phase 已复位：后续调用可立即复用该终端并成功执行。
         let after = outcome_of(
             service_for_task
                 .dispatch_test(tool_request(
                     "run_command",
-                    serde_json::json!({"cmd": "echo", "args": ["recovered"]}),
+                    serde_json::json!({"cmd": "echo", "args": ["recovered"], "timeout": 5}),
                     Some(("session-a", workspace.as_str())),
                 ))
                 .await,
