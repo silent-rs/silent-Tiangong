@@ -841,8 +841,8 @@ await runSidecar({
             "真实插件产物应落在当前会话工作区"
         );
 
-        // 写工作区、存储根与插件专用临时目录之外的路径（卷根目录）：
-        // 沙箱拒绝。Windows 不再把整个系统 Temp 作为全局开放域。
+        // 写系统临时目录、工作区与存储根之外的路径（卷根目录）：
+        // 沙箱拒绝。系统 Temp 是宿主明确授权的运行基础设施，不作为越界目标。
         let outside_target = if cfg!(unix) {
             std::path::PathBuf::from("/tiangong-write-escape-probe.txt")
         } else {

@@ -660,9 +660,8 @@ impl StdioSidecarConnection {
             if let Some(temp_dir) = &effective_temp_dir {
                 policy.extra_writable.push(temp_dir.clone());
             }
-            // Unix 工具仍可能硬编码系统临时目录；Windows 必须只使用上方
-            // 专用目录，避免递归修改整个用户 Temp 的 ACL。
-            #[cfg(not(windows))]
+            // 系统临时目录是插件运行所需的宿主授权基础设施；Windows 由
+            // Launcher 只在授权根维护可继承 ACL，不逐文件修改或清理。
             policy.extra_writable.push(std::env::temp_dir());
             // 全局 /tmp 仅 Unix 存在——Windows 上没有此路径，加了会在
             // Seatbelt/bwrap 的路径校验中产生无效条目。
