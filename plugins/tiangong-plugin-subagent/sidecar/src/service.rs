@@ -231,6 +231,30 @@ impl SubagentService {
             UI_WRITE_MEMORY => self.ui_write_memory(&payload).await,
             UI_DELETE_MEMORY => self.ui_delete_memory(&payload).await,
             UI_COMPILE_MEMORY => self.ui_compile_memory(&payload).await,
+            // ── WASM 转发：@ 提及候选（启用且后端已实现的 Agent） ──
+            MENTION_CANDIDATES => {
+                let candidates: Vec<serde_json::Value> = self
+                    .agents
+                    .list()
+                    .into_iter()
+                    .filter(|config| config.enabled && config.backend.implemented())
+                    .map(|config| {
+                        json!({
+                            "value": format!("@{}", config.name),
+                            "label": config.name,
+                            "kind": "agent",
+                            "hint": if config.description.is_empty() {
+                                config.backend.label().to_string()
+                            } else {
+                                format!("{} · {}", config.backend.label(), config.description)
+                            },
+                            "mark": "@",
+                        })
+                    })
+                    .collect();
+                serde_json::to_value(candidates)
+                    .map_err(|error| anyhow::anyhow!("序列化提及候选失败: {error}"))
+            }
             // ── WASM 生命周期钩子转发 ──
             SESSION_TURN_FINISHED => match parse_request::<SessionTurnFinishedRequest>(&payload) {
                 Ok(request) => self

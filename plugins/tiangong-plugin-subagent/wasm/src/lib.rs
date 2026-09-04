@@ -19,7 +19,7 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_subagent_protocol::{
-    PLUGIN_ID, PLUGIN_VERSION, SESSION_TURN_FINISHED, TOOL_OPERATIONS,
+    MENTION_CANDIDATES, PLUGIN_ID, PLUGIN_VERSION, SESSION_TURN_FINISHED, TOOL_OPERATIONS,
 };
 
 mod descriptor {
@@ -162,8 +162,18 @@ impl UiGuest for Component {
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
+        // mention 候选经此通道下发（loader 以专用方法名探测）。
+        if request.method == "__tiangong.mention_candidates.v1" {
+            // UI 辅助能力：sidecar 不可用时降级为空列表，不阻塞输入补全。
+            let payload =
+                sidecar_client::invoke_raw(MENTION_CANDIDATES, "{}").unwrap_or_else(|error| {
+                    eprintln!("[subagent] 提及候选获取失败，降级为空: {error}");
+                    "[]".to_string()
+                });
+            return Ok(ViewMessageResponse { payload });
+        }
         Err(plugin_err("本插件无视图消息通道"))
     }
 }

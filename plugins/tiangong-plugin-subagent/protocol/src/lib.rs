@@ -23,4 +23,4 @@ pub const SUBAGENT_PROTOCOL_VERSION: u32 = 1;
 /// sidecar → 插件 UI 的通知通道（状态变化时推送，UI 订阅 `sidecar.*` 事件）。
 pub const NOTIFICATION_CHANNEL: &str = "subagent.event";
 
-pub use ops::{SESSION_TURN_FINISHED, TOOL_OPERATIONS};
+pub use ops::{MENTION_CANDIDATES, SESSION_TURN_FINISHED, TOOL_OPERATIONS};
