@@ -662,19 +662,31 @@ fn validate_target(request: &LaunchRequest) -> Result<PathBuf> {
         bail!("目标程序及插件根目录必须是绝对路径");
     }
 
-    let root_metadata = std::fs::symlink_metadata(root)
-        .with_context(|| format!("读取插件根目录失败: {}", root.display()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        bail!("插件根目录必须是实际目录: {}", root.display());
-    }
-    let program_metadata = std::fs::symlink_metadata(program)
-        .with_context(|| format!("读取目标程序失败: {}", program.display()))?;
-    if program_metadata.file_type().is_symlink() || !program_metadata.is_file() {
-        bail!("目标程序必须是实际普通文件: {}", program.display());
+    if !request.interpreter {
+        let root_metadata = std::fs::symlink_metadata(root)
+            .with_context(|| format!("读取插件根目录失败: {}", root.display()))?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            bail!("插件根目录必须是实际目录: {}", root.display());
+        }
+        let program_metadata = std::fs::symlink_metadata(program)
+            .with_context(|| format!("读取目标程序失败: {}", program.display()))?;
+        if program_metadata.file_type().is_symlink() || !program_metadata.is_file() {
+            bail!("目标程序必须是实际普通文件: {}", program.display());
+        }
     }
 
     let canonical_root = std::fs::canonicalize(root).context("规范化插件根目录失败")?;
     let canonical_program = std::fs::canonicalize(program).context("规范化目标程序失败")?;
+    let root_metadata =
+        std::fs::symlink_metadata(&canonical_root).context("读取规范化插件根目录失败")?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        bail!("规范化插件根目录必须是实际目录");
+    }
+    let program_metadata =
+        std::fs::symlink_metadata(&canonical_program).context("读取规范化目标程序失败")?;
+    if program_metadata.file_type().is_symlink() || !program_metadata.is_file() {
+        bail!("规范化目标程序必须是实际普通文件");
+    }
     if canonical_program == canonical_root || !canonical_program.starts_with(&canonical_root) {
         bail!("目标程序不在插件权威目录内");
     }
@@ -1267,12 +1279,20 @@ fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
         .args(["/D", "/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let status = tiangong_toolkit::configure_no_window(&mut command)
-        .status()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let output = tiangong_toolkit::configure_no_window(&mut command)
+        .output()
         .context("创建 Windows 自检 Junction 失败")?;
-    Ok(status.success())
+    if !output.status.success() {
+        eprintln!(
+            "创建 Windows 自检 Junction 失败（{}）：{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output.status.success())
 }
 
 #[cfg(windows)]
@@ -2487,6 +2507,43 @@ mod tests {
         // 解释器形态没有 plugin.json，校验应走到摘要比对而非清单失败。
         let error = validate_target(&req).unwrap_err();
         assert!(error.to_string().contains("摘要不匹配"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn interpreter_target_resolves_linked_program_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let actual_root = fixture.path().join("versions").join("node-v22");
+        let linked_root = fixture.path().join("nodejs");
+        std::fs::create_dir_all(&actual_root).unwrap();
+        let actual_program = actual_root.join("node.exe");
+        std::fs::write(&actual_program, "stub").unwrap();
+        assert!(create_directory_junction(&actual_root, &linked_root).unwrap());
+
+        let linked_program = linked_root.join("node.exe");
+        let mut req = request(&linked_root, &linked_program);
+        req.interpreter = true;
+        req.program_sha256 = sha256_file(&actual_program).unwrap();
+
+        assert_eq!(
+            validate_target(&req).unwrap(),
+            std::fs::canonicalize(actual_program).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_target_still_rejects_linked_program_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let actual_root = fixture.path().join("actual-plugin");
+        let linked_root = fixture.path().join("linked-plugin");
+        std::fs::create_dir_all(&actual_root).unwrap();
+        std::fs::write(actual_root.join("sidecar.exe"), "stub").unwrap();
+        assert!(create_directory_junction(&actual_root, &linked_root).unwrap());
+
+        let error =
+            validate_target(&request(&linked_root, &linked_root.join("sidecar.exe"))).unwrap_err();
+        assert!(error.to_string().contains("插件根目录必须是实际目录"));
     }
 
     #[test]
