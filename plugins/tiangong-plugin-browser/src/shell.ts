@@ -32,6 +32,7 @@ const TOOL_METHOD: Record<string, string> = {
 
 type BrowserToolWindow = Window & {
   __tiangongBrowserToolClaims?: Set<string>;
+  __tiangongBrowserClosedInvocations?: Set<string>;
 };
 
 interface WebviewEvent {
@@ -46,7 +47,30 @@ interface WebviewEvent {
 /** 进行中的工具调用状态：宿主取消/过期（tool.closed）后置 cancelled。 */
 const activeInvocations = new Map<string, { cancelled: boolean }>();
 
+function sharedClosedInvocations(): Set<string> {
+  const sharedWindow = window as BrowserToolWindow;
+  return sharedWindow.__tiangongBrowserClosedInvocations
+    ?? (sharedWindow.__tiangongBrowserClosedInvocations = new Set());
+}
+
+function closeInvocation(invocationId: string): void {
+  sharedClosedInvocations().add(invocationId);
+}
+
+function isInvocationCancelled(invocationId: string): boolean {
+  return activeInvocations.get(invocationId)?.cancelled === true
+    || sharedClosedInvocations().has(invocationId);
+}
+
+class ToolResolutionError extends Error {
+  constructor(cause: unknown) {
+    super(`提交工具结果失败：${String(cause)}`);
+    this.name = 'ToolResolutionError';
+  }
+}
+
 function claimInvocation(invocationId: string): boolean {
+  if (sharedClosedInvocations().has(invocationId)) return false;
   const sharedWindow = window as BrowserToolWindow;
   const claims = sharedWindow.__tiangongBrowserToolClaims
     ?? (sharedWindow.__tiangongBrowserToolClaims = new Set());
@@ -73,8 +97,13 @@ async function resolveActive(
   invocationId: string,
   resolution: Omit<ToolResolution, 'invocation_id'>,
 ): Promise<void> {
-  if (activeInvocations.get(invocationId)?.cancelled) return;
-  await tools.resolve({ invocation_id: invocationId, ...resolution });
+  if (isInvocationCancelled(invocationId)) return;
+  try {
+    await tools.resolve({ invocation_id: invocationId, ...resolution });
+  } catch (error) {
+    if (isInvocationCancelled(invocationId)) return;
+    throw new ToolResolutionError(error);
+  }
 }
 
 /** 打开浏览器插件 App（app.open 宿主原语，聚焦本进程内的会话实例）。 */
@@ -150,12 +179,11 @@ async function main() {
   }
   const tools = createToolProvider(bridge);
 
-  // 宿主取消/过期闭合（tool.closed）：标记进行中的调用并立即释放 claim，
-  // 让其在 await 恢复后不再提交 resolve（宿主保证一次调用只能闭合一次）。
+  // 在当前应用生命周期保留闭合记录，拒绝宿主重放快照中晚于 tool.closed 到达的 requested。
   tools.onClosed((closed: ToolClosed) => {
     const active = activeInvocations.get(closed.invocation_id);
     if (active) active.cancelled = true;
-    (window as BrowserToolWindow).__tiangongBrowserToolClaims?.delete(closed.invocation_id);
+    closeInvocation(closed.invocation_id);
   });
 
   tools.onRequested((invocation: ToolInvocation) => {
@@ -168,6 +196,7 @@ async function main() {
         // browser_close（面板开关，app.* 原语）：带 tab_id 精确关闭一个
         // 页面，不带则收起整个浏览器面板（用户明确要求或任务完成时）。
         if (invocation.name === 'browser_close') {
+          if (isInvocationCancelled(invocation.invocation_id)) return;
           const args = (invocation.arguments ?? {}) as { tab_id?: string };
           await bridge.call(
             'app.close',
@@ -204,11 +233,13 @@ async function main() {
         ) {
           const target = (invocation.arguments as { url: string }).url;
           if (invocation.name === 'browser_open' || tabsModel.tabs.length === 0) {
+            if (isInvocationCancelled(invocation.invocation_id)) return;
             const opened = await tabsModel.newTab(target);
-            if (opened) {
+            if (opened && !isInvocationCancelled(invocation.invocation_id)) {
               void requestOpenInstance(bridge, invocation.session_id, opened.id);
             }
           } else {
+            if (isInvocationCancelled(invocation.invocation_id)) return;
             await tabsModel.navigate(target);
           }
           const summary =
@@ -224,6 +255,7 @@ async function main() {
         // 会话绑定（对齐终端插件）：Agent 打开/操作的页面归属发起对话，
         // 与该对话的浏览器面板是同一实例（插件×会话双维度隔离）。
         const invocationArgs = (invocation.arguments as Record<string, unknown>) ?? {};
+        if (isInvocationCancelled(invocation.invocation_id)) return;
         const showFetchPanel = invocation.name === 'web_fetch' && invocationArgs.open === true;
         const stopAppRegistration = invocation.name === 'web_fetch'
           ? registerNextNavigation(
@@ -246,6 +278,7 @@ async function main() {
         } finally {
           stopAppRegistration?.();
         }
+        if (isInvocationCancelled(invocation.invocation_id)) return;
         const parsed = JSON.parse(raw) as {
           view_id?: string;
           tabs?: Array<{ id?: string; url?: string; title?: string }>;
@@ -285,6 +318,11 @@ async function main() {
           result: { ok: true, summary, exit_code: 0 },
         });
       } catch (error) {
+        if (isInvocationCancelled(invocation.invocation_id)) return;
+        if (error instanceof ToolResolutionError) {
+          console.error(error.message);
+          return;
+        }
         await resolveActive(tools, invocation.invocation_id, {
           status: 'answered',
           result: { ok: false, summary: `webview 调用失败：${String(error)}`, exit_code: 1 },
