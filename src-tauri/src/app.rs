@@ -77,6 +77,8 @@ pub struct TiangongApp {
 pub struct ToolInjection {
     /// 注入到哪个 session（None = 当前活跃 session）。
     pub session_id: Option<String>,
+    /// 浏览器注入来源；消费前再次确认该页面仍有实际标签。
+    pub browser_source: Option<(String, String)>,
     /// 注入的工具数据。
     pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
 }
@@ -380,6 +382,19 @@ impl TiangongApp {
 
                 let tool_name = req.tool.tool_name().to_string();
 
+                if let Some((scope, tab_id)) = req.browser_source.as_ref() {
+                    let host_state = app_handle.state::<crate::webview_host::WebviewHostState>();
+                    let still_mounted = host_state
+                        .registry
+                        .existing_session_state(scope)
+                        .map(crate::webview_host::manager::BrowserManager::from_state)
+                        .is_some_and(|manager| manager.is_tab_mounted(tab_id));
+                    if !still_mounted {
+                        tracing::debug!(session_id, tab_id, "浏览器标签已关闭，跳过页面注入");
+                        continue;
+                    }
+                }
+
                 // 通过 app_handle 获取 TiangongApp
                 let app_state = app_handle.state::<TiangongApp>();
                 // 与发送、编辑和删除共享同一会话边界，覆盖快照读取、ensure、消费者
@@ -416,6 +431,19 @@ impl TiangongApp {
                         stream_rx,
                     );
                     tracing::info!(session_id, "消费者自动恢复 core");
+                }
+
+                if let Some((scope, tab_id)) = req.browser_source.as_ref() {
+                    let host_state = app_handle.state::<crate::webview_host::WebviewHostState>();
+                    let still_mounted = host_state
+                        .registry
+                        .existing_session_state(scope)
+                        .map(crate::webview_host::manager::BrowserManager::from_state)
+                        .is_some_and(|manager| manager.is_tab_mounted(tab_id));
+                    if !still_mounted {
+                        tracing::debug!(session_id, tab_id, "浏览器标签已关闭，跳过页面注入");
+                        continue;
+                    }
                 }
 
                 let core_sent = app_state

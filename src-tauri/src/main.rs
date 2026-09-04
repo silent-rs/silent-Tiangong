@@ -193,9 +193,9 @@ fn run_gui() {
                 else {
                     return;
                 };
-                if !tiangong_app::webview_host::manager::BrowserManager::from_state(source_state)
-                    .is_visible()
-                {
+                let source_manager =
+                    tiangong_app::webview_host::manager::BrowserManager::from_state(source_state);
+                if !source_manager.is_tab_mounted(&data.tab_id) {
                     return;
                 }
                 use tiangong_app::webview_host::page_fetcher::BrowserContent;
@@ -205,6 +205,7 @@ fn run_gui() {
                 };
                 let _ = tx1.send(tiangong_app::ToolInjection {
                     session_id: Some(target_session),
+                    browser_source: Some((data.session_id, data.tab_id)),
                     tool: Box::new(BrowserContent {
                         title: data.title,
                         url: data.url,
@@ -236,12 +237,13 @@ fn run_gui() {
                 else {
                     return;
                 };
-                if !tiangong_app::webview_host::manager::BrowserManager::from_state(source_state)
-                    .is_visible()
-                {
+                let source_manager =
+                    tiangong_app::webview_host::manager::BrowserManager::from_state(source_state);
+                if !source_manager.is_tab_mounted(&payload.tab_id) {
                     return;
                 }
                 let session_id = payload.session_id;
+                let source_tab_id = payload.tab_id;
                 let events = payload.events;
                 let total_count = events.len();
                 let Some((network_events, feedback)) = browser_events_to_feedback(events) else {
@@ -318,9 +320,20 @@ fn run_gui() {
                         debug!("浏览器网络事件来自非会话作用域，跳过注入");
                         return;
                     };
+                    let browser_state =
+                        app_handle.state::<tiangong_app::webview_host::WebviewHostState>();
+                    let mounted = browser_state
+                        .registry
+                        .existing_session_state(&session_id)
+                        .map(tiangong_app::webview_host::manager::BrowserManager::from_state)
+                        .is_some_and(|manager| manager.is_tab_mounted(&source_tab_id));
+                    if !mounted {
+                        return;
+                    }
                     let queued = injection_tx
                         .send(tiangong_app::ToolInjection {
                             session_id: Some(target_session.clone()),
+                            browser_source: Some((session_id.clone(), source_tab_id)),
                             tool: Box::new(BrowserContent {
                                 title,
                                 url: page_url.clone(),
@@ -834,6 +847,7 @@ fn run_gui() {
             tiangong_app::commands::plugin_open_view,
             tiangong_app::commands::plugin_call,
             tiangong_app::commands::list_slot_contributions,
+            tiangong_app::commands::set_webview_mounted_tabs,
             tiangong_app::commands::list_extension_apps,
             tiangong_app::commands::plugin_open_entry,
             tiangong_app::commands::plugin_read_entry_resource,
