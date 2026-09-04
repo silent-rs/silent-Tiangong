@@ -202,8 +202,42 @@ pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
 /// 依赖 server 回调的插件 ID 列表。
 ///
 /// 这些 sidecar 会在运行时经 HTTP 回调本机 server，server 连接信息变化时必须重启。
-const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler"];
+const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler", "subagent"];
 
+/// 请求指定插件 sidecar 执行优雅关闭操作（仅当连接已活跃时，不拉起新进程）。
+///
+/// 宿主退出流程使用：先让 sidecar 自行中断托管子进程并落盘，再由
+/// [`shutdown_all_sidecars`] 统一终止进程。未安装或未运行的 sidecar 直接跳过。
+pub fn request_sidecar_graceful_shutdown(storage_root: &Path, plugin_id: &str, operation: &str) {
+    let installed = match find_installed_plugin(storage_root, plugin_id) {
+        Ok(installed) => installed,
+        Err(error) => {
+            tracing::debug!(plugin_id, %error, "插件未安装，跳过优雅关闭");
+            return;
+        }
+    };
+    let connections = sidecar_connections()
+        .lock()
+        .map(|guard| {
+            guard
+                .iter()
+                .filter(|(key, _)| key.directory == installed.directory)
+                .map(|(_, connection)| connection.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if connections.is_empty() {
+        return;
+    }
+    for connection in connections {
+        match connection.invoke(operation, "{}") {
+            Ok(_) => tracing::info!(plugin_id, "sidecar 已执行优雅关闭"),
+            Err(error) => {
+                tracing::warn!(plugin_id, %error, "sidecar 优雅关闭失败，将由终止流程兜底");
+            }
+        }
+    }
+}
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";
 
