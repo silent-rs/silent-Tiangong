@@ -267,7 +267,7 @@ fn replace_file_windows(from: &Path, to: &Path) -> Result<()> {
         )
     } == 0
     {
-        return Err(anyhow!(std::io::Error::last_os_error()));
+        return Err(anyhow::anyhow!(std::io::Error::last_os_error()));
     }
     Ok(())
 }
