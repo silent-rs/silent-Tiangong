@@ -1,0 +1,414 @@
+//! CLI Adapter 执行引擎：managed JSONL 子进程的启动、注入、中断与终止。
+//!
+//! 协议约定（首版 CLI 后端）：
+//! - sidecar 以 `sh -c <command>`（Windows `cmd /C`）启动子进程，cwd 为绑定的
+//!   Workspace（或独立 worktree），Unix 下 setsid 自立进程组；
+//! - stdin 每行一个 JSON：`begin` → 后续 `user_message` / `interrupt` / `cancel`；
+//! - stdout 每行一个 JSON 事件（见 [`CliEvent`]），非 JSON 行按 `message` 处理；
+//! - stderr 逐行收进运行日志；
+//! - 子进程在 stdin EOF 时应自行退出（宿主异常退出的级联兜底）。
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
+
+/// 子进程 stdout 行事件（归一化前的后端原始事件）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CliEvent {
+    /// 普通输出（有价值的消息，非高频进度）。
+    Message { text: String },
+    /// 状态上报：working / ready。
+    Status {
+        status: String,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// 阻塞，等待外部输入。
+    Blocked { text: String },
+    /// 等待审批。
+    ApprovalRequired { text: String },
+    /// 任务完成。
+    Completed {
+        #[serde(default)]
+        result: Option<String>,
+    },
+    /// 失败。
+    Failed { error: String },
+}
+
+impl CliEvent {
+    /// 解析一行 stdout：JSON 事件优先，非 JSON 行按 message 处理。
+    pub fn parse_line(line: &str) -> Option<Self> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with('{')
+            && let Ok(event) = serde_json::from_str(trimmed)
+        {
+            return Some(event);
+        }
+        Some(Self::Message {
+            text: trimmed.to_string(),
+        })
+    }
+}
+
+/// 传给子进程的启动帧。
+#[derive(Debug, Clone, Serialize)]
+pub struct BeginFrame<'a> {
+    pub r#type: &'a str,
+    pub agent_id: &'a str,
+    pub agent_name: &'a str,
+    pub instructions: &'a str,
+    pub activation_id: &'a str,
+    pub session_id: &'a str,
+    pub workspace: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_criteria: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'a str>,
+    /// 触发本次运行的用户输入（消息内容或任务补充说明）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExitInfo {
+    pub code: Option<i32>,
+}
+
+/// 运行事件回调（由 service 注入，同步执行、必须非阻塞快路径）。
+pub type EventCallback = Arc<dyn Fn(&str, CliEvent) + Send + Sync>;
+pub type LogCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
+pub type ExitCallback = Arc<dyn Fn(&str, ExitInfo) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct RunHooks {
+    pub on_event: EventCallback,
+    pub on_log: LogCallback,
+    pub on_exit: ExitCallback,
+}
+
+struct ManagedProcess {
+    pid: u32,
+    stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+    interrupt_sent: std::sync::atomic::AtomicBool,
+}
+
+/// 全部活跃 managed 子进程的注册表。
+#[derive(Clone)]
+pub struct RunnerHub {
+    processes: Arc<Mutex<HashMap<String, ManagedProcess>>>,
+}
+
+impl RunnerHub {
+    pub fn new() -> Self {
+        Self {
+            processes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 启动一个 managed 运行进程并注入 begin 帧。
+    pub async fn spawn(
+        &self,
+        run_id: &str,
+        command: &str,
+        cwd: &std::path::Path,
+        env: &[(String, String)],
+        begin: &BeginFrame<'_>,
+        hooks: RunHooks,
+    ) -> Result<u32> {
+        let mut cmd = build_command(command);
+        cmd.current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        apply_platform_window_suppression(&mut cmd);
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("启动 Agent 子进程失败（cwd={}）", cwd.display()))?;
+        let pid = child.id().context("子进程启动后立即退出，无法获取 PID")?;
+        let mut stdin = child.stdin.take().context("子进程未提供 stdin")?;
+        let stdout = child.stdout.take().context("子进程未提供 stdout")?;
+        let stderr = child.stderr.take().context("子进程未提供 stderr")?;
+
+        let begin_line = serde_json::to_string(begin).context("序列化 begin 帧失败")?;
+        stdin
+            .write_all(format!("{begin_line}\n").as_bytes())
+            .await
+            .context("写入 begin 帧失败")?;
+        stdin.flush().await.context("flush begin 帧失败")?;
+
+        let stdin_handle = Arc::new(Mutex::new(Some(stdin)));
+        self.processes.lock().await.insert(
+            run_id.to_string(),
+            ManagedProcess {
+                pid,
+                stdin: stdin_handle,
+                interrupt_sent: std::sync::atomic::AtomicBool::new(false),
+            },
+        );
+
+        let run_id_owned = run_id.to_string();
+        let registry = self.processes.clone();
+        // 子进程退出即从注册表移除（进程对象由本 task 独占持有）。
+        tokio::spawn(async move {
+            let exit_code = supervise_process(&run_id_owned, child, stdout, stderr, &hooks).await;
+            registry.lock().await.remove(&run_id_owned);
+            (hooks.on_exit)(&run_id_owned, ExitInfo { code: exit_code });
+        });
+        Ok(pid)
+    }
+
+    /// 向运行中的子进程注入一行 JSON（user_message / interrupt / cancel）。
+    pub async fn write_line(&self, run_id: &str, payload: &serde_json::Value) -> Result<()> {
+        let guard = self.processes.lock().await;
+        let Some(process) = guard.get(run_id) else {
+            bail!("运行已不存在: {run_id}");
+        };
+        let mut stdin_slot = process.stdin.lock().await;
+        let Some(stdin) = stdin_slot.as_mut() else {
+            bail!("运行进程的 stdin 已关闭: {run_id}");
+        };
+        let line = serde_json::to_string(payload).context("序列化注入帧失败")?;
+        stdin
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .context("写入注入帧失败")?;
+        stdin.flush().await.context("flush 注入帧失败")?;
+        Ok(())
+    }
+
+    /// 中断（SIGINT 组信号，保留现场；对应工具 interrupt_agent_run）。
+    pub async fn interrupt(&self, run_id: &str) -> Result<()> {
+        let guard = self.processes.lock().await;
+        let Some(process) = guard.get(run_id) else {
+            bail!("运行已不存在: {run_id}");
+        };
+        process
+            .interrupt_sent
+            .store(true, std::sync::atomic::Ordering::Release);
+        signal_group(process.pid, Signal::Interrupt).context("发送中断信号失败")
+    }
+
+    /// 是否已向该运行发送过中断信号。
+    pub async fn interrupt_sent(&self, run_id: &str) -> bool {
+        self.processes
+            .lock()
+            .await
+            .get(run_id)
+            .is_some_and(|process| {
+                process
+                    .interrupt_sent
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+
+    /// 终止：先发终止信号，宽限内未退出则强杀（同步等待，供取消与退出清理使用）。
+    pub async fn terminate(&self, run_id: &str, grace: Duration) -> Result<()> {
+        let pid = {
+            let guard = self.processes.lock().await;
+            let Some(process) = guard.get(run_id) else {
+                return Ok(());
+            };
+            process.pid
+        };
+        let _ = signal_group(pid, Signal::Terminate);
+        let deadline = tokio::time::Instant::now() + grace;
+        while tokio::time::Instant::now() < deadline {
+            if !process_alive(pid) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = signal_group(pid, Signal::Kill);
+        Ok(())
+    }
+
+    /// 关闭 stdin（通知子进程不再有输入，协议要求其自行退出）。
+    pub async fn close_stdin(&self, run_id: &str) -> Result<()> {
+        let guard = self.processes.lock().await;
+        let Some(process) = guard.get(run_id) else {
+            return Ok(());
+        };
+        *process.stdin.lock().await = None;
+        Ok(())
+    }
+
+    /// 优雅关闭全部 managed 运行：中断 → 宽限 → 强杀（宿主退出流程调用）。
+    pub async fn shutdown_all(&self, grace: Duration) {
+        let pids: Vec<u32> = {
+            let guard = self.processes.lock().await;
+            guard.values().map(|process| process.pid).collect()
+        };
+        if pids.is_empty() {
+            return;
+        }
+        for pid in &pids {
+            let _ = signal_group(*pid, Signal::Interrupt);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        while tokio::time::Instant::now() < deadline && pids.iter().any(|pid| process_alive(*pid)) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for pid in pids.iter().filter(|pid| process_alive(**pid)) {
+            let _ = signal_group(*pid, Signal::Kill);
+        }
+    }
+}
+
+/// 读 stdout/stderr、轮询进程退出，返回退出码。
+async fn supervise_process(
+    run_id: &str,
+    mut child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    hooks: &RunHooks,
+) -> Option<i32> {
+    let event_run_id = run_id.to_string();
+    let event_hook = hooks.on_event.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(event) = CliEvent::parse_line(&line) {
+                event_hook(&event_run_id, event);
+            }
+        }
+    });
+    let log_run_id = run_id.to_string();
+    let log_hook = hooks.on_log.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log_hook(&log_run_id, &line);
+        }
+    });
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) => tokio::time::sleep(Duration::from_millis(200)).await,
+            Err(error) => {
+                tracing::warn!(run_id, %error, "轮询子进程退出状态失败");
+                break None;
+            }
+        }
+    };
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    exit_code
+}
+
+fn build_command(command: &str) -> tokio::process::Command {
+    #[cfg(unix)]
+    {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+}
+
+/// Windows 抑制控制台窗口；Unix 不 setsid——子进程留在 sidecar 进程组内。
+///
+/// Seatbelt 沙箱默认拒绝 process-signal（实测 macOS 26），sidecar 对子进程的
+/// 组信号不可用；保留同组关系让宿主退出时的 kill(-sidecar_pid, SIGKILL)
+/// 级联清理 managed 子进程（不依赖后端遵守 stdin EOF 自退出约定）。
+/// 运行期控制走 JSONL 协议帧（interrupt/cancel）与 stdin EOF。
+fn apply_platform_window_suppression(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+enum Signal {
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: Signal) -> Result<()> {
+    let (sig, name) = match signal {
+        Signal::Interrupt => (libc::SIGINT, "SIGINT"),
+        Signal::Terminate => (libc::SIGTERM, "SIGTERM"),
+        Signal::Kill => (libc::SIGKILL, "SIGKILL"),
+    };
+    // 单进程信号（子进程与 sidecar 同组，宿主级联负责整组回收）。
+    // 沙箱内可能被 Seatbelt 拒绝（process-signal 默认不放行）——
+    // 进程已消失（ESRCH）视为成功，其余失败由调用方降级处理。
+    let result = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    if result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        bail!("向进程 {pid} 发送 {name} 失败")
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    unsafe {
+        let result = libc::kill(pid as libc::pid_t, 0);
+        // EPERM = 进程存在但当前沙箱拒绝信号（Seatbelt process-signal 默认不放行）。
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(windows)]
+fn signal_group(pid: u32, _signal: Signal) -> Result<()> {
+    // Windows 无组信号且 CTRL_BREAK 依赖共享控制台：中断与终止均降级为
+    // 进程树终止（能力差异记录在 Adapter 声明中）。taskkill 抑制窗口闪烁。
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match output {
+        Ok(result) if result.status.success() => Ok(()),
+        Ok(result) => bail!(
+            "taskkill 终止进程树 {pid} 失败: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ),
+        Err(error) => {
+            Err(anyhow::Error::new(error).context(format!("启动 taskkill 失败（pid={pid}）")))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match output {
+        Ok(result) => String::from_utf8_lossy(&result.stdout).contains(&pid.to_string()),
+        Err(_) => false,
+    }
+}
