@@ -165,24 +165,6 @@ fn build_cli_plugins(
     // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
     // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。
     // CLI 作为前台交互工具，生命周期不稳定，不承载调度执行（见 issue 说明）。
-
-    let child_plugin_factory = std::sync::Arc::new({
-        let storage_root = storage_root.clone();
-        move || {
-            let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
-                Vec::new();
-            child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
-                &storage_root,
-                tiangong_plugin_runtime::registry::RuntimeKind::Cli,
-            ));
-            // 子 Core 同样不注册 scheduler 插件，与主 Core 一致。
-            child_plugins
-        }
-    });
-    plugins.extend(tiangong_plugin_agent_team::default_plugins(
-        storage_root,
-        child_plugin_factory,
-    ));
     plugins
 }
 

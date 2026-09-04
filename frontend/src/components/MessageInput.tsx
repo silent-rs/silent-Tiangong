@@ -22,7 +22,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
-import { registerMentionMark, registerMentionMarks, mentionMarkFor } from '@/utils/mentionMarks';
+import { registerMentionMarks, mentionMarkFor } from '@/utils/mentionMarks';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -117,8 +117,6 @@ export function MessageInput({
   const addVoiceMessage = useStore((state) => state.addVoiceMessage);
   const lastUsage = useStore((state) => state.lastUsage);
   const tokenStats = useStore((state) => state.tokenStats);
-  const agents = useStore((state) => state.agents);
-  const selectedAgentTab = useStore((state) => state.selectedAgentTab);
   const reasoningEffort = useStore((state) => state.reasoningEffort);
   const setReasoningEffort = useStore((state) => state.setReasoningEffort);
   const isComposingRef = useRef(false);
@@ -175,24 +173,12 @@ export function MessageInput({
   const currentRunStatus = isNewConversation
     ? 'idle'
     : currentSessionRunStatus || runStatus;
-  const selectedAgent = selectedAgentTab
-    ? agents.find((agent) => agent.role === selectedAgentTab)
-    : null;
-  const selectedAgentId = selectedAgent?.agentId ?? null;
-  const displayTokens = selectedAgentId
-    ? (tokenStats?.agent_current_tokens?.[selectedAgentId] ?? 0)
-    : (tokenStats?.current_tokens ?? 0);
+  const displayTokens = tokenStats?.current_tokens ?? 0;
   const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
   const compressionProgress = compressionThreshold > 0
     ? Math.min(100, Math.round((displayTokens / compressionThreshold) * 100))
     : 0;
-  const selectedAgentTotalTokens = selectedAgentId
-    ? (tokenStats?.agent_token_usage?.[selectedAgentId]?.total_tokens ?? 0)
-    : 0;
-  const totalTokens = selectedAgentId
-    ? (selectedAgentTotalTokens || displayTokens)
-    : (tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0);
-  const activeAgentLabel = selectedAgent?.label ?? null;
+  const totalTokens = tokenStats?.total_tokens ?? lastUsage?.total_tokens ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -317,28 +303,8 @@ export function MessageInput({
       return [];
     }
 
-    // 合并 API 分组和 Agent 分组
-    const aliveAgents = agents.filter(a => a.status !== 'terminated');
-    const agentCandidates: MentionCandidate[] = aliveAgents.map(a => ({
-      value: `@${a.role}`,
-      label: a.label,
-      kind: 'agent',
-      hint: `Agent · ${a.status === 'running' ? '执行中' : a.status === 'idle' ? '空闲' : a.status === 'waiting_for_lock' ? '等待文件锁' : a.status === 'waiting_for_user' ? '等待用户' : '错误'}`,
-      mark: '@',
-    }));
-    // 当存在活跃 Agent 时添加 @all 广播选项
-    if (aliveAgents.length > 0) {
-      agentCandidates.push({
-        value: '@all',
-        label: 'All',
-        kind: 'agent',
-        hint: `广播给全部 ${aliveAgents.length} 个 Agent`,
-        mark: '*',
-      });
-    }
-    const groups: MentionGroup[] = agentCandidates.length > 0
-      ? [{ kind: 'agent', label: 'Agent', candidates: agentCandidates }, ...mentionGroups]
-      : mentionGroups;
+    // 插件 mention 候选由已安装插件统一提供。
+    const groups: MentionGroup[] = mentionGroups;
 
     const filtered = mentionFilter
       ? (() => {
@@ -385,15 +351,6 @@ export function MessageInput({
   useEffect(() => {
     loadCandidates();
   }, [loadCandidates]);
-
-  // 前端本地的 agent 候选自带标记（其余 kind 的标记全部由插件提供）。
-  useEffect(() => {
-    const alive = agents.filter(a => a.status !== 'terminated');
-    if (alive.length > 0) {
-      registerMentionMark(`@${alive[0].role}`, 'agent', '@');
-    }
-    registerMentionMark('@all', 'agent', '*');
-  }, [agents]);
 
   const executeSlashCommand = useCallback(async (command: string) => {
     const trimmed = command.trim();
@@ -1077,9 +1034,6 @@ export function MessageInput({
                     <span>就绪</span>
                   </span>
                 )}
-                {activeAgentLabel && (
-                  <span className="text-muted-foreground/60">[{activeAgentLabel}]</span>
-                )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <Brain className="w-3 h-3" />
@@ -1231,9 +1185,7 @@ export function MessageInput({
                 disabled={!cacheKey}
                 placeholder={
                   isIdle
-                    ? agents.length > 0
-                      ? '输入消息... (Enter 发送，@ 引用 Agent/Skill/MCP)'
-                      : '输入消息... (Enter 发送，@ 引用 Skill/MCP)'
+                    ? '输入消息... (Enter 发送，@ 引用 Skill/MCP)'
                     : `追加指示... (Enter 排队，${MOD_KEY_LABEL} 立即引导)`
                 }
                 className="min-h-[60px] max-h-[200px] resize-none pr-32 bg-muted/50 focus-visible:ring-ring"
@@ -1317,11 +1269,7 @@ export function MessageInput({
                 {(displayTokens > 0 || totalTokens > 0) && (
                   <div
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
-                    title={
-                      activeAgentLabel
-                        ? `[${activeAgentLabel}] 当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
-                        : `当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`
-                    }
+                    title={`当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`}
                   >
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
@@ -1340,7 +1288,6 @@ export function MessageInput({
                     {!compact && (
                       <>
                         <span>
-                          {activeAgentLabel ? `[${activeAgentLabel}] ` : ''}
                           {displayTokens.toLocaleString()}
                         </span>
                         <span>总计 {totalTokens.toLocaleString()}</span>

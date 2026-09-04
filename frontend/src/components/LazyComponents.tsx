@@ -6,14 +6,12 @@ import { MessageList as MessageListComponent } from './MessageList';
 import { MessageInput as MessageInputComponent } from './MessageInput';
 import { PlanPanel as PlanPanelComponent } from './PlanPanel';
 import { StatusPanel as StatusPanelComponent } from './StatusPanel';
-import { AgentPanel as AgentPanelComponent } from './AgentPanel';
 
 // 将命名导出包装为默认导出的懒加载组件
 export const MessageList = lazy(() => Promise.resolve({ default: MessageListComponent }));
 export const MessageInput = lazy(() => Promise.resolve({ default: MessageInputComponent }));
 export const PlanPanel = lazy(() => Promise.resolve({ default: PlanPanelComponent }));
 export const StatusPanel = lazy(() => Promise.resolve({ default: StatusPanelComponent }));
-export const AgentPanel = lazy(() => Promise.resolve({ default: AgentPanelComponent }));
 
 // 加载占位组件
 function ComponentLoader() {
@@ -57,14 +55,6 @@ export function LazyStatusPanel(props: StatusPanelProps) {
   return (
     <Suspense fallback={null}>
       <StatusPanel {...props} />
-    </Suspense>
-  );
-}
-
-export function LazyAgentPanel() {
-  return (
-    <Suspense fallback={null}>
-      <AgentPanel />
     </Suspense>
   );
 }

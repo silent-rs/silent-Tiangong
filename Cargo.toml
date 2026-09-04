@@ -71,7 +71,6 @@ members = [
     "plugins/tiangong-plugin-mcp/protocol",
     "plugins/tiangong-plugin-mcp/sidecar",
     "plugins/tiangong-plugin-mcp/wasm",
-    "crates/plugins/tiangong-plugin-agent-team",
     "plugins/tiangong-plugin-prompt/protocol",
     "plugins/tiangong-plugin-prompt/wasm",
     "crates/tiangong-plugin-runtime",
@@ -144,7 +143,6 @@ tiangong-plugin-skill-protocol = { path = "plugins/tiangong-plugin-skill/protoco
 tiangong-plugin-skill-sidecar = { path = "plugins/tiangong-plugin-skill/sidecar" }
 tiangong-plugin-skill-wasm = { path = "plugins/tiangong-plugin-skill/wasm" }
 tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
-tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
 tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
 tiangong-plugin-prompt-wasm = { path = "plugins/tiangong-plugin-prompt/wasm" }
 tiangong-plugin-memory-wasm = { path = "plugins/tiangong-plugin-memory/wasm" }

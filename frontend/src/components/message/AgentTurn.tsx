@@ -40,7 +40,6 @@ interface AgentTurnProps {
   streamingContent: string;
   streamingReasoningContent: string;
   hasTts: boolean;
-  selectedAgentTab: string | null;
   isActive?: boolean;
   /** 本轮执行总时长（毫秒）：来自本轮用户消息的 elapsed_ms。 */
   turnElapsedMs?: number;
@@ -54,7 +53,6 @@ function AgentTurnView({
   streamingContent,
   streamingReasoningContent,
   hasTts,
-  selectedAgentTab,
   isActive = false,
   turnElapsedMs,
   turnStatus,
@@ -236,8 +234,6 @@ function AgentTurnView({
   })();
 
   const renderFragment = (frag: Fragment, i: number) => {
-    if (selectedAgentTab && frag.type !== "agent_event") return null;
-    if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
     if (frag.type === "thinking") {
       // 历史/已完成思考块一律视为非活跃且默认折叠。
       return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} elapsedMs={frag.elapsedMs} /></div>;
@@ -429,7 +425,7 @@ function AgentTurnView({
 }
 
 const AgentTurn = memo(AgentTurnView, (prev, next) => {
-  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.selectedAgentTab !== next.selectedAgentTab || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
+  if (prev.hasTts !== next.hasTts || !sameMessageRefs(prev.messages, next.messages) || prev.isActive !== next.isActive || prev.turnElapsedMs !== next.turnElapsedMs || prev.turnStatus !== next.turnStatus) return false;
   const touchesStreamingMessage = hasMessage(prev.messages, prev.streamingMessageId) || hasMessage(prev.messages, next.streamingMessageId);
   if (!touchesStreamingMessage) return true;
   return prev.streamingMessageId === next.streamingMessageId && prev.streamingContent === next.streamingContent && prev.streamingReasoningContent === next.streamingReasoningContent;

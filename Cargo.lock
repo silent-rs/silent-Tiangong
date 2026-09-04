@@ -10754,7 +10754,6 @@ dependencies = [
  "tiangong-entry",
  "tiangong-llm",
  "tiangong-media-archive",
- "tiangong-plugin-agent-team",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
@@ -10816,7 +10815,6 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-plugin-agent-team",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
@@ -10999,22 +10997,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-plugin-memory-protocol",
  "tiangong-plugin-runtime",
- "tiangong-types",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tiangong-plugin-agent-team"
-version = "0.16.4"
-dependencies = [
- "chrono",
- "scru128",
- "serde",
- "serde_json",
- "tempfile",
- "tiangong-core",
- "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11842,7 +11824,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-media-archive",
- "tiangong-plugin-agent-team",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",

@@ -42,7 +42,6 @@ impl DesktopCoreFactory {
     ) -> Vec<Arc<dyn Plugin>> {
         use tracing::info;
 
-        let storage_root = self.storage_root.clone();
         let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
         // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
         let Some(_app_handle) = self.app_handle.get().cloned() else {
@@ -57,22 +56,6 @@ impl DesktopCoreFactory {
         );
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
-        // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-        let child_plugin_factory = Arc::new({
-            let storage_root = storage_root.clone();
-            move || {
-                let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-                child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
-                    &storage_root,
-                    tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
-                ));
-                child_plugins
-            }
-        });
-        plugins.push(tiangong_plugin_agent_team::build_plugin(
-            storage_root.clone(),
-            child_plugin_factory,
-        ));
         plugins
     }
 }

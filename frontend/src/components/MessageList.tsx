@@ -14,7 +14,6 @@ import {
 import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import { AgentPanel } from "./AgentPanel";
 import { api, hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
@@ -33,8 +32,6 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   groupMessages,
   workerContentMessages,
-  workerBelongsToAgent,
-  extractAgentRoles,
   UserMessageGroup,
   AgentTurn,
 } from "./message";
@@ -58,8 +55,6 @@ export function MessageList() {
   const streamingMessageId = useStore(s => s.streamingMessageId);
   const streamingContent = useStore(s => s.streamingContent);
   const streamingReasoningContent = useStore(s => s.streamingReasoningContent);
-  const selectedAgentTab = useStore(s => s.selectedAgentTab);
-  const agents = useStore(s => s.agents);
   const voiceMessages = useStore(s => s.voiceMessages);
   const editAndResend = useStore(s => s.editAndResend);
   const activeSessionId = useStore(s => s.activeSessionId);
@@ -81,7 +76,6 @@ export function MessageList() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
-  const prevSelectedAgentTabRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -217,42 +211,8 @@ export function MessageList() {
   const isThinking = runStatus !== "idle";
   const isContextCompressing = runSummary.includes("正在压缩");
 
-  // 消息分组
-  const messageGroups = useMemo(() => groupMessages(messages), [messages]);
-  const selectedAgentId = selectedAgentTab
-    ? agents.find((agent) => agent.role === selectedAgentTab)?.agentId
-    : undefined;
-
-  // agent_tab 过滤前置：将渲染时的 return null 改为数据层过滤
-  const filteredGroups = useMemo(() => {
-    if (!selectedAgentTab) {
-      // 主对话视图：排除子 Agent 的过程消息（worker_id 以 "agent:" 开头），
-      // 这些只在对应的 Agent Tab 中展示。
-      return messageGroups.filter(group => {
-        if (group.type === "worker") {
-          return !group.worker_id?.startsWith("agent:");
-        }
-        return true;
-      });
-    }
-    return messageGroups.filter(group => {
-      if (group.type === "user") return false;
-      if (group.type === "worker") {
-        return workerBelongsToAgent(
-          group.worker_id,
-          selectedAgentTab,
-          selectedAgentId,
-        );
-      }
-      if (group.type === "agent_turn") {
-        return group.messages.some(m =>
-          m.role === "system"
-          && extractAgentRoles(textContent(m), agents).includes(selectedAgentTab)
-        );
-      }
-      return true;
-    });
-  }, [messageGroups, selectedAgentTab, selectedAgentId, agents]);
+  // 消息分组。旧 Agent Team 已移除；历史 worker/agent 输出保留为普通历史内容。
+  const filteredGroups = useMemo(() => groupMessages(messages), [messages]);
 
   // 分离流式消息：正在流式输出的 agent_turn 不参与虚拟化
   const { completedGroups, streamingGroup } = useMemo(() => {
@@ -414,7 +374,6 @@ export function MessageList() {
 
   // 新消息到达时滚动到底部
   useEffect(() => {
-    const tabChanged = selectedAgentTab !== prevSelectedAgentTabRef.current;
     const newMessageArrived = messages.length > prevMessagesLengthRef.current;
     const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const lastMsg = messages[messages.length - 1];
@@ -424,10 +383,9 @@ export function MessageList() {
     if (isUserSelfSent) {
       isAtBottomRef.current = true;
       }
-    // 用户离开底部时，新消息/流式 id 变化不强制拉回；tab 切换与用户主动发送始终跟随
+    // 用户离开底部时，新消息/流式 id 变化不强制拉回；用户主动发送始终跟随
     const shouldScroll =
-      tabChanged
-      || isUserSelfSent
+      isUserSelfSent
       || ((newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
@@ -450,8 +408,7 @@ export function MessageList() {
 
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
-    prevSelectedAgentTabRef.current = selectedAgentTab;
-  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, selectedAgentTab]);
+  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup]);
 
   // 流式输出时自动滚动
   useEffect(() => {
@@ -824,12 +781,6 @@ export function MessageList() {
             </div>
           ) : (
             <>
-              {agents.length > 0 && (
-                <div className="sticky top-0 z-10 bg-background/95 py-1 backdrop-blur">
-                  <AgentPanel />
-                </div>
-              )}
-
               {searchActive && <SearchBar />}
 
               {/* 虚拟化渲染已完成消息 */}
@@ -899,7 +850,6 @@ export function MessageList() {
                           streamingContent=""
                           streamingReasoningContent=""
                           hasTts={hasTts}
-                          selectedAgentTab={null}
                         />
                       </div>
                     );
@@ -933,7 +883,6 @@ export function MessageList() {
                         streamingContent=""
                         streamingReasoningContent=""
                         hasTts={hasTts}
-                        selectedAgentTab={selectedAgentTab}
                         isActive={isLiveTurn}
                         turnElapsedMs={turnResultByGroupKey.get(group.key)?.elapsedMs}
                         turnStatus={turnResultByGroupKey.get(group.key)?.status}
@@ -953,7 +902,6 @@ export function MessageList() {
                     streamingContent={streamingContent}
                     streamingReasoningContent={streamingReasoningContent}
                     hasTts={hasTts}
-                    selectedAgentTab={selectedAgentTab}
                     isActive={isThinking}
                     turnElapsedMs={streamingTurnResult?.elapsedMs}
                     turnStatus={streamingTurnResult?.status}
