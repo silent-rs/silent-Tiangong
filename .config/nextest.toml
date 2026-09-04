@@ -4,3 +4,13 @@ memory-integration = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'package(=tiangong-memory)'
 test-group = 'memory-integration'
+
+# 真实 Launcher 沙箱链路测试全局串行：nextest 进程隔离使进程内互斥锁
+# 失效，并发会在共享目标文件（测试目录下的 Launcher 拷贝）与沙箱资源
+# 上竞争，导致握手超时轮换 flaky（共享 CI runner 上尤甚）。
+[test-groups.real-sandbox]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(real_launcher_*)'
+test-group = 'real-sandbox'
