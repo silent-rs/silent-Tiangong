@@ -23,8 +23,9 @@ use crate::protocol::{
     Request, Response,
 };
 use crate::sidecar::{
-    EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
-    ResponseWait, STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
+    EXEC_ENV_JSON_ENV, InterpreterLaunch, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV,
+    PLUGIN_VERSION_ENV, ResponseWait, STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection,
+    SidecarInvokeError,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
@@ -37,6 +38,86 @@ pub const STDIO_TOKEN_ENV: &str = "TIANGONG_PLUGIN_STDIO_TOKEN";
 pub const HOST_PID_ENV: &str = "TIANGONG_PLUGIN_HOST_PID";
 pub const TRANSPORT_STDIO: &str = "stdio";
 const PROCESS_GROUP_ENV: &str = "TIANGONG_SIDECAR_OWN_PROCESS_GROUP";
+
+#[cfg(windows)]
+const WINDOWS_NODE_MODULE_BOOTSTRAP: &str = r#"const fs = require("node:fs");
+const pathModule = require("node:path");
+const vm = require("node:vm");
+const { fileURLToPath, pathToFileURL } = require("node:url");
+(async () => {
+  const entryPath = pathModule.resolve(process.argv[1]);
+  const moduleRoot = pathModule.dirname(entryPath);
+  const modules = new Map();
+
+  function isInsideModuleRoot(path) {
+    const relative = pathModule.relative(moduleRoot, path);
+    return relative === "" || (
+      !relative.startsWith(`..${pathModule.sep}`) &&
+      relative !== ".." &&
+      !pathModule.isAbsolute(relative)
+    );
+  }
+
+  async function builtinModule(specifier) {
+    if (modules.has(specifier)) return modules.get(specifier);
+    const namespace = await import(specifier);
+    const names = Object.keys(namespace);
+    const module = new vm.SyntheticModule(names, function initialize() {
+      for (const name of names) this.setExport(name, namespace[name]);
+    }, { identifier: specifier });
+    modules.set(specifier, module);
+    return module;
+  }
+
+  async function fileModule(url) {
+    if (url.protocol !== "file:") {
+      throw new Error(`Windows 沙箱 Node sidecar 不允许模块协议: ${url.protocol}`);
+    }
+    const path = pathModule.normalize(fileURLToPath(url));
+    if (!isInsideModuleRoot(path)) {
+      throw new Error(`Windows 沙箱 Node sidecar 模块路径越界: ${path}`);
+    }
+    const identifier = pathToFileURL(path).href;
+    if (modules.has(identifier)) return modules.get(identifier);
+    const source = fs.readFileSync(path, "utf8");
+    const module = new vm.SourceTextModule(source, {
+      identifier,
+      initializeImportMeta(meta) {
+        meta.url = identifier;
+      },
+      async importModuleDynamically(specifier, referencingModule) {
+        if (specifier.startsWith("node:")) return import(specifier);
+        const dependency = await fileModule(new URL(specifier, referencingModule.identifier));
+        if (dependency.status === "unlinked") await dependency.link(linker);
+        if (dependency.status === "linked") await dependency.evaluate();
+        return dependency.namespace;
+      },
+    });
+    modules.set(identifier, module);
+    return module;
+  }
+
+  async function linker(specifier, referencingModule) {
+    if (specifier.startsWith("node:")) return builtinModule(specifier);
+    if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
+      throw new Error(`Windows 沙箱 Node sidecar 不允许裸模块: ${specifier}`);
+    }
+    return fileModule(new URL(specifier, referencingModule.identifier));
+  }
+
+  const entryModule = await fileModule(pathToFileURL(entryPath));
+  await entryModule.link(linker);
+  await entryModule.evaluate();
+})().catch((error) => {
+  console.error(JSON.stringify({
+    stage: "windows-node-bootstrap",
+    code: error?.code,
+    syscall: error?.syscall,
+    path: error?.path,
+    message: String(error?.message ?? error),
+  }));
+  process.exitCode = 1;
+});"#;
 
 /// stdio 传输连接：单子进程 + 常驻读线程按 request_id 路由响应与进度，
 /// Notification 帧走全局通知转发（与 TCP 通知监听等价）。
@@ -505,9 +586,12 @@ impl StdioSidecarConnection {
                         launch.entry.display()
                     )));
                 }
-                let mut args = vec![launch.entry.display().to_string()];
-                args.extend(launch.args.iter().cloned());
-                (program, args)
+                let entry = preparation(
+                    tiangong_sandbox::canonicalize_path(&launch.entry).with_context(|| {
+                        format!("解析 sidecar 入口脚本失败: {}", launch.entry.display())
+                    }),
+                )?;
+                (program, interpreter_target_args(launch, &entry))
             }
             None => {
                 if !self.config.binary.is_file() {
@@ -576,9 +660,9 @@ impl StdioSidecarConnection {
             if let Some(temp_dir) = &effective_temp_dir {
                 policy.extra_writable.push(temp_dir.clone());
             }
-            // 系统临时目录开放：大量库与工具（lance spill、编辑器临时
-            // 文件、语言运行时缓存）默认写系统 temp，不开放会功能异常。
-            // std::env::temp_dir() 三平台通用（Windows 为 %TEMP%）。
+            // Unix 工具仍可能硬编码系统临时目录；Windows 必须只使用上方
+            // 专用目录，避免递归修改整个用户 Temp 的 ACL。
+            #[cfg(not(windows))]
             policy.extra_writable.push(std::env::temp_dir());
             // 全局 /tmp 仅 Unix 存在——Windows 上没有此路径，加了会在
             // Seatbelt/bwrap 的路径校验中产生无效条目。
@@ -1005,6 +1089,24 @@ impl StdioSidecarConnection {
         )?;
         Ok(())
     }
+}
+
+fn interpreter_target_args(launch: &InterpreterLaunch, entry: &Path) -> Vec<String> {
+    #[cfg(windows)]
+    if launch.kind == crate::interpreter_env::InterpreterKind::Node {
+        let mut args = vec![
+            "--experimental-vm-modules".to_string(),
+            "--eval".to_string(),
+            WINDOWS_NODE_MODULE_BOOTSTRAP.to_string(),
+            entry.display().to_string(),
+        ];
+        args.extend(launch.args.iter().cloned());
+        return args;
+    }
+
+    let mut args = vec![entry.display().to_string()];
+    args.extend(launch.args.iter().cloned());
+    args
 }
 
 fn child_status(process: &StdioProcess) -> String {
