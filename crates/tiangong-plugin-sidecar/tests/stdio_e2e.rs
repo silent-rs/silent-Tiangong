@@ -315,6 +315,9 @@ fn session_cancel_cascades_within_session_across_context_forms() {
     std::mem::forget(connection);
 }
 
+// 唯一使用者是 macOS 专属测试：非 macOS 编译时函数一并裁掉，
+// 避免 Linux clippy 的 dead_code 告警。
+#[cfg(target_os = "macos")]
 fn native_sandbox_skip_reason() -> Option<String> {
     tiangong_plugin_runtime::test_support::native_sandbox_skip_reason()
 }
