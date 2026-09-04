@@ -83,6 +83,11 @@ pub struct AgentIdRequest {
     pub agent_id: String,
 }
 
+/// 招募缺省后端：原生 Subagent（无需会话或命令线索）。
+fn default_recruit_backend() -> BackendKind {
+    BackendKind::AgentTeam
+}
+
 /// AI 招募请求：创建（或复用同名）持久 Subagent 并在当前会话激活。
 #[derive(Debug, Deserialize)]
 pub struct CreateAgentRequest {
@@ -90,7 +95,9 @@ pub struct CreateAgentRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// 运行后端：cli（需提供 command）或 tiangong_session（需 session_id / session_query 之一）。
+    /// 运行后端：agent_team（原生，默认，无需额外参数）、cli（需 command）
+    /// 或 tiangong_session（需 session_id / session_query 之一）。
+    #[serde(default = "default_recruit_backend")]
     pub backend: BackendKind,
     #[serde(default)]
     pub command: Option<String>,

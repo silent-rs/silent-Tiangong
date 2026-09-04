@@ -160,6 +160,21 @@ impl BackendKind {
                 artifacts: true,
                 internal_progress: false,
             },
+            // 天工原生 Subagent 后端：系统为 Agent 新建并独占一个专属
+            // 天工运行时会话（首次运行时创建、跨任务延续上下文），执行
+            // 与回报管线同会话后端；无需用户提供任何会话线索。
+            Self::AgentTeam => AdapterCapabilities {
+                messaging: true,
+                tasks: true,
+                streaming: false,
+                resume: false,
+                correction: true,
+                interrupt: true,
+                approval: false,
+                workspace_write: true,
+                artifacts: true,
+                internal_progress: false,
+            },
             // 未实现的后端一律声明为不可用，激活时被拒绝。
             _ => AdapterCapabilities {
                 messaging: false,
@@ -178,6 +193,6 @@ impl BackendKind {
 
     /// 后端是否已在当前版本实现。
     pub fn implemented(&self) -> bool {
-        matches!(self, Self::Cli | Self::TiangongSession)
+        matches!(self, Self::Cli | Self::TiangongSession | Self::AgentTeam)
     }
 }

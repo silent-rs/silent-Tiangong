@@ -158,7 +158,7 @@ export const BACKEND_LABELS: Record<BackendKind, string> = {
 export const BACKEND_IMPLEMENTED: Record<BackendKind, boolean> = {
   cli: true,
   tiangong_session: true,
-  agent_team: false,
+  agent_team: true,
   claude_code: false,
   codex: false,
   octoloop: false,

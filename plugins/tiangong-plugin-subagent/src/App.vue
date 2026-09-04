@@ -478,7 +478,7 @@ onUnmounted(() => {
         <p v-if="agent.activated_in_session && sessionActivation(agent)" class="workspace-line">
           Workspace：{{ sessionActivation(agent)?.workspace }}
         </p>
-        <p v-if="agent.config.backend === 'tiangong_session'" class="workspace-line">
+        <p v-if="agent.config.backend === 'tiangong_session' || agent.config.backend === 'agent_team'" class="workspace-line">
           关联会话：{{ sessionShort(agent) }}
         </p>
 
@@ -593,7 +593,7 @@ onUnmounted(() => {
               <h3>长期记忆（memory/）</h3>
               <div class="memory-actions">
                 <button
-                  v-if="agent.config.backend === 'tiangong_session'"
+                  v-if="agent.config.backend === 'tiangong_session' || agent.config.backend === 'agent_team'"
                   class="btn btn-ghost"
                   type="button"
                   :disabled="busyAgentId === agent.config.id"

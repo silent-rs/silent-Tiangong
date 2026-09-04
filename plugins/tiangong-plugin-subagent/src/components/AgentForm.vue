@@ -42,7 +42,7 @@ const form = reactive<AgentFormValue>({
   agentId: props.initial?.agentId,
   name: props.initial?.name ?? '',
   description: props.initial?.description ?? '',
-  backend: props.initial?.backend ?? 'cli',
+  backend: props.initial?.backend ?? 'agent_team',
   command: props.initial?.command ?? '',
   sessionId: props.initial?.sessionId ?? null,
   workspacePolicy: props.initial?.workspacePolicy ?? 'read-only',

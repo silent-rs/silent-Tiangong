@@ -640,6 +640,26 @@ impl SubagentService {
                 bail!("关联会话不存在或已被删除: {session_id}");
             }
         }
+        // 原生 Subagent 后端：专属会话由系统在首次运行时创建，无需用户提供；
+        // 若已绑定（历史运行回写），校验其仍然存在，被删则清空待重建。
+        if config.backend == BackendKind::AgentTeam
+            && let Some(session_id) = config.session_id.as_deref()
+            && !session_id.trim().is_empty()
+            && !crate::sessions::session_exists(session_id)
+        {
+            let _ = self.agents.update(
+                &config.id,
+                crate::agent_store::AgentChanges {
+                    session_id: Some(""),
+                    ..Default::default()
+                },
+            );
+            tracing::warn!(
+                agent_id = %config.id,
+                session_id,
+                "原生后端专属会话已不存在，将在下次运行时重建"
+            );
+        }
         Ok(())
     }
 
@@ -951,14 +971,36 @@ impl SubagentService {
             summary: None,
         };
         match config.backend {
-            BackendKind::TiangongSession => {
-                let source_session = config
-                    .session_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("天工会话后端缺少关联会话"))?;
+            BackendKind::TiangongSession | BackendKind::AgentTeam => {
+                // 原生后端：首次运行时新建专属会话 ID，投递成功后回写绑定，
+                // 后续任务延续同一会话的上下文；会话后端则要求已绑定。
+                let source_session = match config.session_id.as_deref() {
+                    Some(session_id) if !session_id.trim().is_empty() => {
+                        session_id.trim().to_string()
+                    }
+                    _ => {
+                        if config.backend == BackendKind::TiangongSession {
+                            anyhow::bail!("天工会话后端缺少关联会话");
+                        }
+                        crate::paths::new_id()
+                    }
+                };
                 let outcome = self
-                    .deliver_session_message(config, activation, source_session, task, message)
+                    .deliver_session_message(config, activation, &source_session, task, message)
                     .await?;
+                // 原生后端首次投递成功：回写专属会话绑定（失败不回写，下次重建）。
+                if config.backend == BackendKind::AgentTeam
+                    && config.session_id.as_deref().unwrap_or("").trim().is_empty()
+                    && let Err(error) = self.agents.update(
+                        &config.id,
+                        crate::agent_store::AgentChanges {
+                            session_id: Some(&source_session),
+                            ..Default::default()
+                        },
+                    )
+                {
+                    tracing::warn!(agent_id = %config.id, %error, "回写原生后端专属会话绑定失败");
+                }
                 run.summary = Some(outcome);
                 self.store.save_run(&run)?;
                 if let Some(task) = task {
@@ -971,7 +1013,10 @@ impl SubagentService {
                     &self.store,
                     &run,
                     "run_started",
-                    &json!({ "backend": "tiangong_session", "source_session": source_session }),
+                    &json!({
+                        "backend": if config.backend == BackendKind::AgentTeam { "agent_team" } else { "tiangong_session" },
+                        "source_session": source_session,
+                    }),
                     &now_string(),
                 );
                 notify_run_status(&run);
@@ -1180,14 +1225,16 @@ impl SubagentService {
         if !request.user_text.contains("【Subagent") {
             return Ok("本轮非 Subagent 投递触发，忽略".to_string());
         }
-        // 找到以该会话为源的后端 Agent。
+        // 找到以该会话为源的后端 Agent（关联会话后端与原生后端的专属会话）。
         let agents: Vec<AgentConfig> = self
             .agents
             .list()
             .into_iter()
             .filter(|config| {
-                config.backend == BackendKind::TiangongSession
-                    && config.session_id.as_deref() == Some(request.session_id.as_str())
+                matches!(
+                    config.backend,
+                    BackendKind::TiangongSession | BackendKind::AgentTeam
+                ) && config.session_id.as_deref() == Some(request.session_id.as_str())
             })
             .collect();
         if agents.is_empty() {
@@ -1922,15 +1969,20 @@ impl SubagentService {
     async fn ui_compile_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let request: AgentMemoryRequest = parse_request(payload)?;
         let config = self.agents.load(&request.agent_id)?;
-        if config.backend != BackendKind::TiangongSession {
+        if !matches!(
+            config.backend,
+            BackendKind::TiangongSession | BackendKind::AgentTeam
+        ) {
             bail!(
-                "「从会话整理记忆」仅适用于天工会话后端（其他后端的记忆来源是任务归档与手动记录）"
+                "「从会话整理记忆」仅适用于有天工运行时会话的后端（其他后端的记忆来源是任务归档与手动记录）"
             );
         }
         let session_id = config
             .session_id
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("缺少关联会话"))?;
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("尚未建立运行时会话（原生后端在首次运行后可整理）"))?;
         let session = crate::sessions::load_session_json(session_id)?;
         let name = crate::memory::compile_from_session(
             &self.agents,
