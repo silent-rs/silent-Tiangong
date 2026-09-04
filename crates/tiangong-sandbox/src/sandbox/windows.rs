@@ -7,7 +7,7 @@
 #![cfg(windows)]
 
 use std::collections::HashSet;
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_ALL,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree, WAIT_ABANDONED, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_HANDLE_EOF, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_MORE_DATA, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW,
@@ -42,8 +42,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
     FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileInformationByHandle,
-    OPEN_EXISTING, WRITE_DAC, WRITE_OWNER,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FindClose, FindFirstFileNameW,
+    FindNextFileNameW, GetFileInformationByHandle, GetVolumePathNameW, OPEN_EXISTING, WRITE_DAC,
+    WRITE_OWNER,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -212,14 +213,23 @@ fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
     if !request.program.is_file() || !request.program_root.is_dir() {
         bail!("Windows 目标程序或根目录不存在");
     }
-    for root in request.policy.writable_roots() {
-        validate_writable_tree(&root)
+    let writable_roots = request
+        .policy
+        .writable_roots()
+        .into_iter()
+        .map(|root| {
+            crate::canonicalize_path(&root)
+                .with_context(|| format!("解析 Windows 可写目录失败: {}", root.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for root in &writable_roots {
+        validate_writable_tree(root, &writable_roots)
             .with_context(|| format!("Windows 可写目录不安全: {}", root.display()))?;
     }
     Ok(())
 }
 
-fn validate_writable_tree(root: &Path) -> Result<()> {
+fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()> {
     if !root.is_absolute() || !root.is_dir() {
         bail!("可写根必须是已存在的绝对目录");
     }
@@ -230,8 +240,11 @@ fn validate_writable_tree(root: &Path) -> Result<()> {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
         }
-        if metadata.is_file() && file_link_count(&path)? > 1 {
-            bail!("可写目录包含硬链接，拒绝授予权限: {}", path.display());
+        if metadata.is_file() {
+            let link_count = file_link_count(&path)?;
+            if link_count > 1 {
+                validate_hardlink_aliases(&path, link_count, writable_roots)?;
+            }
         }
         if metadata.is_dir() {
             for entry in std::fs::read_dir(&path)
@@ -266,6 +279,151 @@ fn file_link_count(path: &Path) -> Result<u32> {
         return Err(std::io::Error::last_os_error()).context("读取文件硬链接数量失败");
     }
     Ok(info.nNumberOfLinks)
+}
+
+fn validate_hardlink_aliases(
+    path: &Path,
+    expected_count: u32,
+    writable_roots: &[PathBuf],
+) -> Result<()> {
+    // 硬链接本身不是逃逸；只有无法完整枚举或任一名称越过授权根时才拒绝。
+    let aliases = hardlink_aliases(path)?;
+    if aliases.len() != expected_count as usize {
+        bail!(
+            "硬链接名称数量与文件元数据不一致: {}（元数据={}, 枚举={}）",
+            path.display(),
+            expected_count,
+            aliases.len()
+        );
+    }
+    for alias in aliases {
+        let resolved = crate::canonicalize_path(&alias)
+            .with_context(|| format!("解析硬链接名称失败: {}", alias.display()))?;
+        if !writable_roots.iter().any(|root| resolved.starts_with(root)) {
+            bail!(
+                "硬链接名称超出授权可写目录: {} -> {}",
+                path.display(),
+                resolved.display()
+            );
+        }
+    }
+    let final_count = file_link_count(path)?;
+    if final_count != expected_count {
+        bail!(
+            "硬链接数量在校验期间发生变化: {}（校验前={}, 校验后={}）",
+            path.display(),
+            expected_count,
+            final_count
+        );
+    }
+    Ok(())
+}
+
+fn hardlink_aliases(path: &Path) -> Result<HashSet<PathBuf>> {
+    // FindFirstFileNameW 返回卷内相对名称，先补回卷根再做真实路径校验。
+    let volume_root = volume_root(path)?;
+    let path_wide = wide_os(path.as_os_str());
+    let mut buffer = vec![0u16; 512];
+    let search = loop {
+        let mut length = buffer.len() as u32;
+        let handle =
+            unsafe { FindFirstFileNameW(path_wide.as_ptr(), 0, &mut length, buffer.as_mut_ptr()) };
+        if handle != INVALID_HANDLE_VALUE {
+            break FileNameSearch(handle);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+            return Err(error).context("枚举硬链接名称失败");
+        }
+        resize_name_buffer(&mut buffer, length)?;
+    };
+
+    let mut aliases = HashSet::new();
+    aliases.insert(hardlink_name_path(&volume_root, &buffer)?);
+    loop {
+        buffer.fill(0);
+        let mut length = buffer.len() as u32;
+        if unsafe { FindNextFileNameW(search.0, &mut length, buffer.as_mut_ptr()) } != 0 {
+            aliases.insert(hardlink_name_path(&volume_root, &buffer)?);
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(code) if code == ERROR_HANDLE_EOF as i32 => break,
+            Some(code) if code == ERROR_MORE_DATA as i32 => {
+                resize_name_buffer(&mut buffer, length)?;
+            }
+            _ => return Err(error).context("继续枚举硬链接名称失败"),
+        }
+    }
+    search.close().context("关闭硬链接名称枚举失败")?;
+    Ok(aliases)
+}
+
+fn volume_root(path: &Path) -> Result<PathBuf> {
+    let path = wide_os(path.as_os_str());
+    let mut buffer = vec![0u16; 32_768];
+    if unsafe { GetVolumePathNameW(path.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("读取硬链接所在卷根目录失败");
+    }
+    os_string_from_wide_buffer(&buffer)
+        .map(PathBuf::from)
+        .context("硬链接所在卷根目录为空")
+}
+
+fn hardlink_name_path(volume_root: &Path, buffer: &[u16]) -> Result<PathBuf> {
+    let name = os_string_from_wide_buffer(buffer).context("枚举到空的硬链接名称")?;
+    let mut relative = PathBuf::new();
+    for component in Path::new(&name).components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(value) => relative.push(value),
+            _ => bail!("枚举到非法硬链接名称: {}", Path::new(&name).display()),
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        bail!("枚举到空的硬链接相对路径");
+    }
+    Ok(volume_root.join(relative))
+}
+
+fn os_string_from_wide_buffer(buffer: &[u16]) -> Option<OsString> {
+    use std::os::windows::ffi::OsStringExt;
+
+    let length = buffer.iter().position(|unit| *unit == 0)?;
+    (length > 0).then(|| OsString::from_wide(&buffer[..length]))
+}
+
+fn resize_name_buffer(buffer: &mut Vec<u16>, required: u32) -> Result<()> {
+    let required = usize::try_from(required).context("硬链接名称缓冲区长度溢出")?;
+    let next = required.max(buffer.len().saturating_mul(2));
+    if next <= buffer.len() {
+        bail!("硬链接名称缓冲区无法继续扩展");
+    }
+    buffer.resize(next, 0);
+    Ok(())
+}
+
+struct FileNameSearch(HANDLE);
+
+impl FileNameSearch {
+    fn close(mut self) -> std::io::Result<()> {
+        let handle = std::mem::replace(&mut self.0, INVALID_HANDLE_VALUE);
+        if unsafe { FindClose(handle) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FileNameSearch {
+    fn drop(&mut self) {
+        if self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                FindClose(self.0);
+            }
+        }
+    }
 }
 
 struct CapabilitySet {
@@ -1315,5 +1473,49 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(text, r#""C:\Program Files\tool.exe" "a\\\"b" tail\"#);
+    }
+
+    #[test]
+    fn writable_tree_allows_hardlinks_inside_authorized_root() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("artifact.pdb");
+        let alias = root.path().join("artifact-hash.pdb");
+        std::fs::write(&original, b"pdb").unwrap();
+        std::fs::hard_link(&original, &alias).unwrap();
+        let root = crate::canonicalize_path(root.path()).unwrap();
+
+        validate_writable_tree(&root, std::slice::from_ref(&root)).unwrap();
+    }
+
+    #[test]
+    fn writable_tree_allows_hardlink_alias_across_authorized_roots() {
+        let container = tempfile::tempdir().unwrap();
+        let first = container.path().join("workspace");
+        let second = container.path().join("cache");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let original = first.join("artifact.pdb");
+        std::fs::write(&original, b"pdb").unwrap();
+        std::fs::hard_link(&original, second.join("artifact.pdb")).unwrap();
+        let first = crate::canonicalize_path(&first).unwrap();
+        let second = crate::canonicalize_path(&second).unwrap();
+
+        validate_writable_tree(&first, &[first.clone(), second]).unwrap();
+    }
+
+    #[test]
+    fn writable_tree_rejects_hardlink_alias_outside_authorized_root() {
+        let container = tempfile::tempdir().unwrap();
+        let writable = container.path().join("workspace");
+        let outside = container.path().join("outside");
+        std::fs::create_dir_all(&writable).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let original = outside.join("secret.txt");
+        std::fs::write(&original, b"secret").unwrap();
+        std::fs::hard_link(&original, writable.join("escape.txt")).unwrap();
+        let writable = crate::canonicalize_path(&writable).unwrap();
+
+        let error = validate_writable_tree(&writable, std::slice::from_ref(&writable)).unwrap_err();
+        assert!(error.to_string().contains("超出授权可写目录"));
     }
 }
