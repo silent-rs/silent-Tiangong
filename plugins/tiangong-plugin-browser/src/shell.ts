@@ -32,7 +32,6 @@ const TOOL_METHOD: Record<string, string> = {
 
 type BrowserToolWindow = Window & {
   __tiangongBrowserToolClaims?: Set<string>;
-  __tiangongBrowserClosedInvocations?: Set<string>;
 };
 
 interface WebviewEvent {
@@ -44,23 +43,13 @@ interface WebviewEvent {
   };
 }
 
-/** 进行中的工具调用状态：宿主取消/过期（tool.closed）后置 cancelled。 */
-const activeInvocations = new Map<string, { cancelled: boolean }>();
+/** 进行中的工具调用状态：收到 tool.closed（answered/cancelled/expired
+ * 均同）后置 closed。执行体持有对象引用，Map 提前清理后依然可读。 */
+type ActiveInvocation = {
+  closed: boolean;
+};
 
-function sharedClosedInvocations(): Set<string> {
-  const sharedWindow = window as BrowserToolWindow;
-  return sharedWindow.__tiangongBrowserClosedInvocations
-    ?? (sharedWindow.__tiangongBrowserClosedInvocations = new Set());
-}
-
-function closeInvocation(invocationId: string): void {
-  sharedClosedInvocations().add(invocationId);
-}
-
-function isInvocationCancelled(invocationId: string): boolean {
-  return activeInvocations.get(invocationId)?.cancelled === true
-    || sharedClosedInvocations().has(invocationId);
-}
+const activeInvocations = new Map<string, ActiveInvocation>();
 
 class ToolResolutionError extends Error {
   constructor(cause: unknown) {
@@ -70,7 +59,6 @@ class ToolResolutionError extends Error {
 }
 
 function claimInvocation(invocationId: string): boolean {
-  if (sharedClosedInvocations().has(invocationId)) return false;
   const sharedWindow = window as BrowserToolWindow;
   const claims = sharedWindow.__tiangongBrowserToolClaims
     ?? (sharedWindow.__tiangongBrowserToolClaims = new Set());
@@ -79,29 +67,28 @@ function claimInvocation(invocationId: string): boolean {
   return true;
 }
 
+/** 立即释放调用状态。finally 与 tool.closed 都会到达，必须幂等。 */
 function releaseInvocation(invocationId: string): void {
-  const claims = (window as BrowserToolWindow).__tiangongBrowserToolClaims;
-  window.setTimeout(() => {
-    claims?.delete(invocationId);
-    activeInvocations.delete(invocationId);
-  }, 5_000);
+  (window as BrowserToolWindow).__tiangongBrowserToolClaims?.delete(invocationId);
+  activeInvocations.delete(invocationId);
 }
 
 /**
- * 提交工具结果；调用已被宿主取消/过期时静默跳过。
- * 宿主保证一次调用只能闭合一次，取消后提交的 resolve 会被拒绝，这里
- * 提前短路，避免取消后仍执行有副作用或已失效的闭合。
+ * 提交工具结果；调用已闭合时静默跳过。宿主保证一次调用只能闭合一次，
+ * 闭合后提交的 resolve 会被拒绝，这里提前短路，避免取消后仍执行有副
+ * 作用或已失效的闭合。
  */
 async function resolveActive(
   tools: { resolve: (resolution: ToolResolution) => Promise<void> },
   invocationId: string,
+  state: ActiveInvocation,
   resolution: Omit<ToolResolution, 'invocation_id'>,
 ): Promise<void> {
-  if (isInvocationCancelled(invocationId)) return;
+  if (state.closed) return;
   try {
     await tools.resolve({ invocation_id: invocationId, ...resolution });
   } catch (error) {
-    if (isInvocationCancelled(invocationId)) return;
+    if (state.closed) return;
     throw new ToolResolutionError(error);
   }
 }
@@ -179,24 +166,27 @@ async function main() {
   }
   const tools = createToolProvider(bridge);
 
-  // 在当前应用生命周期保留闭合记录，拒绝宿主重放快照中晚于 tool.closed 到达的 requested。
+  // answered/cancelled/expired 都意味着调用已结束：标记后立即释放认领。
+  // 宿主保证同一调用只会出现 requested → closed，闭合后不再重放 requested，
+  // 因此无需定时器或永久闭合记录。
   tools.onClosed((closed: ToolClosed) => {
-    const active = activeInvocations.get(closed.invocation_id);
-    if (active) active.cancelled = true;
-    closeInvocation(closed.invocation_id);
+    const state = activeInvocations.get(closed.invocation_id);
+    if (state) state.closed = true;
+    releaseInvocation(closed.invocation_id);
   });
 
   tools.onRequested((invocation: ToolInvocation) => {
     // multi 模式下每个浏览器顶部标签都会挂载一个页面。宿主事件会送达
     // 所有实例，按 invocation_id 只允许其中一个实例执行工具。
     if (!claimInvocation(invocation.invocation_id)) return;
-    activeInvocations.set(invocation.invocation_id, { cancelled: false });
+    const state: ActiveInvocation = { closed: false };
+    activeInvocations.set(invocation.invocation_id, state);
     void (async () => {
       try {
         // browser_close（面板开关，app.* 原语）：带 tab_id 精确关闭一个
         // 页面，不带则收起整个浏览器面板（用户明确要求或任务完成时）。
         if (invocation.name === 'browser_close') {
-          if (isInvocationCancelled(invocation.invocation_id)) return;
+          if (state.closed) return;
           const args = (invocation.arguments ?? {}) as { tab_id?: string };
           await bridge.call(
             'app.close',
@@ -206,7 +196,7 @@ async function main() {
                 : { session_id: invocation.session_id, all: true },
             ),
           );
-          await resolveActive(tools, invocation.invocation_id, {
+          await resolveActive(tools, invocation.invocation_id, state, {
             status: 'answered',
             result: {
               ok: true,
@@ -218,7 +208,7 @@ async function main() {
         }
         const method = TOOL_METHOD[invocation.name];
         if (!method) {
-          await resolveActive(tools, invocation.invocation_id, {
+          await resolveActive(tools, invocation.invocation_id, state, {
             status: 'cancelled',
             result: { ok: false, summary: `未知工具 ${invocation.name}`, exit_code: 1 },
           });
@@ -233,20 +223,20 @@ async function main() {
         ) {
           const target = (invocation.arguments as { url: string }).url;
           if (invocation.name === 'browser_open' || tabsModel.tabs.length === 0) {
-            if (isInvocationCancelled(invocation.invocation_id)) return;
+            if (state.closed) return;
             const opened = await tabsModel.newTab(target);
-            if (opened && !isInvocationCancelled(invocation.invocation_id)) {
+            if (opened && !state.closed) {
               void requestOpenInstance(bridge, invocation.session_id, opened.id);
             }
           } else {
-            if (isInvocationCancelled(invocation.invocation_id)) return;
+            if (state.closed) return;
             await tabsModel.navigate(target);
           }
           const summary =
             invocation.name === 'browser_open'
               ? `已在浏览器面板新标签打开：${target}`
               : `已导航到：${target}`;
-          await resolveActive(tools, invocation.invocation_id, {
+          await resolveActive(tools, invocation.invocation_id, state, {
             status: 'answered',
             result: { ok: true, summary, exit_code: 0 },
           });
@@ -255,7 +245,7 @@ async function main() {
         // 会话绑定（对齐终端插件）：Agent 打开/操作的页面归属发起对话，
         // 与该对话的浏览器面板是同一实例（插件×会话双维度隔离）。
         const invocationArgs = (invocation.arguments as Record<string, unknown>) ?? {};
-        if (isInvocationCancelled(invocation.invocation_id)) return;
+        if (state.closed) return;
         const showFetchPanel = invocation.name === 'web_fetch' && invocationArgs.open === true;
         const stopAppRegistration = invocation.name === 'web_fetch'
           ? registerNextNavigation(
@@ -278,7 +268,7 @@ async function main() {
         } finally {
           stopAppRegistration?.();
         }
-        if (isInvocationCancelled(invocation.invocation_id)) return;
+        if (state.closed) return;
         const parsed = JSON.parse(raw) as {
           view_id?: string;
           tabs?: Array<{ id?: string; url?: string; title?: string }>;
@@ -313,17 +303,17 @@ async function main() {
             ? `webview 实例 ${parsed.view_id ?? '?'}，当前页：${active.title ?? active.url ?? '未知'}`
             : `webview 实例 ${parsed.view_id ?? '?'} 已就绪`;
         }
-        await resolveActive(tools, invocation.invocation_id, {
+        await resolveActive(tools, invocation.invocation_id, state, {
           status: 'answered',
           result: { ok: true, summary, exit_code: 0 },
         });
       } catch (error) {
-        if (isInvocationCancelled(invocation.invocation_id)) return;
+        if (state.closed) return;
         if (error instanceof ToolResolutionError) {
           console.error(error.message);
           return;
         }
-        await resolveActive(tools, invocation.invocation_id, {
+        await resolveActive(tools, invocation.invocation_id, state, {
           status: 'answered',
           result: { ok: false, summary: `webview 调用失败：${String(error)}`, exit_code: 1 },
         });
