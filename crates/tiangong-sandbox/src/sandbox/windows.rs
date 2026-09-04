@@ -235,8 +235,16 @@ fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()>
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&path)
-            .with_context(|| format!("读取路径元数据失败: {}", path.display()))?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if path != root && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取路径元数据失败: {}", path.display()));
+            }
+        };
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
         }
