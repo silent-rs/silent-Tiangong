@@ -765,7 +765,6 @@ impl Drop for AppContainerProfile {
 struct AclRoot {
     sid: PSID,
     path: PathBuf,
-    recursive: bool,
 }
 
 struct AclGrants {
@@ -792,14 +791,12 @@ impl AclGrants {
                 program,
                 FILE_PROGRAM_ACCESS,
                 NO_INHERITANCE,
-                false,
             )?;
             grants.add(
                 restriction_sid,
                 program,
                 FILE_PROGRAM_ACCESS,
                 NO_INHERITANCE,
-                false,
             )?;
             let writable = policy.writable_roots();
             for root in &writable {
@@ -808,14 +805,12 @@ impl AclGrants {
                     root,
                     FILE_WORKSPACE_ACCESS,
                     OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                    true,
                 )?;
                 grants.add(
                     restriction_sid,
                     root,
                     FILE_WORKSPACE_ACCESS,
                     OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                    true,
                 )?;
             }
             for path in policy.read_only_roots() {
@@ -850,19 +845,11 @@ impl AclGrants {
         Ok(grants)
     }
 
-    fn add(
-        &mut self,
-        sid: PSID,
-        path: &Path,
-        permissions: u32,
-        inheritance: u32,
-        recursive: bool,
-    ) -> Result<()> {
+    fn add(&mut self, sid: PSID, path: &Path, permissions: u32, inheritance: u32) -> Result<()> {
         modify_acl(path, sid, permissions, inheritance, GRANT_ACCESS)?;
         self.roots.push(AclRoot {
             sid,
             path: path.to_path_buf(),
-            recursive,
         });
         Ok(())
     }
@@ -872,7 +859,6 @@ impl AclGrants {
         self.roots.push(AclRoot {
             sid,
             path: path.to_path_buf(),
-            recursive: true,
         });
         Ok(())
     }
@@ -881,16 +867,13 @@ impl AclGrants {
         if !self.active {
             return Ok(());
         }
-        let mut entries = Vec::new();
-        for root in &self.roots {
-            if root.recursive {
-                let mut paths = Vec::new();
-                collect_tree_paths(&root.path, &mut paths);
-                entries.extend(paths.into_iter().map(|path| (path, root.sid)));
-            } else {
-                entries.push((root.path.clone(), root.sid));
-            }
-        }
+        // 每项 ACL 都写在授权根；只从相同根撤销显式项，让 Windows 传播
+        // 继承变化。逐文件撤销会触碰根内不属于天工管理的受保护文件。
+        let mut entries = self
+            .roots
+            .iter()
+            .map(|root| (root.path.clone(), root.sid))
+            .collect::<Vec<_>>();
         entries.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
         let mut seen = HashSet::new();
         let mut failures = Vec::new();
@@ -915,21 +898,6 @@ impl Drop for AclGrants {
     fn drop(&mut self) {
         if self.active {
             let _ = self.revoke();
-        }
-    }
-}
-
-fn collect_tree_paths(root: &Path, paths: &mut Vec<PathBuf>) {
-    let Ok(metadata) = std::fs::symlink_metadata(root) else {
-        return;
-    };
-    paths.push(root.to_path_buf());
-    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return;
-    }
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            collect_tree_paths(&entry.path(), paths);
         }
     }
 }
