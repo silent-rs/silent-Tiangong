@@ -90,6 +90,9 @@ pub struct AgentConfig {
     /// CLI 后端的启动命令（shell 命令行）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// 天工会话后端关联的源会话 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub workspace_policy: WorkspacePolicy,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -143,6 +146,20 @@ impl BackendKind {
                 artifacts: true,
                 internal_progress: true,
             },
+            // 天工会话后端：消息与任务经本机 server 投递，turn 完成经 WASM
+            // 钩子回报；无流式与审批回流；中断为通知式（无法硬取消 turn）。
+            Self::TiangongSession => AdapterCapabilities {
+                messaging: true,
+                tasks: true,
+                streaming: false,
+                resume: false,
+                correction: true,
+                interrupt: true,
+                approval: false,
+                workspace_write: true,
+                artifacts: true,
+                internal_progress: false,
+            },
             // 未实现的后端一律声明为不可用，激活时被拒绝。
             _ => AdapterCapabilities {
                 messaging: false,
@@ -161,6 +178,6 @@ impl BackendKind {
 
     /// 后端是否已在当前版本实现。
     pub fn implemented(&self) -> bool {
-        matches!(self, Self::Cli)
+        matches!(self, Self::Cli | Self::TiangongSession)
     }
 }

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { reactive } from 'vue';
+import { reactive, ref, watch } from 'vue';
 import {
   BACKEND_IMPLEMENTED,
   BACKEND_LABELS,
   WORKSPACE_POLICY_LABELS,
   type BackendKind,
+  type SessionBrief,
   type WorkspacePolicy,
 } from '../types';
+import { sidecarCall } from '../api';
 
 export interface AgentFormValue {
   agentId?: string;
@@ -14,6 +16,7 @@ export interface AgentFormValue {
   description: string;
   backend: BackendKind;
   command: string;
+  sessionId?: string | null;
   workspacePolicy: WorkspacePolicy;
   enabled: boolean;
 }
@@ -41,9 +44,51 @@ const form = reactive<AgentFormValue>({
   description: props.initial?.description ?? '',
   backend: props.initial?.backend ?? 'cli',
   command: props.initial?.command ?? '',
+  sessionId: props.initial?.sessionId ?? null,
   workspacePolicy: props.initial?.workspacePolicy ?? 'read-only',
   enabled: props.initial?.enabled ?? true,
 });
+
+const sessions = ref<SessionBrief[]>([]);
+const sessionSearch = ref('');
+const sessionLoading = ref(false);
+const sessionError = ref('');
+
+async function loadSessions() {
+  sessionLoading.value = true;
+  sessionError.value = '';
+  try {
+    sessions.value = await sidecarCall<SessionBrief[]>('ui_list_sessions', {});
+  } catch (error) {
+    sessionError.value = String((error as Error).message ?? error);
+  } finally {
+    sessionLoading.value = false;
+  }
+}
+
+// 后端切到天工会话时才拉取会话列表。
+watch(
+  () => form.backend,
+  (backend) => {
+    if (backend === 'tiangong_session' && sessions.value.length === 0) {
+      void loadSessions();
+    }
+  },
+);
+
+const filteredSessions = () => {
+  const keyword = sessionSearch.value.trim().toLowerCase();
+  const list = sessions.value;
+  if (!keyword) return list.slice(0, 50);
+  return list
+    .filter((session) =>
+      session.title.toLowerCase().includes(keyword)
+      || session.id.toLowerCase().includes(keyword))
+    .slice(0, 50);
+};
+
+const selectedSessionTitle = () =>
+  sessions.value.find((session) => session.id === form.sessionId)?.title ?? '';
 
 function submit() {
   emit('submit', { ...form });
@@ -82,8 +127,42 @@ function submit() {
           required
           placeholder="sh /path/to/agent.sh（stdin/stdout 走 JSONL 协议）"
         />
-        <small>子进程从 stdin 逐行读取 JSON 指令，向 stdout 逐行输出 message / blocked / completed / failed 事件。</small>
+        <small>子进程从 stdin 逐行读取 JSON 指令（含长期指令与记忆摘要），向 stdout 逐行输出 message / blocked / completed / failed 事件。</small>
       </label>
+
+      <div v-if="form.backend === 'tiangong_session'" class="field">
+        <span>关联会话 *</span>
+        <div v-if="form.sessionId" class="selected-session">
+          <strong>{{ selectedSessionTitle() || form.sessionId }}</strong>
+          <small>{{ form.sessionId }}</small>
+          <button class="btn btn-ghost" type="button" @click="form.sessionId = null">重选</button>
+        </div>
+        <template v-else>
+          <input
+            v-model="sessionSearch"
+            class="session-search"
+            type="text"
+            placeholder="按标题或 ID 搜索会话…"
+            @input="() => {}"
+          />
+          <p v-if="sessionLoading" class="session-hint">加载会话列表…</p>
+          <p v-else-if="sessionError" class="session-hint error">{{ sessionError }}</p>
+          <div v-else class="session-list">
+            <button
+              v-for="session in filteredSessions()"
+              :key="session.id"
+              class="session-item"
+              type="button"
+              @click="form.sessionId = session.id"
+            >
+              <span class="session-title">{{ session.title }}</span>
+              <span class="session-meta">{{ session.message_count }} 条消息 · {{ session.updated_at }}</span>
+            </button>
+            <p v-if="!filteredSessions().length" class="session-hint">没有匹配的会话</p>
+          </div>
+        </template>
+        <small>该会话的全部上下文与历史将成为此 Subagent 的能力；任务经消息通道投递，完成后自动回报。</small>
+      </div>
 
       <label class="field">
         <span>Workspace 策略</span>
@@ -136,7 +215,7 @@ function submit() {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(460px, 100%);
+  width: min(480px, 100%);
   max-height: 90%;
   padding: 20px;
   overflow-y: auto;
@@ -183,6 +262,71 @@ function submit() {
   flex-direction: row;
   align-items: center;
   gap: 8px;
+}
+
+.session-search {
+  padding: 7px 10px;
+  border: 1px solid var(--ui-input);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-foreground);
+  font-size: 13px;
+}
+
+.session-hint {
+  margin: 4px 0 0;
+  color: var(--ui-muted-foreground);
+  font-size: 12px;
+}
+
+.session-hint.error {
+  color: var(--ui-destructive);
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.session-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-item:hover {
+  border-color: var(--ui-primary);
+}
+
+.session-title {
+  font-size: 13px;
+}
+
+.session-meta {
+  color: var(--ui-muted-foreground);
+  font-size: 11px;
+}
+
+.selected-session {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+
+.selected-session small {
+  color: var(--ui-muted-foreground);
 }
 
 .form-error {

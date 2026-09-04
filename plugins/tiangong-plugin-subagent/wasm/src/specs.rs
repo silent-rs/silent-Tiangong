@@ -1,0 +1,87 @@
+//! 工具规格与系统提示注入（与 protocol::ops::TOOL_OPERATIONS 一一对应）。
+
+pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：list_agents 查看可用的持久 Subagent；向某个 Subagent 交办工作前必须先用 activate_agent 在当前会话激活（自动绑定当前 Workspace）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。";
+
+/// (工具名, 描述, input_schema JSON)。
+pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
+    (
+        "list_agents",
+        "查看全部持久 Subagent 的列表、后端类型、当前会话激活状态与运行实例状态。",
+        r#"{"type":"object","properties":{}}"#,
+    ),
+    (
+        "get_agent",
+        "查看某个 Subagent 的详情：身份配置、长期指令、最近任务与事件、产物数量。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"Agent ID（list_agents 结果中给出）"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "activate_agent",
+        "在当前会话激活某个 Subagent，绑定当前会话 Workspace（只读/独占写/隔离 worktree 策略生效）。激活后才能发送消息与提交任务。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"要激活的 Agent ID"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "deactivate_agent",
+        "在当前会话停用某个 Subagent：中断其在本会话上的运行实例并释放 Workspace 写入所有权。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"要停用的 Agent ID"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "list_active_agents",
+        "查看当前会话已激活的 Subagent 及其运行实例状态。",
+        r#"{"type":"object","properties":{}}"#,
+    ),
+    (
+        "send_agent_message",
+        "向指定 Subagent 发送普通消息：用于追问、补充背景、纠正方向和一般交流。有运行实例时注入当前运行，否则启动一次轻量消息往返；回复经反馈通道返回本会话。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标 Agent ID（须已在当前会话激活）"},"content":{"type":"string","description":"消息内容"}},"required":["agent_id","content"]}"#,
+    ),
+    (
+        "submit_agent_task",
+        "向指定 Subagent 提交有明确完成条件的正式任务。立即返回任务与运行编号，执行在后台进行；完成、阻塞、审批或失败会反馈到本会话。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标 Agent ID（须已在当前会话激活）"},"goal":{"type":"string","description":"任务目标（要做什么）"},"completion_criteria":{"type":"string","description":"完成条件（怎样算做完）"}},"required":["agent_id","goal"]}"#,
+    ),
+    (
+        "get_agent_task",
+        "查看某个任务的详情与全部运行记录。",
+        r#"{"type":"object","properties":{"task_id":{"type":"string","description":"任务 ID（submit_agent_task 结果中给出）"}},"required":["task_id"]}"#,
+    ),
+    (
+        "list_agent_tasks",
+        "查看任务列表（默认当前会话，指定 agent_id 时列出该 Agent 全部任务）。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"可选，按 Agent 过滤"}}}"#,
+    ),
+    (
+        "get_agent_run",
+        "查看某次运行的详情与事件流（输出摘要、终态、时间线）。",
+        r#"{"type":"object","properties":{"run_id":{"type":"string","description":"运行 ID"}},"required":["run_id"]}"#,
+    ),
+    (
+        "interrupt_agent_run",
+        "中断某个运行（保留现场，运行可继续输出或被再次控制）。",
+        r#"{"type":"object","properties":{"run_id":{"type":"string","description":"要中断的运行 ID"}},"required":["run_id"]}"#,
+    ),
+    (
+        "cancel_agent_run",
+        "取消某个运行（终态，托管进程会被终止）。",
+        r#"{"type":"object","properties":{"run_id":{"type":"string","description":"要取消的运行 ID"}},"required":["run_id"]}"#,
+    ),
+    (
+        "list_agent_events",
+        "查看事件历史（运行状态、输出、阻塞、审批、完成、失败），可按 Agent 或运行过滤。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"可选，按 Agent 过滤"},"run_id":{"type":"string","description":"可选，按运行过滤"},"limit":{"type":"integer","description":"返回条数上限，默认 20","minimum":1}}}"#,
+    ),
+    (
+        "get_agent_artifacts",
+        "查看某个 Subagent 的历史产物列表（身份目录 artifacts/ 下）。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"Agent ID"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "get_agent_memory",
+        "读取某个 Subagent 的长期记忆（memory/ 下全部文件的注入形态摘要），供了解其积累的经验与偏好。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"Agent ID"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "append_agent_memory",
+        "向某个 Subagent 的长期记忆追加一条结论（如用户偏好、项目约定、任务经验），后续运行会自动携带。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"Agent ID"},"content":{"type":"string","description":"要记住的结论内容"},"note":{"type":"string","description":"可选备注（来源或场景）"}},"required":["agent_id","content"]}"#,
+    ),
+];

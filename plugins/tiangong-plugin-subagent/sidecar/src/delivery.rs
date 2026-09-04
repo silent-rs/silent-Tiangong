@@ -117,3 +117,36 @@ impl DeliveryWorker {
         }
     }
 }
+
+/// 向指定会话投递一条用户可见消息（respond-async；Hook 队列与会话后端共用）。
+pub async fn deliver_message(
+    client: &reqwest::Client,
+    conversation_id: &str,
+    message: &str,
+) -> Result<()> {
+    let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
+    if url.is_empty() {
+        anyhow::bail!("本机 server 未就绪（缺少 {SERVER_URL_ENV}）");
+    }
+    let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
+    let mut request = client
+        .post(&endpoint)
+        .header("Prefer", "respond-async")
+        .json(&serde_json::json!({
+            "connector": "server-api",
+            "channel_id": conversation_id,
+            "message": message,
+        }));
+    if let Ok(token) = std::env::var(SERVER_TOKEN_ENV)
+        && !token.is_empty()
+    {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    if status.is_success() || status.as_u16() == 202 {
+        Ok(())
+    } else {
+        anyhow::bail!("server 返回 {status}");
+    }
+}

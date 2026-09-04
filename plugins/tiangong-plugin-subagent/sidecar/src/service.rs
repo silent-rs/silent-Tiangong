@@ -63,6 +63,8 @@ pub struct SubagentService {
     agents: AgentStore,
     store: Arc<RuntimeStore>,
     runner: RunnerHub,
+    /// 会话后端投递与源会话通知共用的 HTTP 客户端。
+    http: reqwest::Client,
     /// 变更操作互斥（激活、任务、运行控制、事件状态机）。
     ops: Arc<Mutex<()>>,
     shutting_down: Arc<AtomicBool>,
@@ -78,6 +80,10 @@ impl SubagentService {
             agents,
             store,
             runner,
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .context("构建 HTTP 客户端失败")?,
             ops: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
@@ -204,6 +210,8 @@ impl SubagentService {
             TOOL_CANCEL_AGENT_RUN => self.tool_cancel_run(&payload).await,
             TOOL_LIST_AGENT_EVENTS => self.tool_list_events(&payload).await,
             TOOL_GET_AGENT_ARTIFACTS => self.tool_get_artifacts(&payload).await,
+            TOOL_GET_AGENT_MEMORY => self.tool_get_memory(&payload).await,
+            TOOL_APPEND_AGENT_MEMORY => self.tool_append_memory(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -215,6 +223,21 @@ impl SubagentService {
             UI_SUBMIT_TASK => self.ui_submit_task(&payload).await,
             UI_INTERRUPT_RUN => self.ui_interrupt_run(&payload).await,
             UI_CANCEL_RUN => self.ui_cancel_run(&payload).await,
+            UI_LIST_SESSIONS => serde_json::to_value(crate::sessions::list_sessions())
+                .map_err(|error| anyhow::anyhow!("序列化会话列表失败: {error}")),
+            UI_LIST_MEMORY => self.ui_list_memory(&payload).await,
+            UI_READ_MEMORY => self.ui_read_memory(&payload).await,
+            UI_WRITE_MEMORY => self.ui_write_memory(&payload).await,
+            UI_DELETE_MEMORY => self.ui_delete_memory(&payload).await,
+            UI_COMPILE_MEMORY => self.ui_compile_memory(&payload).await,
+            // ── WASM 生命周期钩子转发 ──
+            SESSION_TURN_FINISHED => match parse_request::<SessionTurnFinishedRequest>(&payload) {
+                Ok(request) => self
+                    .handle_session_turn_finished(&request)
+                    .await
+                    .map(tool_ok),
+                Err(error) => Err(error),
+            },
             other => Err(anyhow::anyhow!("未知操作: {other}")),
         };
         match result {
@@ -362,9 +385,21 @@ fn handle_cli_event(
     }
     let _ = store.save_run(&run);
     sync_task_status(store, &run);
+    if run.status == RunStatus::Completed
+        && let Some(summary) = run.summary.as_deref()
+    {
+        archive_completion(store, agents.as_ref(), &run, summary);
+    }
     if let Some((event_type, payload)) = hook {
         append_event(store, &run, event_type.as_str(), &payload, &timestamp);
-        enqueue_hook(store, agents, &run, event_type, payload, &timestamp);
+        enqueue_hook(
+            store,
+            agents.as_ref(),
+            &run,
+            event_type,
+            payload,
+            &timestamp,
+        );
         // 终态后子进程应自行退出；5s 未退则回收，防止注册表残留。
         if run.status.is_terminal() {
             let runner = runner.clone();
@@ -406,6 +441,7 @@ async fn handle_exit(
             .cloned()
             .unwrap_or_else(|| "运行结束（无输出）".to_string());
         run.summary = Some(text.clone());
+        archive_completion(store, agents.as_ref(), &run, &text);
         append_event(
             store,
             &run,
@@ -415,7 +451,7 @@ async fn handle_exit(
         );
         enqueue_hook(
             store,
-            agents,
+            agents.as_ref(),
             &run,
             HookEventType::Completed,
             json!({ "text": run.summary }),
@@ -438,7 +474,7 @@ async fn handle_exit(
         append_event(store, &run, "failed", &json!({ "text": text }), &timestamp);
         enqueue_hook(
             store,
-            agents,
+            agents.as_ref(),
             &run,
             HookEventType::Failed,
             json!({ "text": text }),
@@ -448,6 +484,28 @@ async fn handle_exit(
     let _ = store.save_run(&run);
     sync_task_status(store, &run);
     notify_run_status(&run);
+}
+
+/// Run 完成后的结论归档（事件流水线与 turn 回报共用）。
+fn archive_completion(
+    store: &RuntimeStore,
+    agents: Option<&AgentStore>,
+    run: &RunRecord,
+    result: &str,
+) {
+    let Some(agents) = agents else {
+        return;
+    };
+    let goal = run
+        .task_id
+        .as_deref()
+        .and_then(|task_id| store.load_task(task_id).ok())
+        .map(|task| task.goal)
+        .unwrap_or_else(|| match run.kind {
+            RunKind::Task => "（任务）".to_string(),
+            RunKind::Message => "（消息往返）".to_string(),
+        });
+    crate::memory::archive_run_result(agents, &run.agent_id, &goal, result);
 }
 
 /// 任务状态跟随其最新运行终态。
@@ -508,14 +566,13 @@ fn append_event(
 /// 重要反馈：先落盘再入投递队列。
 fn enqueue_hook(
     store: &RuntimeStore,
-    agents: &Option<AgentStore>,
+    agents: Option<&AgentStore>,
     run: &RunRecord,
     event_type: HookEventType,
     payload: serde_json::Value,
     timestamp: &str,
 ) {
     let agent_name = agents
-        .as_ref()
         .and_then(|store| store.load(&run.agent_id).ok())
         .map(|config| config.name)
         .unwrap_or_else(|| run.agent_id.clone());
@@ -565,7 +622,7 @@ impl SubagentService {
         }
         if !config.backend.implemented() {
             bail!(
-                "运行后端「{}」将在后续阶段提供，当前版本仅支持 CLI 命令后端",
+                "运行后端「{}」将在后续阶段提供，当前版本仅支持 CLI 命令与天工会话后端",
                 config.backend.label()
             );
         }
@@ -573,6 +630,15 @@ impl SubagentService {
             && config.command.as_deref().unwrap_or("").trim().is_empty()
         {
             bail!("CLI 后端缺少启动命令");
+        }
+        if config.backend == BackendKind::TiangongSession {
+            let session_id = config.session_id.as_deref().unwrap_or("");
+            if session_id.is_empty() {
+                bail!("天工会话后端缺少关联会话（可在管理页编辑补充）");
+            }
+            if !crate::sessions::session_exists(session_id) {
+                bail!("关联会话不存在或已被删除: {session_id}");
+            }
         }
         Ok(())
     }
@@ -780,26 +846,29 @@ impl SubagentService {
         let config = self.agents.load(agent_id)?;
         self.validate_activation(&config)?;
         let activation = self.active_activation(agent_id, session_id)?;
-        // 注入既有活跃运行（纠偏/追问语义）。
-        for run in self.store.list_runs() {
-            if run.activation_id == activation.activation_id && run.status.is_alive() {
-                self.runner
-                    .write_line(
-                        &run.run_id,
-                        &json!({ "type": "user_message", "content": content }),
-                    )
-                    .await?;
-                append_event(
-                    &self.store,
-                    &run,
-                    "user_message",
-                    &json!({ "text": content }),
-                    &now_string(),
-                );
-                return Ok(SendOutcome {
-                    run_id: run.run_id,
-                    injected_into_run: true,
-                });
+        // 注入既有活跃运行（纠偏/追问语义；仅 CLI 后端有注入通道，
+        // 会话后端始终新建投递）。
+        if config.backend == BackendKind::Cli {
+            for run in self.store.list_runs() {
+                if run.activation_id == activation.activation_id && run.status.is_alive() {
+                    self.runner
+                        .write_line(
+                            &run.run_id,
+                            &json!({ "type": "user_message", "content": content }),
+                        )
+                        .await?;
+                    append_event(
+                        &self.store,
+                        &run,
+                        "user_message",
+                        &json!({ "text": content }),
+                        &now_string(),
+                    );
+                    return Ok(SendOutcome {
+                        run_id: run.run_id,
+                        injected_into_run: true,
+                    });
+                }
             }
         }
         let run = self
@@ -853,7 +922,7 @@ impl SubagentService {
         })
     }
 
-    /// 启动运行进程（CLI Adapter，持 ops 锁调用）。
+    /// 启动运行（持 ops 锁调用）：CLI 后端启动子进程，会话后端投递关联会话。
     async fn spawn_run(
         &self,
         config: &AgentConfig,
@@ -865,10 +934,8 @@ impl SubagentService {
         if self.shutting_down.load(Ordering::Acquire) {
             bail!("Subagent 总线正在关闭，不再接受新任务");
         }
-        let command = config.command.as_deref().unwrap_or_default();
-        let instructions = self.agents.instructions(&config.id).unwrap_or_default();
         let timestamp = now_string();
-        let run = RunRecord {
+        let mut run = RunRecord {
             run_id: new_id(),
             task_id: task.map(|task| task.task_id.clone()),
             agent_id: config.id.clone(),
@@ -883,6 +950,101 @@ impl SubagentService {
             finished_at: None,
             summary: None,
         };
+        match config.backend {
+            BackendKind::TiangongSession => {
+                let source_session = config
+                    .session_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("天工会话后端缺少关联会话"))?;
+                let outcome = self
+                    .deliver_session_message(config, activation, source_session, task, message)
+                    .await?;
+                run.summary = Some(outcome);
+                self.store.save_run(&run)?;
+                if let Some(task) = task {
+                    let mut task = task.clone();
+                    task.runs.push(run.run_id.clone());
+                    task.updated_at = now_string();
+                    let _ = self.store.save_task(&task);
+                }
+                append_event(
+                    &self.store,
+                    &run,
+                    "run_started",
+                    &json!({ "backend": "tiangong_session", "source_session": source_session }),
+                    &now_string(),
+                );
+                notify_run_status(&run);
+                Ok(run)
+            }
+            _ => {
+                self.spawn_cli_run(config, activation, run, task, message)
+                    .await
+            }
+        }
+    }
+
+    /// 天工会话后端：把消息/任务投递给关联会话（携带长期指令与记忆摘要）。
+    async fn deliver_session_message(
+        &self,
+        config: &AgentConfig,
+        activation: &ActivationRecord,
+        source_session: &str,
+        task: Option<&TaskRecord>,
+        message: Option<&str>,
+    ) -> Result<String> {
+        let instructions = self.agents.instructions(&config.id).unwrap_or_default();
+        let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
+        let mut body = String::new();
+        match (task, message) {
+            (Some(task), _) => {
+                body.push_str(&format!(
+                    "【Subagent 任务】由「{}」（{}）提交：\n目标：{}\n",
+                    config.name, config.id, task.goal
+                ));
+                if let Some(criteria) = task.completion_criteria.as_deref() {
+                    body.push_str(&format!("完成条件：{criteria}\n"));
+                }
+            }
+            (None, Some(message)) => {
+                body.push_str(&format!(
+                    "【Subagent 消息】来自「{}」（{}）：\n{message}\n",
+                    config.name, config.id
+                ));
+            }
+            (None, None) => {
+                body.push_str(&format!(
+                    "【Subagent 消息】来自「{}」（{}）。\n",
+                    config.name, config.id
+                ));
+            }
+        }
+        body.push_str(&format!(
+            "\n任务工作区：{}\n（请在该工作区语境下处理本次请求；完成后你的最终回复会作为结果返回给提交方会话。）",
+            activation.workspace
+        ));
+        if !instructions.trim().is_empty() {
+            body.push_str(&format!("\n\n【长期指令】\n{}", instructions.trim()));
+        }
+        if !memory.is_empty() {
+            body.push_str(&format!("\n\n【长期记忆】\n{memory}"));
+        }
+        crate::delivery::deliver_message(&self.http, source_session, &body).await?;
+        Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
+    }
+
+    /// CLI 后端：启动子进程（持 ops 锁调用）。
+    async fn spawn_cli_run(
+        &self,
+        config: &AgentConfig,
+        activation: &ActivationRecord,
+        mut run: RunRecord,
+        task: Option<&TaskRecord>,
+        message: Option<&str>,
+    ) -> Result<RunRecord> {
+        let command = config.command.as_deref().unwrap_or_default();
+        let instructions = self.agents.instructions(&config.id).unwrap_or_default();
+        let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
         let cwd = PathBuf::from(&activation.workspace);
         if !cwd.is_dir() {
             bail!("运行 Workspace 不存在: {}", cwd.display());
@@ -892,6 +1054,7 @@ impl SubagentService {
             agent_id: &config.id,
             agent_name: &config.name,
             instructions: &instructions,
+            memory: &memory,
             activation_id: &activation.activation_id,
             session_id: &activation.session_id,
             workspace: &activation.workspace,
@@ -909,7 +1072,6 @@ impl SubagentService {
             .runner
             .spawn(&run.run_id, command, &cwd, &[], &begin, hooks)
             .await?;
-        let mut run = run;
         run.pid = Some(pid);
         self.store.save_run(&run)?;
         if let Some(task) = task {
@@ -929,28 +1091,34 @@ impl SubagentService {
         Ok(run)
     }
 
-    /// 中断运行（保留现场；CLI 后端为组 SIGINT）。
+    /// 中断运行（CLI：协议帧+信号；会话后端：投递停止通知）。
     async fn interrupt_run_core(&self, run_id: &str) -> Result<()> {
         let _guard = self.ops.lock().await;
         let run = self.store.load_run(run_id)?;
         if !run.status.is_alive() {
             bail!("运行已结束（{}），无需中断", run.status.label());
         }
-        self.runner
-            .write_line(run_id, &json!({ "type": "interrupt" }))
-            .await
-            .ok();
-        // 信号在 Seatbelt 沙箱内会被拒绝（process-signal 默认不放行）：
-        // 协议帧已送达即视为中断发起，信号尽力而为。
-        if let Err(error) = self.runner.interrupt(run_id).await {
-            tracing::debug!(run_id, %error, "中断信号未送达（沙箱内预期），已依赖协议帧");
+        if run.pid.is_none() {
+            // 天工会话后端：通知式中断（宿主内 turn 无法硬取消）。
+            self.notify_source_session(&run, "中断请求").await;
+        } else {
+            self.runner
+                .write_line(run_id, &json!({ "type": "interrupt" }))
+                .await
+                .ok();
+            // 信号在 Seatbelt 沙箱内会被拒绝（process-signal 默认不放行）：
+            // 协议帧已送达即视为中断发起，信号尽力而为。
+            if let Err(error) = self.runner.interrupt(run_id).await {
+                tracing::debug!(run_id, %error, "中断信号未送达（沙箱内预期），已依赖协议帧");
+            }
         }
         append_event(&self.store, &run, "interrupted", &json!({}), &now_string());
         notify_run_status(&run);
         Ok(())
     }
 
-    /// 取消运行（终态 cancelled）：协议帧 → stdin EOF → 信号宽限 → 强杀兜底。
+    /// 取消运行（终态 cancelled）：CLI 走协议帧 → stdin EOF → 信号宽限；
+    /// 会话后端投递停止通知后直接落终态。
     async fn cancel_run_core(&self, run_id: &str) -> Result<()> {
         let _guard = self.ops.lock().await;
         let mut run = self.store.load_run(run_id)?;
@@ -958,16 +1126,20 @@ impl SubagentService {
             bail!("运行已结束（{}），无需取消", run.status.label());
         }
         let timestamp = now_string();
-        self.runner
-            .write_line(run_id, &json!({ "type": "cancel" }))
-            .await
-            .ok();
-        // 先断 stdin（协议约定 EOF 即退出），再等信号宽限；
-        // 沙箱内信号被拒时靠 EOF 与宿主退出级联兜底。
-        self.runner.close_stdin(run_id).await.ok();
-        self.runner
-            .terminate(run_id, Duration::from_secs(3))
-            .await?;
+        if run.pid.is_none() {
+            self.notify_source_session(&run, "取消请求").await;
+        } else {
+            self.runner
+                .write_line(run_id, &json!({ "type": "cancel" }))
+                .await
+                .ok();
+            // 先断 stdin（协议约定 EOF 即退出），再等信号宽限；
+            // 沙箱内信号被拒时靠 EOF 与宿主退出级联兜底。
+            self.runner.close_stdin(run_id).await.ok();
+            self.runner
+                .terminate(run_id, Duration::from_secs(3))
+                .await?;
+        }
         run.status = RunStatus::Cancelled;
         run.finished_at = Some(timestamp.clone());
         run.updated_at = timestamp.clone();
@@ -977,6 +1149,115 @@ impl SubagentService {
         append_event(&self.store, &run, "cancelled", &json!({}), &now_string());
         notify_run_status(&run);
         Ok(())
+    }
+
+    /// 会话后端运行控制通知（中断/取消尽力语义）。
+    async fn notify_source_session(&self, run: &RunRecord, action: &str) {
+        let Ok(config) = self.agents.load(&run.agent_id) else {
+            return;
+        };
+        let Some(source_session) = config.session_id.as_deref() else {
+            return;
+        };
+        let body = format!(
+            "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
+            config.name, config.id, action
+        );
+        if let Err(error) =
+            crate::delivery::deliver_message(&self.http, source_session, &body).await
+        {
+            tracing::warn!(run_id = %run.run_id, %error, "向关联会话投递{action}通知失败");
+        }
+    }
+
+    /// 关联会话本轮完成（WASM on_turn_finished 转发）：
+    /// 本轮用户消息带 Subagent 标记时，把完成归因到该源会话上最新的活跃运行。
+    async fn handle_session_turn_finished(
+        &self,
+        request: &SessionTurnFinishedRequest,
+    ) -> Result<String> {
+        let _guard = self.ops.lock().await;
+        if !request.user_text.contains("【Subagent") {
+            return Ok("本轮非 Subagent 投递触发，忽略".to_string());
+        }
+        // 找到以该会话为源的后端 Agent。
+        let agents: Vec<AgentConfig> = self
+            .agents
+            .list()
+            .into_iter()
+            .filter(|config| {
+                config.backend == BackendKind::TiangongSession
+                    && config.session_id.as_deref() == Some(request.session_id.as_str())
+            })
+            .collect();
+        if agents.is_empty() {
+            return Ok(format!("没有以会话 {} 为源的 Subagent", request.session_id));
+        }
+        let agent_ids: Vec<&str> = agents.iter().map(|config| config.id.as_str()).collect();
+        // 归因到最新的活跃运行（同一源会话并发多 run 时按最新）。
+        let target = self
+            .store
+            .list_runs()
+            .into_iter()
+            .filter(|run| {
+                run.pid.is_none()
+                    && run.status.is_alive()
+                    && agent_ids.contains(&run.agent_id.as_str())
+            })
+            .max_by_key(|run| run.run_id.clone());
+        let Some(mut run) = target else {
+            return Ok("源会话上没有等待回复的运行，忽略".to_string());
+        };
+        let timestamp = now_string();
+        let status = match request.turn_status.as_deref() {
+            Some("cancelled") => RunStatus::Cancelled,
+            Some("failed") => RunStatus::Failed,
+            _ => RunStatus::Completed,
+        };
+        let text = if request.assistant_text.trim().is_empty() {
+            match status {
+                RunStatus::Cancelled => "运行被取消".to_string(),
+                RunStatus::Failed => "运行失败（无回复文本）".to_string(),
+                _ => "运行完成（无回复文本）".to_string(),
+            }
+        } else {
+            request.assistant_text.trim().to_string()
+        };
+        run.status = status;
+        run.summary = Some(text.clone());
+        run.finished_at = Some(timestamp.clone());
+        run.updated_at = timestamp.clone();
+        self.store.save_run(&run)?;
+        sync_task_status(&self.store, &run);
+        let (event_type, payload) = match status {
+            RunStatus::Completed => ("completed", json!({ "text": text })),
+            RunStatus::Failed => ("failed", json!({ "text": text })),
+            _ => ("cancelled", json!({ "text": text })),
+        };
+        append_event(&self.store, &run, event_type, &payload, &timestamp);
+        if status == RunStatus::Completed {
+            let agents_ref = Some(&self.agents);
+            archive_completion(&self.store, agents_ref, &run, &text);
+        }
+        let agents_ref = Some(&self.agents);
+        enqueue_hook(
+            &self.store,
+            agents_ref,
+            &run,
+            match status {
+                RunStatus::Completed => HookEventType::Completed,
+                RunStatus::Failed => HookEventType::Failed,
+                _ => HookEventType::Message,
+            },
+            payload,
+            &timestamp,
+        );
+        notify_run_status(&run);
+        Ok(format!(
+            "运行 {} 已随源会话本轮结束归因（{}）",
+            run.run_id,
+            run.status.label()
+        ))
     }
 
     /// 优雅关闭：中断全部 managed 运行并落盘（宿主退出流程 / 终止信号调用）。
@@ -1338,6 +1619,34 @@ impl SubagentService {
         Ok(tool_detail(summary_text, json!({ "artifacts": artifacts })))
     }
 
+    async fn tool_get_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: AgentMemoryRequest = parse_request(payload)?;
+        let files = crate::memory::list(&self.agents, &request.agent_id)?;
+        if files.is_empty() {
+            return Ok(tool_ok("该 Subagent 暂无长期记忆".to_string()));
+        }
+        // 默认返回全部记忆内容（注入形态），供模型读取参考。
+        let snapshot = crate::memory::injection_snapshot(&self.agents, &request.agent_id);
+        let summary_text = if snapshot.is_empty() {
+            "长期记忆文件存在但内容为空".to_string()
+        } else {
+            snapshot
+        };
+        Ok(tool_detail(summary_text, json!({ "files": files })))
+    }
+
+    async fn tool_append_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: AppendAgentMemoryRequest = parse_request(payload)?;
+        let name = crate::memory::append_note(
+            &self.agents,
+            &request.agent_id,
+            &request.content,
+            request.note.as_deref(),
+        )?;
+        notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
+        Ok(tool_ok(format!("已追加到长期记忆（memory/{name}）")))
+    }
+
     fn list_artifacts(&self, agent_id: &str) -> Result<Vec<ArtifactEntry>> {
         let dir = self.agents.root().join(agent_id).join("artifacts");
         let mut entries = Vec::new();
@@ -1391,11 +1700,21 @@ impl SubagentService {
 
     async fn ui_agent_create(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let request: UiAgentCreateRequest = parse_request(payload)?;
+        if request.backend == BackendKind::TiangongSession {
+            let session_id = request.session_id.as_deref().unwrap_or("").trim();
+            if session_id.is_empty() {
+                bail!("天工会话后端必须选择一个关联会话");
+            }
+            if !crate::sessions::session_exists(session_id) {
+                bail!("关联会话不存在: {session_id}");
+            }
+        }
         let config = self.agents.create(
             &request.name,
             request.description.as_deref().unwrap_or(""),
             request.backend,
             request.command.as_deref(),
+            request.session_id.as_deref(),
             request
                 .workspace_policy
                 .unwrap_or(WorkspacePolicy::ReadOnly),
@@ -1407,12 +1726,19 @@ impl SubagentService {
 
     async fn ui_agent_update(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let request: UiAgentUpdateRequest = parse_request(payload)?;
+        if let Some(session_id) = request.session_id.as_deref() {
+            let session_id = session_id.trim();
+            if !session_id.is_empty() && !crate::sessions::session_exists(session_id) {
+                bail!("关联会话不存在: {session_id}");
+            }
+        }
         let config = self.agents.update(
             &request.agent_id,
             crate::agent_store::AgentChanges {
                 name: request.name.as_deref(),
                 description: request.description.as_deref(),
                 command: request.command.as_deref(),
+                session_id: request.session_id.as_deref(),
                 workspace_policy: request.workspace_policy,
                 enabled: request.enabled,
                 instructions: request.instructions.as_deref(),
@@ -1420,6 +1746,61 @@ impl SubagentService {
         )?;
         notify(json!({ "kind": "agent_updated", "agent_id": config.id }));
         Ok(serde_json::to_value(config)?)
+    }
+
+    async fn ui_list_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: AgentMemoryRequest = parse_request(payload)?;
+        let files = crate::memory::list(&self.agents, &request.agent_id)?;
+        Ok(json!({ "files": files }))
+    }
+
+    async fn ui_read_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: UiReadMemoryRequest = parse_request(payload)?;
+        let content = crate::memory::read(&self.agents, &request.agent_id, &request.name)?;
+        Ok(json!({ "name": request.name, "content": content }))
+    }
+
+    async fn ui_write_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: UiWriteMemoryRequest = parse_request(payload)?;
+        crate::memory::write(
+            &self.agents,
+            &request.agent_id,
+            &request.name,
+            &request.content,
+        )?;
+        notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
+        Ok(json!({ "written": request.name }))
+    }
+
+    async fn ui_delete_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: UiDeleteMemoryRequest = parse_request(payload)?;
+        crate::memory::delete(&self.agents, &request.agent_id, &request.name)?;
+        notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
+        Ok(json!({ "deleted": request.name }))
+    }
+
+    /// 从关联会话整理记忆（天工会话后端）：每轮「用户请求 + 最终回复（截断）」。
+    async fn ui_compile_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let request: AgentMemoryRequest = parse_request(payload)?;
+        let config = self.agents.load(&request.agent_id)?;
+        if config.backend != BackendKind::TiangongSession {
+            bail!(
+                "「从会话整理记忆」仅适用于天工会话后端（其他后端的记忆来源是任务归档与手动记录）"
+            );
+        }
+        let session_id = config
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("缺少关联会话"))?;
+        let session = crate::sessions::load_session_json(session_id)?;
+        let name = crate::memory::compile_from_session(
+            &self.agents,
+            &request.agent_id,
+            &session,
+            session_id,
+        )?;
+        notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
+        Ok(json!({ "compiled": name }))
     }
 
     async fn ui_agent_delete(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {

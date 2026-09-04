@@ -16,6 +16,8 @@ export interface AgentConfig {
   description: string;
   backend: BackendKind;
   command?: string | null;
+  /** 天工会话后端关联的源会话 ID。 */
+  session_id?: string | null;
   workspace_policy: WorkspacePolicy;
   enabled: boolean;
   created_at: string;
@@ -155,12 +157,27 @@ export const BACKEND_LABELS: Record<BackendKind, string> = {
 
 export const BACKEND_IMPLEMENTED: Record<BackendKind, boolean> = {
   cli: true,
-  tiangong_session: false,
+  tiangong_session: true,
   agent_team: false,
   claude_code: false,
   codex: false,
   octoloop: false,
 };
+
+/** 会话列表条目（ui_list_sessions）。 */
+export interface SessionBrief {
+  id: string;
+  title: string;
+  updated_at: string;
+  message_count: number;
+}
+
+/** 长期记忆文件条目（ui_list_memory）。 */
+export interface MemoryFileEntry {
+  name: string;
+  size_bytes: number;
+  updated_at?: string | null;
+}
 
 export const WORKSPACE_POLICY_LABELS: Record<WorkspacePolicy, string> = {
   'read-only': '只读',

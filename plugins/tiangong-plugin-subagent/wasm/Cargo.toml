@@ -1,14 +1,15 @@
 [package]
-name = "tiangong-plugin-subagent-protocol"
+name = "tiangong-plugin-subagent-wasm"
 version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
-
-[package.metadata.tiangong]
-business-protocol = 1
-description = "Subagent 插件宿主、UI 与 sidecar 共用的私有业务协议"
 publish = false
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
+tiangong-plugin-subagent-protocol = { workspace = true }
+wit-bindgen = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

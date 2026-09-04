@@ -17,6 +17,7 @@ pub struct AgentChanges<'a> {
     pub name: Option<&'a str>,
     pub description: Option<&'a str>,
     pub command: Option<&'a str>,
+    pub session_id: Option<&'a str>,
     pub workspace_policy: Option<WorkspacePolicy>,
     pub enabled: Option<bool>,
     pub instructions: Option<&'a str>,
@@ -91,12 +92,14 @@ impl AgentStore {
     }
 
     /// 创建新 Agent（身份目录 + 空指令/记忆/产物目录）。
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         name: &str,
         description: &str,
         backend: BackendKind,
         command: Option<&str>,
+        session_id: Option<&str>,
         workspace_policy: WorkspacePolicy,
         instructions: Option<&str>,
     ) -> Result<AgentConfig> {
@@ -105,6 +108,10 @@ impl AgentStore {
         }
         if backend == BackendKind::Cli && command.map(str::trim).unwrap_or("").is_empty() {
             bail!("CLI 后端必须提供启动命令");
+        }
+        let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+        if backend == BackendKind::TiangongSession && session_id.is_none() {
+            bail!("天工会话后端必须关联一个已有会话");
         }
         let agent_id = format!("agent-{}", new_id());
         let dir = self.agent_dir(&agent_id)?;
@@ -119,6 +126,7 @@ impl AgentStore {
             command: command
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            session_id: session_id.map(str::to_string),
             workspace_policy,
             enabled: true,
             created_at: now.clone(),
@@ -162,6 +170,13 @@ impl AgentStore {
             {
                 bail!("CLI 后端必须提供启动命令");
             }
+        }
+        if let Some(session_id) = changes.session_id {
+            let session_id = session_id.trim();
+            if config.backend == BackendKind::TiangongSession && session_id.is_empty() {
+                bail!("天工会话后端必须关联一个已有会话");
+            }
+            config.session_id = (!session_id.is_empty()).then(|| session_id.to_string());
         }
         if let Some(policy) = changes.workspace_policy {
             config.workspace_policy = policy;

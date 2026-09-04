@@ -67,6 +67,8 @@ pub struct BeginFrame<'a> {
     pub agent_id: &'a str,
     pub agent_name: &'a str,
     pub instructions: &'a str,
+    /// 长期记忆摘要（memory/ 注入，可为空串）。
+    pub memory: &'a str,
     pub activation_id: &'a str,
     pub session_id: &'a str,
     pub workspace: &'a str,

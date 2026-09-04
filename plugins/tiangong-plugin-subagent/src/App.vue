@@ -8,6 +8,7 @@ import {
   TASK_STATUS_LABELS,
   WORKSPACE_POLICY_LABELS,
   type AgentSummary,
+  type MemoryFileEntry,
   type StateSnapshot,
 } from './types';
 import { sidecarCall, subscribeSubagentEvents } from './api';
@@ -231,6 +232,7 @@ function openEdit(agent: AgentSummary) {
     description: agent.config.description,
     backend: agent.config.backend,
     command: agent.config.command ?? '',
+    sessionId: agent.config.session_id ?? null,
     workspacePolicy: agent.config.workspace_policy,
     enabled: agent.config.enabled,
   };
@@ -247,6 +249,7 @@ async function submitForm(value: AgentFormValue) {
         description: value.description,
         backend: value.backend,
         command: value.command,
+        session_id: value.sessionId,
         workspace_policy: value.workspacePolicy,
         enabled: value.enabled,
       });
@@ -256,6 +259,7 @@ async function submitForm(value: AgentFormValue) {
         description: value.description,
         backend: value.backend,
         command: value.command,
+        session_id: value.sessionId,
         workspace_policy: value.workspacePolicy,
       });
     }
@@ -277,7 +281,104 @@ async function removeAgent(agent: AgentSummary) {
 }
 
 function toggleExpand(agentId: string) {
-  expandedAgentId.value = expandedAgentId.value === agentId ? null : agentId;
+  const expanding = expandedAgentId.value !== agentId;
+  expandedAgentId.value = expanding ? agentId : null;
+  if (expanding) {
+    void loadMemory(agentId);
+  }
+}
+
+// ── 长期记忆面板 ─────────────────────────────────────────────
+
+const memoryFiles = ref<Record<string, MemoryFileEntry[]>>({});
+const memoryDrafts = ref<Record<string, { name: string; content: string; original: string }>>({});
+const memoryError = ref('');
+
+async function loadMemory(agentId: string) {
+  try {
+    const body = await sidecarCall<{ files: MemoryFileEntry[] }>('ui_list_memory', {
+      agent_id: agentId,
+    });
+    memoryFiles.value = { ...memoryFiles.value, [agentId]: body.files ?? [] };
+  } catch (error) {
+    memoryError.value = String((error as Error).message ?? error);
+  }
+}
+
+async function openMemory(agentId: string, name: string) {
+  try {
+    const body = await sidecarCall<{ name: string; content: string }>('ui_read_memory', {
+      agent_id: agentId,
+      name,
+    });
+    memoryDrafts.value = {
+      ...memoryDrafts.value,
+      [agentId]: { name, content: body.content, original: body.content },
+    };
+  } catch (error) {
+    memoryError.value = String((error as Error).message ?? error);
+  }
+}
+
+async function saveMemory(agentId: string) {
+  const draft = memoryDrafts.value[agentId];
+  if (!draft) return;
+  void withBusy(agentId, async () => {
+    await sidecarCall('ui_write_memory', {
+      agent_id: agentId,
+      name: draft.name,
+      content: draft.content,
+    });
+    memoryDrafts.value = { ...memoryDrafts.value, [agentId]: { ...draft, original: draft.content } };
+    await loadMemory(agentId);
+  });
+}
+
+async function deleteMemory(agentId: string, name: string) {
+  if (!window.confirm(`确定删除记忆文件「${name}」？`)) return;
+  void withBusy(agentId, async () => {
+    await sidecarCall('ui_delete_memory', { agent_id: agentId, name });
+    if (memoryDrafts.value[agentId]?.name === name) {
+      const next = { ...memoryDrafts.value };
+      delete next[agentId];
+      memoryDrafts.value = next;
+    }
+    await loadMemory(agentId);
+  });
+}
+
+async function compileMemory(agent: AgentSummary) {
+  void withBusy(agent.config.id, async () => {
+    const body = await sidecarCall<{ compiled: string }>('ui_compile_memory', {
+      agent_id: agent.config.id,
+    });
+    memoryError.value = '';
+    await loadMemory(agent.config.id);
+    await openMemory(agent.config.id, body.compiled);
+  });
+}
+
+function newMemory(agentId: string) {
+  memoryDrafts.value = {
+    ...memoryDrafts.value,
+    [agentId]: { name: '', content: '', original: '' },
+  };
+}
+
+function memorySizeLabel(size: number): string {
+  if (size < 1024) return `${size} B`;
+  return `${(size / 1024).toFixed(1)} KB`;
+}
+
+function closeMemory(agentId: string) {
+  const next = { ...memoryDrafts.value };
+  delete next[agentId];
+  memoryDrafts.value = next;
+}
+
+function sessionShort(agent: AgentSummary): string {
+  const sessionId = agent.config.session_id ?? '';
+  return sessionId ? `…${sessionId.slice(-8)}` : '';
 }
 
 onMounted(async () => {
@@ -376,6 +477,9 @@ onUnmounted(() => {
 
         <p v-if="agent.activated_in_session && sessionActivation(agent)" class="workspace-line">
           Workspace：{{ sessionActivation(agent)?.workspace }}
+        </p>
+        <p v-if="agent.config.backend === 'tiangong_session'" class="workspace-line">
+          关联会话：{{ sessionShort(agent) }}
         </p>
 
         <div class="actions">
@@ -483,6 +587,72 @@ onUnmounted(() => {
               写工作区 {{ agent.capabilities.workspace_write ? '✓' : '✗' }} ·
               产物 {{ agent.capabilities.artifacts ? '✓' : '✗' }}
             </p>
+          </div>
+          <div class="detail-block">
+            <div class="memory-head">
+              <h3>长期记忆（memory/）</h3>
+              <div class="memory-actions">
+                <button
+                  v-if="agent.config.backend === 'tiangong_session'"
+                  class="btn btn-ghost"
+                  type="button"
+                  :disabled="busyAgentId === agent.config.id"
+                  @click="compileMemory(agent)"
+                >
+                  从会话整理
+                </button>
+                <button class="btn btn-ghost" type="button" @click="newMemory(agent.config.id)">
+                  新建文件
+                </button>
+              </div>
+            </div>
+            <p v-if="memoryError" class="session-hint">{{ memoryError }}</p>
+            <p v-if="!(memoryFiles[agent.config.id] ?? []).length" class="empty small">
+              暂无记忆文件（任务完成后自动归档结论；会话后端可「从会话整理」）
+            </p>
+            <ul v-else class="memory-list">
+              <li v-for="file in memoryFiles[agent.config.id]" :key="file.name">
+                <span class="memory-name" @click="openMemory(agent.config.id, file.name)">
+                  {{ file.name }}
+                </span>
+                <span class="memory-meta">{{ memorySizeLabel(file.size_bytes) }} · {{ file.updated_at ?? '' }}</span>
+                <button class="btn btn-ghost btn-danger-ghost" type="button" @click="deleteMemory(agent.config.id, file.name)">
+                  删除
+                </button>
+              </li>
+            </ul>
+            <div v-if="memoryDrafts[agent.config.id]" class="memory-editor">
+              <input
+                v-model="memoryDrafts[agent.config.id]!.name"
+                class="memory-name-input"
+                type="text"
+                placeholder="文件名（如 notes.md）"
+                :disabled="Boolean(memoryDrafts[agent.config.id]!.original)"
+              />
+              <textarea
+                v-model="memoryDrafts[agent.config.id]!.content"
+                class="memory-content"
+                rows="8"
+                placeholder="记忆内容（markdown）…"
+              />
+              <div class="memory-editor-actions">
+                <button
+                  class="btn"
+                  type="button"
+                  :disabled="!memoryDrafts[agent.config.id]!.name.trim()"
+                  @click="saveMemory(agent.config.id)"
+                >
+                  保存
+                </button>
+                <button
+                  class="btn btn-ghost"
+                  type="button"
+                  @click="closeMemory(agent.config.id)"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -806,5 +976,77 @@ onUnmounted(() => {
   margin: 0;
   color: var(--ui-muted-foreground);
   font-size: 12px;
+}
+
+.memory-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memory-head h3 {
+  margin: 0;
+}
+
+.memory-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.memory-name {
+  color: var(--ui-foreground);
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.memory-meta {
+  flex: 1;
+  color: var(--ui-muted-foreground);
+}
+
+.memory-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.memory-name-input,
+.memory-content {
+  padding: 7px 10px;
+  border: 1px solid var(--ui-input);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-foreground);
+  font-size: 12px;
+}
+
+.memory-content {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.6;
+}
+
+.memory-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 </style>

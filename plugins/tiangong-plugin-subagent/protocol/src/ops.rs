@@ -26,8 +26,10 @@ pub const TOOL_INTERRUPT_AGENT_RUN: &str = "interrupt_agent_run";
 pub const TOOL_CANCEL_AGENT_RUN: &str = "cancel_agent_run";
 pub const TOOL_LIST_AGENT_EVENTS: &str = "list_agent_events";
 pub const TOOL_GET_AGENT_ARTIFACTS: &str = "get_agent_artifacts";
+pub const TOOL_GET_AGENT_MEMORY: &str = "get_agent_memory";
+pub const TOOL_APPEND_AGENT_MEMORY: &str = "append_agent_memory";
 
-/// 全部工具操作名（与 plugin.json tools[] 一一对应）。
+/// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_LIST_AGENTS,
     TOOL_GET_AGENT,
@@ -43,6 +45,8 @@ pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_CANCEL_AGENT_RUN,
     TOOL_LIST_AGENT_EVENTS,
     TOOL_GET_AGENT_ARTIFACTS,
+    TOOL_GET_AGENT_MEMORY,
+    TOOL_APPEND_AGENT_MEMORY,
 ];
 
 // ── UI 操作名 ──────────────────────────────────────────────────
@@ -57,9 +61,18 @@ pub const UI_SEND_MESSAGE: &str = "ui_send_message";
 pub const UI_SUBMIT_TASK: &str = "ui_submit_task";
 pub const UI_INTERRUPT_RUN: &str = "ui_interrupt_run";
 pub const UI_CANCEL_RUN: &str = "ui_cancel_run";
+pub const UI_LIST_SESSIONS: &str = "ui_list_sessions";
+pub const UI_LIST_MEMORY: &str = "ui_list_memory";
+pub const UI_READ_MEMORY: &str = "ui_read_memory";
+pub const UI_WRITE_MEMORY: &str = "ui_write_memory";
+pub const UI_DELETE_MEMORY: &str = "ui_delete_memory";
+pub const UI_COMPILE_MEMORY: &str = "ui_compile_memory";
 
 /// 优雅关闭操作（宿主退出流程在终止 sidecar 前调用）。
 pub const SHUTDOWN_OPERATION: &str = "subagent_shutdown";
+
+/// WASM 生命周期钩子转发操作：关联会话本轮完成（on_turn_finished → sidecar）。
+pub const SESSION_TURN_FINISHED: &str = "session_turn_finished";
 
 // ── 请求类型 ───────────────────────────────────────────────────
 
@@ -152,6 +165,9 @@ pub struct UiAgentCreateRequest {
     pub backend: BackendKind,
     #[serde(default)]
     pub command: Option<String>,
+    /// 天工会话后端：关联的源会话 ID。
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub workspace_policy: Option<WorkspacePolicy>,
     #[serde(default)]
@@ -168,6 +184,8 @@ pub struct UiAgentUpdateRequest {
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub workspace_policy: Option<WorkspacePolicy>,
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -178,6 +196,61 @@ pub struct UiAgentUpdateRequest {
 #[derive(Debug, Deserialize)]
 pub struct UiAgentDeleteRequest {
     pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionTurnFinishedRequest {
+    /// 完成本轮的会话（Agent 关联的源会话）。
+    pub session_id: String,
+    /// 本轮用户消息文本（用于确认该轮由 Subagent 投递触发，防止误归因）。
+    #[serde(default)]
+    pub user_text: String,
+    /// 本轮最终回复文本（assistant 消息 text 块拼接）。
+    #[serde(default)]
+    pub assistant_text: String,
+    /// 本轮用户消息锚点的 turn 终态：success / failed / cancelled。
+    #[serde(default)]
+    pub turn_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionBrief {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UiReadMemoryRequest {
+    pub agent_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UiWriteMemoryRequest {
+    pub agent_id: String,
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UiDeleteMemoryRequest {
+    pub agent_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentMemoryRequest {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppendAgentMemoryRequest {
+    pub agent_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 // ── 响应类型 ───────────────────────────────────────────────────
@@ -238,4 +311,18 @@ pub struct ArtifactEntry {
     pub is_dir: bool,
     pub size_bytes: u64,
     pub modified_at: Option<String>,
+}
+
+/// Agent 长期记忆文件条目（memory/ 下 markdown）。
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryFileEntry {
+    pub name: String,
+    pub size_bytes: u64,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryReadOutcome {
+    pub name: String,
+    pub content: String,
 }

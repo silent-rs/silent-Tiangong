@@ -9,10 +9,12 @@
 
 mod agent_store;
 mod delivery;
+mod memory;
 mod paths;
 mod runner;
 mod runtime_store;
 mod service;
+mod sessions;
 
 use std::sync::Arc;
 

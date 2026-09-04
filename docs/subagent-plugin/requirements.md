@@ -13,14 +13,29 @@
 - 关键回调先落盘再投递，Sidecar 重启后补投；
 - 退出天工时清理 managed 运行实例（attached 只断开）。
 
-不在阶段一：天工原生 Subagent/已有会话 Adapter（阶段二）、Claude Code/Codex 接入（阶段三）、OctoLoop（阶段四）。
+### 0.2.0 追加（用户裁定优先级：关联会话后端提前实现）
+
+- **天工会话后端（tiangong_session）**：已有天工会话作为 Agent 运行后端——
+  - agent.toml 关联 `session_id`；管理页创建时从会话列表选择；
+  - 发送消息/提交任务 = 经本机 server 向关联会话投递（消息携带任务目标、Workspace 与 Agent 长期指令/记忆摘要）；
+  - **完成回报**：插件 WASM 逻辑层在 `on_turn_finished` 钩子中把「关联会话本轮最终回复」转发给 sidecar，sidecar 将对应 Run 置完成并经 Hook 投回激活会话；
+  - 中断/取消 = 向关联会话投递停止通知（尽力语义，无法硬取消宿主内 turn）；
+  - 记忆整理来源即关联会话历史。
+- **memory 长期记忆落成实际功能**：
+  - `memory/` 下 markdown 文件可管理（列表/查看/编辑/删除）；
+  - 运行注入：CLI 后端 begin 帧、会话后端投递消息均携带记忆摘要（不复制全部会话历史）；
+  - 自动归档：Run 完成后把「任务目标 + 结果」追加到 `memory/tasks.md`（结论式记忆）；
+  - 从关联会话整理：提取每轮「用户消息 + 最终回复（截断）」生成 `memory/session-notes.md`；
+  - AI 工具 `get_agent_memory` / `append_agent_memory` 读写记忆。
+
+不在本版：天工原生 agent-team Subagent 适配（原阶段二其余部分）、Claude Code/Codex 接入（阶段三）、OctoLoop（阶段四）。
 
 ## 关键决策
 
 | 决策点 | 结论 | 依据 |
 | --- | --- | --- |
 | 插件形态 | schema v2：manifest 声明工具 + extension.tab + resident Rust sidecar，工具直连 sidecar | terminal 同款成熟形态 |
-| 首版运行后端 | CLI Adapter（JSONL 非交互协议子进程，managed 进程组） | issue 接入优先级第 2 层；同时是阶段三 Claude Code/Codex 的地基 |
+| 首版运行后端 | CLI Adapter（JSONL 非交互协议子进程，managed 进程组）；0.2.0 追加天工会话后端（WASM turn 钩子回报完成） | issue 接入优先级第 2 层；同时是阶段三 Claude Code/Codex 的地基 |
 | Hook 投递通道 | HTTP `POST /api/v1/messages`（connector=server-api，channel_id=激活会话），`Prefer: respond-async` | scheduler/bot 已验证的正式通道，无需修改会话数据库 |
 | 运行态持久化 | `~/.tiangong/agents-runtime/`（activations、tasks、runs、hooks 队列、worktrees） | 高频运行状态不写入 agent.toml |
 | 存储根定位 | `TIANGONG_STORAGE_ROOT` > `$HOME/.tiangong` | 与 scheduler 一致 |
