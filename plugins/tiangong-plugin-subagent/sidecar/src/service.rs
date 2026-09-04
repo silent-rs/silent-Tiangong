@@ -265,14 +265,13 @@ impl SubagentService {
 impl SidecarService for SubagentService {
     async fn dispatch(&self, request: Request) -> Response {
         let payload = self.dispatch_inner(&request).await;
-        let success = payload
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
+        // 对齐官方惯例（scheduler 等）：传输成功即 success=true，业务成败
+        // 一律经 payload（{ok, summary}）表达。success=false 会被宿主当作
+        // 传输级错误抛给 WASM，最终在 Core 层被误报为「未注册的工具」。
         Response {
             protocol_version: PROTOCOL_VERSION.to_string(),
             request_id: request.request_id,
-            success,
+            success: true,
             payload: Some(payload),
             error_code: None,
             error_message: None,
@@ -1393,8 +1392,25 @@ impl SubagentService {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
+                // 附最近会话候选，模型可直接据此补 session_query 重试。
+                let candidates = crate::sessions::list_sessions()
+                    .into_iter()
+                    .take(5)
+                    .map(|session| {
+                        format!(
+                            "「{}」（{} 条消息，{}）",
+                            session.title, session.message_count, session.updated_at
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("、");
                 anyhow::anyhow!(
-                    "天工会话后端需要提供 session_id 或 session_query（按标题搜索）之一"
+                    "天工会话后端需要提供 session_id 或 session_query（按标题搜索）之一{}",
+                    if candidates.is_empty() {
+                        String::new()
+                    } else {
+                        format!("；最近的会话：{candidates}")
+                    }
                 )
             })?;
         let keyword = query.to_lowercase();

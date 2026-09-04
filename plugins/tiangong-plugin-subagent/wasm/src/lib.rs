@@ -30,6 +30,19 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
 }
 
+/// 工具级失败的 ToolResult（区别于 PluginError：后者会被宿主映射为
+/// 「未注册的工具」，丢失真实原因）。
+fn tool_failure(summary: impl Into<String>) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: summary.into(),
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 1,
+        execution: None,
+    }
+}
+
 struct Component;
 
 impl Guest for Component {
@@ -57,14 +70,30 @@ impl Guest for Component {
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
+        // 失败一律映射为 ok:false 的 ToolResult：PluginError 会被宿主吞成
+        // 「未注册的工具」（adapter 对 Err 返回 None），模型将收到误导信息。
         if !TOOL_OPERATIONS.contains(&call.name.as_str()) {
-            return Err(plugin_err(format!("未知的 Subagent 工具: {}", call.name)));
+            return Ok(tool_failure(format!("未知的 Subagent 工具: {}", call.name)));
         }
         // sidecar 对全部工具操作返回 ToolOutcome 形状，直接映射。
-        let response = sidecar_client::invoke_raw(&call.name, &call.arguments)
-            .map_err(|error| plugin_err(format!("{} 执行失败: {error}", call.name)))?;
-        let outcome: Value = serde_json::from_str(&response)
-            .map_err(|error| plugin_err(format!("解析 {} 响应失败: {error}", call.name)))?;
+        let response = match sidecar_client::invoke_raw(&call.name, &call.arguments) {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(tool_failure(format!(
+                    "{} 执行失败（sidecar 通道）: {error}",
+                    call.name
+                )));
+            }
+        };
+        let outcome: Value = match serde_json::from_str(&response) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(tool_failure(format!(
+                    "解析 {} 响应失败: {error}",
+                    call.name
+                )));
+            }
+        };
         Ok(ToolResult {
             ok: outcome.get("ok").and_then(Value::as_bool).unwrap_or(false),
             summary: outcome
