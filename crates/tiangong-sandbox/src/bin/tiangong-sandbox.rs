@@ -1262,12 +1262,14 @@ fn reachable_network_address() -> Result<String> {
 
 #[cfg(windows)]
 fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
-    let status = std::process::Command::new("cmd.exe")
+    let mut command = std::process::Command::new("cmd.exe");
+    command
         .args(["/D", "/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = tiangong_toolkit::configure_no_window(&mut command)
         .status()
         .context("创建 Windows 自检 Junction 失败")?;
     Ok(status.success())
@@ -1337,14 +1339,15 @@ fn run_windows_file_probe(raw: &str) -> i32 {
         std::fs::File::create(&file_stderr_path),
     ) {
         (Ok(stdin), Ok(stdout), Ok(stderr)) => {
-            std::process::Command::new(&request.workspace_executable)
+            let mut command = std::process::Command::new(&request.workspace_executable);
+            command
                 .arg("--windows-self-check-child-probe")
                 .arg(&child_request)
                 .current_dir(&request.workspace)
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
-                .stderr(std::process::Stdio::from(stderr))
-                .status()
+                .stderr(std::process::Stdio::from(stderr));
+            tiangong_toolkit::configure_no_window(&mut command).status()
         }
         (stdin, stdout, stderr) => {
             eprintln!(
@@ -1369,15 +1372,16 @@ fn run_windows_file_probe(raw: &str) -> i32 {
     const PIPE_TOKEN: &str = "tiangong-sandbox-pipe-input";
     const STDOUT_TOKEN: &str = "tiangong-sandbox-pipe-stdout";
     const STDERR_TOKEN: &str = "tiangong-sandbox-pipe-stderr";
-    let piped_child = std::process::Command::new(&request.workspace_executable)
+    let mut piped_command = std::process::Command::new(&request.workspace_executable);
+    piped_command
         .arg("--windows-self-check-child-probe")
         .arg(&child_request)
         .arg(PIPE_TOKEN)
         .current_dir(&request.workspace)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    let piped_child = tiangong_toolkit::configure_no_window(&mut piped_command).spawn();
     let pipe_stdio_ok = match piped_child {
         Ok(mut child) => {
             let input_written = child
@@ -1549,10 +1553,9 @@ fn run_windows_process_limit_probe() -> i32 {
     let Ok(program) = std::env::current_exe() else {
         return 3;
     };
-    match std::process::Command::new(program)
-        .args(["--self-check-network-probe", "invalid"])
-        .spawn()
-    {
+    let mut command = std::process::Command::new(program);
+    command.args(["--self-check-network-probe", "invalid"]);
+    match tiangong_toolkit::configure_no_window(&mut command).spawn() {
         Err(_) => 0,
         Ok(mut child) => {
             let _ = child.wait();
@@ -1604,11 +1607,11 @@ fn run_windows_tree_probe(raw: &str) -> i32 {
     if std::fs::write(&request.parent_pid_path, std::process::id().to_string()).is_err() {
         return 3;
     }
-    let child = match std::process::Command::new(&request.executable)
+    let mut command = std::process::Command::new(&request.executable);
+    command
         .arg("--windows-self-check-idle-probe")
-        .current_dir(&request.workspace)
-        .spawn()
-    {
+        .current_dir(&request.workspace);
+    let child = match tiangong_toolkit::configure_no_window(&mut command).spawn() {
         Ok(child) => child,
         Err(_) => return 4,
     };
@@ -1839,8 +1842,9 @@ fn windows_stop_event_cleanup_probe(root: &Path, current_exe: &Path) -> Result<b
 #[cfg(windows)]
 fn windows_host_exit_cleanup_probe(root: &Path, current_exe: &Path) -> Result<bool> {
     let fixture = WindowsTreeFixture::new(root, current_exe, "host-exit")?;
-    let mut host = std::process::Command::new(current_exe)
-        .arg("--windows-self-check-idle-probe")
+    let mut command = std::process::Command::new(current_exe);
+    command.arg("--windows-self-check-idle-probe");
+    let mut host = tiangong_toolkit::configure_no_window(&mut command)
         .spawn()
         .context("启动 Windows 生命周期宿主探针失败")?;
     let host_pid = host.id();
@@ -1907,14 +1911,15 @@ fn windows_concurrent_cleanup_probe(root: &Path, current_exe: &Path) -> Result<b
             let stdin = std::fs::File::open(&input_path)?;
             let stdout = std::fs::File::create(&stdout_path)?;
             let stderr = std::fs::File::create(&stderr_path)?;
-            Ok(std::process::Command::new(current_exe)
+            let mut command = std::process::Command::new(current_exe);
+            command
                 .arg("--windows-self-check-lifecycle-worker")
                 .arg(&worker_root)
                 .arg(format!("worker-{index}"))
                 .stdin(std::process::Stdio::from(stdin))
                 .stdout(std::process::Stdio::from(stdout))
-                .stderr(std::process::Stdio::from(stderr))
-                .spawn()?)
+                .stderr(std::process::Stdio::from(stderr));
+            Ok(tiangong_toolkit::configure_no_window(&mut command).spawn()?)
         })();
         match child {
             Ok(child) => workers.push((child, stdout_path, stderr_path)),

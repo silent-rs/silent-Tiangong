@@ -160,8 +160,9 @@ pub fn installed_version(storage_root: &Path) -> Option<String> {
     verify_launcher_self_check(&launcher).ok()
 }
 fn verify_launcher_self_check(binary: &Path) -> Result<String> {
-    let output = std::process::Command::new(binary)
-        .arg("--self-check")
+    let mut command = std::process::Command::new(binary);
+    command.arg("--self-check");
+    let output = tiangong_toolkit::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行 Sandbox 自检失败: {}", binary.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {
