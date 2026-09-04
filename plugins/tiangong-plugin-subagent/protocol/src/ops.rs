@@ -12,6 +12,7 @@ use crate::state::{ActivationRecord, AgentEventRecord, RunRecord, RunStatus, Tas
 
 // ── AI 工具操作名 ──────────────────────────────────────────────
 
+pub const TOOL_CREATE_AGENT: &str = "create_agent";
 pub const TOOL_LIST_AGENTS: &str = "list_agents";
 pub const TOOL_GET_AGENT: &str = "get_agent";
 pub const TOOL_ACTIVATE_AGENT: &str = "activate_agent";
@@ -31,6 +32,7 @@ pub const TOOL_APPEND_AGENT_MEMORY: &str = "append_agent_memory";
 
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
+    TOOL_CREATE_AGENT,
     TOOL_LIST_AGENTS,
     TOOL_GET_AGENT,
     TOOL_ACTIVATE_AGENT,
@@ -79,6 +81,32 @@ pub const SESSION_TURN_FINISHED: &str = "session_turn_finished";
 #[derive(Debug, Deserialize)]
 pub struct AgentIdRequest {
     pub agent_id: String,
+}
+
+/// AI 招募请求：创建（或复用同名）持久 Subagent 并在当前会话激活。
+#[derive(Debug, Deserialize)]
+pub struct CreateAgentRequest {
+    /// 成员名称；同名 Agent 已存在时直接复用（延续其指令与记忆）。
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 运行后端：cli（需提供 command）或 tiangong_session（需 session_id / session_query 之一）。
+    pub backend: BackendKind,
+    #[serde(default)]
+    pub command: Option<String>,
+    /// 关联会话 ID（tiangong_session）。
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// 按标题关键词搜索会话并取最近匹配（tiangong_session 的替代写法）。
+    #[serde(default)]
+    pub session_query: Option<String>,
+    #[serde(default)]
+    pub workspace_policy: Option<WorkspacePolicy>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// 创建后是否立即在当前会话激活，默认 true。
+    #[serde(default)]
+    pub activate: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

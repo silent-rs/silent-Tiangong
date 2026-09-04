@@ -21,6 +21,7 @@
   - **完成回报**：插件 WASM 逻辑层在 `on_turn_finished` 钩子中把「关联会话本轮最终回复」转发给 sidecar，sidecar 将对应 Run 置完成并经 Hook 投回激活会话；
   - 中断/取消 = 向关联会话投递停止通知（尽力语义，无法硬取消宿主内 turn）；
   - 记忆整理来源即关联会话历史。
+- **AI 招募（create_agent 工具）**：主 Agent 对话中动态创建持久 Subagent（或复用同名成员），支持 CLI 后端（提供启动命令）与天工会话后端（session_id 或按标题搜索 session_query），默认创建后立即在当前会话激活。
 - **memory 长期记忆落成实际功能**：
   - `memory/` 下 markdown 文件可管理（列表/查看/编辑/删除）；
   - 运行注入：CLI 后端 begin 帧、会话后端投递消息均携带记忆摘要（不复制全部会话历史）；

@@ -196,6 +196,7 @@ impl SubagentService {
                 Ok(tool_ok("Subagent 总线已优雅关闭".to_string()))
             }
             // ── AI 工具操作（会话归属来自宿主注入的 invocation context）──
+            TOOL_CREATE_AGENT => self.tool_create_agent(&payload).await,
             TOOL_LIST_AGENTS => self.tool_list_agents().await,
             TOOL_GET_AGENT => self.tool_get_agent(&payload).await,
             TOOL_ACTIVATE_AGENT => self.tool_activate(&payload).await,
@@ -1288,6 +1289,128 @@ impl SubagentService {
     }
 
     // ── 工具实现 ──────────────────────────────────────────────
+
+    /// AI 招募：创建（或复用同名）持久 Subagent，并默认立即在当前会话激活。
+    async fn tool_create_agent(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let (session_id, workspace) = Self::require_context()?;
+        let request: CreateAgentRequest = parse_request(payload)?;
+        let name = request.name.trim();
+        if name.is_empty() {
+            bail!("成员名称不能为空");
+        }
+        let instructions = request
+            .instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        // 同名复用：延续已有身份的指令与记忆（招募熟手语义）。
+        let existing = self
+            .agents
+            .list()
+            .into_iter()
+            .find(|config| config.name == name);
+        let (config, reused) = if let Some(config) = existing {
+            // 允许本次招募补充长期指令与描述（不覆盖后端与关联）。
+            if instructions.is_some() || request.description.is_some() {
+                let updated = self.agents.update(
+                    &config.id,
+                    crate::agent_store::AgentChanges {
+                        description: request.description.as_deref(),
+                        instructions,
+                        ..Default::default()
+                    },
+                )?;
+                (updated, true)
+            } else {
+                (config, true)
+            }
+        } else {
+            let session_binding = self.resolve_recruit_session(&request)?;
+            let config = self.agents.create(
+                name,
+                request.description.as_deref().unwrap_or(""),
+                request.backend,
+                request.command.as_deref(),
+                session_binding.as_deref(),
+                request
+                    .workspace_policy
+                    .unwrap_or(WorkspacePolicy::ReadOnly),
+                instructions,
+            )?;
+            (config, false)
+        };
+        self.validate_activation(&config)?;
+        let mut summary = if reused {
+            format!(
+                "已复用现有 Subagent「{}」（{}），延续其长期指令与记忆",
+                config.name, config.id
+            )
+        } else {
+            format!(
+                "已创建 Subagent「{}」（{}，后端：{}）",
+                config.name,
+                config.id,
+                config.backend.label()
+            )
+        };
+        if request.activate.unwrap_or(true) {
+            let activation = self
+                .activate_agent_in_session(&config.id, &session_id, &workspace)
+                .await?;
+            summary.push_str(&format!(
+                "，并已在当前会话激活（Workspace 策略：{}）；现在可用 send_agent_message 交流或 submit_agent_task 派活",
+                activation.workspace_policy.label()
+            ));
+        } else {
+            summary.push_str("；尚未激活，需要时先用 activate_agent 激活");
+        }
+        notify(json!({ "kind": "agent_created", "agent_id": config.id }));
+        Ok(tool_detail(
+            summary,
+            json!({ "agent_id": config.id, "reused": reused }),
+        ))
+    }
+
+    /// 解析天工会话后端的关联会话：显式 ID 优先，其次按标题关键词取最近匹配。
+    fn resolve_recruit_session(&self, request: &CreateAgentRequest) -> Result<Option<String>> {
+        if request.backend != BackendKind::TiangongSession {
+            return Ok(None);
+        }
+        let explicit = request
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(session_id) = explicit {
+            if !crate::sessions::session_exists(session_id) {
+                bail!("关联会话不存在: {session_id}");
+            }
+            return Ok(Some(session_id.to_string()));
+        }
+        let query = request
+            .session_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "天工会话后端需要提供 session_id 或 session_query（按标题搜索）之一"
+                )
+            })?;
+        let keyword = query.to_lowercase();
+        let matched = crate::sessions::list_sessions()
+            .into_iter()
+            .find(|session| {
+                session.title.to_lowercase().contains(&keyword)
+                    || session.id.to_lowercase().contains(&keyword)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "没有找到标题包含「{query}」的会话；可换用更准确的关键词或显式 session_id"
+                )
+            })?;
+        Ok(Some(matched.id))
+    }
 
     async fn tool_list_agents(&self) -> Result<serde_json::Value> {
         let (session_id, _) = Self::require_context()?;
