@@ -141,14 +141,25 @@ pub(crate) fn verify_installed_sidecar(
     if installed.manifest.sidecar.is_none() {
         bail!("插件 {} 未声明 sidecar，无需验证", installed.manifest.id);
     }
-    let connection = crate::registry::ephemeral_sidecar_connection(storage_root, installed)?;
-    // 清理守卫：验证与停止的结果共同决定成败——严格安装语义下，
-    // 临时验证进程停不干净（残留常驻进程/endpoint/文件占用）同样
-    // 不得放行安装，只记日志会让后续升级或安装冲突。
+    let (connection, stop_after_verification) =
+        if let Some(connection) = crate::registry::resident_sidecar_for_verification(installed) {
+            (connection, false)
+        } else {
+            (
+                crate::registry::ephemeral_sidecar_connection(storage_root, installed)?,
+                true,
+            )
+        };
+    // 临时连接必须在验证后清理；已加载的同版本常驻连接属于业务运行态，
+    // 只复用其已校验握手能力，不能为补验证而停止。
     let verification_result = connection
         .verify_capabilities()
         .with_context(|| format!("插件 {} sidecar 完整验证失败", installed.manifest.id));
-    let stop_result = connection.stop();
+    let stop_result = if stop_after_verification {
+        connection.stop()
+    } else {
+        Ok(())
+    };
     let capabilities = match (verification_result, stop_result) {
         (Ok(capabilities), Ok(())) => capabilities,
         (Err(verify_error), Ok(())) => return Err(verify_error),

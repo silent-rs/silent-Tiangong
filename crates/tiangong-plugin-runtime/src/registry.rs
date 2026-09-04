@@ -1594,6 +1594,23 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
     }
 }
 
+/// 启动期补验证可复用同版本、同目录的常驻连接，避免为数据库类插件
+/// 再启动一个争用相同数据目录的进程。暂存安装与按需插件仍返回 None。
+pub(crate) fn resident_sidecar_for_verification(
+    installed: &InstalledPlugin,
+) -> Option<Arc<dyn SidecarConnection>> {
+    if !installed.manifest.should_preload_sidecar() {
+        return None;
+    }
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(&installed.manifest.id)?;
+    (loaded.directory == installed.directory
+        && loaded.manifest.version == installed.manifest.version
+        && loaded.enabled)
+        .then(|| loaded.sidecar.clone())
+        .flatten()
+}
+
 fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
     let (manifest, component, descriptor_id, sidecar, enabled, storage_access, verified_sidecar) = {
         let plugins = loaded_plugins().lock().ok()?;
