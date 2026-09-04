@@ -25,14 +25,14 @@ Sandbox 不决定宿主的存储布局。安装目录由 App、服务或其他�
 
 正式版由独立发布流程构建、签名并发布到官方 OSS。推荐先读取 [最新版本清单](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/latest.json)，清单包含当前版本、协议版本、各平台下载地址、SHA-256 和签名地址。
 
-当前正式版为 `0.1.2`：
+当前正式版为 `0.1.3`：
 
 | 平台 | 程序 | minisign 签名 |
 | --- | --- | --- |
-| macOS Apple Silicon | [tiangong-sb-darwin-aarch64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-darwin-aarch64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-darwin-aarch64.sig) |
-| macOS Intel | [tiangong-sb-darwin-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-darwin-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-darwin-x86_64.sig) |
-| Linux x86_64 | [tiangong-sb-linux-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-linux-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-linux-x86_64.sig) |
-| Windows x86_64 | [tiangong-sb-windows-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-windows-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.2/tiangong-sb-windows-x86_64.sig) |
+| macOS Apple Silicon | [tiangong-sb-darwin-aarch64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-darwin-aarch64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-darwin-aarch64.sig) |
+| macOS Intel | [tiangong-sb-darwin-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-darwin-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-darwin-x86_64.sig) |
+| Linux x86_64 | [tiangong-sb-linux-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-linux-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-linux-x86_64.sig) |
+| Windows x86_64 | [tiangong-sb-windows-x86_64](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-windows-x86_64) | [签名](https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/sandbox/0.1.3/tiangong-sb-windows-x86_64.sig) |
 
 手动下载后，将程序重命名为 `tiangong-sandbox`（Windows 为 `tiangong-sandbox.exe`），签名放在同目录并命名为程序名加 `.sig`。macOS 和 Linux 还需要添加执行权限：
 

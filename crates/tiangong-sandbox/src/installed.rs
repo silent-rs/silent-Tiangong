@@ -38,8 +38,9 @@ pub fn verify_signature_with_public_key(program: &Path, public_key_b64: &str) ->
 /// 官方验签后执行真实自检，并返回产品版本。
 pub fn verify_official_install(program: &Path) -> Result<String> {
     verify_official_signature(program)?;
-    let output = std::process::Command::new(program)
-        .arg("--self-check")
+    let mut command = std::process::Command::new(program);
+    command.arg("--self-check");
+    let output = tiangong_toolkit::configure_no_window(&mut command)
         .output()
         .with_context(|| format!("运行 Sandbox 自检失败: {}", program.display()))?;
     if !output.status.success() && output.status.code() != Some(79) {

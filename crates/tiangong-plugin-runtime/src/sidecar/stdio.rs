@@ -1229,6 +1229,8 @@ fn apply_user_environment_policy(command: &mut Command, config: &SidecarConfig) 
 }
 
 fn configure_process_lifecycle(command: &mut Command) -> Result<()> {
+    #[cfg(windows)]
+    tiangong_toolkit::configure_no_window(command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
