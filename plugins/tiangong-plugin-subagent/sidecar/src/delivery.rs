@@ -90,7 +90,9 @@ impl DeliveryWorker {
     async fn deliver_one(&self, event: &HookEvent) -> Result<()> {
         let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
         if url.is_empty() {
-            anyhow::bail!("本机 server 未就绪（缺少 {SERVER_URL_ENV}）");
+            anyhow::bail!(
+                "天工 Server 未启动，消息暂无法投递：请先在天工设置中开启 Server（或从托盘菜单启动），必要时重启天工后重试"
+            );
         }
         let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
         let mut request = self
@@ -126,7 +128,9 @@ pub async fn deliver_message(
 ) -> Result<()> {
     let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
     if url.is_empty() {
-        anyhow::bail!("本机 server 未就绪（缺少 {SERVER_URL_ENV}）");
+        anyhow::bail!(
+            "天工 Server 未启动，消息暂无法投递：请先在天工设置中开启 Server（或从托盘菜单启动），必要时重启天工后重试"
+        );
     }
     let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
     let mut request = client
