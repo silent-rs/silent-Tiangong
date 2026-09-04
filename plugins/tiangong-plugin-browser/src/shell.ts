@@ -4,7 +4,9 @@ import {
   getShadowHostRuntime,
   openExtensionApp,
   type HostBridge,
+  type ToolClosed,
   type ToolInvocation,
+  type ToolResolution,
 } from '@tiangong/plugin-sdk';
 import { tabsModel } from './tabs-model';
 
@@ -41,6 +43,9 @@ interface WebviewEvent {
   };
 }
 
+/** 进行中的工具调用状态：宿主取消/过期（tool.closed）后置 cancelled。 */
+const activeInvocations = new Map<string, { cancelled: boolean }>();
+
 function claimInvocation(invocationId: string): boolean {
   const sharedWindow = window as BrowserToolWindow;
   const claims = sharedWindow.__tiangongBrowserToolClaims
@@ -52,7 +57,24 @@ function claimInvocation(invocationId: string): boolean {
 
 function releaseInvocation(invocationId: string): void {
   const claims = (window as BrowserToolWindow).__tiangongBrowserToolClaims;
-  window.setTimeout(() => claims?.delete(invocationId), 5_000);
+  window.setTimeout(() => {
+    claims?.delete(invocationId);
+    activeInvocations.delete(invocationId);
+  }, 5_000);
+}
+
+/**
+ * 提交工具结果；调用已被宿主取消/过期时静默跳过。
+ * 宿主保证一次调用只能闭合一次，取消后提交的 resolve 会被拒绝，这里
+ * 提前短路，避免取消后仍执行有副作用或已失效的闭合。
+ */
+async function resolveActive(
+  tools: { resolve: (resolution: ToolResolution) => Promise<void> },
+  invocationId: string,
+  resolution: Omit<ToolResolution, 'invocation_id'>,
+): Promise<void> {
+  if (activeInvocations.get(invocationId)?.cancelled) return;
+  await tools.resolve({ invocation_id: invocationId, ...resolution });
 }
 
 /** 打开浏览器插件 App（app.open 宿主原语，聚焦本进程内的会话实例）。 */
@@ -128,10 +150,19 @@ async function main() {
   }
   const tools = createToolProvider(bridge);
 
+  // 宿主取消/过期闭合（tool.closed）：标记进行中的调用并立即释放 claim，
+  // 让其在 await 恢复后不再提交 resolve（宿主保证一次调用只能闭合一次）。
+  tools.onClosed((closed: ToolClosed) => {
+    const active = activeInvocations.get(closed.invocation_id);
+    if (active) active.cancelled = true;
+    (window as BrowserToolWindow).__tiangongBrowserToolClaims?.delete(closed.invocation_id);
+  });
+
   tools.onRequested((invocation: ToolInvocation) => {
     // multi 模式下每个浏览器顶部标签都会挂载一个页面。宿主事件会送达
     // 所有实例，按 invocation_id 只允许其中一个实例执行工具。
     if (!claimInvocation(invocation.invocation_id)) return;
+    activeInvocations.set(invocation.invocation_id, { cancelled: false });
     void (async () => {
       try {
         // browser_close（面板开关，app.* 原语）：带 tab_id 精确关闭一个
@@ -146,8 +177,7 @@ async function main() {
                 : { session_id: invocation.session_id, all: true },
             ),
           );
-          await tools.resolve({
-            invocation_id: invocation.invocation_id,
+          await resolveActive(tools, invocation.invocation_id, {
             status: 'answered',
             result: {
               ok: true,
@@ -159,8 +189,7 @@ async function main() {
         }
         const method = TOOL_METHOD[invocation.name];
         if (!method) {
-          await tools.resolve({
-            invocation_id: invocation.invocation_id,
+          await resolveActive(tools, invocation.invocation_id, {
             status: 'cancelled',
             result: { ok: false, summary: `未知工具 ${invocation.name}`, exit_code: 1 },
           });
@@ -186,8 +215,7 @@ async function main() {
             invocation.name === 'browser_open'
               ? `已在浏览器面板新标签打开：${target}`
               : `已导航到：${target}`;
-          await tools.resolve({
-            invocation_id: invocation.invocation_id,
+          await resolveActive(tools, invocation.invocation_id, {
             status: 'answered',
             result: { ok: true, summary, exit_code: 0 },
           });
@@ -252,14 +280,12 @@ async function main() {
             ? `webview 实例 ${parsed.view_id ?? '?'}，当前页：${active.title ?? active.url ?? '未知'}`
             : `webview 实例 ${parsed.view_id ?? '?'} 已就绪`;
         }
-        await tools.resolve({
-          invocation_id: invocation.invocation_id,
+        await resolveActive(tools, invocation.invocation_id, {
           status: 'answered',
           result: { ok: true, summary, exit_code: 0 },
         });
       } catch (error) {
-        await tools.resolve({
-          invocation_id: invocation.invocation_id,
+        await resolveActive(tools, invocation.invocation_id, {
           status: 'answered',
           result: { ok: false, summary: `webview 调用失败：${String(error)}`, exit_code: 1 },
         });
