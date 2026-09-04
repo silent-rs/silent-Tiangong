@@ -537,24 +537,31 @@ impl StdioSidecarConnection {
             );
         }
 
-        // 沙箱不放行全局系统临时目录：常驻 sidecar 无显式专用目录时，
-        // 宿主在存储根下为其创建一个（lance 向量库等依赖 TMPDIR 的
-        // spill/临时文件）。固定子目录名复用，不随重启累积。
+        // 显式专用目录用于 command 等宿主需要回收的临时调用。普通 Windows
+        // sidecar 使用 AppContainer 自动提供的私有 Temp；Unix 常驻 sidecar
+        // 继续使用存储根下的固定目录。
         let effective_temp_dir = if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             Some(temp_dir.clone())
         } else if sandbox_enabled {
-            let dir = self
-                .config
-                .storage_root
-                .join("tmp")
-                .join(&self.config.plugin_id);
-            match std::fs::create_dir_all(&dir) {
-                Ok(()) => Some(dir),
-                Err(error) => {
-                    return Err(SpawnAttemptError::Preparation(anyhow!(
-                        "创建 sidecar 专用临时目录失败: {}: {error:#}",
-                        dir.display()
-                    )));
+            #[cfg(windows)]
+            {
+                None
+            }
+            #[cfg(not(windows))]
+            {
+                let dir = self
+                    .config
+                    .storage_root
+                    .join("tmp")
+                    .join(&self.config.plugin_id);
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => Some(dir),
+                    Err(error) => {
+                        return Err(SpawnAttemptError::Preparation(anyhow!(
+                            "创建 sidecar 专用临时目录失败: {}: {error:#}",
+                            dir.display()
+                        )));
+                    }
                 }
             }
         } else {

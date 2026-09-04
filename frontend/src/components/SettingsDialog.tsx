@@ -393,6 +393,11 @@ function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: 
   useEffect(() => { void api.getSandboxPolicy().then(setPolicy).catch((e) => showError('加载失败', String(e))); }, [showError]);
   const refresh = useCallback(() => { void api.getSandboxUpdateState().then(setSandboxState).catch(() => {}); }, []);
   useEffect(refresh, [refresh]);
+  useEffect(() => {
+    if (sandboxState?.status !== 'preparing') return;
+    const timer = window.setInterval(refresh, 1000);
+    return () => window.clearInterval(timer);
+  }, [refresh, sandboxState?.status]);
   const save = async (next: SandboxPolicyView) => {
     onSaveStatusChange('saving');
     try { const saved = await api.setSandboxPolicy(next); setPolicy(saved); onSaveStatusChange('saved'); setTimeout(() => onSaveStatusChange('idle'), 1500); }
