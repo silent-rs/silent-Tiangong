@@ -581,9 +581,9 @@ impl StdioSidecarConnection {
             if let Some(temp_dir) = &effective_temp_dir {
                 policy.extra_writable.push(temp_dir.clone());
             }
-            // 系统临时目录开放：大量库与工具（lance spill、编辑器临时
-            // 文件、语言运行时缓存）默认写系统 temp，不开放会功能异常。
-            // std::env::temp_dir() 三平台通用（Windows 为 %TEMP%）。
+            // Unix 平台继续开放系统临时目录；Windows 由 AppContainer
+            // 自动提供隔离的 AC/Temp，不向策略加入宿主系统 Temp。
+            #[cfg(not(windows))]
             policy.extra_writable.push(std::env::temp_dir());
             // 全局 /tmp 仅 Unix 存在——Windows 上没有此路径，加了会在
             // Seatbelt/bwrap 的路径校验中产生无效条目。
