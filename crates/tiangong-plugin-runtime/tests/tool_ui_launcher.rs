@@ -348,6 +348,102 @@ fn ui_handler超过清单时限仍可正常返回() {
 }
 
 #[test]
+fn 调用闭合后重放不得补发requested() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    init_globals();
+    let root = tempfile::TempDir::new().unwrap();
+    stage_tool_plugin(root.path(), "tool-ui-replay-order");
+    let plugin = load_plugin(root.path(), "tool-ui-replay-order");
+    bridge_subscribe("tool-ui-replay-order", "tool.requested").unwrap();
+    bridge_subscribe("tool-ui-replay-order", "tool.closed").unwrap();
+
+    let count_requested = || {
+        event_hits()
+            .iter()
+            .filter(|(id, channel, _)| id == "tool-ui-replay-order" && channel == "tool.requested")
+            .count()
+    };
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut session = Session::new("重放顺序测试");
+        let call = ToolCall {
+            id: "call-replay-order".to_string(),
+            name: "demo_tool".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let task = tokio::spawn({
+            let plugin = plugin.clone();
+            async move { plugin.handle(&call, &mut session, "tester").await }
+        });
+        let invocation_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some((_, _, payload)) = event_hits().iter().rev().find(|(id, channel, _)| {
+                    id == "tool-ui-replay-order" && channel == "tool.requested"
+                }) {
+                    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+                    return value["invocation_id"].as_str().unwrap().to_string();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("工具请求应送达");
+        assert_eq!(count_requested(), 1, "首次投递只应有一次 requested");
+
+        // 闭合调用并等待 closed 事件与调用任务收尾。
+        bridge_call(
+            "tool-ui-replay-order",
+            "tool.resolve",
+            &serde_json::json!({
+                "invocation_id": invocation_id,
+                "status": "answered",
+                "result": {"ok": true, "summary": "done", "exit_code": 0}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("工具调用应正常闭合");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let closed = event_hits().iter().any(|(id, channel, payload)| {
+                    id == "tool-ui-replay-order"
+                        && channel == "tool.closed"
+                        && serde_json::from_str::<serde_json::Value>(payload)
+                            .ok()
+                            .and_then(|value| value["invocation_id"].as_str().map(str::to_string))
+                            == Some(invocation_id.clone())
+                });
+                if closed {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("闭合事件应送达");
+
+        // 模拟新标签页挂载：退订后重新订阅触发 pending 重放。调用已闭合，
+        // 不得补发该调用的 tool.requested（closed 之后永不重放）。
+        bridge_unsubscribe("tool-ui-replay-order", "tool.requested").unwrap();
+        bridge_subscribe("tool-ui-replay-order", "tool.requested").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            count_requested(),
+            1,
+            "调用闭合后的重放不得补发 tool.requested"
+        );
+    });
+
+    bridge_unsubscribe("tool-ui-replay-order", "tool.requested").unwrap();
+    bridge_unsubscribe("tool-ui-replay-order", "tool.closed").unwrap();
+}
+
+#[test]
 fn 插件经桥接调用app原语需声明权限且只能操作自己() {
     let _guard = REGISTRY_LOCK.lock().unwrap();
     init_globals();
