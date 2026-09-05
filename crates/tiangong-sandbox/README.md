@@ -171,3 +171,27 @@ cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
 ## 许可证
 
 Apache-2.0
+
+### 独立宿主执行测试（issue #485）
+
+`tests/launcher_execution.rs` 不依赖 Runtime/sidecar SDK。默认测试只执行策略拒绝及宿主测试辅助逻辑；真实隔离用例标记为 `ignored`，避免在天工命令工具的沙箱内嵌套执行。
+必须从**沙箱外**原生终端或 CI runner 显式运行：
+
+```bash
+cargo test --locked -p tiangong-sandbox --test launcher_execution -- --ignored --test-threads=1 --nocapture
+```
+
+Windows 需安装 Node 22，并将独立 `node.exe` 的绝对路径设置为 `SANDBOX_TEST_NODE`；Sandbox CI 已自动准备。CI 显式启用用例后任何失败都直接失败，不以环境探测失败后返回制造成功。受限环境未运行不等于功能验证通过。
+
+取消/超时由外部测试宿主执行：Unix 关闭本次调用独占的进程组，通过继承通信端全部关闭确认后台进程结束；Windows 通过停止事件通知 Launcher 终止 Job，再清理 ACL 和临时身份。并发取消不得影响另一次任务。
+
+| 覆盖项 | 验证边界 |
+| --- | --- |
+| 敏感读取、越界写、网络、路径逃逸 | Launcher 真实自检报告，每项断言 |
+| 工作区、专用 Temp、敏感只读豁免 | Unix CLI 文件操作；Windows CLI 授权及私有 Temp，专用 Temp 由自检覆盖 |
+| CPU、内存 | Unix CPU 读回/实际超限、Linux 内存读回/实际分配；Windows Job 自检 |
+| 取消、超时、并发隔离 | Unix 外部宿主进程组；Windows 生命周期自检 |
+| 宿主异常退出 | Windows 现有 Job 自检；macOS SDK 的 kqueue 路径不属于独立 Launcher，不在此伪造实现 |
+| 进程数限制 | Windows Job 自检；当前 Linux Launcher 未施加该限制，保留独立待办，不用目标自己 setrlimit 代替 Launcher 验证 |
+
+此测试组不表示 issue #485 的所有能力已完成，也不改变 Launcher 生产代码。平台 CI 未运行时不得宣称三平台真实隔离通过。
