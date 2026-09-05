@@ -98,16 +98,23 @@ pub fn delete(agents: &AgentStore, agent_id: &str, name: &str) -> Result<()> {
     std::fs::remove_file(&path).with_context(|| format!("删除记忆文件失败: {name}"))
 }
 
-/// 追加一行记忆到 notes.md（AI 工具 append_agent_memory）。
+/// 追加记忆条目（AI 工具 append_agent_memory）：默认 notes.md，
+/// 可指定目标文件（如成长经验写 lessons.md）。
 pub fn append_note(
     agents: &AgentStore,
     agent_id: &str,
     content: &str,
     note: Option<&str>,
+    memory_name: Option<&str>,
 ) -> Result<String> {
     if content.trim().is_empty() {
         bail!("记忆内容不能为空");
     }
+    let name = memory_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("notes.md");
+    validate_memory_name(name)?;
     let timestamp = now_string();
     let entry = format!(
         "\n## {}{}\n\n{}\n",
@@ -118,7 +125,7 @@ pub fn append_note(
             .unwrap_or_default(),
         content.trim()
     );
-    let path = memory_dir(agents, agent_id)?.join("notes.md");
+    let path = memory_dir(agents, agent_id)?.join(name);
     let mut body = std::fs::read_to_string(&path).unwrap_or_else(|_| {
         format!(
             "# {} 的长期记忆\n",
@@ -127,7 +134,7 @@ pub fn append_note(
     });
     body.push_str(&entry);
     crate::paths::atomic_write(&path, body.as_bytes())?;
-    Ok("notes.md".to_string())
+    Ok(name.to_string())
 }
 
 /// Run 完成后的结论归档（append 到 tasks.md）。
@@ -195,14 +202,29 @@ pub fn compile_from_session(
     Ok("session-notes.md".to_string())
 }
 
-/// 运行注入的记忆摘要：全部记忆文件内容拼接（总量截断）。
+/// 经验文件（成长沉淀目标）：注入时优先并给予最大份额。
+const LESSONS_FILE: &str = "lessons.md";
+/// 经验文件注入配额。
+const LESSONS_QUOTA_CHARS: usize = 2400;
+/// 笔记文件注入配额。
+const NOTES_QUOTA_CHARS: usize = 1200;
+
+/// 记忆注入快照：按价值分文件配额——经验（lessons）优先且份额最大，
+/// 其次 notes，任务流水与其余文件填充剩余额度，总量上限不变。
 pub fn injection_snapshot(agents: &AgentStore, agent_id: &str) -> String {
     let Ok(entries) = list(agents, agent_id) else {
         return String::new();
     };
+    // 分层排序：经验优先，其次笔记，最后其余文件（组内保持原序）。
+    let mut prioritized = entries;
+    prioritized.sort_by_key(|entry| match entry.name.as_str() {
+        LESSONS_FILE => 0,
+        "notes.md" => 1,
+        _ => 2,
+    });
     let mut parts = Vec::new();
     let mut total = 0usize;
-    for entry in entries {
+    for entry in prioritized {
         let Ok(content) = read(agents, agent_id, &entry.name) else {
             continue;
         };
@@ -210,7 +232,17 @@ pub fn injection_snapshot(agents: &AgentStore, agent_id: &str) -> String {
         if content.is_empty() {
             continue;
         }
-        let part = format!("### {}（memory/{}）\n{}\n", entry.name, entry.name, content);
+        let quota = match entry.name.as_str() {
+            LESSONS_FILE => LESSONS_QUOTA_CHARS,
+            "notes.md" => NOTES_QUOTA_CHARS,
+            _ => INJECTION_MAX_CHARS,
+        };
+        let part = format!(
+            "### {}（memory/{}）\n{}\n",
+            entry.name,
+            entry.name,
+            truncate_chars(content, quota)
+        );
         total += part.chars().count();
         parts.push(part);
         if total >= INJECTION_MAX_CHARS {

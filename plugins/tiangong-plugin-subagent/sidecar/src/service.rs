@@ -219,6 +219,7 @@ impl SubagentService {
             TOOL_GET_AGENT_ARTIFACTS => self.tool_get_artifacts(&payload).await,
             TOOL_GET_AGENT_MEMORY => self.tool_get_memory(&payload).await,
             TOOL_APPEND_AGENT_MEMORY => self.tool_append_memory(&payload).await,
+            TOOL_APPEND_AGENT_INSTRUCTIONS => self.tool_append_instructions(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -1237,6 +1238,7 @@ impl SubagentService {
         if !memory.is_empty() {
             body.push_str(&format!("\n\n【长期记忆】\n{memory}"));
         }
+        body.push_str("\n\n【成长约定】完成本次工作后：把可复用经验（成功做法、踩坑、用户偏好等，一行一条、结论式）用 append_agent_memory 追加到 lessons.md；确实学到稳定的新规则时，用 append_agent_instructions 并入你的长期指令（追加式，勿重复已有内容）。");
         crate::delivery::deliver_message(&self.http, source_session, &body).await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
@@ -1991,9 +1993,59 @@ impl SubagentService {
             &request.agent_id,
             &request.content,
             request.note.as_deref(),
+            request.memory_name.as_deref(),
         )?;
         notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
         Ok(tool_ok(format!("已追加到长期记忆（memory/{name}）")))
+    }
+
+    /// 指令受控成长：向成员长期指令追加稳定规则（不覆盖既有内容）。
+    /// 权限——主会话可操作任意成员；成员后端会话只能操作自己。
+    async fn tool_append_instructions(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let (session_id, _) = Self::require_context()?;
+        let request: AppendAgentInstructionsRequest = parse_request(payload)?;
+        let addition = request.addition.trim();
+        if addition.is_empty() {
+            bail!("追加内容不能为空");
+        }
+        if addition.chars().count() > 2000 {
+            bail!("单次追加过长（上限 2000 字符）；长内容请改用 append_agent_memory 存入记忆");
+        }
+        let config = self.agents.load(&request.agent_id)?;
+        if let Some(origin) = self.collaboration_origin(&session_id)
+            && origin.id != config.id
+        {
+            bail!("成员只能追加自己的长期指令；如需调整其他成员，请在主会话发起");
+        }
+        let existing = self.agents.instructions(&config.id)?;
+        if existing.chars().count() + addition.chars().count() > 16_000 {
+            bail!("长期指令总量接近上限，请先整理既有内容再追加");
+        }
+        let timestamp = now_string();
+        let merged = if existing.trim().is_empty() {
+            format!("{addition}\n")
+        } else {
+            format!(
+                "{}\n\n<!-- 追加于 {timestamp} -->\n{addition}\n",
+                existing.trim_end()
+            )
+        };
+        self.agents.update(
+            &config.id,
+            crate::agent_store::AgentChanges {
+                instructions: Some(merged.as_str()),
+                ..Default::default()
+            },
+        )?;
+        notify(json!({ "kind": "agent_updated", "agent_id": config.id }));
+        Ok(tool_ok(format!(
+            "已追加到「{}」的长期指令（当前共 {} 字符）",
+            config.name,
+            merged.chars().count()
+        )))
     }
 
     fn list_artifacts(&self, agent_id: &str) -> Result<Vec<ArtifactEntry>> {

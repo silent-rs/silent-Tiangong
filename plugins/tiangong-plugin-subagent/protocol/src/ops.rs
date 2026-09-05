@@ -29,6 +29,7 @@ pub const TOOL_LIST_AGENT_EVENTS: &str = "list_agent_events";
 pub const TOOL_GET_AGENT_ARTIFACTS: &str = "get_agent_artifacts";
 pub const TOOL_GET_AGENT_MEMORY: &str = "get_agent_memory";
 pub const TOOL_APPEND_AGENT_MEMORY: &str = "append_agent_memory";
+pub const TOOL_APPEND_AGENT_INSTRUCTIONS: &str = "append_agent_instructions";
 
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
@@ -49,6 +50,7 @@ pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_GET_AGENT_ARTIFACTS,
     TOOL_GET_AGENT_MEMORY,
     TOOL_APPEND_AGENT_MEMORY,
+    TOOL_APPEND_AGENT_INSTRUCTIONS,
 ];
 
 // ── UI 操作名 ──────────────────────────────────────────────────
@@ -289,6 +291,16 @@ pub struct AppendAgentMemoryRequest {
     pub content: String,
     #[serde(default)]
     pub note: Option<String>,
+    /// 目标记忆文件（默认 notes.md；可复用经验写 lessons.md）。
+    #[serde(default)]
+    pub memory_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppendAgentInstructionsRequest {
+    pub agent_id: String,
+    /// 追加的稳定规则（带日期分段写入，不覆盖既有内容）。
+    pub addition: String,
 }
 
 // ── 响应类型 ───────────────────────────────────────────────────
