@@ -689,12 +689,25 @@ mod tests {
             release.join("sidecar/main.mjs"),
             r#"
 import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 await runSidecar({
   pluginId: 'ID_PLACEHOLDER',
   pluginVersion: '0.1.0',
   dispatch(operation, payload) {
     if (operation === 'demo.echo') {
       return { payload: { text: payload?.text ?? '' } };
+    }
+    if (operation === 'demo.temp') {
+      const tempDir = os.tmpdir();
+      const target = path.join(tempDir, `tiangong-temp-probe-${process.pid}.txt`);
+      fs.writeFileSync(target, 'one');
+      const reopened = fs.readFileSync(target, 'utf8') === 'one';
+      fs.appendFileSync(target, '-two');
+      const modified = fs.readFileSync(target, 'utf8') === 'one-two';
+      fs.unlinkSync(target);
+      return { payload: { tempDir, reopened, modified, removed: !fs.existsSync(target) } };
     }
     return { payload: {} };
   },
@@ -1266,6 +1279,30 @@ await runSidecar({
         )
         .expect("sidecar 桥接调用");
         assert!(response.contains("obs"), "{response}");
+        #[cfg(windows)]
+        {
+            let invoke_temp = || {
+                let response = crate::bridge_call(id, "sidecar.demo.temp", "{}")
+                    .expect("Windows AppContainer 私有 Temp 文件操作");
+                serde_json::from_str::<serde_json::Value>(&response).unwrap()
+            };
+            let payload = invoke_temp();
+            let temp_dir = PathBuf::from(payload["tempDir"].as_str().unwrap());
+            let normalized = temp_dir.to_string_lossy().replace('\\', "/").to_lowercase();
+            assert!(
+                normalized.contains("/packages/tiangongsandbox.")
+                    && normalized.ends_with("/ac/temp"),
+                "Windows 沙箱未使用 AppContainer 私有 Temp: {temp_dir:?}"
+            );
+            assert_eq!(payload["reopened"], true);
+            assert_eq!(payload["modified"], true);
+            assert_eq!(payload["removed"], true);
+            let next = invoke_temp();
+            assert_ne!(
+                payload["tempDir"], next["tempDir"],
+                "不同临时沙箱身份不得复用同一私有 Temp"
+            );
+        }
         let records = observed.lock().unwrap();
         assert!(
             records

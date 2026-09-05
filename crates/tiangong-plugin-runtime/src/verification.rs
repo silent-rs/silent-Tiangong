@@ -131,9 +131,9 @@ fn verification_is_valid(
 /// 协议兼容后采集能力列表；随后计算制品摘要组装记录。调用方负责在
 /// 安装事务成功后保存记录。
 ///
-/// 验证走专属临时连接，不进入运行时共享连接表：验证失败时坏连接与
-/// 存活进程不会留给业务调用；成功与失败路径都必须停止验证进程（TCP
-/// 形态还负责删除 endpoint）。
+/// 记录缺失或失效时走专属临时连接，不进入运行时共享连接表：验证失败时
+/// 坏连接与存活进程不会留给业务调用；已有记录仍与当前制品一致时，允许
+/// 复用同版本常驻连接做运行状态复核。
 pub(crate) fn verify_installed_sidecar(
     storage_root: &Path,
     installed: &crate::registry::InstalledPlugin,
@@ -141,14 +141,25 @@ pub(crate) fn verify_installed_sidecar(
     if installed.manifest.sidecar.is_none() {
         bail!("插件 {} 未声明 sidecar，无需验证", installed.manifest.id);
     }
-    let connection = crate::registry::ephemeral_sidecar_connection(storage_root, installed)?;
-    // 清理守卫：验证与停止的结果共同决定成败——严格安装语义下，
-    // 临时验证进程停不干净（残留常驻进程/endpoint/文件占用）同样
-    // 不得放行安装，只记日志会让后续升级或安装冲突。
+    let (connection, stop_after_verification) =
+        if let Some(connection) = crate::registry::resident_sidecar_for_verification(installed) {
+            (connection, false)
+        } else {
+            (
+                crate::registry::ephemeral_sidecar_connection(storage_root, installed)?,
+                true,
+            )
+        };
+    // 临时连接必须在验证后清理；已加载的同版本常驻连接属于业务运行态，
+    // 只复用其已校验握手能力，不能为补验证而停止。
     let verification_result = connection
         .verify_capabilities()
         .with_context(|| format!("插件 {} sidecar 完整验证失败", installed.manifest.id));
-    let stop_result = connection.stop();
+    let stop_result = if stop_after_verification {
+        connection.stop()
+    } else {
+        Ok(())
+    };
     let capabilities = match (verification_result, stop_result) {
         (Ok(capabilities), Ok(())) => capabilities,
         (Err(verify_error), Ok(())) => return Err(verify_error),
@@ -166,6 +177,14 @@ pub(crate) fn verify_installed_sidecar(
         }
     };
     let digest = artifact_digest(&installed.directory)?;
+    if !stop_after_verification
+        && load_valid_capabilities(&installed.directory, &installed.manifest).is_none()
+    {
+        bail!(
+            "插件 {} 在复用常驻进程验证期间制品发生变化，拒绝更新验证记录",
+            installed.manifest.id
+        );
+    }
     Ok(SidecarVerification {
         plugin_id: installed.manifest.id.clone(),
         plugin_version: installed.manifest.version.clone(),
@@ -327,6 +346,9 @@ fn reverify_installed_sidecars_blocking(storage_root: &Path) {
                         &installed.manifest.id,
                         record.capabilities,
                     );
+                    // 独立验证进程已经退出，此时再启动常驻进程，不会争用
+                    // 数据库或索引目录。
+                    crate::registry::prewarm_plugin_sidecar(storage_root, &installed.manifest.id);
                     tracing::info!(plugin_id = %installed.manifest.id, "旧插件 sidecar 补验证完成");
                 }
             }

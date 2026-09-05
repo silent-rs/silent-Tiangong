@@ -708,6 +708,8 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
 
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
+    let verified_sidecar =
+        crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
     // 仅预热原生常驻 sidecar。解释器即使脚本声明常驻，也等首次实际
     // 使用时才启动；command 继续由每次调用的独立连接承载。
     // 启动失败是运行异常：不阻断重载/升级（安装前提类失败已在上方
@@ -716,6 +718,7 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     let mut preload_error = None;
     if installed.enabled
         && installed.manifest.should_preload_sidecar()
+        && verified_sidecar.is_some()
         && let Some(connection) = &sidecar
         && let Err(error) = connection.ensure_running()
     {
@@ -785,6 +788,7 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.generation = next_generation;
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
+    loaded.verified_sidecar = verified_sidecar;
     loaded.load_error = None;
     loaded.runtime_error = preload_error;
     loaded.enabled = installed.enabled;
@@ -1520,7 +1524,8 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         Err(error) => (None, Some(error.to_string())),
     };
     // 读取安装阶段保存的验证记录（校验 ID、版本、制品摘要与协议兼容）；
-    // 缺失或失效不在加载路径启动 sidecar 补验证——后台补验证负责恢复。
+    // 缺失或失效时先由独立进程完成补验证，再启动常驻进程，避免数据库类
+    // 插件的验证进程与业务进程争用同一数据目录。
     let verified_sidecar =
         crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest);
     // 常驻 sidecar 启动失败是运行异常：保留安装，插件管理显示启动异常
@@ -1528,6 +1533,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
     let mut runtime_error = None;
     if installed.enabled
         && installed.manifest.should_preload_sidecar()
+        && verified_sidecar.is_some()
         && let Some(connection) = &sidecar
         && let Err(error) = connection.ensure_running()
     {
@@ -1592,6 +1598,27 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
             }
         }
     }
+}
+
+/// 仅当磁盘上已有记录仍与当前制品一致时，重新验证才可复用同版本、同目录
+/// 的常驻连接。记录缺失或失效时必须使用独立验证进程，不能让旧进程为当前
+/// 磁盘内容生成新的验证记录。
+pub(crate) fn resident_sidecar_for_verification(
+    installed: &InstalledPlugin,
+) -> Option<Arc<dyn SidecarConnection>> {
+    if !installed.manifest.should_preload_sidecar()
+        || crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest)
+            .is_none()
+    {
+        return None;
+    }
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(&installed.manifest.id)?;
+    (loaded.directory == installed.directory
+        && loaded.manifest.version == installed.manifest.version
+        && loaded.enabled)
+        .then(|| loaded.sidecar.clone())
+        .flatten()
 }
 
 fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
@@ -2159,6 +2186,7 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
     let record = crate::verification::verify_installed_sidecar(storage_root, &installed)?;
     crate::verification::save_verification(&installed.directory, &record)?;
     refresh_verified_sidecar(plugin_id, record.capabilities);
+    prewarm_plugin_sidecar(storage_root, plugin_id);
     list_plugin_status_without_preload(&installed.manifest)
         .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
 }

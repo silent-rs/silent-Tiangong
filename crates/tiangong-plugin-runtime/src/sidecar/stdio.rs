@@ -505,7 +505,13 @@ impl StdioSidecarConnection {
                         launch.entry.display()
                     )));
                 }
-                let mut args = vec![launch.entry.display().to_string()];
+                let mut args = Vec::new();
+                #[cfg(windows)]
+                if launch.kind == crate::interpreter_env::InterpreterKind::Node {
+                    args.push("--preserve-symlinks".to_string());
+                    args.push("--preserve-symlinks-main".to_string());
+                }
+                args.push(launch.entry.display().to_string());
                 args.extend(launch.args.iter().cloned());
                 (program, args)
             }
@@ -519,7 +525,6 @@ impl StdioSidecarConnection {
                 (self.config.binary.clone(), Vec::new())
             }
         };
-
         // 用户开关仅作用于宿主标记为“首次实际使用才启动”的 sidecar。
         // 每次 spawn 都读取最新配置，关闭与重新开启无需重建连接对象；配置
         // 尚未初始化时按开启处理（fail-safe 向保护方向）。
@@ -532,24 +537,31 @@ impl StdioSidecarConnection {
             );
         }
 
-        // 沙箱不放行全局系统临时目录：常驻 sidecar 无显式专用目录时，
-        // 宿主在存储根下为其创建一个（lance 向量库等依赖 TMPDIR 的
-        // spill/临时文件）。固定子目录名复用，不随重启累积。
+        // 显式专用目录用于 command 等宿主需要回收的临时调用。普通 Windows
+        // sidecar 使用 AppContainer 自动提供的私有 Temp；Unix 常驻 sidecar
+        // 继续使用存储根下的固定目录。
         let effective_temp_dir = if let Some(temp_dir) = &self.config.sandbox_temp_dir {
             Some(temp_dir.clone())
         } else if sandbox_enabled {
-            let dir = self
-                .config
-                .storage_root
-                .join("tmp")
-                .join(&self.config.plugin_id);
-            match std::fs::create_dir_all(&dir) {
-                Ok(()) => Some(dir),
-                Err(error) => {
-                    return Err(SpawnAttemptError::Preparation(anyhow!(
-                        "创建 sidecar 专用临时目录失败: {}: {error:#}",
-                        dir.display()
-                    )));
+            #[cfg(windows)]
+            {
+                None
+            }
+            #[cfg(not(windows))]
+            {
+                let dir = self
+                    .config
+                    .storage_root
+                    .join("tmp")
+                    .join(&self.config.plugin_id);
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => Some(dir),
+                    Err(error) => {
+                        return Err(SpawnAttemptError::Preparation(anyhow!(
+                            "创建 sidecar 专用临时目录失败: {}: {error:#}",
+                            dir.display()
+                        )));
+                    }
                 }
             }
         } else {
@@ -576,9 +588,9 @@ impl StdioSidecarConnection {
             if let Some(temp_dir) = &effective_temp_dir {
                 policy.extra_writable.push(temp_dir.clone());
             }
-            // 系统临时目录开放：大量库与工具（lance spill、编辑器临时
-            // 文件、语言运行时缓存）默认写系统 temp，不开放会功能异常。
-            // std::env::temp_dir() 三平台通用（Windows 为 %TEMP%）。
+            // Unix 平台继续开放系统临时目录；Windows 由 AppContainer
+            // 自动提供隔离的 AC/Temp，不向策略加入宿主系统 Temp。
+            #[cfg(not(windows))]
             policy.extra_writable.push(std::env::temp_dir());
             // 全局 /tmp 仅 Unix 存在——Windows 上没有此路径，加了会在
             // Seatbelt/bwrap 的路径校验中产生无效条目。

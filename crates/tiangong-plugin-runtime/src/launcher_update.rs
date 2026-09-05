@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
@@ -14,6 +15,24 @@ const MANIFEST_URL_OVERRIDE: &str = "TIANGONG_LAUNCHER_MANIFEST_URL";
 fn launcher_update_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LauncherCacheKey {
+    path: PathBuf,
+    length: u64,
+    modified: Option<SystemTime>,
+}
+
+fn launcher_check_cache() -> &'static std::sync::Mutex<Option<(LauncherCacheKey, String)>> {
+    static CACHE: OnceLock<std::sync::Mutex<Option<(LauncherCacheKey, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn invalidate_launcher_check() {
+    if let Ok(mut cache) = launcher_check_cache().lock() {
+        *cache = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +75,9 @@ pub fn mark_launcher_preparing(value: bool) {
     startup_prepare_flags()
         .0
         .store(value, std::sync::atomic::Ordering::Release);
+    if value {
+        invalidate_launcher_check();
+    }
 }
 pub fn record_startup_prepare_failure(value: Option<String>) {
     if let Ok(mut slot) = startup_prepare_flags().1.lock() {
@@ -77,11 +99,8 @@ pub fn launcher_status(storage_root: &Path) -> (SandboxLauncherStatus, Option<St
     {
         return (SandboxLauncherStatus::Preparing, None);
     }
-    if launcher_available(storage_root) {
-        return (
-            SandboxLauncherStatus::Ready,
-            installed_version(storage_root),
-        );
+    if let Ok(version) = verified_launcher_version(storage_root) {
+        return (SandboxLauncherStatus::Ready, Some(version));
     }
     let status = if startup_prepare_failure_reason().is_some() {
         SandboxLauncherStatus::Failed
@@ -112,6 +131,7 @@ impl LauncherUpdater {
     }
     pub async fn install_or_update(&self, storage_root: &Path) -> Result<String> {
         let _guard = launcher_update_lock().lock().await;
+        invalidate_launcher_check();
         let directory = host_install_directory(storage_root);
         let status = tiangong_sandbox::update::SelfUpdater::new(self.manifest_url.clone())?
             .install_to(&directory)
@@ -125,6 +145,7 @@ impl LauncherUpdater {
             tiangong_sandbox::update::UpdateStatus::UpdateScheduled { version, .. } => version,
         };
         cleanup_legacy_layout(storage_root);
+        invalidate_launcher_check();
         Ok(version)
     }
 }
@@ -145,19 +166,43 @@ fn cleanup_legacy_layout(storage_root: &Path) {
 }
 
 pub fn launcher_available(storage_root: &Path) -> bool {
+    verified_launcher_version(storage_root).is_ok()
+}
+pub fn installed_version(storage_root: &Path) -> Option<String> {
+    verified_launcher_version(storage_root).ok()
+}
+
+fn verified_launcher_version(storage_root: &Path) -> Result<String> {
     let Some(launcher) = tiangong_sandbox::launcher_manager::resolve_installed_program(
         &host_install_directory(storage_root),
     ) else {
-        return false;
+        bail!("Sandbox 程序不存在");
     };
-    crate::signature::verify_launcher_signature(&launcher, storage_root).is_ok()
-        && verify_launcher_self_check(&launcher).is_ok()
+    crate::signature::verify_launcher_signature(&launcher, storage_root)?;
+    let key = launcher_cache_key(&launcher)?;
+    let mut cache = launcher_check_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Sandbox 自检缓存锁已损坏"))?;
+    if let Some((cached_key, version)) = cache.as_ref()
+        && cached_key == &key
+    {
+        return Ok(version.clone());
+    }
+    let version = verify_launcher_self_check(&launcher)?;
+    if launcher_cache_key(&launcher).is_ok_and(|current| current == key) {
+        *cache = Some((key, version.clone()));
+    }
+    Ok(version)
 }
-pub fn installed_version(storage_root: &Path) -> Option<String> {
-    let launcher = tiangong_sandbox::launcher_manager::resolve_installed_program(
-        &host_install_directory(storage_root),
-    )?;
-    verify_launcher_self_check(&launcher).ok()
+
+fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
+    let metadata = std::fs::metadata(launcher)
+        .with_context(|| format!("读取 Sandbox 程序元数据失败: {}", launcher.display()))?;
+    Ok(LauncherCacheKey {
+        path: launcher.to_path_buf(),
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 fn verify_launcher_self_check(binary: &Path) -> Result<String> {
     let mut command = std::process::Command::new(binary);
