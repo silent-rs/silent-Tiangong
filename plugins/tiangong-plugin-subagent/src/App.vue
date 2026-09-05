@@ -144,7 +144,12 @@ const collaborationTimeline = computed(() => {
   const nameOf = (agentId: string) =>
     members.find((agent) => agent.config.id === agentId)?.config.name ?? agentId;
   return events
-    .filter((event) => typeof event.payload?.origin_session === 'string' || event.payload?.text)
+    .filter(
+      (event) =>
+        typeof event.payload?.origin_session === 'string'
+        || event.payload?.text
+        || event.event_type === 'run_started',
+    )
     .slice(0, 60)
     .map((event) => ({
       ...event,
