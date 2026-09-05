@@ -59,6 +59,12 @@ enum RunnerEvent {
     Exit { run_id: String, info: ExitInfo },
 }
 
+/// 集群协作发起方信息：发起会话（回报投回目标）与展示名（投递正文用）。
+struct CollabOrigin<'a> {
+    session: &'a str,
+    label: String,
+}
+
 pub struct SubagentService {
     agents: AgentStore,
     store: Arc<RuntimeStore>,
@@ -605,7 +611,11 @@ fn enqueue_hook(
         agent_id: run.agent_id.clone(),
         agent_name,
         activation_id: Some(run.activation_id.clone()),
-        conversation_id: run.session_id.clone(),
+        // 集群协作运行回报投回发起方会话；主会话发起保持投回激活会话。
+        conversation_id: run
+            .origin_session
+            .clone()
+            .unwrap_or_else(|| run.session_id.clone()),
         task_id: run.task_id.clone(),
         run_id: Some(run.run_id.clone()),
         workspace: run.workspace.clone(),
@@ -876,6 +886,79 @@ impl SubagentService {
     }
 
     /// 发送消息：有活跃运行则注入，否则新建轻量消息运行。
+    /// 解析成员：优先按 ID，其次按名称唯一匹配（集群协作常用名字指人）。
+    fn resolve_agent(&self, agent_id: &str) -> Result<AgentConfig> {
+        let key = agent_id.trim();
+        if let Ok(config) = self.agents.load(key) {
+            return Ok(config);
+        }
+        let matches: Vec<AgentConfig> = self
+            .agents
+            .list()
+            .into_iter()
+            .filter(|config| config.name == key)
+            .collect();
+        match matches.len() {
+            1 => Ok(matches[0].clone()),
+            0 => bail!("Agent 不存在: {agent_id}"),
+            _ => bail!("名称「{agent_id}」匹配多个成员，请改用 agent_id 指定"),
+        }
+    }
+
+    /// 发起会话是否为某成员的后端会话（专属/关联）——集群协作识别。
+    fn collaboration_origin(&self, session_id: &str) -> Option<AgentConfig> {
+        self.agents.list().into_iter().find(|config| {
+            matches!(
+                config.backend,
+                BackendKind::TiangongSession | BackendKind::AgentTeam
+            ) && config.session_id.as_deref() == Some(session_id)
+        })
+    }
+
+    /// 成员最近的激活 Workspace（活跃优先，其次最新历史记录）。
+    fn latest_activation_workspace(&self, agent_id: &str) -> Option<String> {
+        let mut history: Vec<ActivationRecord> = self
+            .store
+            .activations()
+            .into_iter()
+            .filter(|activation| activation.agent_id == agent_id)
+            .collect();
+        history.sort_by(|a, b| b.activated_at.cmp(&a.activated_at));
+        history
+            .iter()
+            .find(|activation| activation.active())
+            .or_else(|| history.first())
+            .map(|activation| activation.workspace.clone())
+    }
+
+    /// 合成集群协作激活：目标成员未在发起会话激活时的运行载体（不落盘）。
+    /// Workspace 解析：目标最近激活 → 发起方最近激活 → 用户 home。
+    fn synthetic_collab_activation(
+        &self,
+        target: &AgentConfig,
+        origin: &AgentConfig,
+        origin_session: &str,
+    ) -> Result<ActivationRecord> {
+        let workspace = self
+            .latest_activation_workspace(&target.id)
+            .or_else(|| self.latest_activation_workspace(&origin.id))
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+        if !Path::new(&workspace).is_dir() {
+            bail!("协作 Workspace 不存在: {workspace}");
+        }
+        Ok(ActivationRecord {
+            activation_id: format!("collab-{}", new_id()),
+            agent_id: target.id.clone(),
+            session_id: origin_session.to_string(),
+            workspace: workspace.clone(),
+            workspace_policy: target.workspace_policy,
+            source_workspace: workspace,
+            activated_at: now_string(),
+            deactivated_at: None,
+            worktree_retained: false,
+        })
+    }
+
     async fn send_message_core(
         &self,
         agent_id: &str,
@@ -887,9 +970,24 @@ impl SubagentService {
             bail!("消息内容不能为空");
         }
         let _guard = self.ops.lock().await;
-        let config = self.agents.load(agent_id)?;
-        self.validate_activation(&config)?;
-        let activation = self.active_activation(agent_id, session_id)?;
+        let config = self.resolve_agent(agent_id)?;
+        // 集群协作识别：发起会话是某成员的后端会话（专属/关联）时，视为
+        // 该成员向目标的定向协作——目标无需在发起会话激活，运行以合成
+        // 协作激活执行，完成回报投回发起会话（origin_session）。
+        let origin_agent = self.collaboration_origin(session_id);
+        let origin = origin_agent.as_ref().map(|agent| CollabOrigin {
+            session: session_id,
+            label: format!("成员「{}」（{}）", agent.name, agent.id),
+        });
+        let activation = match &origin_agent {
+            Some(origin_agent) => {
+                self.synthetic_collab_activation(&config, origin_agent, session_id)?
+            }
+            None => {
+                self.validate_activation(&config)?;
+                self.active_activation(&config.id, session_id)?
+            }
+        };
         // 注入既有活跃运行（纠偏/追问语义；仅 CLI 后端有注入通道，
         // 会话后端始终新建投递）。
         if config.backend == BackendKind::Cli {
@@ -916,7 +1014,14 @@ impl SubagentService {
             }
         }
         let run = self
-            .spawn_run(&config, &activation, RunKind::Message, None, Some(content))
+            .spawn_run(
+                &config,
+                &activation,
+                RunKind::Message,
+                None,
+                Some(content),
+                origin.as_ref(),
+            )
             .await?;
         Ok(SendOutcome {
             run_id: run.run_id,
@@ -937,9 +1042,21 @@ impl SubagentService {
             bail!("任务目标不能为空");
         }
         let _guard = self.ops.lock().await;
-        let config = self.agents.load(agent_id)?;
-        self.validate_activation(&config)?;
-        let activation = self.active_activation(agent_id, session_id)?;
+        let config = self.resolve_agent(agent_id)?;
+        let origin_agent = self.collaboration_origin(session_id);
+        let origin = origin_agent.as_ref().map(|agent| CollabOrigin {
+            session: session_id,
+            label: format!("成员「{}」（{}）", agent.name, agent.id),
+        });
+        let activation = match &origin_agent {
+            Some(origin_agent) => {
+                self.synthetic_collab_activation(&config, origin_agent, session_id)?
+            }
+            None => {
+                self.validate_activation(&config)?;
+                self.active_activation(&config.id, session_id)?
+            }
+        };
         let timestamp = now_string();
         let task = TaskRecord {
             task_id: new_id(),
@@ -958,7 +1075,14 @@ impl SubagentService {
         };
         self.store.save_task(&task)?;
         let run = self
-            .spawn_run(&config, &activation, RunKind::Task, Some(&task), None)
+            .spawn_run(
+                &config,
+                &activation,
+                RunKind::Task,
+                Some(&task),
+                None,
+                origin.as_ref(),
+            )
             .await?;
         Ok(SubmitOutcome {
             task_id: task.task_id,
@@ -974,6 +1098,7 @@ impl SubagentService {
         kind: RunKind,
         task: Option<&TaskRecord>,
         message: Option<&str>,
+        origin: Option<&CollabOrigin<'_>>,
     ) -> Result<RunRecord> {
         if self.shutting_down.load(Ordering::Acquire) {
             bail!("Subagent 总线正在关闭，不再接受新任务");
@@ -989,6 +1114,7 @@ impl SubagentService {
             status: RunStatus::Working,
             pid: None,
             workspace: activation.workspace.clone(),
+            origin_session: origin.map(|origin| origin.session.to_string()),
             created_at: timestamp.clone(),
             updated_at: timestamp,
             finished_at: None,
@@ -1010,7 +1136,14 @@ impl SubagentService {
                     }
                 };
                 let outcome = self
-                    .deliver_session_message(config, activation, &source_session, task, message)
+                    .deliver_session_message(
+                        config,
+                        activation,
+                        &source_session,
+                        task,
+                        message,
+                        origin,
+                    )
                     .await?;
                 // 原生后端首次投递成功：回写专属会话绑定（失败不回写，下次重建）。
                 if config.backend == BackendKind::AgentTeam
@@ -1054,6 +1187,7 @@ impl SubagentService {
     }
 
     /// 天工会话后端：把消息/任务投递给关联会话（携带长期指令与记忆摘要）。
+    #[allow(clippy::too_many_arguments)]
     async fn deliver_session_message(
         &self,
         config: &AgentConfig,
@@ -1061,15 +1195,19 @@ impl SubagentService {
         source_session: &str,
         task: Option<&TaskRecord>,
         message: Option<&str>,
+        origin: Option<&CollabOrigin<'_>>,
     ) -> Result<String> {
         let instructions = self.agents.instructions(&config.id).unwrap_or_default();
         let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
+        let origin_label = origin
+            .map(|origin| origin.label.as_str())
+            .unwrap_or("主会话");
         let mut body = String::new();
         match (task, message) {
             (Some(task), _) => {
                 body.push_str(&format!(
-                    "【Subagent 任务】由「{}」（{}）提交：\n目标：{}\n",
-                    config.name, config.id, task.goal
+                    "【Subagent 任务】来自{origin_label}：\n目标：{}\n",
+                    task.goal
                 ));
                 if let Some(criteria) = task.completion_criteria.as_deref() {
                     body.push_str(&format!("完成条件：{criteria}\n"));
@@ -1077,19 +1215,15 @@ impl SubagentService {
             }
             (None, Some(message)) => {
                 body.push_str(&format!(
-                    "【Subagent 消息】来自「{}」（{}）：\n{message}\n",
-                    config.name, config.id
+                    "【Subagent 消息】来自{origin_label}：\n{message}\n"
                 ));
             }
             (None, None) => {
-                body.push_str(&format!(
-                    "【Subagent 消息】来自「{}」（{}）。\n",
-                    config.name, config.id
-                ));
+                body.push_str(&format!("【Subagent 消息】来自{origin_label}。\n"));
             }
         }
         body.push_str(&format!(
-            "\n任务工作区：{}\n（请在该工作区语境下处理本次请求；完成后你的最终回复会作为结果返回给提交方会话。）",
+            "\n任务工作区：{}\n（请在该工作区语境下处理本次请求；完成后你的最终回复会作为结果返回发起会话；如需其他成员协助，可用 send_agent_message 向其发送协作消息。）",
             activation.workspace
         ));
         if !instructions.trim().is_empty() {

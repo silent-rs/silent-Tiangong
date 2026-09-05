@@ -169,6 +169,10 @@ pub struct RunRecord {
     pub pid: Option<u32>,
     /// 本次运行使用的 Workspace。
     pub workspace: String,
+    /// 集群协作发起方会话：成员互发消息时记录，完成/失败回报投回该会话；
+    /// 缺省（主会话发起）回投激活会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_session: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

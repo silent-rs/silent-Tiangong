@@ -1,6 +1,6 @@
 //! 工具规格与系统提示注入（与 protocol::ops::TOOL_OPERATIONS 一一对应）。
 
-pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。";
+pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续用 send_agent_message 与更多成员协作。";
 
 /// (工具名, 描述, input_schema JSON)。
 pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
@@ -36,8 +36,8 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "send_agent_message",
-        "向指定 Subagent 发送普通消息：用于追问、补充背景、纠正方向和一般交流。有运行实例时注入当前运行，否则启动一次轻量消息往返；回复经反馈通道返回本会话。",
-        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标 Agent ID（须已在当前会话激活）"},"content":{"type":"string","description":"消息内容"}},"required":["agent_id","content"]}"#,
+        "向指定 Subagent 发送普通消息：用于追问、补充背景、纠正方向和一般交流。有运行实例时注入当前运行，否则启动一次轻量消息往返；回复经反馈通道返回发起会话。Subagent 成员之间也可用它互相发送协作消息（agent_id 支持成员 ID 或名称，目标成员无需在发起会话激活，对方完成后回复自动送回发起会话）。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标成员的 Agent ID 或名称（主会话发起时须已在当前会话激活；成员间协作无需激活）"},"content":{"type":"string","description":"消息内容"}},"required":["agent_id","content"]}"#,
     ),
     (
         "submit_agent_task",
