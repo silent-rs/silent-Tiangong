@@ -308,6 +308,9 @@ pub struct AgentSummary {
     /// 活跃 run id。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_run_id: Option<String>,
+    /// 长期指令（instructions.md 全文；管理页查看与编辑用）。
+    #[serde(default)]
+    pub instructions: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -2253,6 +2253,7 @@ impl SubagentService {
                                 .any(|activation| activation.activation_id == run.activation_id)
                     })
                     .max_by_key(|run| run.run_id.as_str());
+                let instructions = self.agents.instructions(&config.id).unwrap_or_default();
                 AgentSummary {
                     capabilities: config.backend.capabilities(),
                     config,
@@ -2260,6 +2261,7 @@ impl SubagentService {
                     activated_in_session,
                     runtime_status: active_run.map(|run| run.status),
                     active_run_id: active_run.map(|run| run.run_id.clone()),
+                    instructions,
                 }
             })
             .collect()

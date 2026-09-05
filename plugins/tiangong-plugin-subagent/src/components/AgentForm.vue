@@ -19,6 +19,7 @@ export interface AgentFormValue {
   sessionId?: string | null;
   workspacePolicy: WorkspacePolicy;
   enabled: boolean;
+  instructions: string;
 }
 
 interface Props {
@@ -47,6 +48,7 @@ const form = reactive<AgentFormValue>({
   sessionId: props.initial?.sessionId ?? null,
   workspacePolicy: props.initial?.workspacePolicy ?? 'read-only',
   enabled: props.initial?.enabled ?? true,
+  instructions: props.initial?.instructions ?? '',
 });
 
 const sessions = ref<SessionBrief[]>([]);
@@ -179,6 +181,16 @@ function submit() {
         <span>启用该 Subagent</span>
       </label>
 
+      <label class="field">
+        <span>长期指令</span>
+        <textarea
+          v-model="form.instructions"
+          class="instructions-input"
+          rows="6"
+          placeholder="该成员的职责与工作要求（跨会话保留；每次派活与协作时自动注入）"
+        />
+      </label>
+
       <p v-if="error" class="form-error">{{ error }}</p>
 
       <div class="form-actions">
@@ -246,6 +258,17 @@ function submit() {
   color: var(--ui-muted-foreground);
   font-size: 11px;
   line-height: 1.5;
+}
+
+.instructions-input {
+  padding: 6px 10px;
+  border: 1px solid var(--ui-input, hsl(var(--input, 214.3 31.8% 91.4%)));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ui-foreground);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
 }
 
 .field input[type='text'],

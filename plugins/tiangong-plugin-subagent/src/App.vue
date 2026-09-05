@@ -277,6 +277,7 @@ function openEdit(agent: AgentSummary) {
     sessionId: agent.config.session_id ?? null,
     workspacePolicy: agent.config.workspace_policy,
     enabled: agent.config.enabled,
+    instructions: agent.instructions ?? '',
   };
   formError.value = '';
   formVisible.value = true;
@@ -294,6 +295,7 @@ async function submitForm(value: AgentFormValue) {
         session_id: value.sessionId,
         workspace_policy: value.workspacePolicy,
         enabled: value.enabled,
+        instructions: value.instructions,
       });
     } else {
       await sidecarCall('ui_agent_create', {
@@ -303,6 +305,7 @@ async function submitForm(value: AgentFormValue) {
         command: value.command,
         session_id: value.sessionId,
         workspace_policy: value.workspacePolicy,
+        instructions: value.instructions,
       });
     }
     formVisible.value = false;
@@ -618,6 +621,10 @@ onUnmounted(() => {
                 <span class="event-text">{{ eventText(event.payload) }}</span>
               </li>
             </ul>
+          </div>
+          <div v-if="(agent.instructions ?? '').trim()" class="detail-block">
+            <h3>长期指令</h3>
+            <p class="instructions-view">{{ agent.instructions }}</p>
           </div>
           <div class="detail-block">
             <h3>能力声明</h3>
@@ -999,6 +1006,16 @@ onUnmounted(() => {
   gap: 10px;
   padding: 10px;
   border-top: 1px dashed var(--ui-border);
+}
+
+.instructions-view {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ui-muted-foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 .detail-block h3 {

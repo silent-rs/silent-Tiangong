@@ -66,6 +66,7 @@ export interface AgentSummary {
   activated_in_session: boolean;
   runtime_status?: RunStatus | null;
   active_run_id?: string | null;
+  instructions?: string;
 }
 
 export type TaskStatus =
