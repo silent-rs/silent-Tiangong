@@ -186,9 +186,10 @@ function submit() {
         <textarea
           v-model="form.instructions"
           class="instructions-input"
-          rows="6"
+          rows="12"
           placeholder="该成员的职责与工作要求（跨会话保留；每次派活与协作时自动注入）"
         />
+        <small>支持多段长文；可拖拽右下角继续调整高度。</small>
       </label>
 
       <p v-if="error" class="form-error">{{ error }}</p>
@@ -227,7 +228,7 @@ function submit() {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(480px, 100%);
+  width: min(620px, 100%);
   max-height: 90%;
   padding: 20px;
   overflow-y: auto;
@@ -261,13 +262,15 @@ function submit() {
 }
 
 .instructions-input {
-  padding: 6px 10px;
+  min-height: 220px;
+  padding: 8px 10px;
   border: 1px solid var(--ui-input, hsl(var(--input, 214.3 31.8% 91.4%)));
   border-radius: 8px;
   background: transparent;
   color: var(--ui-foreground);
   font-size: 12px;
   font-family: inherit;
+  line-height: 1.6;
   resize: vertical;
 }
 

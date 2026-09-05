@@ -683,8 +683,8 @@ onUnmounted(() => {
               <textarea
                 v-model="memoryDrafts[agent.config.id]!.content"
                 class="memory-content"
-                rows="8"
-                placeholder="记忆内容（markdown）…"
+                rows="14"
+                placeholder="记忆内容（markdown，可长文）…"
               />
               <div class="memory-editor-actions">
                 <button
@@ -1181,6 +1181,7 @@ onUnmounted(() => {
 }
 
 .memory-content {
+  min-height: 240px;
   resize: vertical;
   font-family: inherit;
   line-height: 1.6;
