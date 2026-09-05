@@ -3160,7 +3160,7 @@ fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn stop_connection_for_directory(directory: &Path) -> Result<()> {
+pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
     let connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?
