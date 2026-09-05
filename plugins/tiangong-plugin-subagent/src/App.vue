@@ -484,6 +484,7 @@ onUnmounted(() => {
         暂无 Subagent。点击右上角「新建 Subagent」创建第一个持久 Agent。
       </p>
 
+      <div class="agents-grid">
       <section
         v-for="agent in filteredAgents"
         :key="agent.config.id"
@@ -699,6 +700,7 @@ onUnmounted(() => {
           </div>
         </div>
       </section>
+      </div>
 
       <section v-if="collaborationTimeline.length" class="collab-panel">
         <h2>协作时间线</h2>
@@ -829,13 +831,20 @@ onUnmounted(() => {
   text-align: left;
 }
 
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
 .agent-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px;
+  gap: 6px;
+  padding: 10px;
   border: 1px solid var(--ui-border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--ui-card);
 }
 
@@ -847,32 +856,33 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   cursor: pointer;
 }
 
 .identity {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+  min-width: 0;
 }
 
 .name {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
 }
 
 .tag {
-  padding: 1px 8px;
+  padding: 0 6px;
   border: 1px solid var(--ui-border);
   border-radius: 999px;
   color: var(--ui-muted-foreground);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .tag-muted {
@@ -881,7 +891,7 @@ onUnmounted(() => {
 
 .runtime {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -894,13 +904,18 @@ onUnmounted(() => {
 .description {
   margin: 0;
   color: var(--ui-muted-foreground);
+  font-size: 12px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .status-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  font-size: 12px;
+  gap: 8px;
+  font-size: 11px;
 }
 
 .status-item {
@@ -915,23 +930,25 @@ onUnmounted(() => {
 .workspace-line {
   margin: 0;
   color: var(--ui-muted-foreground);
-  font-size: 12px;
-  word-break: break-all;
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .btn {
-  padding: 5px 12px;
+  padding: 3px 9px;
   border: 1px solid var(--ui-border);
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: var(--ui-foreground);
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -967,12 +984,13 @@ onUnmounted(() => {
 
 .message-input {
   flex: 1;
-  padding: 6px 10px;
+  min-width: 0;
+  padding: 4px 8px;
   border: 1px solid var(--ui-input);
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: var(--ui-foreground);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .detail {
