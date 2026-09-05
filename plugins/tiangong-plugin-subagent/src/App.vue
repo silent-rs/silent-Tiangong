@@ -7,6 +7,7 @@ import {
   RUN_STATUS_LABELS,
   TASK_STATUS_LABELS,
   WORKSPACE_POLICY_LABELS,
+  type AgentEventRecord,
   type AgentSummary,
   type MemoryFileEntry,
   type StateSnapshot,
@@ -126,6 +127,42 @@ function eventText(payload: Record<string, unknown>): string {
   const status = payload?.status;
   return typeof status === 'string' ? status : '';
 }
+
+/// 发起方标注：协作事件（origin_session）映射为发起成员名，主会话发起无标注。
+function originLabel(event: AgentEventRecord): string {
+  const origin = event.payload?.origin_session;
+  if (typeof origin !== 'string' || !origin) return '';
+  const members = snapshot.value?.agents ?? [];
+  const from = members.find((agent) => agent.config.session_id === origin);
+  return from ? `来自 ${from.config.name}` : `来自 ${origin.slice(-6)}`;
+}
+
+/// 协作时间线：跨成员按时间正序聚合「有发起方或含结果文本」的关键事件。
+const collaborationTimeline = computed(() => {
+  const events = snapshot.value?.recent_events ?? [];
+  const members = snapshot.value?.agents ?? [];
+  const nameOf = (agentId: string) =>
+    members.find((agent) => agent.config.id === agentId)?.config.name ?? agentId;
+  return events
+    .filter((event) => typeof event.payload?.origin_session === 'string' || event.payload?.text)
+    .slice(0, 60)
+    .map((event) => ({
+      ...event,
+      from: originLabel(event) || '主会话',
+      target: nameOf(event.agent_id),
+      summary: eventText(event.payload),
+    }))
+    .reverse();
+});
+
+const COLLAB_EVENT_LABELS: Record<string, string> = {
+  run_started: '发起运行',
+  completed: '完成回报',
+  failed: '失败回报',
+  cancelled: '已取消',
+  interrupted: '被中断',
+  user_message: '追加消息',
+};
 
 async function refresh() {
   try {
@@ -571,6 +608,7 @@ onUnmounted(() => {
               <li v-for="event in eventsOf(agent)" :key="event.event_id">
                 <span class="event-time">{{ event.created_at }}</span>
                 <span class="event-type">{{ event.event_type }}</span>
+                <span v-if="originLabel(event)" class="event-origin">{{ originLabel(event) }}</span>
                 <span class="event-text">{{ eventText(event.payload) }}</span>
               </li>
             </ul>
@@ -655,6 +693,21 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </section>
+
+      <section v-if="collaborationTimeline.length" class="collab-panel">
+        <h2>协作时间线</h2>
+        <p class="small muted">跨成员的关键事件按时间正序排列：谁发起、交给谁、结果回到谁。</p>
+        <ul class="collab-list">
+          <li v-for="event in collaborationTimeline" :key="event.event_id">
+            <span class="event-time">{{ event.created_at }}</span>
+            <span class="collab-from">{{ event.from }}</span>
+            <span class="collab-arrow">→</span>
+            <span class="collab-target">{{ event.target }}</span>
+            <span class="event-type">{{ COLLAB_EVENT_LABELS[event.event_type] ?? event.event_type }}</span>
+            <span class="event-text">{{ event.summary.slice(0, 120) }}</span>
+          </li>
+        </ul>
       </section>
     </main>
 
@@ -945,6 +998,55 @@ onUnmounted(() => {
 .event-list li {
   display: flex;
   gap: 8px;
+  font-size: 12px;
+}
+
+.event-origin {
+  flex-shrink: 0;
+  color: var(--ui-primary, #2563eb);
+}
+
+.collab-panel {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--ui-border, rgba(0, 0, 0, 0.1));
+  border-radius: 10px;
+}
+
+.collab-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.collab-list li {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.collab-from {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.collab-arrow {
+  color: var(--ui-muted-foreground);
+}
+
+.collab-target {
+  flex-shrink: 0;
+}
+
+.muted {
+  color: var(--ui-muted-foreground);
+}
+
+.small {
   font-size: 12px;
 }
 

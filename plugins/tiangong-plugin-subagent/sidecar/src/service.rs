@@ -576,6 +576,11 @@ fn append_event(
     payload: &serde_json::Value,
     timestamp: &str,
 ) {
+    // 集群协作运行自动标注发起会话：事件流即可还原「谁委托、结果回谁」。
+    let mut payload = payload.clone();
+    if let Some(origin) = run.origin_session.as_deref() {
+        payload["origin_session"] = serde_json::json!(origin);
+    }
     let record = AgentEventRecord {
         event_id: new_id(),
         agent_id: run.agent_id.clone(),
@@ -586,7 +591,7 @@ fn append_event(
         workspace: run.workspace.clone(),
         event_type: event_type.to_string(),
         created_at: timestamp.to_string(),
-        payload: payload.clone(),
+        payload,
     };
     if let Err(error) = store.append_event(&record) {
         tracing::warn!(%error, "追加事件历史失败");
@@ -2037,7 +2042,7 @@ impl SubagentService {
                 runs.truncate(30);
                 runs
             },
-            recent_events: self.store.list_events(None, None, 50),
+            recent_events: self.store.list_events(None, None, 200),
         };
         Ok(serde_json::to_value(snapshot)?)
     }
