@@ -218,11 +218,15 @@ fn forward_turn_finished(session_json: &str, turn_start_idx: u32) {
         }
         None => (String::new(), "success".to_string(), 0),
     };
-    // 最终回复：仅在本轮（锚点之后）倒序取第一条 assistant（优先 summary
-    // 阶段，过滤空文本）——绝不能引用历史轮次的结果。
+    // 最终回复：本轮（锚点之后）倒序第一条 assistant（优先 summary 阶段，
+    // 过滤空文本）。切片从锚点之后开始——锚点已排除，倒序第一条即本轮
+    // 最后一条消息（最终答案），不得再跳过。
     let mut assistant_text = String::new();
     for phase in ["summary", "normal"] {
-        for message in messages[anchor_idx..].iter().rev().skip(1) {
+        for message in messages[(anchor_idx + 1).min(messages.len())..]
+            .iter()
+            .rev()
+        {
             if message.get("role").and_then(Value::as_str) == Some("assistant")
                 && message
                     .get("phase")

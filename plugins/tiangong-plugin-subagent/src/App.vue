@@ -98,6 +98,7 @@ function runtimeStatusLabel(agent: AgentSummary): string {
 function runtimeStatusTone(agent: AgentSummary): string {
   switch (agent.runtime_status) {
     case 'working':
+    case 'stopping':
       return 'tone-working';
     case 'blocked':
     case 'approval_required':

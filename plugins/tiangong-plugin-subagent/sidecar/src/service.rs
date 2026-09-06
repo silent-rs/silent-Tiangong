@@ -416,6 +416,9 @@ fn handle_cli_event(
     }
     let _ = store.save_run(&run);
     sync_task_status(store, &run);
+    if run.status.is_terminal() {
+        release_collab_activation(store, &run);
+    }
     if run.status == RunStatus::Completed
         && let Some(summary) = run.summary.as_deref()
     {
@@ -517,6 +520,35 @@ async fn handle_exit(
     notify_run_status(&run);
 }
 
+/// 协作激活释放（自由函数版，终态出口共用）：协作激活（collab- 前缀）
+/// 下已无活跃运行时解除登记，写占用随终态消失。
+fn release_collab_activation(store: &RuntimeStore, run: &RunRecord) {
+    if !run.activation_id.starts_with("collab-") {
+        return;
+    }
+    let still_busy = store.list_runs().into_iter().any(|other| {
+        other.activation_id == run.activation_id
+            && other.run_id != run.run_id
+            && other.status.is_alive()
+    });
+    if still_busy {
+        return;
+    }
+    let Some(mut activation) = store
+        .activations()
+        .into_iter()
+        .find(|activation| activation.activation_id == run.activation_id)
+    else {
+        return;
+    };
+    if activation.active() {
+        activation.deactivated_at = Some(now_string());
+        if let Err(error) = store.replace_activation(activation) {
+            tracing::warn!(run_id = %run.run_id, %error, "释放协作激活登记失败");
+        }
+    }
+}
+
 /// Run 完成后的结论归档（事件流水线与 turn 回报共用）。
 fn archive_completion(
     store: &RuntimeStore,
@@ -552,9 +584,10 @@ fn sync_task_status(store: &RuntimeStore, run: &RunRecord) {
         RunStatus::Failed => Some(TaskStatus::Failed),
         RunStatus::Cancelled => Some(TaskStatus::Cancelled),
         RunStatus::Interrupted => Some(TaskStatus::Interrupted),
-        RunStatus::Working | RunStatus::Blocked | RunStatus::ApprovalRequired => {
-            Some(TaskStatus::Running)
-        }
+        RunStatus::Working
+        | RunStatus::Stopping
+        | RunStatus::Blocked
+        | RunStatus::ApprovalRequired => Some(TaskStatus::Running),
         RunStatus::Ready => None,
     };
     if let Some(status) = mapped
@@ -656,6 +689,22 @@ fn notify_run_status(run: &RunRecord) {
 
 impl SubagentService {
     /// 激活前置校验。
+    /// 后端能力校验：策略与后端组合不支持时显式拒绝（不假装支持）。
+    /// 会话型后端在专属/关联会话内执行，目录不受插件管理——隔离 worktree
+    /// 无法落实；只读/独占写暂为提示级约束（需求文档已知限制）。
+    fn ensure_policy_supported(backend: &BackendKind, policy: WorkspacePolicy) -> Result<()> {
+        if matches!(
+            backend,
+            BackendKind::TiangongSession | BackendKind::AgentTeam
+        ) && policy == WorkspacePolicy::IsolatedWorktree
+        {
+            bail!(
+                "会话型后端不支持隔离工作区策略（成员在专属会话内执行，目录不受插件管理）；请改用只读或独占写策略"
+            );
+        }
+        Ok(())
+    }
+
     fn validate_activation(&self, config: &AgentConfig) -> Result<()> {
         if !config.enabled {
             bail!("Agent 已禁用: {}（{}）", config.name, config.id);
@@ -666,6 +715,7 @@ impl SubagentService {
                 config.backend.label()
             );
         }
+        Self::ensure_policy_supported(&config.backend, config.workspace_policy)?;
         if config.backend == BackendKind::Cli
             && config.command.as_deref().unwrap_or("").trim().is_empty()
         {
@@ -704,9 +754,22 @@ impl SubagentService {
     }
 
     /// Workspace 写互斥：读可并行，独占写只允许一个写者。
+    /// 占用两处来源：激活表（显式/协作登记）与活跃运行（含停止请求中——
+    /// 激活可能已解除绑定，运行结束前写占用不释放）。
     fn check_workspace_exclusive(&self, agent_id: &str, source_workspace: &str) -> Result<()> {
+        self.check_workspace_exclusive_for(&[agent_id.to_string()], source_workspace)
+    }
+
+    /// 写互斥（排除名单版）：协作场景排除发起方与目标——发起方已持有
+    /// 写权时，目标成员以发起方名义代执行（写入者数不增加，权限不扩大），
+    /// 不与发起方自己的占用冲突。
+    fn check_workspace_exclusive_for(
+        &self,
+        exempt: &[String],
+        source_workspace: &str,
+    ) -> Result<()> {
         for activation in self.store.activations() {
-            if !activation.active() || activation.agent_id == agent_id {
+            if !activation.active() || exempt.contains(&activation.agent_id) {
                 continue;
             }
             if activation.source_workspace == source_workspace
@@ -717,6 +780,24 @@ impl SubagentService {
                     activation.agent_id,
                     activation.workspace_policy.label(),
                     activation.workspace_policy
+                );
+            }
+        }
+        for run in self.store.list_runs() {
+            if !run.status.is_alive() || exempt.contains(&run.agent_id) {
+                continue;
+            }
+            let holds_write = self
+                .agents
+                .load(&run.agent_id)
+                .map(|config| config.workspace_policy.allows_write())
+                .unwrap_or(false);
+            if holds_write && run.workspace == source_workspace {
+                bail!(
+                    "Workspace 正被 Agent「{}」的运行占用（{}，{}）；运行结束前不释放写入权",
+                    run.agent_id,
+                    run.run_id,
+                    run.status.label()
                 );
             }
         }
@@ -849,19 +930,31 @@ impl SubagentService {
         for mut run in self.store.list_runs() {
             if run.activation_id == activation.activation_id && run.status.is_alive() {
                 if run.pid.is_none() {
-                    // 会话后端：先投递停止请求（尽力语义——宿主内 turn 无法
-                    // 硬取消），再落中断状态；状态如实标注通知语义。
-                    self.notify_source_session(&run, "停用中断请求").await;
-                    run.summary = Some("停用激活时中断（已向成员会话投递停止请求）".to_string());
+                    // 会话后端停止为通知语义（宿主内 turn 无法硬取消）：
+                    // 投递失败如实上抛、状态与占用不动；成功则置 Stopping，
+                    // 占用由运行维持到本轮收尾归因，写互斥不会失守。
+                    if let Err(error) = self.notify_source_session(&run, "停用中断请求").await
+                    {
+                        bail!(
+                            "停止请求投递失败，运行仍在继续（{}）；未确认停止，激活与占用保留",
+                            error
+                        );
+                    }
+                    run.status = RunStatus::Stopping;
+                    run.summary = Some("停止请求已投递，等待成员会话本轮收尾确认".to_string());
                 } else {
                     let _ = self
                         .runner
                         .terminate(&run.run_id, Duration::from_secs(3))
                         .await;
+                    run.status = RunStatus::Interrupted;
                     run.summary = Some("停用激活时中断".to_string());
                 }
-                run.status = RunStatus::Interrupted;
-                run.finished_at = Some(timestamp.clone());
+                run.finished_at = if run.status.is_terminal() {
+                    Some(timestamp.clone())
+                } else {
+                    None
+                };
                 run.updated_at = timestamp.clone();
                 let _ = self.store.save_run(&run);
                 sync_task_status(&self.store, &run);
@@ -944,19 +1037,18 @@ impl SubagentService {
             .map(|activation| activation.workspace.clone())
     }
 
-    /// 合成集群协作激活：目标成员未在发起会话激活时的运行载体（不落盘）。
+    /// 合成集群协作激活：目标成员未在发起会话激活时的运行载体。
+    /// 与普通派活同一套规则：策略能力校验、写互斥检查（激活表 + 活跃运行
+    /// 占用），并登记进统一激活表——后续申请能看到本协作的占用，随运行
+    /// 终态自动释放（release_collab_activation_if_idle）。
     /// Workspace 解析：目标最近激活 → 发起方最近激活 → 用户 home。
-    /// 权限与普通派活一致：写互斥检查照常执行；会话型后端不支持隔离目录，
-    /// 显式拒绝而不是假装隔离。
     fn synthetic_collab_activation(
         &self,
         target: &AgentConfig,
         origin: &AgentConfig,
         origin_session: &str,
     ) -> Result<ActivationRecord> {
-        if matches!(target.workspace_policy, WorkspacePolicy::IsolatedWorktree) {
-            bail!("会话型后端暂不支持隔离工作区策略（成员在专属会话内执行，目录不受插件控制）");
-        }
+        Self::ensure_policy_supported(&target.backend, target.workspace_policy)?;
         let workspace = self
             .latest_activation_workspace(&target.id)
             .or_else(|| self.latest_activation_workspace(&origin.id))
@@ -965,22 +1057,10 @@ impl SubagentService {
             bail!("协作 Workspace 不存在: {workspace}");
         }
         if target.workspace_policy.allows_write() {
-            for activation in self.store.activations() {
-                if activation.active()
-                    && activation.agent_id != target.id
-                    && activation.workspace_policy.allows_write()
-                    && (activation.workspace == workspace
-                        || activation.source_workspace == workspace)
-                {
-                    bail!(
-                        "协作运行与「{}」的独占写入冲突（工作区 {}），请等待其释放后再协作",
-                        activation.agent_id,
-                        workspace
-                    );
-                }
-            }
+            self.check_workspace_exclusive_for(&[target.id.clone(), origin.id.clone()], &workspace)
+                .context("协作运行无法取得工作区写入权")?;
         }
-        Ok(ActivationRecord {
+        let record = ActivationRecord {
             activation_id: format!("collab-{}", new_id()),
             agent_id: target.id.clone(),
             session_id: origin_session.to_string(),
@@ -990,7 +1070,16 @@ impl SubagentService {
             activated_at: now_string(),
             deactivated_at: None,
             worktree_retained: false,
-        })
+        };
+        // 登记进统一激活表：后续派活/协作的写互斥检查可见本占用。
+        self.store.replace_activation(record.clone())?;
+        Ok(record)
+    }
+
+    /// 协作激活释放：该协作激活下已无活跃运行时解除登记（终态统一出口
+    /// 调用；普通激活由停用路径管理，不经过此处）。
+    fn release_collab_activation_if_idle(&self, run: &RunRecord) {
+        release_collab_activation(&self.store, run);
     }
 
     async fn send_message_core(
@@ -1347,7 +1436,9 @@ impl SubagentService {
         }
         if run.pid.is_none() {
             // 天工会话后端：通知式中断（宿主内 turn 无法硬取消）。
-            self.notify_source_session(&run, "中断请求").await;
+            if let Err(error) = self.notify_source_session(&run, "中断请求").await {
+                tracing::warn!(run_id = %run.run_id, %error, "中断通知投递失败（中断为尽力语义）");
+            }
         } else {
             self.runner
                 .write_line(run_id, &json!({ "type": "interrupt" }))
@@ -1374,7 +1465,9 @@ impl SubagentService {
         }
         let timestamp = now_string();
         if run.pid.is_none() {
-            self.notify_source_session(&run, "取消请求").await;
+            if let Err(error) = self.notify_source_session(&run, "取消请求").await {
+                tracing::warn!(run_id = %run.run_id, %error, "取消通知投递失败（取消为终态裁定，仍落终态）");
+            }
         } else {
             self.runner
                 .write_line(run_id, &json!({ "type": "cancel" }))
@@ -1399,22 +1492,19 @@ impl SubagentService {
     }
 
     /// 会话后端运行控制通知（中断/取消尽力语义）。
-    async fn notify_source_session(&self, run: &RunRecord, action: &str) {
-        let Ok(config) = self.agents.load(&run.agent_id) else {
-            return;
-        };
-        let Some(source_session) = config.session_id.as_deref() else {
-            return;
-        };
+    async fn notify_source_session(&self, run: &RunRecord, action: &str) -> Result<()> {
+        let config = self.agents.load(&run.agent_id)?;
+        let source_session = config
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("成员未绑定源会话，无法投递{action}通知"))?;
         let body = format!(
             "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
             config.name, config.id, action
         );
-        if let Err(error) =
-            crate::delivery::deliver_message(&self.http, source_session, &body).await
-        {
-            tracing::warn!(run_id = %run.run_id, %error, "向关联会话投递{action}通知失败");
-        }
+        crate::delivery::deliver_message(&self.http, source_session, &body).await
     }
 
     /// 关联会话本轮完成（WASM on_turn_finished 转发）：
@@ -1453,8 +1543,9 @@ impl SubagentService {
                     && agent_ids.contains(&run.agent_id.as_str())
             })
             .collect();
-        // 归因：投递正文携带「（运行标记 r-短码）」时精确匹配对应运行；
-        // 无标记（早期投递/外部消息）回退最新活跃运行。
+        // 归因：投递正文携带「（运行标记 r-短码）」时精确匹配对应运行。
+        // 标记存在但匹配不到（运行已终态的迟到回报 / 重复回报）一律忽略，
+        // 绝不回退到其他活跃运行；无标记（早期投递）才回退最新。
         let tag = request
             .user_text
             .split("（运行标记 r-")
@@ -1462,16 +1553,18 @@ impl SubagentService {
             .and_then(|rest| rest.split('）').next())
             .map(str::to_string);
         let target = match tag.as_deref() {
-            Some(tag) if !tag.is_empty() => alive_runs
-                .iter()
-                .find(|run| run.run_id.ends_with(tag))
-                .cloned()
-                .or_else(|| {
-                    alive_runs
-                        .iter()
-                        .max_by_key(|run| run.run_id.clone())
-                        .cloned()
-                }),
+            Some(tag) if !tag.is_empty() => {
+                let Some(run) = alive_runs
+                    .iter()
+                    .find(|run| run.run_id.ends_with(tag))
+                    .cloned()
+                else {
+                    return Ok(format!(
+                        "运行标记 r-{tag} 无匹配的活跃运行（迟到或重复回报），忽略"
+                    ));
+                };
+                Some(run)
+            }
             _ => alive_runs.into_iter().max_by_key(|run| run.run_id.clone()),
         };
         let Some(mut run) = target else {
@@ -1498,6 +1591,7 @@ impl SubagentService {
         run.updated_at = timestamp.clone();
         self.store.save_run(&run)?;
         sync_task_status(&self.store, &run);
+        self.release_collab_activation_if_idle(&run);
         let (event_type, payload) = match status {
             RunStatus::Completed => ("completed", json!({ "text": text })),
             RunStatus::Failed => ("failed", json!({ "text": text })),

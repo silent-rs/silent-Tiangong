@@ -40,6 +40,7 @@ export interface AdapterCapabilities {
 export type RunStatus =
   | 'ready'
   | 'working'
+  | 'stopping'
   | 'blocked'
   | 'approval_required'
   | 'completed'
@@ -130,6 +131,7 @@ export interface StateSnapshot {
 export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   ready: '空闲',
   working: '工作中',
+  stopping: '停止请求中',
   blocked: '阻塞',
   approval_required: '待审批',
   completed: '已完成',

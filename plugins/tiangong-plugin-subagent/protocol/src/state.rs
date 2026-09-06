@@ -71,6 +71,8 @@ pub enum RunStatus {
     Ready,
     /// 工作中。
     Working,
+    /// 已投递停止请求，等待执行侧确认收尾（占用保留）。
+    Stopping,
     /// 阻塞，等待外部输入。
     Blocked,
     /// 等待审批。
@@ -101,6 +103,7 @@ impl RunStatus {
         match self {
             Self::Ready => "空闲",
             Self::Working => "工作中",
+            Self::Stopping => "停止请求中",
             Self::Blocked => "阻塞",
             Self::ApprovalRequired => "待审批",
             Self::Completed => "已完成",
