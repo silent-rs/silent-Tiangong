@@ -848,14 +848,21 @@ impl SubagentService {
         let timestamp = now_string();
         for mut run in self.store.list_runs() {
             if run.activation_id == activation.activation_id && run.status.is_alive() {
-                let _ = self
-                    .runner
-                    .terminate(&run.run_id, Duration::from_secs(3))
-                    .await;
+                if run.pid.is_none() {
+                    // 会话后端：先投递停止请求（尽力语义——宿主内 turn 无法
+                    // 硬取消），再落中断状态；状态如实标注通知语义。
+                    self.notify_source_session(&run, "停用中断请求").await;
+                    run.summary = Some("停用激活时中断（已向成员会话投递停止请求）".to_string());
+                } else {
+                    let _ = self
+                        .runner
+                        .terminate(&run.run_id, Duration::from_secs(3))
+                        .await;
+                    run.summary = Some("停用激活时中断".to_string());
+                }
                 run.status = RunStatus::Interrupted;
                 run.finished_at = Some(timestamp.clone());
                 run.updated_at = timestamp.clone();
-                run.summary = Some("停用激活时中断".to_string());
                 let _ = self.store.save_run(&run);
                 sync_task_status(&self.store, &run);
                 notify_run_status(&run);
@@ -939,18 +946,39 @@ impl SubagentService {
 
     /// 合成集群协作激活：目标成员未在发起会话激活时的运行载体（不落盘）。
     /// Workspace 解析：目标最近激活 → 发起方最近激活 → 用户 home。
+    /// 权限与普通派活一致：写互斥检查照常执行；会话型后端不支持隔离目录，
+    /// 显式拒绝而不是假装隔离。
     fn synthetic_collab_activation(
         &self,
         target: &AgentConfig,
         origin: &AgentConfig,
         origin_session: &str,
     ) -> Result<ActivationRecord> {
+        if matches!(target.workspace_policy, WorkspacePolicy::IsolatedWorktree) {
+            bail!("会话型后端暂不支持隔离工作区策略（成员在专属会话内执行，目录不受插件控制）");
+        }
         let workspace = self
             .latest_activation_workspace(&target.id)
             .or_else(|| self.latest_activation_workspace(&origin.id))
             .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
         if !Path::new(&workspace).is_dir() {
             bail!("协作 Workspace 不存在: {workspace}");
+        }
+        if target.workspace_policy.allows_write() {
+            for activation in self.store.activations() {
+                if activation.active()
+                    && activation.agent_id != target.id
+                    && activation.workspace_policy.allows_write()
+                    && (activation.workspace == workspace
+                        || activation.source_workspace == workspace)
+                {
+                    bail!(
+                        "协作运行与「{}」的独占写入冲突（工作区 {}），请等待其释放后再协作",
+                        activation.agent_id,
+                        workspace
+                    );
+                }
+            }
         }
         Ok(ActivationRecord {
             activation_id: format!("collab-{}", new_id()),
@@ -1141,6 +1169,10 @@ impl SubagentService {
                         crate::paths::new_id()
                     }
                 };
+                // 运行标记：投递正文携带 run 短码，turn 完成回报按标记精确
+                // 归因（同一成员并发多运行时不串任务）。
+                let run_tag: String = run.run_id.chars().rev().take(8).collect();
+                let run_tag: String = run_tag.chars().rev().collect();
                 let outcome = self
                     .deliver_session_message(
                         config,
@@ -1149,6 +1181,7 @@ impl SubagentService {
                         task,
                         message,
                         origin,
+                        Some(&run_tag),
                     )
                     .await?;
                 // 原生后端首次投递成功：回写专属会话绑定（失败不回写，下次重建）。
@@ -1202,6 +1235,7 @@ impl SubagentService {
         task: Option<&TaskRecord>,
         message: Option<&str>,
         origin: Option<&CollabOrigin<'_>>,
+        run_tag: Option<&str>,
     ) -> Result<String> {
         let instructions = self.agents.instructions(&config.id).unwrap_or_default();
         let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
@@ -1239,6 +1273,9 @@ impl SubagentService {
             body.push_str(&format!("\n\n【长期记忆】\n{memory}"));
         }
         body.push_str("\n\n【成长约定】完成本次工作后：把可复用经验（成功做法、踩坑、用户偏好等，一行一条、结论式）用 append_agent_memory 追加到 lessons.md；确实学到稳定的新规则时，用 append_agent_instructions 并入你的长期指令（追加式，勿重复已有内容）。");
+        if let Some(run_tag) = run_tag {
+            body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
+        }
         crate::delivery::deliver_message(&self.http, source_session, &body).await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
@@ -1406,8 +1443,7 @@ impl SubagentService {
             return Ok(format!("没有以会话 {} 为源的 Subagent", request.session_id));
         }
         let agent_ids: Vec<&str> = agents.iter().map(|config| config.id.as_str()).collect();
-        // 归因到最新的活跃运行（同一源会话并发多 run 时按最新）。
-        let target = self
+        let alive_runs: Vec<RunRecord> = self
             .store
             .list_runs()
             .into_iter()
@@ -1416,7 +1452,28 @@ impl SubagentService {
                     && run.status.is_alive()
                     && agent_ids.contains(&run.agent_id.as_str())
             })
-            .max_by_key(|run| run.run_id.clone());
+            .collect();
+        // 归因：投递正文携带「（运行标记 r-短码）」时精确匹配对应运行；
+        // 无标记（早期投递/外部消息）回退最新活跃运行。
+        let tag = request
+            .user_text
+            .split("（运行标记 r-")
+            .nth(1)
+            .and_then(|rest| rest.split('）').next())
+            .map(str::to_string);
+        let target = match tag.as_deref() {
+            Some(tag) if !tag.is_empty() => alive_runs
+                .iter()
+                .find(|run| run.run_id.ends_with(tag))
+                .cloned()
+                .or_else(|| {
+                    alive_runs
+                        .iter()
+                        .max_by_key(|run| run.run_id.clone())
+                        .cloned()
+                }),
+            _ => alive_runs.into_iter().max_by_key(|run| run.run_id.clone()),
+        };
         let Some(mut run) = target else {
             return Ok("源会话上没有等待回复的运行，忽略".to_string());
         };

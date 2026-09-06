@@ -200,21 +200,29 @@ fn forward_turn_finished(session_json: &str, turn_start_idx: u32) {
                 .find(|message| message.get("id").and_then(Value::as_str) == Some(id))
         })
         .or_else(|| messages.get(turn_start_idx as usize));
-    let (user_text, turn_status) = match anchor {
-        Some(anchor) => (
-            message_text(anchor),
-            anchor
-                .get("turn_status")
-                .and_then(Value::as_str)
-                .unwrap_or("success")
-                .to_string(),
-        ),
-        None => (String::new(), "success".to_string()),
+    let (user_text, turn_status, anchor_idx) = match anchor {
+        Some(anchor) => {
+            let idx = messages
+                .iter()
+                .position(|message| std::ptr::eq(message, anchor))
+                .unwrap_or(0);
+            (
+                message_text(anchor),
+                anchor
+                    .get("turn_status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("success")
+                    .to_string(),
+                idx,
+            )
+        }
+        None => (String::new(), "success".to_string(), 0),
     };
-    // 最终回复：倒序第一条 assistant（优先 summary 阶段，过滤空文本）。
+    // 最终回复：仅在本轮（锚点之后）倒序取第一条 assistant（优先 summary
+    // 阶段，过滤空文本）——绝不能引用历史轮次的结果。
     let mut assistant_text = String::new();
     for phase in ["summary", "normal"] {
-        for message in messages.iter().rev() {
+        for message in messages[anchor_idx..].iter().rev().skip(1) {
             if message.get("role").and_then(Value::as_str) == Some("assistant")
                 && message
                     .get("phase")
