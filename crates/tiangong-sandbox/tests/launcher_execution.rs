@@ -442,7 +442,7 @@ fn cli_cancel_and_timeout_stop_entire_process_group() {
         let marker = f.workspace.join(label);
         let heartbeat = f.workspace.join(format!("{label}-heartbeat"));
         let script = format!(
-            "(while :; do echo tick >> {}; sleep 0.05; done) <&0 & echo ready > {}; wait",
+            "exec 9<&0; (while :; do echo tick >> {}; sleep 0.05; done) <&9 & echo ready > {}; wait",
             quote(&heartbeat),
             quote(&marker)
         );
@@ -582,10 +582,10 @@ fn cli_concurrent_cancellation_does_not_stop_other_invocation() {
 #[cfg(unix)]
 #[test]
 fn host_liveness_probe_waits_for_descendant_exit() {
-    use std::io::Read;
+    use std::io::{Read, Write};
     let root = tempfile::tempdir().unwrap();
     let mut process = Process::spawn(
-        Command::new("/bin/sh").args(["-c", "(sleep 1) <&0 & exit 0"]),
+        Command::new("/bin/sh").args(["-c", "exec 9<&0; (read token <&9) <&9 & exit 0"]),
         root.path(),
     );
     assert!(process.wait(Duration::from_secs(5)).success());
@@ -593,5 +593,7 @@ fn host_liveness_probe_waits_for_descendant_exit() {
         matches!(process.liveness.read(&mut [0u8; 1]), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
         "首进程退出不应误判后台子进程也已退出"
     );
+    // 显式释放后台进程，不依赖 sleep 时长或 CI 调度速度。
+    process.liveness.write_all(b"stop\n").unwrap();
     process.assert_tree_closed();
 }
