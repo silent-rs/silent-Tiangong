@@ -406,6 +406,13 @@ async fn send_message_and_wait(
             stream_tx,
         )
         .await;
+    let ensured = match ensured {
+        Ok(ensured) => ensured,
+        Err(error) => {
+            rollback_failed_delivery(state, &session_id, &message_id, created_paths).await;
+            return Err(error);
+        }
+    };
     let waiter = state.register_remote_turn_waiter(&session_id, &message_id);
     if let Err(error) =
         state.deliver_prepared_if_live(&ensured.session_id, message_id.clone(), prepared)

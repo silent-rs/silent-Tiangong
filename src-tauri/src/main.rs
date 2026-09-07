@@ -147,10 +147,13 @@ fn run_gui() {
 
             // 启动阶段一次性预加载插件快照。后续状态查询、设置页和 Core 创建
             // 只复用该快照，不隐式扫描、编译或热加载插件。
+            #[cfg(not(windows))]
             {
                 let storage_root = tiangong_config::io::storage_root();
                 tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
             }
+            #[cfg(windows)]
+            state.start_plugin_preload();
 
             // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
@@ -923,7 +926,34 @@ fn run_gui() {
         .expect("error while building tauri application")
         .run(|handle, event| {
             // Desktop 退出时停止自己 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let tauri::RunEvent::ExitRequested { api: _exit_api, code: _exit_code, .. } = &event {
+                #[cfg(windows)]
+                {
+                    use std::sync::atomic::{AtomicU8, Ordering};
+                    static EXIT_PHASE: AtomicU8 = AtomicU8::new(0);
+                    if EXIT_PHASE.load(Ordering::Acquire) != 2 {
+                        _exit_api.prevent_exit();
+                        if EXIT_PHASE.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                            tiangong_plugin_runtime::registry::begin_sidecar_shutdown();
+                            let handle = handle.clone();
+                            let exit_code = _exit_code.unwrap_or(0);
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(state) = handle.try_state::<tiangong_app::TiangongApp>() {
+                                    state.bot_runtime.stop_all().await;
+                                }
+                                if let Err(error) = tauri::async_runtime::spawn_blocking(
+                                    tiangong_plugin_runtime::registry::shutdown_all_sidecars
+                                ).await {
+                                    warn!(%error, "后台插件退出任务失败");
+                                }
+                                EXIT_PHASE.store(2, Ordering::Release);
+                                handle.exit(exit_code);
+                            });
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
                 if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
                     let runtime = app_state.bot_runtime.clone();
                     tauri::async_runtime::block_on(async move {
@@ -932,6 +962,7 @@ fn run_gui() {
                 }
                 // 逐个停止所有 sidecar（它们经 setsid 独立运行，不会随宿主自动退出）。
                 tiangong_plugin_runtime::registry::shutdown_all_sidecars();
+                }
             }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {

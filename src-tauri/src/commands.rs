@@ -248,7 +248,7 @@ pub async fn switch_session(
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, None, None, None, stream_tx)
-            .await;
+            .await?;
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
         }
@@ -695,6 +695,16 @@ async fn send_message_inner(
             stream_tx,
         )
         .await;
+    let ensured = match ensured {
+        Ok(ensured) => ensured,
+        Err(error) => {
+            let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
+            cleanup_unreferenced_input_attachments(state, raw_attachments_for_paths(created_paths))
+                .await;
+            abort_session_send(state, &session_id, revision, true).await;
+            return Err(error);
+        }
+    };
     let sid = ensured.session_id.clone();
     if let Err(error) =
         state.deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
@@ -1063,6 +1073,18 @@ pub async fn edit_and_resend(
     let ensured = state
         .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
+    let ensured = match ensured {
+        Ok(ensured) => ensured,
+        Err(error) => {
+            restore_edited_session(state.inner(), &session_id, original_session).await;
+            cleanup_unreferenced_input_attachments(
+                state.inner(),
+                raw_attachments_for_paths(created_paths.clone()),
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let sid = ensured.session_id.clone();
     if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
         // 复用 Core 时不销毁 Core（它仍可能被其它流程持有）。deliver 失败时尚未启动
@@ -1194,7 +1216,7 @@ async fn run_context_slash_command(
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, None, None, None, stream_tx)
-            .await;
+            .await?;
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
         }
@@ -1493,6 +1515,8 @@ pub async fn set_sandbox_policy(
         .await?;
     config.sandbox_policy = cleaned.clone();
     config.command_env_blocklist = cleaned.environment_blocklist.clone();
+    #[cfg(windows)]
+    let storage_root = config.storage_root.clone();
     tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
     state
         .with_state(|core_state| {
@@ -1500,7 +1524,15 @@ pub async fn set_sandbox_policy(
             Ok(())
         })
         .await?;
-    tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::on_sandbox_setting_changed();
+        #[cfg(windows)]
+        tiangong_plugin_runtime::registry::invalidate_persistent_grants(&storage_root)
+            .map_err(|error| format!("配置已保存，但旧授权清理或插件重载失败：{error:#}"))?;
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     Ok(cleaned.into())
 }
 
@@ -1582,8 +1614,11 @@ pub async fn get_sandbox_update_state(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await
         .map_err(|e| e.to_string())?;
-    let (status, version) =
-        tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
+    let (status, version) = tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     let failure = (status
         == tiangong_plugin_runtime::launcher_update::SandboxLauncherStatus::Failed)
         .then(|| {
@@ -1612,7 +1647,13 @@ pub async fn prepare_startup_resources(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await
         .map_err(|e| e.to_string())?;
-    if tiangong_plugin_runtime::launcher_update::launcher_available(&storage_root) {
+    let check_root = storage_root.clone();
+    let available = tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::launcher_update::launcher_available(&check_root)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if available {
         tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
         return Ok(StartupPrepareResult {
             installed_version: None,
@@ -2506,6 +2547,8 @@ pub async fn set_workspace_dir(
         .with_state_read(|core_state| Ok(core_state.config.clone()))
         .await?;
     config.workspace_dir = workspace_dir.clone();
+    #[cfg(windows)]
+    let storage_root = config.storage_root.clone();
     tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
     state
         .with_state(|core_state| {
@@ -2519,6 +2562,14 @@ pub async fn set_workspace_dir(
         .await?;
 
     // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
+
+    #[cfg(windows)]
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::invalidate_persistent_grants(&storage_root)
+            .map_err(|error| format!("工作区已保存，但旧授权清理或插件重载失败：{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
 
     Ok(())
 }
@@ -4685,6 +4736,7 @@ pub struct PluginEntryResource {
 pub async fn list_plugins(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_plugin_runtime::registry::PluginStatus>, String> {
+    state.wait_plugin_preload().await?;
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;

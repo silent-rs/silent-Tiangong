@@ -475,6 +475,69 @@ fn cli_cancel_and_timeout_stop_entire_process_group() {
 #[cfg(windows)]
 #[test]
 #[ignore = "必须由沙箱外宿主运行：cargo test --test launcher_execution -- --ignored --test-threads=1"]
+fn windows_persistent_grants_preserve_file_access_and_private_temp() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let f = Fixture::new();
+    let node = f.root.path().join("node.exe");
+    fs::copy(
+        std::env::var_os("SANDBOX_TEST_NODE").expect("需要 Node"),
+        &node,
+    )
+    .unwrap();
+    let managed = f.workspace.join("managed");
+    fs::create_dir(&managed).unwrap();
+    let cache = managed.join("grant.json");
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&self.0).unwrap();
+        }
+    }
+    let _cleanup = Cleanup(cache.clone());
+    let existing = f.workspace.join("existing.txt");
+    fs::write(&existing, "one").unwrap();
+    let mut policy = f.policy();
+    policy.denied_read_paths.push(managed);
+    let policy_file = f.root.path().join("policy.json");
+    fs::write(&policy_file, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let script = "const fs=require('fs'),os=require('os'),path=require('path'); const p=process.argv[1]; if(!fs.readFileSync(p,'utf8'))process.exit(20); fs.appendFileSync(p,'two'); try{fs.readFileSync(process.argv[2]);process.exit(21);}catch(e){if(e.code!=='EPERM'&&e.code!=='EACCES')throw e;} const t=path.join(os.tmpdir(),'check.txt'); fs.writeFileSync(t,'temp');if(fs.readFileSync(t,'utf8')!=='temp')process.exit(22);fs.unlinkSync(t);console.log(JSON.stringify({dir:os.tmpdir()}));";
+    let mut dirs = Vec::new();
+    for reused in [false, true] {
+        let mut command = Command::new(LAUNCHER);
+        command
+            .arg("run")
+            .arg("--policy")
+            .arg(&policy_file)
+            .arg("--grant-cache")
+            .arg(&cache)
+            .arg("--")
+            .arg(&node)
+            .arg("-e")
+            .arg(script)
+            .arg(&existing)
+            .arg(&cache)
+            .env("TIANGONG_SANDBOX_DIAGNOSTICS", "1");
+        let mut process = Process::spawn(&mut command, f.root.path());
+        assert!(
+            process.wait(Duration::from_secs(30)).success(),
+            "{}",
+            process.diagnostics()
+        );
+        assert!(
+            process.diagnostics().contains(&format!("reused={reused}")),
+            "{}",
+            process.diagnostics()
+        );
+        dirs.push(
+            serde_json::from_str::<serde_json::Value>(&process.output()).unwrap()["dir"].clone(),
+        );
+    }
+    assert_ne!(dirs[0], dirs[1]);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "必须由沙箱外宿主运行：cargo test --test launcher_execution -- --ignored --test-threads=1"]
 fn windows_cli_node_private_temp_roundtrip_and_identity_isolation() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let f = Fixture::new();
