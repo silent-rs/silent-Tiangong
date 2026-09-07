@@ -91,9 +91,22 @@ pub struct SubagentService {
 
 impl SubagentService {
     pub fn new() -> Result<Self> {
+        Self::new_with_restore(true)
+    }
+
+    /// 外部接入（MCP）构造：跳过启动恢复——多实例共享存储时，恢复是
+    /// 执行管理者（宿主实例）的职责，外部接入层不得把其他实例正在
+    /// 执行的运行误标为遗留中断。
+    pub fn new_without_restore() -> Result<Self> {
+        Self::new_with_restore(false)
+    }
+
+    fn new_with_restore(restore: bool) -> Result<Self> {
         let agents = AgentStore::open()?;
         let store = Arc::new(RuntimeStore::open()?);
-        Self::restore_orphan_runs(&store);
+        if restore {
+            Self::restore_orphan_runs(&store);
+        }
         let runner = RunnerHub::new();
         let service = Self {
             agents,
@@ -1816,10 +1829,16 @@ impl SubagentService {
             // 随上一轮终结——本轮（正文标注补充、标记同源）作为结果修订：
             // 更新原运行结论并重投发起方，修正不丢失。
             if request.user_text.contains("（补充消息）")
-                && let Some(mut finished) =
-                    self.store.list_runs().into_iter().find(|run| {
-                        run.run_id.ends_with(&tag) && run.status == RunStatus::Completed
-                    })
+                && let Some(mut finished) = self.store.list_runs().into_iter().find(|run| {
+                    // 修订归属校验：只匹配本会话所属成员的工作——跨成员
+                    // 完善须先建立协作关系，不能仅凭标记后缀接受修改。
+                    run.run_id.ends_with(&tag)
+                        && run.status == RunStatus::Completed
+                        && agents.iter().any(|config| {
+                            config.id == run.agent_id
+                                && config.session_id.as_deref() == Some(request.session_id.as_str())
+                        })
+                })
             {
                 let text = request.assistant_text.trim();
                 if text.is_empty() {
@@ -1829,6 +1848,15 @@ impl SubagentService {
                 finished.summary = Some(format!("[含补充修订] {text}"));
                 finished.updated_at = timestamp.clone();
                 self.store.save_run(&finished)?;
+                // 当前有效成果同步到任务结论（运行与任务引用一致结论）。
+                if let Some(task_id) = finished.task_id.clone()
+                    && let Ok(mut task) = self.store.load_task(&task_id)
+                    && task.status == TaskStatus::Completed
+                {
+                    task.result_summary = Some(format!("[含补充修订] {text}"));
+                    task.updated_at = timestamp.clone();
+                    let _ = self.store.save_task(&task);
+                }
                 append_event(
                     &self.store,
                     &finished,
@@ -2616,10 +2644,19 @@ impl SubagentService {
                         "运行标记 r-{marker} 没有匹配的等待中工作；请核对正在处理的消息尾部标记"
                     )
                 })?,
-            None => alive
-                .into_iter()
-                .max_by_key(|run| run.run_id.clone())
-                .ok_or_else(|| anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）"))?,
+            None => {
+                // 无标记缺省仅在恰好一项等待工作时合法；多项时拒绝歧义，
+                // 由成员明确指明——总线不猜测回报归属。
+                if alive.len() > 1 {
+                    bail!(
+                        "当前有 {} 项等待中的工作，回报必须携带 run_marker（正在处理消息尾部的 r-短码）指明对象",
+                        alive.len()
+                    );
+                }
+                alive.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）")
+                })?
+            }
         };
         // 取消/停用裁定优先：停止请求中的工作收到成果时保留备查，
         // 但不恢复为正常完成——是否继续由主 Agent 重新安排。

@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
         .is_some_and(|frame| frame.get("jsonrpc").is_some() && frame.get("method").is_some());
     if is_mcp {
-        let service = Arc::new(service::SubagentService::new()?);
+        let service = Arc::new(service::SubagentService::new_without_restore()?);
         let workspace = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));

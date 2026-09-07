@@ -43,12 +43,6 @@ fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {
             "submit_agent_task",
         ),
         (
-            "report_agent_result",
-            "成员侧主动回报工作结果（在成员执行上下文中调用；带 run_marker 精确关联）。",
-            json!({"type":"object","properties":{"result":{"type":"string"},"status":{"type":"string","enum":["completed","failed","blocked"]},"note":{"type":"string"},"run_marker":{"type":"string"}},"required":["result"]}),
-            "report_agent_result",
-        ),
-        (
             "list_pending_work",
             "查看等待中的工作与协作关系（谁在为谁执行、谁在等结果，含 workspace 域）。",
             json!({"type":"object","properties":{"agent_id":{"type":"string","description":"可选：只看某成员"}}}),
@@ -189,9 +183,11 @@ pub async fn run_mcp(
                 let result = service.dispatch_inner_public(&request).await;
                 let text =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                // 业务失败如实映射为 MCP 错误（外部 Agent 可可靠判断后续动作）。
+                let is_error = result.get("ok").and_then(serde_json::Value::as_bool) == Some(false);
                 rpc_result(
                     id,
-                    json!({ "content": [ { "type": "text", "text": text } ], "isError": false }),
+                    json!({ "content": [ { "type": "text", "text": text } ], "isError": is_error }),
                 )
             }
             other => rpc_error(id, -32601, &format!("未知方法: {other}")),
