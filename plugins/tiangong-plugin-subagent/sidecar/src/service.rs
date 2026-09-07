@@ -106,7 +106,13 @@ impl SubagentService {
             if !run.status.is_alive() {
                 continue;
             }
-            // 本 sidecar 刚启动，不存在属于本代次的活跃子进程；
+            if run.pid.is_none() {
+                // 会话型孤儿：执行在宿主会话内，不因 sidecar 重启而停止——
+                // 保留等待 turn 归因（运行标记仍可精确对号）。
+                tracing::info!(run_id = %run.run_id, "会话型孤儿运行保留，等待归因");
+                continue;
+            }
+            // CLI 孤儿：本 sidecar 刚启动，不存在属于本代次的活跃子进程；
             // 残留 pid 即使存活也不能接管（可能是无关进程）。
             run.status = RunStatus::Interrupted;
             run.finished_at = Some(now.clone());
@@ -115,6 +121,7 @@ impl SubagentService {
             if let Err(error) = store.save_run(&run) {
                 tracing::warn!(run_id = %run.run_id, %error, "恢复孤儿运行状态失败");
             }
+            release_collab_activation(store, &run.activation_id);
             if let Some(task_id) = run.task_id.clone()
                 && let Ok(mut task) = store.load_task(&task_id)
                 && task.status == TaskStatus::Running
@@ -590,6 +597,11 @@ fn sync_task_status(store: &RuntimeStore, run: &RunRecord) {
         | RunStatus::ApprovalRequired => Some(TaskStatus::Running),
         RunStatus::Ready => None,
     };
+    // 逻辑取消是独立裁定：运行状态变化（如停用把 Stopping 映射为执行中）
+    // 不得把已取消的任务改回执行中；终态间的正常流转不受影响。
+    if mapped == Some(TaskStatus::Running) && task.status == TaskStatus::Cancelled {
+        return;
+    }
     if let Some(status) = mapped
         && task.status != status
     {
@@ -1587,8 +1599,13 @@ impl SubagentService {
             })
             .collect();
         // 控制通知（停止/取消请求）触发的回复不是任务结果，忽略——
-        // 其正文以【Subagent 控制】开头。
-        if request.user_text.contains("【Subagent 控制】") {
+        // 只认正文以【Subagent 控制】开头的控制通知本身；任务正文任何
+        // 位置引用这段字样不受影响（仍按运行标记正常归因）。
+        if request
+            .user_text
+            .trim_start()
+            .starts_with("【Subagent 控制】")
+        {
             return Ok("本轮为控制通知的回复，不归因任何运行".to_string());
         }
         // 归因只认运行标记：无标记的轮次（用户在成员会话直接对话等）
@@ -1696,6 +1713,7 @@ impl SubagentService {
             run.summary = Some("天工退出，运行已中断".to_string());
             let _ = self.store.save_run(&run);
             sync_task_status(&self.store, &run);
+            release_collab_activation(&self.store, &run.activation_id);
         }
         tracing::info!("Subagent 总线已停止全部 managed 运行实例");
     }

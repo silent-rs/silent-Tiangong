@@ -221,7 +221,9 @@ impl RunnerHub {
             })
     }
 
-    /// 终止：先发终止信号，宽限内未退出则强杀（同步等待，供取消与退出清理使用）。
+    /// 终止：先发终止信号，宽限内未退出则强杀，并确认实际退出后才返回成功
+    ///（同步等待，供取消与退出清理使用）；强杀后仍存活（沙箱拒绝信号等）
+    /// 返回错误——未确认停止不能向调用方宣告已结束。
     pub async fn terminate(&self, run_id: &str, grace: Duration) -> Result<()> {
         let pid = {
             let guard = self.processes.lock().await;
@@ -239,7 +241,14 @@ impl RunnerHub {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let _ = signal_group(pid, Signal::Kill);
-        Ok(())
+        let kill_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < kill_deadline {
+            if !process_alive(pid) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        anyhow::bail!("进程 {pid} 在终止与强杀后仍未退出（沙箱可能拒绝信号），未确认停止")
     }
 
     /// 关闭 stdin（通知子进程不再有输入，协议要求其自行退出）。
