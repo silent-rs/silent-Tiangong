@@ -21,6 +21,25 @@ use std::sync::Arc;
 
 use tiangong_plugin_sidecar::SidecarConfig;
 
+/// 预读首条非空帧（阻塞至对端发出首帧）：用于协议探测；EOF 返回 None
+///（无对端时交还原生入口的常规行为）。
+fn peek_first_frame() -> anyhow::Result<Option<String>> {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut guard = stdin.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = guard.read_line(&mut line)?;
+        if bytes == 0 {
+            return Ok(None);
+        }
+        if !line.trim().is_empty() {
+            return Ok(Some(line));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -32,15 +51,32 @@ async fn main() -> anyhow::Result<()> {
         .init();
     tracing::info!("subagent sidecar 启动中...");
 
-    // MCP server 模式：外部 agent 工具经标准 MCP（stdio）接入总线。
-    if std::env::args().any(|arg| arg == "--mcp") {
+    // 多协议自动探测：同一入口同时服务宿主（stdio IPC 帧）与外部 agent
+    // 工具（标准 MCP JSON-RPC）——预读首帧判定协议，宿主帧回喂原生循环。
+    let first_line = peek_first_frame()?;
+    let is_mcp = first_line
+        .as_deref()
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .is_some_and(|frame| frame.get("jsonrpc").is_some() && frame.get("method").is_some());
+    if is_mcp {
         let service = Arc::new(service::SubagentService::new()?);
         let workspace = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
-        return mcp::run_mcp(service, workspace).await;
+        return mcp::run_mcp(service, workspace, first_line).await;
     }
 
+    if tiangong_plugin_sidecar::stdio::stdio_requested() {
+        return tiangong_plugin_sidecar::stdio::run_stdio_with_first_line(
+            || {
+                let service = Arc::new(service::SubagentService::new()?);
+                spawn_signal_cleanup(Arc::clone(&service));
+                Ok(service)
+            },
+            first_line,
+        )
+        .await;
+    }
     let config = SidecarConfig::new("subagent");
     tiangong_plugin_sidecar::run(config, || {
         let service = Arc::new(service::SubagentService::new()?);

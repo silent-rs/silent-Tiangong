@@ -161,6 +161,35 @@ const collaborationTimeline = computed(() => {
     .reverse();
 });
 
+/// MCP 接入配置参考（外部 agent 工具的 mcpServers 片段）。
+const mcpCopied = ref(false);
+const mcpConfigSnippet = JSON.stringify(
+  {
+    mcpServers: {
+      'tiangong-subagent': {
+        command: '~/.tiangong/plugins/subagent/tiangong-subagent-sidecar',
+        args: [],
+        env: {
+          TIANGONG_STORAGE_ROOT: '~/.tiangong',
+          TIANGONG_SERVER_URL: 'http://127.0.0.1:9090',
+        },
+      },
+    },
+  },
+  null,
+  2,
+);
+
+async function copyMcpConfig() {
+  try {
+    await navigator.clipboard.writeText(mcpConfigSnippet);
+    mcpCopied.value = true;
+    setTimeout(() => (mcpCopied.value = false), 1500);
+  } catch {
+    mcpCopied.value = false;
+  }
+}
+
 const COLLAB_EVENT_LABELS: Record<string, string> = {
   run_started: '发起运行',
   completed: '完成回报',
@@ -724,6 +753,16 @@ onUnmounted(() => {
           </li>
         </ul>
       </section>
+
+      <section class="collab-panel mcp-panel">
+        <h2>外部工具接入（MCP）</h2>
+        <p class="small muted">
+          Claude Code、Codex 等支持 MCP 的 agent 工具可直接接入 Subagent 总线：成员、任务、协作关系与天工内完全一致。
+          回报投递需要本机 Server 已开启（默认 9090，以实际配置为准）。
+        </p>
+        <pre class="mcp-config">{{ mcpConfigSnippet }}</pre>
+        <button class="btn btn-ghost" type="button" @click="copyMcpConfig">{{ mcpCopied ? '已复制' : '复制配置' }}</button>
+      </section>
     </main>
 
     <AgentForm
@@ -1045,6 +1084,19 @@ onUnmounted(() => {
 .event-origin {
   flex-shrink: 0;
   color: var(--ui-primary, #2563eb);
+}
+
+.mcp-config {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-background, #f7f7f8);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
 }
 
 .collab-panel {

@@ -106,6 +106,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> String {
 pub async fn run_mcp(
     service: std::sync::Arc<SubagentService>,
     workspace: String,
+    first_line: Option<String>,
 ) -> anyhow::Result<()> {
     // MCP 调用方的固定身份：外部会话（回报仍投回其发起关系）。
     crate::service::init_mcp_context("mcp-external", &workspace);
@@ -113,8 +114,15 @@ pub async fn run_mcp(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut seq: u64 = 0;
-    for line in stdin.lock().lines() {
-        let line = line?;
+    let mut pending_first = first_line;
+    loop {
+        let line = match pending_first.take() {
+            Some(first) => first,
+            None => match stdin.lock().lines().next() {
+                Some(line) => line?,
+                None => break,
+            },
+        };
         if line.trim().is_empty() {
             continue;
         }

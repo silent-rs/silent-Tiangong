@@ -171,8 +171,13 @@ Subagent 不是「接任务、执行、返回」的后台执行器，而是**有
 
 ### 0.2.20 追加（用户裁定：总线矩阵测试与 MCP server 能力）
 
-- **MCP server 模式（`--mcp`）**：sidecar 以标准 MCP（stdio JSON-RPC）对外暴露总线——外部 agent 工具（Claude Code、Codex 等）可直连：activate/deactivate、send_agent_message（补充自动关联）、submit_agent_task、report_agent_result（标记关联）、list_pending_work（协作视图）、运行控制与记忆读写，共 13 个工具；与宿主走同一分发与状态机（单一真相源），MCP 调用方以固定外部会话身份执行（回报投回其发起关系）；同步返回操作结果提供快速消息反馈，回报与状态可经查询工具拉取；
+- **MCP server（v0.2.21 起无参数、首帧自动探测）**：sidecar 以标准 MCP（stdio JSON-RPC）对外暴露总线——外部 agent 工具（Claude Code、Codex 等）可直连：activate/deactivate、send_agent_message（补充自动关联）、submit_agent_task、report_agent_result（标记关联）、list_pending_work（协作视图）、运行控制与记忆读写，共 13 个工具；与宿主走同一分发与状态机（单一真相源），MCP 调用方以固定外部会话身份执行（回报投回其发起关系）；同步返回操作结果提供快速消息反馈，回报与状态可经查询工具拉取；
 - **message bus 矩阵测试**：消息类型全集（任务/补充注入/协作/协作补充/主动回报/补充修订/控制中断）在一次会话中顺序流转，逐步核对运行、事件（supplement/revised/completed）、激活登记与释放、协作视图一致性（视图行数=活跃运行数）四层记录——总线行为回归有系统性基线。
+
+### 0.2.21 追加（用户裁定：MCP 无参数化与管理页配置参考）
+
+- **首帧协议探测**：sidecar 启动即同时支持两种协议——预读首帧判定，JSON-RPC（jsonrpc+method）进入 MCP 循环，宿主 IPC 帧回喂原生 stdio 循环（共享库新增 run_stdio_with_first_line 首帧回喂入口），不再需要 --mcp 参数；
+- **管理页配置参考**：Subagent 管理页新增「外部工具接入（MCP）」区块——展示可直接复制的 mcpServers 配置片段（sidecar 路径、存储根、Server 地址占默认值并注明以实际为准）。
 
 ## 关键决策
 

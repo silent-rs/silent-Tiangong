@@ -63,6 +63,18 @@ pub async fn run_stdio<F>(service_factory: F) -> Result<()>
 where
     F: FnOnce() -> Result<Arc<dyn SidecarService>>,
 {
+    run_stdio_with_first_line(service_factory, None).await
+}
+
+/// 带预读首帧的 stdio 入口：协议探测方（如 sidecar 自身多协议分流）已
+/// 消费首行时经此回喂，循环语义与 [`run_stdio`] 完全一致。
+pub async fn run_stdio_with_first_line<F>(
+    service_factory: F,
+    first_line: Option<String>,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<Arc<dyn SidecarService>>,
+{
     let service_name =
         std::env::var("TIANGONG_PLUGIN_ID").unwrap_or_else(|_| "sidecar".to_string());
     start_host_process_monitor()?;
@@ -104,12 +116,19 @@ where
     let active: Arc<tokio::sync::Mutex<HashMap<String, ActiveRequest>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut line = String::new();
+    let mut pending_first = first_line;
     loop {
         line.clear();
-        let bytes = reader
-            .read_line(&mut line)
-            .await
-            .context("读取 stdio 帧失败")?;
+        let bytes = match pending_first.take() {
+            Some(first) => {
+                line.push_str(&first);
+                first.len()
+            }
+            None => reader
+                .read_line(&mut line)
+                .await
+                .context("读取 stdio 帧失败")?,
+        };
         if bytes == 0 {
             tracing::info!(service = %service_name, "stdin 已关闭（宿主退出），stdio sidecar 退出");
             terminate_owned_process_group();
