@@ -101,7 +101,7 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "report_agent_result",
-        "成员主动向发起方回报工作结果（Subagent 专用：在自己的执行会话内调用）。回报会直接送达发起本次工作的主会话或协作成员，并结束对应运行——完成收尾请务必调用本工具回报，而不是只在回复文本里写结论；无法继续时用 failed，等待发起方补充时用 blocked。",
-        r#"{"type":"object","properties":{"result":{"type":"string","description":"回报结果正文（结论、关键产出、未尽事项）"},"status":{"type":"string","enum":["completed","failed","blocked"],"description":"回报状态，默认 completed"},"note":{"type":"string","description":"可选备注（产物位置、后续建议）"}},"required":["result"]}"#,
+        "成员主动向发起方回报工作结果（Subagent 专用：在自己的执行会话内调用）。回报直接送达发起本次工作的主会话或协作成员并结束对应运行——完成收尾务必调用本工具回报，而不是只在回复文本里写结论；无法继续用 failed，等待发起方补充用 blocked。同时处理多项工作时必须带 run_marker（你正在处理的那条消息尾部的 r-短码）精确指明回报对象。",
+        r#"{"type":"object","properties":{"result":{"type":"string","description":"回报结果正文（结论、关键产出、未尽事项）"},"status":{"type":"string","enum":["completed","failed","blocked"],"description":"回报状态，默认 completed"},"note":{"type":"string","description":"可选备注（产物位置、后续建议）"},"run_marker":{"type":"string","description":"运行标记（正在处理消息尾部的 r-短码）；同时处理多项工作时必填"}},"required":["result"]}"#,
     ),
 ];

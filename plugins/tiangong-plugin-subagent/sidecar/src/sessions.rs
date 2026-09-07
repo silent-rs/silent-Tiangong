@@ -83,6 +83,19 @@ pub fn list_sessions() -> Vec<SessionBrief> {
 }
 
 /// 会话是否存在。
+/// 读取会话的工作区（cwd）：协作运行的 workspace 域以发起会话为准，
+/// 不随「最近激活」漂移到其他工作区。
+pub fn session_workspace(session_id: &str) -> Option<String> {
+    let session = load_session_json(session_id).ok()?;
+    session
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+        .filter(|cwd| std::path::Path::new(cwd).is_dir())
+}
+
 pub fn session_exists(session_id: &str) -> bool {
     validate_session_id(session_id).is_ok()
         && sessions_dir()

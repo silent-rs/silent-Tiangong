@@ -327,6 +327,10 @@ pub struct ReportAgentResultRequest {
     /// 可选备注（产物位置、后续建议等）。
     #[serde(default)]
     pub note: Option<String>,
+    /// 运行标记（正在处理消息尾部的 r-短码）：成员管理多项工作时
+    /// 精确关联回报对象；缺省按最新活跃运行。
+    #[serde(default)]
+    pub run_marker: Option<String>,
 }
 
 // ── 响应类型 ───────────────────────────────────────────────────

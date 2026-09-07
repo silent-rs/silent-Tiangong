@@ -548,6 +548,18 @@ async fn handle_exit(
     notify_run_status(&run);
 }
 
+/// workspace 短显示（末两段路径），视图标注用。
+fn short_workspace(workspace: &str) -> String {
+    let mut tail: Vec<&str> = workspace.split('/').filter(|p| !p.is_empty()).collect();
+    if tail.len() > 2 {
+        tail = tail.split_off(tail.len() - 2);
+    }
+    if tail.is_empty() {
+        return workspace.to_string();
+    }
+    format!("…{}", tail.join("/"))
+}
+
 /// 协作激活释放（自由函数版，终态出口与启动失败回滚共用）：协作激活
 /// （collab- 前缀）下已无活跃运行时解除登记，写占用随终态消失。
 fn release_collab_activation(store: &RuntimeStore, activation_id: &str) {
@@ -1139,8 +1151,11 @@ impl SubagentService {
         origin_session: &str,
     ) -> Result<ActivationRecord> {
         Self::ensure_policy_supported(&target.backend, target.workspace_policy)?;
-        let workspace = self
-            .latest_activation_workspace(&target.id)
+        // 协作 workspace 域绑定发起会话的工作区（发起成员专属会话的 cwd）：
+        // 不同 workspace 的协作链互不漂移；发起会话无有效 cwd 才回退
+        // 目标/发起方最近激活，最终回退用户 home。
+        let workspace = crate::sessions::session_workspace(origin_session)
+            .or_else(|| self.latest_activation_workspace(&target.id))
             .or_else(|| self.latest_activation_workspace(&origin.id))
             .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
         if !Path::new(&workspace).is_dir() {
@@ -1192,6 +1207,102 @@ impl SubagentService {
             session: session_id,
             label: format!("成员「{}」（{}）", agent.name, agent.id),
         });
+        // 消息意图关联（有状态成员语义）：追问、补充与纠偏是「对进行中
+        // 工作的追加输入」，不是新执行——发起方在该成员上若有等待中的
+        // 运行（本会话派活或协作委托），消息注入该运行，不新建。
+        // 判定先于任何资源申请：复用工作时不得额外创建激活记录。
+        let injectable = self
+            .store
+            .list_runs()
+            .into_iter()
+            .filter(|run| {
+                run.agent_id == config.id
+                    && run.status.is_alive()
+                    && run.status != RunStatus::Stopping
+                    // 归属判定：本会话发起（协作 origin 或主会话激活）的运行。
+                    && match run.origin_session.as_deref() {
+                        Some(origin) => origin == session_id,
+                        None => run.session_id == session_id,
+                    }
+                    // 后端匹配：会话型注入走投递，CLI 注入走进程通道。
+                    && if config.backend == BackendKind::Cli {
+                        run.pid.is_some()
+                    } else {
+                        run.pid.is_none()
+                    }
+            })
+            .max_by_key(|run| run.run_id.clone());
+        if let Some(run) = injectable {
+            if config.backend == BackendKind::Cli {
+                self.runner
+                    .write_line(
+                        &run.run_id,
+                        &json!({ "type": "user_message", "content": content }),
+                    )
+                    .await?;
+                append_event(
+                    &self.store,
+                    &run,
+                    "user_message",
+                    &json!({ "text": content }),
+                    &now_string(),
+                );
+                return Ok(SendOutcome {
+                    run_id: run.run_id,
+                    injected_into_run: true,
+                });
+            }
+            let source_session = config
+                .session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("成员缺少后端会话，无法注入补充消息"))?
+                .to_string();
+            // 轻量载体仅供投递正文提示（workspace 来自该成员最近激活），
+            // 不落盘——复用工作进行中，不新增占用记录。
+            let workspace = crate::sessions::session_workspace(session_id)
+                .or_else(|| self.latest_activation_workspace(&config.id))
+                .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+            let carrier = ActivationRecord {
+                activation_id: run.activation_id.clone(),
+                agent_id: config.id.clone(),
+                session_id: session_id.to_string(),
+                workspace: workspace.clone(),
+                workspace_policy: config.workspace_policy,
+                source_workspace: workspace,
+                activated_at: now_string(),
+                deactivated_at: None,
+                worktree_retained: false,
+            };
+            // 携带原运行的标记投递：整轮（含补充）按标记归因回原运行；
+            // 正文标注「补充」，归因侧据此识别修订链。
+            let run_tag: String = run.run_id.chars().rev().take(8).collect();
+            let run_tag: String = run_tag.chars().rev().collect();
+            let supplement_content = format!("（补充消息）{content}");
+            self.deliver_session_message(
+                &config,
+                &carrier,
+                &source_session,
+                None,
+                Some(&supplement_content),
+                origin.as_ref(),
+                Some(&run_tag),
+            )
+            .await?;
+            append_event(
+                &self.store,
+                &run,
+                "supplement",
+                &json!({ "text": content }),
+                &now_string(),
+            );
+            notify_run_status(&run);
+            return Ok(SendOutcome {
+                run_id: run.run_id,
+                injected_into_run: true,
+            });
+        }
         let activation = match &origin_agent {
             Some(origin_agent) => {
                 self.synthetic_collab_activation(&config, origin_agent, session_id)?
@@ -1201,88 +1312,6 @@ impl SubagentService {
                 self.active_activation(&config.id, session_id)?
             }
         };
-        // 消息意图关联（有状态成员语义）：追问、补充与纠偏是「对进行中
-        // 工作的追加输入」，不是新执行——发起方在该成员上若有等待中的
-        // 运行（本会话派活或协作委托），消息注入该运行，不新建。
-        if matches!(
-            config.backend,
-            BackendKind::TiangongSession | BackendKind::AgentTeam
-        ) {
-            let existing = self
-                .store
-                .list_runs()
-                .into_iter()
-                .filter(|run| {
-                    run.agent_id == config.id
-                        && run.pid.is_none()
-                        && run.status.is_alive()
-                        && run.status != RunStatus::Stopping
-                        // 归属判定：本会话发起（协作 origin 或主会话激活）的运行。
-                        && match run.origin_session.as_deref() {
-                            Some(origin) => origin == session_id,
-                            None => run.session_id == session_id,
-                        }
-                })
-                .max_by_key(|run| run.run_id.clone());
-            if let Some(run) = existing {
-                let source_session = config
-                    .session_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("成员缺少后端会话，无法注入补充消息"))?
-                    .to_string();
-                // 携带原运行的标记投递：整轮（含补充）按标记归因回原运行。
-                let run_tag: String = run.run_id.chars().rev().take(8).collect();
-                let run_tag: String = run_tag.chars().rev().collect();
-                self.deliver_session_message(
-                    &config,
-                    &activation,
-                    &source_session,
-                    None,
-                    Some(content),
-                    origin.as_ref(),
-                    Some(&run_tag),
-                )
-                .await?;
-                append_event(
-                    &self.store,
-                    &run,
-                    "supplement",
-                    &json!({ "text": content }),
-                    &now_string(),
-                );
-                notify_run_status(&run);
-                return Ok(SendOutcome {
-                    run_id: run.run_id,
-                    injected_into_run: true,
-                });
-            }
-        }
-        // CLI 后端：注入既有活跃运行（进程通道追加输入）。
-        if config.backend == BackendKind::Cli {
-            for run in self.store.list_runs() {
-                if run.activation_id == activation.activation_id && run.status.is_alive() {
-                    self.runner
-                        .write_line(
-                            &run.run_id,
-                            &json!({ "type": "user_message", "content": content }),
-                        )
-                        .await?;
-                    append_event(
-                        &self.store,
-                        &run,
-                        "user_message",
-                        &json!({ "text": content }),
-                        &now_string(),
-                    );
-                    return Ok(SendOutcome {
-                        run_id: run.run_id,
-                        injected_into_run: true,
-                    });
-                }
-            }
-        }
         let run = self
             .spawn_run(
                 &config,
@@ -1760,13 +1789,67 @@ impl SubagentService {
             .find(|run| run.run_id.ends_with(&tag))
             .cloned()
         else {
+            // 修订链：补充消息排在原轮次之后（服务端串行），原运行可能已
+            // 随上一轮终结——本轮（正文标注补充、标记同源）作为结果修订：
+            // 更新原运行结论并重投发起方，修正不丢失。
+            if request.user_text.contains("（补充消息）")
+                && let Some(mut finished) =
+                    self.store.list_runs().into_iter().find(|run| {
+                        run.run_id.ends_with(&tag) && run.status == RunStatus::Completed
+                    })
+            {
+                let text = request.assistant_text.trim();
+                if text.is_empty() {
+                    return Ok("补充轮无回复文本，忽略".to_string());
+                }
+                let timestamp = now_string();
+                finished.summary = Some(format!("[含补充修订] {text}"));
+                finished.updated_at = timestamp.clone();
+                self.store.save_run(&finished)?;
+                append_event(
+                    &self.store,
+                    &finished,
+                    "revised",
+                    &json!({ "text": text }),
+                    &timestamp,
+                );
+                let agents_ref = Some(&self.agents);
+                enqueue_hook(
+                    &self.store,
+                    agents_ref,
+                    &finished,
+                    HookEventType::Message,
+                    json!({ "text": format!("结果修订（补充后）：{text}") }),
+                    &timestamp,
+                );
+                notify_run_status(&finished);
+                return Ok("补充后的修订结果已更新到运行并重投发起方".to_string());
+            }
             return Ok(format!(
                 "运行标记 r-{tag} 无匹配的活跃运行（迟到或重复回报），忽略"
             ));
         };
         let timestamp = now_string();
-        // Stopping（停止/取消请求已投递）的运行：执行侧收尾确认即实际停止，
-        // 终态一律 Cancelled——本轮回复内容不改变已作出的取消裁定。
+        // 轮次结束只表示本轮处理结束，不替成员决定任务状态：成员已明确
+        // 表态（blocked 等待补充 / 待审批）的运行，轮次结束仅记录事件、
+        // 状态保持——只有未表态（working/ready）的运行才由轮次结果收尾；
+        // 停止请求中（Stopping）例外：其轮次结束正是「停止确认」路径，
+        // 落取消终态。
+        if matches!(run.status, RunStatus::Blocked | RunStatus::ApprovalRequired) {
+            append_event(
+                &self.store,
+                &run,
+                "turn_ended",
+                &json!({ "held": run.status.label() }),
+                &timestamp,
+            );
+            return Ok(format!(
+                "本轮处理结束；运行状态保持「{}」（成员已明确表态，不由轮次收尾改写）",
+                run.status.label()
+            ));
+        }
+        // Stopping（停止/取消请求已投递）的收尾确认：终态一律 Cancelled，
+        // 本轮回复内容不改变已作出的取消裁定。
         let status = if run.status == RunStatus::Stopping {
             RunStatus::Cancelled
         } else {
@@ -2410,23 +2493,26 @@ impl SubagentService {
                 .as_deref()
                 .map(origin_label)
                 .unwrap_or_else(|| "主会话".to_string());
+            let short_run: String = run
+                .run_id
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             lines_by_member.push(format!(
-                "- 为 {origin}：{goal}（{}，run …{}）",
+                "- 为 {origin}：{goal}（{}，workspace {}，run …{short_run}）",
                 run.status.label(),
-                run.run_id
-                    .chars()
-                    .rev()
-                    .take(6)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
+                short_workspace(&run.workspace),
             ));
             lines_by_origin.push(format!(
-                "- {} → 成员「{}」：{goal}（{}）",
+                "- {} → 成员「{}」：{goal}（{}，workspace {}）",
                 origin,
                 name_of(&run.agent_id),
-                run.status.label()
+                run.status.label(),
+                short_workspace(&run.workspace)
             ));
             rows.push(json!({
                 "run_id": run.run_id,
@@ -2437,6 +2523,7 @@ impl SubagentService {
                 "goal": goal,
                 "status": run.status.label(),
                 "task_id": run.task_id,
+                "workspace": run.workspace,
             }));
         }
         let mut text = String::new();
@@ -2482,14 +2569,67 @@ impl SubagentService {
                 ) && config.session_id.as_deref() == Some(session_id.as_str())
             })
             .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话，无法回报"))?;
-        // 关联到该成员在此会话上最新的活跃运行（正在处理的工作）。
-        let mut run = self
+        // 关联明确的工作：优先按回报携带的运行标记精确匹配（成员管理多
+        // 项工作时不由系统猜测）；未携带才回退最新活跃运行（单工作场景）。
+        let alive: Vec<RunRecord> = self
             .store
             .list_runs()
             .into_iter()
             .filter(|run| run.agent_id == target.id && run.status.is_alive() && run.pid.is_none())
-            .max_by_key(|run| run.run_id.clone())
-            .ok_or_else(|| anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）"))?;
+            .collect();
+        let marker = request
+            .run_marker
+            .as_deref()
+            .map(str::trim)
+            .map(|s| s.trim_start_matches("r-"))
+            .filter(|s| !s.is_empty());
+        let mut run = match marker {
+            Some(marker) => alive
+                .iter()
+                .find(|run| run.run_id.ends_with(marker))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "运行标记 r-{marker} 没有匹配的等待中工作；请核对正在处理的消息尾部标记"
+                    )
+                })?,
+            None => alive
+                .into_iter()
+                .max_by_key(|run| run.run_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）"))?,
+        };
+        // 取消/停用裁定优先：停止请求中的工作收到成果时保留备查，
+        // 但不恢复为正常完成——是否继续由主 Agent 重新安排。
+        if run.status == RunStatus::Stopping {
+            let timestamp = now_string();
+            run.status = RunStatus::Cancelled;
+            run.summary = Some(format!("[停止请求中收到的成果备查] {result}"));
+            run.finished_at = Some(timestamp.clone());
+            run.updated_at = timestamp.clone();
+            self.store.save_run(&run)?;
+            sync_task_status(&self.store, &run);
+            self.release_collab_activation_if_idle(&run);
+            append_event(
+                &self.store,
+                &run,
+                "cancelled",
+                &json!({ "text": "停止确认；成员后续送达的成果已备查" }),
+                &timestamp,
+            );
+            let agents_ref = Some(&self.agents);
+            enqueue_hook(
+                &self.store,
+                agents_ref,
+                &run,
+                HookEventType::Message,
+                json!({ "text": format!("已请求停止的工作收到成员成果（备查，不改变取消裁定）：{result}") }),
+                &timestamp,
+            );
+            notify_run_status(&run);
+            return Ok(tool_ok(
+                "该工作已请求停止：成果已备查并转达发起方，取消裁定保持不变".to_string(),
+            ));
+        }
         let timestamp = now_string();
         if let Some(note) = request
             .note
