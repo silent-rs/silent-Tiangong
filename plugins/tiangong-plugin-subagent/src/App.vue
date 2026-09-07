@@ -375,7 +375,7 @@ interface WorkspaceState {
   paths: string[];
   plan: string;
   context: string;
-  task_notes: string[];
+  task: string;
 }
 
 const workspaceStates = ref<Record<string, WorkspaceState[]>>({});
@@ -699,7 +699,8 @@ onUnmounted(() => {
               <pre v-if="ws.plan" class="ws-content">{{ ws.plan }}</pre>
               <p v-if="ws.context" class="ws-section"><strong>背景</strong></p>
               <pre v-if="ws.context" class="ws-content">{{ ws.context }}</pre>
-              <p v-if="ws.task_notes?.length" class="ws-section small muted">任务笔记：{{ ws.task_notes.join('、') }}</p>
+              <p v-if="ws.task" class="ws-section"><strong>当前工作</strong></p>
+              <pre v-if="ws.task" class="ws-content">{{ ws.task }}</pre>
             </div>
           </div>
           <div class="detail-block">

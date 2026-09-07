@@ -63,7 +63,7 @@ fn workspace_id(agents: &AgentStore, agent_id: &str, workspace_path: &str) -> Re
     entries.push(serde_json::json!({ "id": id, "path": workspace_path.clone() }));
     paths::atomic_write(&index_path, serde_json::to_string(&index)?.as_bytes())?;
     let ws_dir = dir.join(&id);
-    std::fs::create_dir_all(ws_dir.join("tasks"))?;
+    std::fs::create_dir_all(&ws_dir)?;
     let meta = serde_json::json!({
         "workspace_id": id,
         "paths": [workspace_path.clone()],

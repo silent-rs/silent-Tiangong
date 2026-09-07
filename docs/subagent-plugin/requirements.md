@@ -241,6 +241,12 @@ agents/<agent-id>/
 - `update_workspace_state` 支持 plan/context/task 三文件（整文件覆盖）；`load_workspace_state` 返回三文件全文；投递注入按三等分配额（当前工作最优先展示）；
 - 成员状态工具收敛为 load/update_workspace_state 两类——save_task_note、create/update/read/list_workspace_task 已移除。
 
+**0.2.28 追加（用户裁定：十二轮——迁移一致性收尾）**
+
+- **Prompt 修正**：移除对已删工具（create/update_workspace_task、save_task_note）的引用，改为「update_workspace_state 的 task 文件维护当前工作与待办、plan 更新规划、context 积累背景」；
+- **管理页**：task_notes 字段改为 task（与 plan/context 同等展示完整内容）；
+- **目录清理**：新工作区初始化不再创建 tasks/ 子目录（旧骨架数据无兼容负担——分支未发布，v0.2.26 编号任务工具的生命周期内无外部用户）。
+
 **sidecar 收敛方向（依赖成员状态能力成熟，分阶段执行，不一步撤销现有可靠性基础）**：收敛项——按最新运行猜归属、轮次结束自动认定完成、从回复文本推断修订、替成员决定记忆归档。执行事实层（送达/退出/中断/占用）与消息路由、身份与 workspace 上下文传递、状态存取、查询视图保留。
 
 ## 关键决策
