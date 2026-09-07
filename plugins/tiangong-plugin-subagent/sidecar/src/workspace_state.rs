@@ -120,7 +120,7 @@ pub fn load(
 }
 
 /// 写入成员工作状态文件（plan/context——整文件覆盖，调用方为持有
-/// 有序锁的成员侧写入；任务笔记走独立文件追加）。
+/// 有序锁的成员侧写入；task 为当前工作与待办，三文件均整文件覆盖）。
 pub fn write(
     agents: &AgentStore,
     agent_id: &str,

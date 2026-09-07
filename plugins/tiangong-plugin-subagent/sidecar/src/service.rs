@@ -2505,7 +2505,7 @@ impl SubagentService {
     }
 
     /// 成员自维护工作区状态（读）：按当前会话上下文的工作区解析稳定
-    /// 身份后读取 plan/context/任务笔记——sidecar 只存取不理解。
+    /// 身份后读取 plan/context/task——sidecar 只存取不理解。
     /// 解析目标成员：显式编号优先；缺省=当前会话归属的成员（自己）；
     /// 非成员会话且未提供编号时明确失败。
     fn resolve_state_target(&self, agent_id: &str, session_id: &str) -> Result<String> {

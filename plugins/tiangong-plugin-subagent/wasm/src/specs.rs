@@ -96,7 +96,7 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "load_workspace_state",
-        "读取成员在某工作区的自维护工作状态（工作规划 plan、背景约定 context、任务笔记清单）——收到消息后先加载，判断新工作/补充/协作结果/控制意图，决定关联、拆分或调整。",
+        "读取成员在某工作区的自维护工作状态：工作规划 plan、背景约定 context 和当前工作 task——收到消息后先加载，判断新工作/补充/协作结果/控制意图，决定关联、拆分或调整。",
         r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID（缺省=自己）"}},"required":["agent_id"]}"#,
     ),
     (
