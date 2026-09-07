@@ -16,6 +16,160 @@ use crate::permission::TrustMode;
 use crate::session::MessageRole;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
+    use crate::core::plugin::Plugin;
+    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::tool_override::{
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OrderedPlugin {
+        id: &'static str,
+        names: [&'static str; 2],
+        calls: AtomicUsize,
+    }
+    impl Plugin for OrderedPlugin {
+        fn id(&self) -> &str {
+            self.id
+        }
+    }
+    impl MentionCandidateProvider for OrderedPlugin {}
+    impl ToolOverrideHandler for OrderedPlugin {}
+    impl PromptSectionProvider for OrderedPlugin {
+        fn prompt_sections(&self) -> Vec<String> {
+            vec![format!("插件提示:{}", self.id)]
+        }
+    }
+    impl ToolSpecProvider for OrderedPlugin {
+        fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
+            let mut names = self.names;
+            if self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+                names.reverse();
+            }
+            names
+                .iter()
+                .map(|name| crate::model::ToolSpec {
+                    name: (*name).into(),
+                    description: self.id.into(),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                })
+                .collect()
+        }
+    }
+
+    let (env, sid) = TestEnv::new("plugin-order");
+    let server = MockServer::builder().start().await;
+    mount_prompt_router(
+        &server,
+        vec![PromptRoute::new(
+            "answer",
+            |_| true,
+            MockReply::sse(stream_text_chunks(&["完成"])),
+        )],
+    )
+    .await;
+    let mut session = crate::session::Session::new("顺序验证");
+    session.id = sid.clone();
+    session.bind_storage_root(&env.root);
+    session.try_persist_to_disk().unwrap();
+    let mut previous: Option<serde_json::Value> = None;
+    let mut system_id = None;
+    // 每次重建模拟不同的插件发现顺序，每个实例内再连续发送两轮用户消息。
+    for (generation, order) in [
+        [0, 1, 2],
+        [2, 0, 1],
+        [1, 2, 0],
+        [0, 2, 1],
+        [1, 0, 2],
+        [2, 1, 0],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let plugins: Vec<Arc<dyn Plugin>> = order
+            .into_iter()
+            .map(|index| {
+                let (id, names) = [
+                    ("zeta", ["a_last", "b_last"]),
+                    ("prompt", ["identity_b", "identity_a"]),
+                    ("alpha", ["z_first", "y_first"]),
+                ][index];
+                Arc::new(OrderedPlugin {
+                    id,
+                    names,
+                    calls: AtomicUsize::new(generation),
+                }) as Arc<dyn Plugin>
+            })
+            .collect();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let core = super::TiangongCore::builder()
+            .session_id(sid.clone())
+            .config(CoreConfigProvider::new(
+                CoreConfig::builder()
+                    .with_chat(&server.uri(), "test-key", "test-model")
+                    .with_trust_mode(TrustMode::FullTrust)
+                    .build(),
+            ))
+            .trust_mode(TrustMode::FullTrust)
+            .storage_root(env.root.clone())
+            .workspace_dir(env.root.to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(plugins)
+            .build();
+        for round in 0..2 {
+            let id = format!("msg-{generation}-{round}");
+            send_message(&core, &id, "继续");
+            assert_eq!(
+                wait_turn_status(&env, &sid, &id).await,
+                TurnStatus::Success,
+                "events: {:?}",
+                event_rx.try_iter().collect::<Vec<_>>()
+            );
+            wait_idle(&sid).await;
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), generation * 2 + round + 1);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+            let names: Vec<_> = payload["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "plugin_injection",
+                    "identity_a",
+                    "identity_b",
+                    "y_first",
+                    "z_first",
+                    "a_last",
+                    "b_last"
+                ]
+            );
+            let system = payload["messages"][0]["content"].as_str().unwrap();
+            assert!(system.starts_with("插件提示:prompt\n\n插件提示:alpha\n\n插件提示:zeta\n\n"));
+            if let Some(previous) = &previous {
+                assert_eq!(previous["tools"], payload["tools"]);
+                let old = previous["messages"].as_array().unwrap();
+                let new = payload["messages"].as_array().unwrap();
+                assert_eq!(new.len(), old.len() + 2);
+                assert_eq!(&new[..old.len()], old.as_slice());
+            }
+            previous = Some(payload);
+            let current_id = env.load_session(&sid).system_prompt_message.unwrap().id;
+            if let Some(system_id) = &system_id {
+                assert_eq!(system_id, &current_id);
+            }
+            system_id = Some(current_id);
+        }
+        core.shutdown_join().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plain_question_completes_with_done_event() {
     let (env, sid) = TestEnv::new("plain");
     let server = MockServer::builder().start().await;

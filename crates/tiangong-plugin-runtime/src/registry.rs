@@ -544,7 +544,7 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
     };
 
     let configured = configured_model_capabilities();
-    let plugin_ids = {
+    let mut plugin_ids = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return Vec::new();
         };
@@ -567,6 +567,11 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
             .collect::<Vec<_>>()
     };
 
+    plugin_ids.sort_by(|left, right| {
+        (left != "prompt")
+            .cmp(&(right != "prompt"))
+            .then_with(|| left.cmp(right))
+    });
     plugin_ids
         .into_iter()
         .filter_map(|plugin_id| load_core_plugin(&plugin_id, runtime))

@@ -269,7 +269,7 @@ impl TiangongCore {
             .lite_client(lite_client)
             .session(session)
             .stream_tx(stream_tx)
-            .plugins(plugins)
+            .plugins(prepared_plugins.plugins)
             .context_limit(config.context_limit)
             .agent_config(crate::agent_config::AgentConfig {
                 trust_mode,
