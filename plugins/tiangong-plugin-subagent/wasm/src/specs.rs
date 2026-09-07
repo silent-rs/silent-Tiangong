@@ -36,8 +36,8 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "send_agent_message",
-        "向指定 Subagent 发送普通消息：用于追问、补充背景、纠正方向和一般交流。有运行实例时注入当前运行，否则启动一次轻量消息往返；回复经反馈通道返回发起会话。Subagent 成员之间也可用它互相发送协作消息（agent_id 支持成员 ID 或名称，目标成员无需在发起会话激活，对方完成后回复自动送回发起会话）。",
-        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标成员的 Agent ID 或名称（主会话发起时须已在当前会话激活；成员间协作无需激活）"},"content":{"type":"string","description":"消息内容"}},"required":["agent_id","content"]}"#,
+        "向指定 Subagent 发送补充消息：追问、补充背景、纠正方向。该成员在本发起方若有进行中的工作，消息自动关联该工作（不新建执行，最终结果合并回报）；没有进行中的工作时才启动一次轻量消息往返。有明确目标和完成条件的正式工作请用 submit_agent_task。Subagent 成员之间也可用它发送协作消息（agent_id 支持成员 ID 或名称，目标无需在发起会话激活）。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"目标成员的 Agent ID 或名称（主会话发起时须已在当前会话激活；成员间协作无需激活）"},"content":{"type":"string","description":"消息内容（补充/纠偏/协作）"}},"required":["agent_id","content"]}"#,
     ),
     (
         "submit_agent_task",

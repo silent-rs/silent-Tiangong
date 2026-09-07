@@ -1200,8 +1200,65 @@ impl SubagentService {
                 self.active_activation(&config.id, session_id)?
             }
         };
-        // 注入既有活跃运行（纠偏/追问语义；仅 CLI 后端有注入通道，
-        // 会话后端始终新建投递）。
+        // 消息意图关联（有状态成员语义）：追问、补充与纠偏是「对进行中
+        // 工作的追加输入」，不是新执行——发起方在该成员上若有等待中的
+        // 运行（本会话派活或协作委托），消息注入该运行，不新建。
+        if matches!(
+            config.backend,
+            BackendKind::TiangongSession | BackendKind::AgentTeam
+        ) {
+            let existing = self
+                .store
+                .list_runs()
+                .into_iter()
+                .filter(|run| {
+                    run.agent_id == config.id
+                        && run.pid.is_none()
+                        && run.status.is_alive()
+                        && run.status != RunStatus::Stopping
+                        // 归属判定：本会话发起（协作 origin 或主会话激活）的运行。
+                        && match run.origin_session.as_deref() {
+                            Some(origin) => origin == session_id,
+                            None => run.session_id == session_id,
+                        }
+                })
+                .max_by_key(|run| run.run_id.clone());
+            if let Some(run) = existing {
+                let source_session = config
+                    .session_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("成员缺少后端会话，无法注入补充消息"))?
+                    .to_string();
+                // 携带原运行的标记投递：整轮（含补充）按标记归因回原运行。
+                let run_tag: String = run.run_id.chars().rev().take(8).collect();
+                let run_tag: String = run_tag.chars().rev().collect();
+                self.deliver_session_message(
+                    &config,
+                    &activation,
+                    &source_session,
+                    None,
+                    Some(content),
+                    origin.as_ref(),
+                    Some(&run_tag),
+                )
+                .await?;
+                append_event(
+                    &self.store,
+                    &run,
+                    "supplement",
+                    &json!({ "text": content }),
+                    &now_string(),
+                );
+                notify_run_status(&run);
+                return Ok(SendOutcome {
+                    run_id: run.run_id,
+                    injected_into_run: true,
+                });
+            }
+        }
+        // CLI 后端：注入既有活跃运行（进程通道追加输入）。
         if config.backend == BackendKind::Cli {
             for run in self.store.list_runs() {
                 if run.activation_id == activation.activation_id && run.status.is_alive() {
