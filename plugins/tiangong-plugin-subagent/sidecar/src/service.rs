@@ -262,11 +262,6 @@ impl SubagentService {
             TOOL_LIST_PENDING_WORK => self.tool_list_pending_work(&payload).await,
             TOOL_LOAD_WORKSPACE_STATE => self.tool_load_workspace_state(&payload).await,
             TOOL_UPDATE_WORKSPACE_STATE => self.tool_update_workspace_state(&payload).await,
-            TOOL_SAVE_TASK_NOTE => self.tool_save_task_note(&payload).await,
-            TOOL_CREATE_WORKSPACE_TASK => self.tool_create_workspace_task(&payload).await,
-            TOOL_UPDATE_WORKSPACE_TASK => self.tool_update_workspace_task(&payload).await,
-            TOOL_READ_WORKSPACE_TASK => self.tool_read_workspace_task(&payload).await,
-            TOOL_LIST_WORKSPACE_TASKS => self.tool_list_workspace_tasks(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -2526,18 +2521,6 @@ impl SubagentService {
             })
     }
 
-    /// 成员会话内写入自维护数据的身份校验：仅成员自己。
-    fn ensure_self_write(&self, target: &str, session_id: &str) -> Result<()> {
-        let is_self =
-            self.agents.list().into_iter().any(|config| {
-                config.id == target && config.session_id.as_deref() == Some(session_id)
-            });
-        if !is_self {
-            bail!("该数据由成员自己维护：只有成员自己的执行会话可写入");
-        }
-        Ok(())
-    }
-
     async fn tool_load_workspace_state(
         &self,
         payload: &serde_json::Value,
@@ -2547,66 +2530,6 @@ impl SubagentService {
         let target = self.resolve_state_target(request.agent_id.as_str(), &session_id)?;
         let state = crate::workspace_state::load(&self.agents, &target, &workspace)?;
         Ok(json!({ "ok": true, "state": state }))
-    }
-
-    async fn tool_create_workspace_task(
-        &self,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let (session_id, workspace) = Self::require_context()?;
-        let request: CreateWorkspaceTaskRequest = parse_request(payload)?;
-        let target = self
-            .resolve_state_target(request.agent_id.as_deref().unwrap_or_default(), &session_id)?;
-        self.ensure_self_write(&target, &session_id)?;
-        let body = request
-            .content
-            .unwrap_or_else(|| format!("# {}\n", request.title));
-        let (wid, task_id) =
-            crate::workspace_state::create_task(&self.agents, &target, &workspace, &body)?;
-        Ok(json!({ "ok": true, "workspace_id": wid, "task_id": task_id }))
-    }
-
-    async fn tool_update_workspace_task(
-        &self,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let (session_id, workspace) = Self::require_context()?;
-        let request: UpdateWorkspaceTaskRequest = parse_request(payload)?;
-        let target = self
-            .resolve_state_target(request.agent_id.as_deref().unwrap_or_default(), &session_id)?;
-        self.ensure_self_write(&target, &session_id)?;
-        let wid = crate::workspace_state::update_task(
-            &self.agents,
-            &target,
-            &workspace,
-            &request.task_id,
-            &request.content,
-        )?;
-        Ok(json!({ "ok": true, "workspace_id": wid, "task_id": request.task_id }))
-    }
-
-    async fn tool_read_workspace_task(
-        &self,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let (session_id, workspace) = Self::require_context()?;
-        let request: ReadWorkspaceTaskRequest = parse_request(payload)?;
-        let target = self
-            .resolve_state_target(request.agent_id.as_deref().unwrap_or_default(), &session_id)?;
-        let content =
-            crate::workspace_state::read_task(&self.agents, &target, &workspace, &request.task_id)?;
-        Ok(json!({ "ok": true, "content": content }))
-    }
-
-    async fn tool_list_workspace_tasks(
-        &self,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let (session_id, workspace) = Self::require_context()?;
-        let request: AgentIdRequest = parse_request(payload)?;
-        let target = self.resolve_state_target(request.agent_id.as_str(), &session_id)?;
-        let tasks = crate::workspace_state::list_tasks(&self.agents, &target, &workspace)?;
-        Ok(tasks)
     }
 
     /// 成员写工作状态（plan/context）：写入方为该成员自己的会话
@@ -2643,36 +2566,6 @@ impl SubagentService {
             &request.content,
         )?;
         Ok(json!({ "ok": true, "workspace_id": id }))
-    }
-
-    /// 任务笔记：tasks/ 独立文件（多任务互不覆盖），限成员自己写入。
-    async fn tool_save_task_note(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
-        let (session_id, workspace) = Self::require_context()?;
-        let request: SaveTaskNoteRequest = parse_request(payload)?;
-        let agent_id = request.agent_id.as_deref().unwrap_or_default();
-        let target = if agent_id.is_empty() {
-            self.collaboration_origin(&session_id)
-                .map(|config| config.id)
-                .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话"))?
-        } else {
-            agent_id.to_string()
-        };
-        if !agent_id.is_empty() {
-            let is_self = self.agents.list().into_iter().any(|config| {
-                config.id == target && config.session_id.as_deref() == Some(session_id.as_str())
-            });
-            if !is_self {
-                bail!("任务笔记由成员自己维护：只有成员自己的执行会话可写入");
-            }
-        }
-        let id = crate::workspace_state::save_task_note(
-            &self.agents,
-            &target,
-            &workspace,
-            &request.note_name,
-            &request.content,
-        )?;
-        Ok(json!({ "ok": true, "workspace_id": id, "note": request.note_name }))
     }
 
     /// 协作关系视图：谁在为谁执行、每个发起方在等谁的结果——从运行

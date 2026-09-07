@@ -33,12 +33,7 @@ pub const TOOL_APPEND_AGENT_INSTRUCTIONS: &str = "append_agent_instructions";
 pub const TOOL_REPORT_AGENT_RESULT: &str = "report_agent_result";
 pub const TOOL_LIST_PENDING_WORK: &str = "list_pending_work";
 pub const TOOL_LOAD_WORKSPACE_STATE: &str = "load_workspace_state";
-pub const TOOL_CREATE_WORKSPACE_TASK: &str = "create_workspace_task";
-pub const TOOL_UPDATE_WORKSPACE_TASK: &str = "update_workspace_task";
-pub const TOOL_READ_WORKSPACE_TASK: &str = "read_workspace_task";
-pub const TOOL_LIST_WORKSPACE_TASKS: &str = "list_workspace_tasks";
 pub const TOOL_UPDATE_WORKSPACE_STATE: &str = "update_workspace_state";
-pub const TOOL_SAVE_TASK_NOTE: &str = "save_task_note";
 
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
@@ -64,11 +59,6 @@ pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_LIST_PENDING_WORK,
     TOOL_LOAD_WORKSPACE_STATE,
     TOOL_UPDATE_WORKSPACE_STATE,
-    TOOL_SAVE_TASK_NOTE,
-    TOOL_CREATE_WORKSPACE_TASK,
-    TOOL_UPDATE_WORKSPACE_TASK,
-    TOOL_READ_WORKSPACE_TASK,
-    TOOL_LIST_WORKSPACE_TASKS,
 ];
 
 // ── UI 操作名 ──────────────────────────────────────────────────
@@ -323,34 +313,6 @@ pub struct AppendAgentInstructionsRequest {
     pub addition: String,
 }
 
-/// 创建成员任务：系统生成稳定编号，初始内容为完整任务正文。
-#[derive(Debug, Deserialize)]
-pub struct CreateWorkspaceTaskRequest {
-    pub title: String,
-    /// 完整任务正文（目标/完成条件/进展等，markdown）。
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-}
-
-/// 按稳定编号更新成员任务（整文件覆盖）。
-#[derive(Debug, Deserialize)]
-pub struct UpdateWorkspaceTaskRequest {
-    pub task_id: String,
-    pub content: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-}
-
-/// 按稳定编号读取成员任务。
-#[derive(Debug, Deserialize)]
-pub struct ReadWorkspaceTaskRequest {
-    pub task_id: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-}
-
 /// 写入成员自维护的工作区状态（plan / context 整文件覆盖，成员有序写入）。
 #[derive(Debug, Deserialize)]
 pub struct UpdateWorkspaceStateRequest {
@@ -358,15 +320,6 @@ pub struct UpdateWorkspaceStateRequest {
     pub file: String,
     pub content: String,
     /// 可选：操作其他成员的工作区状态（默认当前归属成员自己）。
-    #[serde(default)]
-    pub agent_id: Option<String>,
-}
-
-/// 任务笔记：tasks/ 下独立文件，多任务互不覆盖。
-#[derive(Debug, Deserialize)]
-pub struct SaveTaskNoteRequest {
-    pub note_name: String,
-    pub content: String,
     #[serde(default)]
     pub agent_id: Option<String>,
 }

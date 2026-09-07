@@ -3,7 +3,7 @@
 //! 解析（路径→workspace-id），不理解业务内容——工作含义由成员维护，
 //! 执行事实由运行记录维护，两类状态分离。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
@@ -97,7 +97,7 @@ fn state_dir(agents: &AgentStore, agent_id: &str, workspace_id: &str) -> Result<
     Ok(workspaces_dir(agents, agent_id)?.join(workspace_id))
 }
 
-/// 读取成员在某工作区的自维护状态（plan + context + 任务笔记清单）。
+/// 读取成员在某工作区的自维护状态（plan + context + task）。
 pub fn load(
     agents: &AgentStore,
     agent_id: &str,
@@ -110,22 +110,12 @@ pub fn load(
             .map(|body| body.trim().to_string())
             .unwrap_or_default()
     };
-    let mut tasks: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir.join("tasks")) {
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .collect();
-        names.sort();
-        tasks = names;
-    }
     Ok(serde_json::json!({
         "workspace_id": id,
         "workspace_path": workspace_path,
         "plan": read("plan.md"),
         "context": read("context.md"),
-        "task_notes": tasks,
+        "task": read("task.md"),
     }))
 }
 
@@ -143,131 +133,11 @@ pub fn write(
     let name = match file {
         "plan" => "plan.md",
         "context" => "context.md",
-        other => bail!("工作状态只支持 plan / context 文件（任务笔记用任务专用入口）: {other}"),
+        "task" => "task.md",
+        other => bail!("工作状态只支持 plan / context / task 文件: {other}"),
     };
     paths::atomic_write(&dir.join(name), content.as_bytes())?;
     Ok(id)
-}
-
-/// 任务笔记：tasks/<note>.md 独立文件写入（互不覆盖）。
-pub fn save_task_note(
-    agents: &AgentStore,
-    agent_id: &str,
-    workspace_path: &str,
-    note_name: &str,
-    content: &str,
-) -> Result<String> {
-    let id = workspace_id(agents, agent_id, workspace_path)?;
-    let dir = state_dir(agents, agent_id, &id)?;
-    let safe: String = note_name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || !c.is_ascii())
-        .collect();
-    let safe = safe.trim().trim_matches('.').to_string();
-    if safe.is_empty() || safe.contains('/') || safe.contains('\\') {
-        bail!("任务笔记名不能为空且不得包含路径分隔符");
-    }
-    let path = dir.join("tasks").join(format!("{safe}.md"));
-    if !path.is_absolute() || Path::new(&path).parent() != Some(dir.join("tasks").as_path()) {
-        bail!("非法任务笔记名");
-    }
-    paths::atomic_write(&path, content.as_bytes())?;
-    Ok(id)
-}
-
-/// 创建成员任务：系统生成稳定编号，文件身份不受名称清洗影响。
-pub fn create_task(
-    agents: &AgentStore,
-    agent_id: &str,
-    workspace_path: &str,
-    initial_content: &str,
-) -> Result<(String, String)> {
-    let id = workspace_id(agents, agent_id, workspace_path)?;
-    let dir = state_dir(agents, agent_id, &id)?;
-    let task_id = format!("t-{}", paths::new_id());
-    paths::atomic_write(
-        &dir.join("tasks").join(format!("{task_id}.md")),
-        initial_content.as_bytes(),
-    )?;
-    Ok((id, task_id))
-}
-
-/// 按稳定编号更新任务（整文件覆盖）。
-pub fn update_task(
-    agents: &AgentStore,
-    agent_id: &str,
-    workspace_path: &str,
-    task_id: &str,
-    content: &str,
-) -> Result<String> {
-    let id = workspace_id(agents, agent_id, workspace_path)?;
-    let dir = state_dir(agents, agent_id, &id)?;
-    let safe = task_id.trim();
-    if !safe.starts_with("t-") || safe.contains('/') || safe.contains('\\') {
-        bail!("非法任务编号: {task_id}");
-    }
-    let path = dir.join("tasks").join(format!("{safe}.md"));
-    if !path.is_file() {
-        bail!("任务不存在: {safe}（先创建再更新）");
-    }
-    paths::atomic_write(&path, content.as_bytes())?;
-    Ok(id)
-}
-
-/// 按稳定编号读取任务。
-pub fn read_task(
-    agents: &AgentStore,
-    agent_id: &str,
-    workspace_path: &str,
-    task_id: &str,
-) -> Result<String> {
-    let id = workspace_id(agents, agent_id, workspace_path)?;
-    let dir = state_dir(agents, agent_id, &id)?;
-    let safe = task_id.trim();
-    if !safe.starts_with("t-") || safe.contains('/') || safe.contains('\\') {
-        bail!("非法任务编号: {task_id}");
-    }
-    let path = dir.join("tasks").join(format!("{safe}.md"));
-    if !path.is_file() {
-        bail!("任务不存在: {safe}");
-    }
-    Ok(std::fs::read_to_string(path)?)
-}
-
-/// 列举当前 workspace 的任务（编号 + 首行摘要）。
-pub fn list_tasks(
-    agents: &AgentStore,
-    agent_id: &str,
-    workspace_path: &str,
-) -> Result<serde_json::Value> {
-    let id = workspace_id(agents, agent_id, workspace_path)?;
-    let dir = state_dir(agents, agent_id, &id)?;
-    let mut tasks = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir.join("tasks")) {
-        let mut files: Vec<_> = entries
-            .into_iter()
-            .flatten()
-            .filter(|e| {
-                e.path().extension().is_some_and(|ext| ext == "md")
-                    && e.file_name().to_string_lossy().starts_with("t-")
-            })
-            .collect();
-        files.sort_by_key(|e| e.file_name());
-        for entry in files {
-            let name = entry.file_name().into_string().unwrap_or_default();
-            let task_id = name.trim_end_matches(".md").to_string();
-            let summary = std::fs::read_to_string(entry.path())
-                .ok()
-                .and_then(|body| {
-                    body.lines()
-                        .find(|line| line.starts_with("# "))
-                        .map(|line| line.trim_start_matches("# ").to_string())
-                })
-                .unwrap_or_default();
-            tasks.push(serde_json::json!({ "task_id": task_id, "title": summary }));
-        }
-    }
-    Ok(serde_json::json!({ "workspace_id": id, "tasks": tasks }))
 }
 
 /// 列举成员全部工作区的自维护状态（管理页/外部查询视图用）。
@@ -289,24 +159,12 @@ pub fn list_all(agents: &AgentStore, agent_id: &str) -> Result<serde_json::Value
                 .map(|body| body.trim().to_string())
                 .unwrap_or_default()
         };
-        let notes: Vec<String> = std::fs::read_dir(ws_dir.join("tasks"))
-            .map(|entries| {
-                let mut names: Vec<String> = entries
-                    .flatten()
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
-                names.sort();
-                names
-            })
-            .unwrap_or_default();
         items.push(serde_json::json!({
             "workspace_id": id,
             "paths": meta.get("paths").cloned().unwrap_or(serde_json::json!([])),
             "plan": read("plan.md"),
             "context": read("context.md"),
-            "task_notes": notes,
-            "task_ids": notes.iter().filter(|n| n.starts_with("t-")).collect::<Vec<_>>(),
+            "task": read("task.md"),
         }));
     }
     Ok(serde_json::json!({ "workspaces": items }))
@@ -317,6 +175,10 @@ pub fn injection_summary(agents: &AgentStore, agent_id: &str, workspace_path: &s
     let Ok(state) = load(agents, agent_id, workspace_path) else {
         return String::new();
     };
+    let task = state
+        .get("task")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let plan = state
         .get("plan")
         .and_then(|v| v.as_str())
@@ -325,21 +187,22 @@ pub fn injection_summary(agents: &AgentStore, agent_id: &str, workspace_path: &s
         .get("context")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if plan.trim().is_empty() && context.trim().is_empty() {
+    if task.trim().is_empty() && plan.trim().is_empty() && context.trim().is_empty() {
         return String::new();
     }
+    let per_part = STATE_INJECTION_MAX_CHARS / 3;
     let truncate = |text: &str| {
-        if text.chars().count() > STATE_INJECTION_MAX_CHARS / 2 {
-            text.chars()
-                .take(STATE_INJECTION_MAX_CHARS / 2)
-                .collect::<String>()
-                + "…"
+        if text.chars().count() > per_part {
+            text.chars().take(per_part).collect::<String>() + "…"
         } else {
             text.to_string()
         }
     };
     let mut body =
         String::from("\n\n【工作区状态】（你在本工作区的自维护状态，收尾时用工作区状态工具更新）");
+    if !task.trim().is_empty() {
+        body.push_str(&format!("\n当前工作：\n{}", truncate(task)));
+    }
     if !plan.trim().is_empty() {
         body.push_str(&format!("\n规划：\n{}", truncate(plan)));
     }

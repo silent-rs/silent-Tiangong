@@ -235,6 +235,12 @@ agents/<agent-id>/
 - **MCP 按定位收窄**：仅保留 list_agents / send_agent_message / load_workspace_state / list_pending_work（查询、快速消息、公开状态查询）；激活停用、任务提交、运行控制、外部回报、记忆读写全部移除——修改类操作统一经成员消息入口（主 Agent 或 MCP 发消息→成员按内置规则处理）。外部凭据回报入口保留于 sidecar（report_by_marker 标注过渡，供后续外部消息通道复用）；
 - **裁定撤回归档**：成员可为未绑定 workspace 写状态（无绑定要求）与首次加载按需初始化——不再视为问题。
 
+**0.2.27 追加（用户裁定：十一轮——tasks/ 收敛为单 task.md）**
+
+- **单 task.md 模型**：移除 tasks/ 目录、save_task_note 与四个稳定编号任务工具——每个 workspace 维护统一的三文件（plan.md=中长期规划 / context.md=背景约定 / task.md=当前工作与待办）。task.md 内部多项工作由成员自行组织（内部编号仅为内容结构，不决定文件路径），一次读取掌握全貌、消名称碰撞与多文件管理复杂度；
+- `update_workspace_state` 支持 plan/context/task 三文件（整文件覆盖）；`load_workspace_state` 返回三文件全文；投递注入按三等分配额（当前工作最优先展示）；
+- 成员状态工具收敛为 load/update_workspace_state 两类——save_task_note、create/update/read/list_workspace_task 已移除。
+
 **sidecar 收敛方向（依赖成员状态能力成熟，分阶段执行，不一步撤销现有可靠性基础）**：收敛项——按最新运行猜归属、轮次结束自动认定完成、从回复文本推断修订、替成员决定记忆归档。执行事实层（送达/退出/中断/占用）与消息路由、身份与 workspace 上下文传递、状态存取、查询视图保留。
 
 ## 关键决策

@@ -101,33 +101,8 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "update_workspace_state",
-        "成员更新自己的工作区状态（plan=工作规划与待办、context=背景与关键约定；整文件覆盖，按当前会话工作区写入）。执行中更新关键进展、阻塞和下一步，收尾时保存后续所需上下文。",
-        r#"{"type":"object","properties":{"file":{"type":"string","enum":["plan","context"],"description":"目标文件"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["file","content"]}"#,
-    ),
-    (
-        "create_workspace_task",
-        "在当前工作区创建成员任务：系统分配稳定编号（task_id），后续更新/读取/回报都以该编号定位——任务名称只是显示字段。初始内容为完整任务正文（目标/完成条件/发起者/回报接收者）。",
-        r#"{"type":"object","properties":{"title":{"type":"string","description":"任务标题（显示用）"},"content":{"type":"string","description":"完整任务正文（markdown，含目标/完成条件/发起者/关联运行等）"}},"required":["title"]}"#,
-    ),
-    (
-        "update_workspace_task",
-        "按稳定编号更新成员任务（整文件覆盖）：更新目标、进展、阻塞、结论和下一步。",
-        r#"{"type":"object","properties":{"task_id":{"type":"string","description":"创建时分配的稳定编号"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["task_id","content"]}"#,
-    ),
-    (
-        "read_workspace_task",
-        "按稳定编号读取成员任务全文。",
-        r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#,
-    ),
-    (
-        "list_workspace_tasks",
-        "列出当前工作区的全部成员任务（编号+标题）。",
-        r#"{"type":"object","properties":{}}"#,
-    ),
-    (
-        "save_task_note",
-        "成员保存任务笔记（独立文件，多任务互不覆盖）：任务目标、发起者、进展、结论——回报与验收的依据。",
-        r#"{"type":"object","properties":{"note_name":{"type":"string","description":"笔记名（如任务名或编号）"},"content":{"type":"string","description":"笔记内容（markdown）"}},"required":["note_name","content"]}"#,
+        "成员更新自己的工作区状态（task=当前工作与待办、plan=中长期规划、context=背景与关键约定；整文件覆盖，按当前会话工作区写入）。执行中更新关键进展、阻塞和下一步，收尾时保存后续所需上下文。",
+        r#"{"type":"object","properties":{"file":{"type":"string","enum":["plan","context","task"],"description":"目标文件（task=当前工作与待办）"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["file","content"]}"#,
     ),
     (
         "list_pending_work",
