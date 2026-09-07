@@ -96,6 +96,19 @@ fn v1_插件经_slot_与宿主桥接完成设置页闭环() {
 
     let root = tempfile::TempDir::new().unwrap();
     stage_plugins(root.path());
+    // 此处验证旧清单结构兼容性，版本仍须匹配当前实际构建的 WASM。
+    let config = tiangong_plugin_runtime::PluginRuntimeConfig::default();
+    let loader = tiangong_plugin_runtime::WasmPluginLoader::new(&config).unwrap();
+    for id in ["prompt", "memory"] {
+        let dir = root.path().join("plugins").join(id);
+        let manifest_path = dir.join("plugin.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let binary = manifest["wasm"]["binary"].as_str().unwrap();
+        let mut component = loader.load(&dir.join(binary), &config).unwrap();
+        manifest["version"] = component.describe().unwrap().version.into();
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
 
     // ── 1. v1 清单按旧规则解析并加载 ──
     let loaded = preload_installed_plugins(root.path());

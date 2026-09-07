@@ -23,7 +23,6 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde::Deserialize;
 use tiangong_plugin_memory_protocol::control::Reconfigure;
-use tiangong_plugin_memory_protocol::injection::{LoadInjection, LoadInjectionRequest};
 use tiangong_plugin_memory_protocol::recall::{
     Recall, RecallContext, RecallContextRequest, RecallQuery, RecallRequest,
 };
@@ -52,14 +51,11 @@ struct RecallToolArguments {
 }
 
 /// 全局状态缓存（WASM 单线程，RefCell 安全）。
-/// 存放 prompt_sections 拉注入所需的 session_id 和 workspace，
-/// 以及 handle-tool 构建召回 context 所需的上一个 PluginSession 快照。
+/// 存放 handle-tool 构建召回 context 所需的上一个 PluginSession 快照。
 mod state {
     use std::cell::RefCell;
 
     struct PluginState {
-        session_id: Option<String>,
-        workspace: Option<String>,
         /// 上一次 on_turn_started / on_session_ready 收到的 PluginSession 快照。
         last_session: Option<tiangong_types::PluginSession>,
         /// 本轮是否已经召回过（每轮只召回一次）。
@@ -70,47 +66,20 @@ mod state {
 
     thread_local! {
         static STATE: RefCell<PluginState> = const { RefCell::new(PluginState {
-            session_id: None,
-            workspace: None,
             last_session: None,
             recall_attempted: false,
             turn_count: 0,
         }) };
     }
 
-    #[allow(dead_code)]
-    pub fn set_session_id(id: Option<String>) {
-        STATE.with(|s| s.borrow_mut().session_id = id);
-    }
-
-    pub fn set_workspace(ws: Option<String>) {
-        STATE.with(|s| s.borrow_mut().workspace = ws);
-    }
-
     pub fn set_last_session(session: tiangong_types::PluginSession) {
         STATE.with(|s| {
-            s.borrow_mut().session_id = Some(session.id.clone());
             s.borrow_mut().last_session = Some(session);
         });
     }
 
     pub fn last_session() -> Option<tiangong_types::PluginSession> {
         STATE.with(|s| s.borrow().last_session.clone())
-    }
-
-    pub fn session_id() -> Option<String> {
-        STATE.with(|s| s.borrow().session_id.clone())
-    }
-
-    pub fn workspace_id() -> Option<String> {
-        STATE.with(|s| {
-            s.borrow().workspace.as_ref().and_then(|ws| {
-                ws.rsplit('/')
-                    .next()
-                    .filter(|n| !n.is_empty())
-                    .map(String::from)
-            })
-        })
     }
 
     /// 标记本轮已召回。
@@ -198,21 +167,8 @@ impl Guest for Component {
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        // 读缓存的状态，经 request 拉取三级记忆注入。
-        let session_id = state::session_id().unwrap_or_default();
-        let workspace_id = state::workspace_id();
-        let request = LoadInjectionRequest {
-            session_id,
-            workspace_id,
-        };
-        let sections = match sidecar_client::invoke::<LoadInjection>(&request) {
-            Ok(response) => response.items,
-            Err(_) => {
-                // sidecar 不可用时返回空（不注入），不阻断 prompt 装配。
-                Vec::new()
-            }
-        };
-        Ok(sections)
+        // 记忆只通过 recall_memory 的工具结果进入上下文，后台整理不得改写系统提示。
+        Ok(Vec::new())
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
@@ -346,8 +302,7 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn set_workspace(workspace: Option<String>, _full_trust: bool) -> Result<(), PluginError> {
-        state::set_workspace(workspace);
+    fn set_workspace(_workspace: Option<String>, _full_trust: bool) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -364,7 +319,7 @@ impl Guest for Component {
     // session 的所有修改权始终在 Core，WASM/ sidecar 绝不回写。
 
     fn on_session_ready(session_json: String) -> Result<(), PluginError> {
-        // 会话就绪：缓存 PluginSession 供 handle-tool 构建 context 和 prompt_sections 拉注入。
+        // 会话就绪：缓存 PluginSession 供 handle-tool 构建回忆 context。
         if let Ok(session) = serde_json::from_str::<tiangong_types::PluginSession>(&session_json) {
             state::set_last_session(session);
         }

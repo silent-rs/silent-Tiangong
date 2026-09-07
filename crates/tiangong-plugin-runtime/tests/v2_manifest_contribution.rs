@@ -158,7 +158,19 @@ fn stage_extension_tab_plugin(root: &std::path::Path, manifest: &str) {
         dir.join("tiangong_plugin_memory_wasm.wasm"),
     )
     .unwrap();
-    std::fs::write(dir.join("plugin.json"), manifest).unwrap();
+    // UI 贡献测试使用当前构建的组件，不应因夹具写死旧版本而退化为未加载状态。
+    let config = tiangong_plugin_runtime::PluginRuntimeConfig::default();
+    let loader = tiangong_plugin_runtime::WasmPluginLoader::new(&config).unwrap();
+    let mut component = loader
+        .load(&dir.join("tiangong_plugin_memory_wasm.wasm"), &config)
+        .unwrap();
+    let mut manifest: serde_json::Value = serde_json::from_str(manifest).unwrap();
+    manifest["version"] = component.describe().unwrap().version.into();
+    std::fs::write(
+        dir.join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("app").join("index.html"),
         "<html><body>board</body></html>",

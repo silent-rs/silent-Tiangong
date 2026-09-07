@@ -41,6 +41,8 @@ pub trait ToolSpecProvider: Send + Sync + 'static {
 ///
 /// Plugin 通过此机制向 system prompt 注入规则段落（如终端交互引导、浏览器使用规范等）。
 /// 段落会按 plugin 注册顺序追加到 system prompt 中。
+/// 相同配置下必须保持稳定，不应包含当前时间、轮次、自动提取的记忆或成员状态。
+/// 动态信息应经工具结果或追加消息进入上下文，避免改写已发送的请求前缀。
 pub trait PromptSectionProvider: Send + Sync + 'static {
     /// 返回该 plugin 暴露的所有 prompt 段落（每段会作为独立块拼接到 system prompt）。
     /// 默认返回空，不注入 prompt 的插件无需覆写。

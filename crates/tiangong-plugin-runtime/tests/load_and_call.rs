@@ -577,8 +577,7 @@ fn prompt_sections_without_handle_returns_empty() {
 }
 
 #[test]
-fn set_workspace_and_prompt_sections_flow() {
-    // set_workspace → on_session_ready → prompt_sections 完整流程。
+fn new_turns_do_not_load_memory_into_system_prompt() {
     let sidecar = Arc::new(MockMemorySidecar::default());
     let Some(wasm) = wasm_or_skip() else {
         return;
@@ -597,9 +596,37 @@ fn set_workspace_and_prompt_sections_flow() {
     let mut session = test_session();
     <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
 
-    // prompt_sections 应能正常调用（返回注入段落或空）。
-    let _sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
-    assert!(sidecar.called("load_injection"));
+    session.system_prompt_message = Some(tiangong_types::Message::new(
+        tiangong_types::MessageRole::System,
+        "旧版自动注入的 Session Memory 和更新时间",
+    ));
+    let mut previous_prompt = None;
+    for turn in 0..3 {
+        session.append_message(tiangong_types::MessageRole::User, format!("继续 {turn}"));
+        let start = session.messages.len() - 1;
+        <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, start);
+        let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
+        assert!(
+            sections.is_empty(),
+            "记忆只能经 handler 返回，不能拼入系统提示"
+        );
+        session.rebuild_system_prompt(
+            &tiangong_core::prompt::SystemPromptConfig::from_plugin_sections(sections),
+        );
+        let prompt = session.system_prompt_message.as_ref().unwrap();
+        assert!(!prompt.text_content().contains("Session Memory"));
+        let serialized_prompt = serde_json::to_vec(prompt).unwrap();
+        if let Some(previous) = &previous_prompt {
+            assert_eq!(
+                previous, &serialized_prompt,
+                "重新加载和追加消息不应重建系统提示"
+            );
+        }
+        previous_prompt = Some(serialized_prompt);
+        assert!(!sidecar.called("load_injection"));
+        assert!(!sidecar.called("recall_context"));
+        session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+    }
 }
 
 #[test]

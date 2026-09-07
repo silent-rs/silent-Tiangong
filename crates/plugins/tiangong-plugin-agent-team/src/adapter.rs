@@ -94,7 +94,7 @@ impl ToolOverrideHandler for AgentTeamPlugin {
 
 impl PromptSectionProvider for AgentTeamPlugin {
     fn prompt_sections(&self) -> Vec<String> {
-        vec![format!(
+        vec![String::from(
             "团队协作能力（默认不创建子 Agent）：\n\
              - create_agent 会启动一个全新的独立成员，它必须跑完自己的整轮后才能返回结果，开销显著。\n\
              - **默认不要主动 create_agent**：单轮即可完成的任务一律自己处理。仅在用户明确要求并行、\n\
@@ -103,8 +103,8 @@ impl PromptSectionProvider for AgentTeamPlugin {
              - send_message 向指定成员发送消息，并等待其跑完整轮后返回；发给 main 时仅投递、不等待。\n\
              - 用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message；不要解析或改写 @ 消息。\n\
              - 子 Agent 只能向 main 异步报告；同级之间的等待只允许沿创建顺序向后。\n\
-             - 执行命令时必须前台运行并设置有限超时。\n{}",
-            self.coordinator.roster_prompt()
+             - 执行命令时必须前台运行并设置有限超时。\n\
+             - 团队成员信息以创建、解散工具的结果和会话消息为准。"
         )]
     }
 }
@@ -202,6 +202,42 @@ mod tests {
     use crate::test_support::storage_test_guard;
 
     const SLOW_SESSION_END_SAFETY_LIMIT: Duration = Duration::from_secs(10);
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn membership_changes_do_not_rewrite_system_prompt() {
+        let _guard = crate::test_support::storage_test_guard_async().await;
+        let storage = tempfile::tempdir().unwrap();
+        let plugin = super::AgentTeamPlugin::new(storage.path().to_path_buf(), Arc::new(Vec::new));
+        let mut session = Session::new("team prompt");
+        session.cwd = storage.path().to_string_lossy().into_owned();
+        plugin.coordinator.initialize(&mut session);
+        let before = plugin.prompt_sections();
+        let call = tiangong_core::model::ToolCall {
+            id: "create".into(),
+            name: crate::constants::TOOL_CREATE_AGENT.into(),
+            arguments: json!({"role":"dev","label":"Developer","system_prompt":"检查结果"}),
+        };
+        let result = plugin.coordinator.create_agent(&call, &mut session);
+        assert!(result.ok, "{}", result.stderr);
+        assert_eq!(before, plugin.prompt_sections());
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("已加入团队")));
+        let call = tiangong_core::model::ToolCall {
+            id: "dismiss".into(),
+            name: crate::constants::TOOL_DISMISS_AGENT.into(),
+            arguments: json!({"role":"dev"}),
+        };
+        let result = plugin
+            .coordinator
+            .prepare_dismiss_agent(&call, &mut session)
+            .unwrap()
+            .finish()
+            .await;
+        assert!(result.ok, "{}", result.stderr);
+        assert_eq!(before, plugin.prompt_sections());
+    }
 
     struct SlowSessionEndedState {
         started: AtomicBool,
