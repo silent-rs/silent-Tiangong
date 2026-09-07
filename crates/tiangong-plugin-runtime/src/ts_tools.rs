@@ -350,12 +350,30 @@ fn validate_result(result: &TsToolResult) -> Result<()> {
     Ok(())
 }
 
+/// 发出 `tool.requested` 前必须在待处理表临界区内复查调用仍存在：
+/// 所有闭合路径都是「持锁移除表项、随后发出 tool.closed」，本函数把
+/// 复查与发出放进同一临界区后，同一调用只可能出现 requested → closed
+/// 顺序，绝不会在 closed 之后补发重放快照里的迟到 requested。
 fn emit_requested(plugin_id: &str, invocation: &TsToolInvocation) {
-    if let Ok(payload) = serde_json::to_string(invocation) {
-        crate::bridge::bridge_emit_to(plugin_id, "tool.requested", &payload);
-    } else {
+    let Ok(payload) = serde_json::to_string(invocation) else {
         tracing::warn!(plugin_id, "序列化 TS 工具调用事件失败");
+        return;
+    };
+    let Ok(pending) = pending_calls().lock() else {
+        return;
+    };
+    let still_pending = pending
+        .get(&invocation.invocation_id)
+        .is_some_and(|call| call.plugin_id == plugin_id);
+    if !still_pending {
+        tracing::debug!(
+            plugin_id,
+            invocation_id = %invocation.invocation_id,
+            "调用已闭合，跳过迟到的 tool.requested 重放"
+        );
+        return;
     }
+    crate::bridge::bridge_emit_to(plugin_id, "tool.requested", &payload);
 }
 
 fn emit_closed(plugin_id: &str, invocation_id: &str, status: TsToolCloseStatus) {

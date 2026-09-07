@@ -4501,6 +4501,21 @@ pub async fn list_slot_contributions(
     ))
 }
 
+/// 同步拓展区中实际存在的 webview 插件标签，供页面事件注入校验。
+#[tauri::command]
+pub async fn set_webview_mounted_tabs(
+    session_id: String,
+    tab_ids: Vec<String>,
+    state: State<'_, crate::webview_host::WebviewHostState>,
+) -> Result<(), String> {
+    if session_id.trim().is_empty() {
+        return Err("会话 ID 不能为空".to_string());
+    }
+    let scope = format!("webview:browser:{session_id}");
+    state.manager_for(&scope).set_mounted_tabs(tab_ids);
+    Ok(())
+}
+
 /// 列出拓展区 App：声明 `extension.tab` 贡献的已启用插件（能力矩阵数据源）。
 #[tauri::command]
 pub async fn list_extension_apps(

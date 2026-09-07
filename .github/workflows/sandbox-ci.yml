@@ -81,7 +81,19 @@ jobs:
       - name: Lint sandbox crate
         run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
       - name: Test sandbox crate
-        run: cargo test --locked -p tiangong-sandbox
+        run: |
+          cargo test --locked -p tiangong-sandbox --lib --bins
+          cargo test --locked -p tiangong-sandbox --test launcher_execution
+      - name: Test Launcher execution contract
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          cargo test --locked -p tiangong-sandbox --test launcher_execution -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/launcher-execution.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-execution-linux
+          path: ${{ runner.temp }}/launcher-execution.log
       - name: Build Launcher
         run: cargo build --locked -p tiangong-sandbox --release
       - name: Verify Launcher self-check (bwrap)
@@ -117,7 +129,20 @@ jobs:
       - name: Lint sandbox crate
         run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
       - name: Test sandbox crate
-        run: cargo test --locked -p tiangong-sandbox
+        run: |
+          cargo test --locked -p tiangong-sandbox --lib --bins
+          cargo test --locked -p tiangong-sandbox --test launcher_execution
+      - name: Test Launcher execution contract
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          # CI runner 本身是测试宿主；绝不通过天工沙箱工具嵌套执行本组测试。
+          cargo test --locked -p tiangong-sandbox --test launcher_execution -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/launcher-execution.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-execution-macos
+          path: ${{ runner.temp }}/launcher-execution.log
       - name: Verify Launcher self-check (Seatbelt)
         run: |
           # macOS 托管环境可能无法嵌套 Seatbelt：0=真实验证通过，
@@ -145,7 +170,29 @@ jobs:
       - name: Lint sandbox crate
         run: cargo clippy --locked -p tiangong-sandbox --all-targets -- -D warnings
       - name: Test sandbox crate
-        run: cargo test --locked -p tiangong-sandbox
+        run: |
+          cargo test --locked -p tiangong-sandbox --lib --bins
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p tiangong-sandbox --test launcher_execution
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare standalone Node probe
+        shell: pwsh
+        run: |
+          Copy-Item (Get-Command node.exe).Source "$env:RUNNER_TEMP\sandbox-node.exe"
+          "SANDBOX_TEST_NODE=$env:RUNNER_TEMP\sandbox-node.exe" >> $env:GITHUB_ENV
+      - name: Test Launcher execution contract
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p tiangong-sandbox --test launcher_execution -- --ignored --test-threads=1 --nocapture 2>&1 | Tee-Object "$env:RUNNER_TEMP\launcher-execution.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: launcher-execution-windows
+          path: ${{ runner.temp }}/launcher-execution.log
       - name: Verify Launcher self-check (AppContainer)
         shell: pwsh
         run: |

@@ -1,6 +1,6 @@
 use tracing::{debug, warn};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -261,6 +261,8 @@ pub struct BrowserState {
     pub pending_events: Vec<BrowserEvent>,
     /// 标签列表
     pub tabs: Vec<BrowserTab>,
+    /// 前端拓展区中实际存在的浏览器标签。
+    pub mounted_tab_ids: HashSet<String>,
     /// 活跃标签 ID
     pub active_tab_id: Option<String>,
     /// 当前可见区域 (x, y, w, h)，用于标签切换时定位新 WebView
@@ -316,6 +318,7 @@ impl BrowserState {
             visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pending_events: Vec::new(),
             tabs: Vec::new(),
+            mounted_tab_ids: HashSet::new(),
             active_tab_id: None,
             browser_rect: (0.0, 0.0, 0.0, 0.0),
             shared,
@@ -359,6 +362,7 @@ impl BrowserManager {
                 visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 pending_events: Vec::new(),
                 tabs: Vec::new(),
+                mounted_tab_ids: HashSet::new(),
                 active_tab_id: None,
                 browser_rect: (0.0, 0.0, 0.0, 0.0),
                 shared,
@@ -410,6 +414,19 @@ impl BrowserManager {
             s.visible
                 .store(visible, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    pub fn set_mounted_tabs(&self, tab_ids: Vec<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.mounted_tab_ids = tab_ids.into_iter().collect();
+        }
+    }
+
+    pub fn is_tab_mounted(&self, tab_id: &str) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.mounted_tab_ids.contains(tab_id))
+            .unwrap_or(false)
     }
 
     /// 当前页面缩放比例（来自持久化状态）
@@ -1676,6 +1693,7 @@ impl BrowserManager {
                                     "browser:events",
                                     BrowserEventsEvent {
                                         session_id: session_id.clone(),
+                                        tab_id: active_tab_id_for_events,
                                         events,
                                     },
                                 );

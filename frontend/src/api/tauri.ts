@@ -1235,6 +1235,10 @@ export const api = {
   listSlotContributions: (slot: string): Promise<SlotContributionEntry[]> =>
     invoke('list_slot_contributions', { slot }),
 
+  /// 同步当前会话实际挂载的 webview 插件标签。
+  setWebviewMountedTabs: (sessionId: string, tabIds: string[]): Promise<void> =>
+    invoke('set_webview_mounted_tabs', { sessionId, tabIds }),
+
   /// 列出拓展区 App（声明 extension.tab 贡献的插件，能力矩阵数据源）。
   listExtensionApps: (): Promise<AppEntry[]> =>
     invoke('list_extension_apps'),

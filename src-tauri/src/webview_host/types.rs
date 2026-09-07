@@ -91,6 +91,7 @@ pub struct BrowserNavigationStateEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserEventsEvent {
     pub session_id: String,
+    pub tab_id: String,
     pub events: Vec<BrowserEvent>,
 }
 

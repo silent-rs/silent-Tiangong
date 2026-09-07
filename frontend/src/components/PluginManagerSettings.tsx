@@ -23,6 +23,7 @@ import {
   type PluginStatus,
   type TrustedPublisherEntry,
 } from '@/api/tauri';
+import { isRemotePluginVersionNewer } from '@/lib/pluginVersion';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { DefaultPluginOnboarding } from './DefaultPluginOnboarding';
@@ -558,8 +559,10 @@ function InstalledPluginRow({
   const working = activeOperation?.pluginId === plugin.id;
   const healthy = plugin.state === 'loaded';
   const invalid = plugin.state === 'invalid';
-  const canUpgrade = Boolean(release?.update_available && release.supported);
   const currentVersion = plugin.loaded_version ?? plugin.manifest_version;
+  const canUpgrade = Boolean(
+    release?.supported && isRemotePluginVersionNewer(currentVersion, release.version),
+  );
   const sidecar = getSidecarPresentation(plugin);
   const StatusIcon = healthy ? CheckCircle2 : plugin.state === 'disabled' ? Circle : AlertCircle;
 

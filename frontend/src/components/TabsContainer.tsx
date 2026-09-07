@@ -77,6 +77,12 @@ function isWebviewPluginTab(tab: TabState): boolean {
     && Boolean(tab.plugin_id && tab.contribution_id);
 }
 
+function mountedBrowserTabIds(tabs: TabState[]): string[] {
+  return tabs
+    .filter((tab) => isWebviewPluginTab(tab) && tab.plugin_id === 'browser')
+    .map((tab) => tab.id);
+}
+
 function webviewSessionId(sessionId: string): string {
   return sessionId || '__global__';
 }
@@ -156,6 +162,7 @@ export function TabsContainer({
   const isVisibleRef = useRef(isVisible);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
   const mountedSessionIdRef = useRef('');
+  const mountedTabsSyncRef = useRef<Promise<void>>(Promise.resolve());
   /** tab 栏横向滚动容器：滚轮转横向滚动 + 活跃 tab 自动滚入可视区。 */
   const tabsScrollRef = useRef<HTMLDivElement>(null);
   const terminalSessionId = activeSessionId || newConversationId || '';
@@ -164,6 +171,14 @@ export function TabsContainer({
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
     [activeTabId, tabs],
   );
+
+  const syncMountedBrowserTabs = useCallback((sessionId: string, tabIds: string[]) => {
+    const sync = mountedTabsSyncRef.current
+      .catch(() => {})
+      .then(() => api.setWebviewMountedTabs(sessionId, tabIds));
+    mountedTabsSyncRef.current = sync;
+    return sync;
+  }, []);
 
   const openWebviewPluginTab = useCallback(async (
     app: NonNullable<AppTabCommand['app']>,
@@ -230,7 +245,8 @@ export function TabsContainer({
     }
   }, [terminalSessionId]);
 
-  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点。
+  // tab 类型/插件 App 集合变化 → 通知宿主更新「已打开」绿点，并同步
+  // webview 页面实际挂载清单，页面事件只有命中该清单才允许进入会话。
   const onTabKindsChangedRef = useRef(onTabKindsChanged);
   onTabKindsChangedRef.current = onTabKindsChanged;
   const lastTabKindsRef = useRef<string>('');
@@ -241,11 +257,15 @@ export function TabsContainer({
         .filter((tab) => tab.kind === 'plugin' && tab.plugin_id && tab.contribution_id)
         .map((tab) => `${tab.plugin_id}:${tab.contribution_id}`),
     ));
-    const key = `${terminalSessionId}|${kinds.join(',')}|${pluginApps.join(',')}`;
+    const mountedWebviewTabIds = mountedBrowserTabIds(tabs);
+    const key = `${terminalSessionId}|${kinds.join(',')}|${pluginApps.join(',')}|${mountedWebviewTabIds.join(',')}`;
     if (key === lastTabKindsRef.current) return;
     lastTabKindsRef.current = key;
     onTabKindsChangedRef.current?.(kinds, pluginApps);
-  }, [tabs, terminalSessionId]);
+    if (terminalSessionId && mountedSessionIdRef.current === terminalSessionId) {
+      void syncMountedBrowserTabs(terminalSessionId, mountedWebviewTabIds).catch(console.error);
+    }
+  }, [syncMountedBrowserTabs, tabs, terminalSessionId]);
 
   useEffect(() => {
     onActiveKindChange?.(isVisible ? activeTab?.kind ?? null : null);
@@ -350,7 +370,10 @@ export function TabsContainer({
         .filter((tab) => tab.kind === 'plugin')
         .map((tab) => runPluginBeforeClose(tab.id)),
     );
-    if (previousSessionId) hideWebviewPluginTabs(closingTabs, previousSessionId);
+    if (previousSessionId) {
+      void syncMountedBrowserTabs(previousSessionId, []).catch(console.error);
+      hideWebviewPluginTabs(closingTabs, previousSessionId);
+    }
 
     tabsRef.current = [];
     activeTabIdRef.current = '';
@@ -359,7 +382,7 @@ export function TabsContainer({
     setReloadGenerations({});
     setSessionResetVersion((version) => version + 1);
     setActivationRetryVersion((version) => version + 1);
-  }, [hideWebviewPluginTabs, terminalSessionId]);
+  }, [hideWebviewPluginTabs, syncMountedBrowserTabs, terminalSessionId]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
@@ -428,10 +451,28 @@ export function TabsContainer({
     if (closedIndex === -1) return;
 
     const closingTab = currentTabs[closedIndex];
+    const closingBrowserTab = isWebviewPluginTab(closingTab) && closingTab.plugin_id === 'browser';
+    if (closingBrowserTab) {
+      const remainingMountedIds = mountedBrowserTabIds(
+        currentTabs.filter((tab) => tab.id !== tabId),
+      );
+      try {
+        await syncMountedBrowserTabs(terminalSessionId, remainingMountedIds);
+      } catch (error) {
+        console.error('撤销浏览器标签登记失败：', error);
+        return;
+      }
+    }
     if (closingTab.kind === 'plugin') {
       try {
         await runPluginBeforeClose(closingTab.id);
       } catch (error) {
+        if (closingBrowserTab) {
+          await syncMountedBrowserTabs(
+            terminalSessionId,
+            mountedBrowserTabIds(currentTabs),
+          ).catch(console.error);
+        }
         console.error('插件关闭前处理失败：', error);
         return;
       }
@@ -448,6 +489,12 @@ export function TabsContainer({
           { tab_id: closingTab.id },
         );
       } catch (error) {
+        if (closingBrowserTab) {
+          await syncMountedBrowserTabs(
+            terminalSessionId,
+            mountedBrowserTabIds(currentTabs),
+          ).catch(console.error);
+        }
         console.error('关闭 webview 插件标签失败：', error);
         return;
       }
@@ -494,7 +541,7 @@ export function TabsContainer({
       }
       return;
     }
-  }, [onClose, onShowMatrix, terminalSessionId]);
+  }, [onClose, onShowMatrix, syncMountedBrowserTabs, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
     hideWebviewPluginTabs(tabsRef.current);
