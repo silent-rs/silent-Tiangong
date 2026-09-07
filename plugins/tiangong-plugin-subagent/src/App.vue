@@ -360,6 +360,7 @@ function toggleExpand(agentId: string) {
   expandedAgentId.value = expanding ? agentId : null;
   if (expanding) {
     void loadMemory(agentId);
+    void loadWorkspaceStates(agentId);
   }
 }
 
@@ -368,6 +369,27 @@ function toggleExpand(agentId: string) {
 const memoryFiles = ref<Record<string, MemoryFileEntry[]>>({});
 const memoryDrafts = ref<Record<string, { name: string; content: string; original: string }>>({});
 const memoryError = ref('');
+
+interface WorkspaceState {
+  workspace_id: string;
+  paths: string[];
+  plan: string;
+  context: string;
+  task_notes: string[];
+}
+
+const workspaceStates = ref<Record<string, WorkspaceState[]>>({});
+
+async function loadWorkspaceStates(agentId: string) {
+  try {
+    const body = await sidecarCall<{ workspaces: WorkspaceState[] }>('ui_list_workspace_states', {
+      agent_id: agentId,
+    });
+    workspaceStates.value = { ...workspaceStates.value, [agentId]: body.workspaces ?? [] };
+  } catch {
+    workspaceStates.value = { ...workspaceStates.value, [agentId]: [] };
+  }
+}
 
 async function loadMemory(agentId: string) {
   try {
@@ -668,6 +690,17 @@ onUnmounted(() => {
               写工作区 {{ agent.capabilities.workspace_write ? '✓' : '✗' }} ·
               产物 {{ agent.capabilities.artifacts ? '✓' : '✗' }}
             </p>
+          </div>
+          <div v-if="(workspaceStates[agent.config.id] ?? []).length" class="detail-block">
+            <h3>工作区状态（成员自维护）</h3>
+            <div v-for="ws in workspaceStates[agent.config.id]" :key="ws.workspace_id" class="ws-state">
+              <p class="ws-path">{{ ws.paths?.[0] ?? ws.workspace_id }}</p>
+              <p v-if="ws.plan" class="ws-section"><strong>规划</strong></p>
+              <pre v-if="ws.plan" class="ws-content">{{ ws.plan }}</pre>
+              <p v-if="ws.context" class="ws-section"><strong>背景</strong></p>
+              <pre v-if="ws.context" class="ws-content">{{ ws.context }}</pre>
+              <p v-if="ws.task_notes?.length" class="ws-section small muted">任务笔记：{{ ws.task_notes.join('、') }}</p>
+            </div>
           </div>
           <div class="detail-block">
             <div class="memory-head">
@@ -1221,6 +1254,38 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 6px;
   margin-top: 10px;
+}
+
+.ws-state {
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.ws-path {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: var(--ui-muted-foreground);
+  word-break: break-all;
+}
+
+.ws-section {
+  margin: 6px 0 2px;
+  font-size: 11px;
+}
+
+.ws-content {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--ui-background, #f7f7f8);
+  font-size: 11px;
+  font-family: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow-y: auto;
 }
 
 .memory-name-input,

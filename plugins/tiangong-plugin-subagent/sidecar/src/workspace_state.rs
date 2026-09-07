@@ -166,6 +166,47 @@ pub fn save_task_note(
     Ok(id)
 }
 
+/// 列举成员全部工作区的自维护状态（管理页/外部查询视图用）。
+pub fn list_all(agents: &AgentStore, agent_id: &str) -> Result<serde_json::Value> {
+    let dir = workspaces_dir(agents, agent_id)?;
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let id = entry.file_name().into_string().unwrap_or_default();
+        if !id.starts_with("ws-") {
+            continue;
+        }
+        let ws_dir = entry.path();
+        let meta = std::fs::read_to_string(ws_dir.join("workspace.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let read = |name: &str| {
+            std::fs::read_to_string(ws_dir.join(name))
+                .map(|body| body.trim().to_string())
+                .unwrap_or_default()
+        };
+        let notes: Vec<String> = std::fs::read_dir(ws_dir.join("tasks"))
+            .map(|entries| {
+                let mut names: Vec<String> = entries
+                    .flatten()
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default();
+        items.push(serde_json::json!({
+            "workspace_id": id,
+            "paths": meta.get("paths").cloned().unwrap_or(serde_json::json!([])),
+            "plan": read("plan.md"),
+            "context": read("context.md"),
+            "task_notes": notes,
+        }));
+    }
+    Ok(serde_json::json!({ "workspaces": items }))
+}
+
 /// 投递正文注入的工作状态摘要（plan/context 头部，截断保上限）。
 pub fn injection_summary(agents: &AgentStore, agent_id: &str, workspace_path: &str) -> String {
     let Ok(state) = load(agents, agent_id, workspace_path) else {

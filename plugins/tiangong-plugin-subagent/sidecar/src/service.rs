@@ -277,6 +277,7 @@ impl SubagentService {
             UI_LIST_SESSIONS => serde_json::to_value(crate::sessions::list_sessions())
                 .map_err(|error| anyhow::anyhow!("序列化会话列表失败: {error}")),
             UI_LIST_MEMORY => self.ui_list_memory(&payload).await,
+            UI_LIST_WORKSPACE_STATES => self.ui_list_workspace_states(&payload).await,
             UI_READ_MEMORY => self.ui_read_memory(&payload).await,
             UI_WRITE_MEMORY => self.ui_write_memory(&payload).await,
             UI_DELETE_MEMORY => self.ui_delete_memory(&payload).await,
@@ -3101,6 +3102,14 @@ impl SubagentService {
         )?;
         notify(json!({ "kind": "agent_updated", "agent_id": config.id }));
         Ok(serde_json::to_value(config)?)
+    }
+
+    async fn ui_list_workspace_states(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let request: AgentIdRequest = parse_request(payload)?;
+        crate::workspace_state::list_all(&self.agents, &request.agent_id)
     }
 
     async fn ui_list_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {

@@ -49,6 +49,12 @@ fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {
             "__external_report",
         ),
         (
+            "load_workspace_state",
+            "读取成员的自维护工作区状态（按工作区列出 plan/context/任务笔记）——外部调度者查询成员工作进展用；写入仅成员自己的执行会话。",
+            json!({"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"]}),
+            "ui_list_workspace_states",
+        ),
+        (
             "list_pending_work",
             "查看等待中的工作与协作关系（谁在为谁执行、谁在等结果，含 workspace 域）。",
             json!({"type":"object","properties":{"agent_id":{"type":"string","description":"可选：只看某成员"}}}),

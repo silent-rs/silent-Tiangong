@@ -77,6 +77,7 @@ pub const UI_INTERRUPT_RUN: &str = "ui_interrupt_run";
 pub const UI_CANCEL_RUN: &str = "ui_cancel_run";
 pub const UI_LIST_SESSIONS: &str = "ui_list_sessions";
 pub const UI_LIST_MEMORY: &str = "ui_list_memory";
+pub const UI_LIST_WORKSPACE_STATES: &str = "ui_list_workspace_states";
 pub const UI_READ_MEMORY: &str = "ui_read_memory";
 pub const UI_WRITE_MEMORY: &str = "ui_write_memory";
 pub const UI_DELETE_MEMORY: &str = "ui_delete_memory";
