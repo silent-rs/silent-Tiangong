@@ -169,6 +169,11 @@ Subagent 不是「接任务、执行、返回」的后台执行器，而是**有
 - **视图标注 workspace 域**：list_pending_work 的双向视图与结构化行携带 workspace——跨工作区的等待关系可区分；
 - 写互斥本就按 workspace 精确比较：W1 的独占写不拦 W2 的写入（跨工作区并行合法），同工作区互斥不变。
 
+### 0.2.20 追加（用户裁定：总线矩阵测试与 MCP server 能力）
+
+- **MCP server 模式（`--mcp`）**：sidecar 以标准 MCP（stdio JSON-RPC）对外暴露总线——外部 agent 工具（Claude Code、Codex 等）可直连：activate/deactivate、send_agent_message（补充自动关联）、submit_agent_task、report_agent_result（标记关联）、list_pending_work（协作视图）、运行控制与记忆读写，共 13 个工具；与宿主走同一分发与状态机（单一真相源），MCP 调用方以固定外部会话身份执行（回报投回其发起关系）；同步返回操作结果提供快速消息反馈，回报与状态可经查询工具拉取；
+- **message bus 矩阵测试**：消息类型全集（任务/补充注入/协作/协作补充/主动回报/补充修订/控制中断）在一次会话中顺序流转，逐步核对运行、事件（supplement/revised/completed）、激活登记与释放、协作视图一致性（视图行数=活跃运行数）四层记录——总线行为回归有系统性基线。
+
 ## 关键决策
 
 | 决策点 | 结论 | 依据 |

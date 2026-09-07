@@ -59,6 +59,19 @@ enum RunnerEvent {
     Exit { run_id: String, info: ExitInfo },
 }
 
+/// MCP 模式的回退会话上下文：外部 agent 工具经 MCP server 调用总线时
+/// 没有宿主线程本地上下文，以此固定身份执行（启动时一次性设置）。
+pub static MCP_CONTEXT: std::sync::OnceLock<std::sync::RwLock<Option<(String, String)>>> =
+    std::sync::OnceLock::new();
+
+/// 初始化 MCP 回退上下文（--mcp 模式启动时调用一次）。
+pub fn init_mcp_context(session: &str, workspace: &str) {
+    let _ = MCP_CONTEXT.set(std::sync::RwLock::new(Some((
+        session.to_string(),
+        workspace.to_string(),
+    ))));
+}
+
 /// 集群协作发起方信息：发起会话（回报投回目标）与展示名（投递正文用）。
 struct CollabOrigin<'a> {
     session: &'a str,
@@ -199,6 +212,11 @@ impl SubagentService {
 
     // ── dispatch ──────────────────────────────────────────────
 
+    /// MCP 模式公开入口：外部工具调用与宿主走同一分发。
+    pub async fn dispatch_inner_public(&self, request: &Request) -> serde_json::Value {
+        self.dispatch_inner(request).await
+    }
+
     async fn dispatch_inner(&self, request: &Request) -> serde_json::Value {
         let operation = request.operation.as_str();
         let payload = request.payload.clone();
@@ -294,10 +312,15 @@ impl SubagentService {
 
     /// 工具调用的会话上下文（宿主权威注入；缺失即拒绝执行）。
     fn require_context() -> Result<(String, String)> {
-        let context = invocation_context().ok_or_else(|| {
-            anyhow::anyhow!("缺少宿主注入的会话上下文，拒绝执行（不允许从参数推断会话归属）")
-        })?;
-        Ok((context.session_id, context.workspace))
+        if let Some(context) = invocation_context() {
+            return Ok((context.session_id, context.workspace));
+        }
+        if let Some(cell) = MCP_CONTEXT.get()
+            && let Some((session, workspace)) = cell.read().ok().and_then(|guard| guard.clone())
+        {
+            return Ok((session, workspace));
+        }
+        bail!("缺少宿主注入的会话上下文，拒绝执行（不允许从参数推断会话归属）")
     }
 }
 

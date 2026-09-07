@@ -9,6 +9,7 @@
 
 mod agent_store;
 mod delivery;
+mod mcp;
 mod memory;
 mod paths;
 mod runner;
@@ -30,6 +31,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     tracing::info!("subagent sidecar 启动中...");
+
+    // MCP server 模式：外部 agent 工具经标准 MCP（stdio）接入总线。
+    if std::env::args().any(|arg| arg == "--mcp") {
+        let service = Arc::new(service::SubagentService::new()?);
+        let workspace = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+        return mcp::run_mcp(service, workspace).await;
+    }
 
     let config = SidecarConfig::new("subagent");
     tiangong_plugin_sidecar::run(config, || {
