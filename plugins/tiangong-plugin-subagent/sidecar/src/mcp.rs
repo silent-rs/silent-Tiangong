@@ -19,34 +19,10 @@ fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {
             "list_agents",
         ),
         (
-            "activate_agent",
-            "在当前 MCP 调用方激活成员（绑定使用关系与工作区，派活前置）。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID 或名称"},"workspace_policy":{"type":"string","enum":["read-only","read-write-exclusive","isolated-worktree"]}},"required":["agent_id"]}),
-            "activate_agent",
-        ),
-        (
-            "deactivate_agent",
-            "停用当前调用方对成员的使用关系（进行中的工作按停止请求处理）。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"]}),
-            "deactivate_agent",
-        ),
-        (
             "send_agent_message",
             "向成员发送补充消息（追问/补充背景/纠正方向）；该发起方有进行中的工作时自动关联，不新建执行。",
             json!({"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID 或名称"},"content":{"type":"string","description":"消息内容"}},"required":["agent_id","content"]}),
             "send_agent_message",
-        ),
-        (
-            "submit_agent_task",
-            "向成员提交正式任务（有目标与完成条件，总是新建运行；完成/失败/阻塞回报自动送达）。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID 或名称"},"goal":{"type":"string","description":"任务目标"},"completion_criteria":{"type":"string","description":"完成条件"}},"required":["agent_id","goal"]}),
-            "submit_agent_task",
-        ),
-        (
-            "report_run_result",
-            "外部执行体回报工作结果：凭任务消息尾部的运行标记（run_marker，只在任务投递正文中给出——收到任务的一方才持有）关联，回报送达该工作的发起方并终结对应运行；completed/failed/blocked，blocked 为等待发起方补充（非终态）。",
-            json!({"type":"object","properties":{"run_marker":{"type":"string","description":"运行标记（任务消息尾部的 r-短码，必填）"},"result":{"type":"string","description":"回报结果正文"},"status":{"type":"string","enum":["completed","failed","blocked"],"description":"回报状态，默认 completed"},"note":{"type":"string","description":"可选备注"}},"required":["run_marker","result"]}),
-            "__external_report",
         ),
         (
             "load_workspace_state",
@@ -59,42 +35,6 @@ fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {
             "查看等待中的工作与协作关系（谁在为谁执行、谁在等结果，含 workspace 域）。",
             json!({"type":"object","properties":{"agent_id":{"type":"string","description":"可选：只看某成员"}}}),
             "list_pending_work",
-        ),
-        (
-            "get_agent_run",
-            "查看一次运行的详情（状态、结果、发起方）。",
-            json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}),
-            "get_agent_run",
-        ),
-        (
-            "list_agent_events",
-            "查看成员的事件历史（含补充、回报、修订）。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string"},"limit":{"type":"number"}},"required":["agent_id"]}),
-            "list_agent_events",
-        ),
-        (
-            "interrupt_agent_run",
-            "请求中断运行（可恢复语义）。",
-            json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}),
-            "interrupt_agent_run",
-        ),
-        (
-            "cancel_agent_run",
-            "取消运行（终态裁定；执行侧停止确认后释放占用）。",
-            json!({"type":"object","properties":{"run_id":{"type":"string"}},"required":["run_id"]}),
-            "cancel_agent_run",
-        ),
-        (
-            "get_agent_memory",
-            "读取成员的长期记忆文件列表或内容。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string"},"name":{"type":"string","description":"可选：文件名，缺省列表"}},"required":["agent_id"]}),
-            "get_agent_memory",
-        ),
-        (
-            "append_agent_memory",
-            "向成员长期记忆追加结论（可复用经验指定 memory_name=lessons.md）。",
-            json!({"type":"object","properties":{"agent_id":{"type":"string"},"content":{"type":"string"},"memory_name":{"type":"string"},"note":{"type":"string"}},"required":["agent_id","content"]}),
-            "append_agent_memory",
         ),
     ]
 }
@@ -186,34 +126,13 @@ pub async fn run_mcp(
                     out.flush()?;
                     continue;
                 };
-                // 外部凭据回报走独立入口（运行标记即关联凭据，不依赖成员会话）。
-                let result = if operation == "__external_report" {
-                    let marker = arguments
-                        .get("run_marker")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let text = arguments
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let status = arguments
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("completed");
-                    let note = arguments.get("note").and_then(Value::as_str);
-                    match service.report_by_marker(marker, text, status, note).await {
-                        Ok(value) => value,
-                        Err(error) => json!({ "ok": false, "summary": error.to_string() }),
-                    }
-                } else {
-                    let request = Request {
-                        protocol_version: PROTOCOL_VERSION.to_string(),
-                        request_id: format!("mcp-{seq}"),
-                        operation: operation.to_string(),
-                        payload: arguments,
-                    };
-                    service.dispatch_inner_public(&request).await
+                let request = Request {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    request_id: format!("mcp-{seq}"),
+                    operation: operation.to_string(),
+                    payload: arguments,
                 };
+                let result = service.dispatch_inner_public(&request).await;
                 let text =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 // 业务失败如实映射为 MCP 错误（外部 Agent 可可靠判断后续动作）。

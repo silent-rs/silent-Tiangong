@@ -76,9 +76,18 @@ fn workspace_id(agents: &AgentStore, agent_id: &str, workspace_path: &str) -> Re
 }
 
 fn workspaces_dir(agents: &AgentStore, agent_id: &str) -> Result<PathBuf> {
+    ensure_agent_exists(agents, agent_id)?;
     let dir = agents.root().join(agent_id).join("workspaces");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// 公共入口统一校验：成员不存在时不创建任何目录，直接报错。
+fn ensure_agent_exists(agents: &AgentStore, agent_id: &str) -> Result<()> {
+    if agents.load(agent_id).is_err() {
+        bail!("Agent 不存在: {agent_id}");
+    }
+    Ok(())
 }
 
 fn state_dir(agents: &AgentStore, agent_id: &str, workspace_id: &str) -> Result<PathBuf> {
@@ -166,6 +175,101 @@ pub fn save_task_note(
     Ok(id)
 }
 
+/// 创建成员任务：系统生成稳定编号，文件身份不受名称清洗影响。
+pub fn create_task(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+    initial_content: &str,
+) -> Result<(String, String)> {
+    let id = workspace_id(agents, agent_id, workspace_path)?;
+    let dir = state_dir(agents, agent_id, &id)?;
+    let task_id = format!("t-{}", paths::new_id());
+    paths::atomic_write(
+        &dir.join("tasks").join(format!("{task_id}.md")),
+        initial_content.as_bytes(),
+    )?;
+    Ok((id, task_id))
+}
+
+/// 按稳定编号更新任务（整文件覆盖）。
+pub fn update_task(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+    task_id: &str,
+    content: &str,
+) -> Result<String> {
+    let id = workspace_id(agents, agent_id, workspace_path)?;
+    let dir = state_dir(agents, agent_id, &id)?;
+    let safe = task_id.trim();
+    if !safe.starts_with("t-") || safe.contains('/') || safe.contains('\\') {
+        bail!("非法任务编号: {task_id}");
+    }
+    let path = dir.join("tasks").join(format!("{safe}.md"));
+    if !path.is_file() {
+        bail!("任务不存在: {safe}（先创建再更新）");
+    }
+    paths::atomic_write(&path, content.as_bytes())?;
+    Ok(id)
+}
+
+/// 按稳定编号读取任务。
+pub fn read_task(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+    task_id: &str,
+) -> Result<String> {
+    let id = workspace_id(agents, agent_id, workspace_path)?;
+    let dir = state_dir(agents, agent_id, &id)?;
+    let safe = task_id.trim();
+    if !safe.starts_with("t-") || safe.contains('/') || safe.contains('\\') {
+        bail!("非法任务编号: {task_id}");
+    }
+    let path = dir.join("tasks").join(format!("{safe}.md"));
+    if !path.is_file() {
+        bail!("任务不存在: {safe}");
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
+/// 列举当前 workspace 的任务（编号 + 首行摘要）。
+pub fn list_tasks(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+) -> Result<serde_json::Value> {
+    let id = workspace_id(agents, agent_id, workspace_path)?;
+    let dir = state_dir(agents, agent_id, &id)?;
+    let mut tasks = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir.join("tasks")) {
+        let mut files: Vec<_> = entries
+            .into_iter()
+            .flatten()
+            .filter(|e| {
+                e.path().extension().is_some_and(|ext| ext == "md")
+                    && e.file_name().to_string_lossy().starts_with("t-")
+            })
+            .collect();
+        files.sort_by_key(|e| e.file_name());
+        for entry in files {
+            let name = entry.file_name().into_string().unwrap_or_default();
+            let task_id = name.trim_end_matches(".md").to_string();
+            let summary = std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|body| {
+                    body.lines()
+                        .find(|line| line.starts_with("# "))
+                        .map(|line| line.trim_start_matches("# ").to_string())
+                })
+                .unwrap_or_default();
+            tasks.push(serde_json::json!({ "task_id": task_id, "title": summary }));
+        }
+    }
+    Ok(serde_json::json!({ "workspace_id": id, "tasks": tasks }))
+}
+
 /// 列举成员全部工作区的自维护状态（管理页/外部查询视图用）。
 pub fn list_all(agents: &AgentStore, agent_id: &str) -> Result<serde_json::Value> {
     let dir = workspaces_dir(agents, agent_id)?;
@@ -202,6 +306,7 @@ pub fn list_all(agents: &AgentStore, agent_id: &str) -> Result<serde_json::Value
             "plan": read("plan.md"),
             "context": read("context.md"),
             "task_notes": notes,
+            "task_ids": notes.iter().filter(|n| n.starts_with("t-")).collect::<Vec<_>>(),
         }));
     }
     Ok(serde_json::json!({ "workspaces": items }))

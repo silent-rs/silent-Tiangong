@@ -1,6 +1,6 @@
 //! 工具规格与系统提示注入（与 protocol::ops::TOOL_OPERATIONS 一一对应）。
 
-pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory；安排分工或判断进度时先用 list_pending_work 查看待处理工作与协作关系（谁在为谁执行、谁在等结果）。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续用 send_agent_message 与更多成员协作。Subagent 具备成长进化能力：完成一项工作后，先用 report_agent_result 主动向发起方回报结果（这是正式的收尾动作，回报会送达发起本次工作的主会话或成员）；随后把可复用经验（成功做法、踩坑、用户偏好，一行一条结论式）用 append_agent_memory（memory_name 指定 lessons.md）沉淀为经验记忆（后续运行优先注入）；确有稳定下来的新规则时，用 append_agent_instructions 追加进自己的长期指令——只记结论，不记流水。成员维护自己的工作状态：收到消息先用 load_workspace_state 加载本工作区状态，判断其意图（新工作/补充/协作结果/控制）后决定关联、拆分或调整（不默认当作新任务）；执行中用 update_workspace_state 更新规划与进展、save_task_note 记任务笔记；收尾回报后保存下一步所需上下文——工作的含义由你维护，执行事实由系统记录。";
+pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory；安排分工或判断进度时先用 list_pending_work 查看待处理工作与协作关系（谁在为谁执行、谁在等结果）。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续用 send_agent_message 与更多成员协作。Subagent 具备成长进化能力：完成一项工作后，先用 report_agent_result 主动向发起方回报结果（这是正式的收尾动作，回报会送达发起本次工作的主会话或成员）；随后把可复用经验（成功做法、踩坑、用户偏好，一行一条结论式）用 append_agent_memory（memory_name 指定 lessons.md）沉淀为经验记忆（后续运行优先注入）；确有稳定下来的新规则时，用 append_agent_instructions 追加进自己的长期指令——只记结论，不记流水。成员维护自己的工作状态：收到消息先用 load_workspace_state 加载本工作区状态，判断其意图（新工作/补充/协作结果/控制）后决定关联、拆分或调整（不默认当作新任务）；执行中用 update_workspace_state 更新规划与进展、create_workspace_task 创建任务（系统分配稳定编号）并以 update_workspace_task 维护其进展与结论——后续更新和回报都以该编号定位；收尾后保存下一步所需上下文——工作的含义由你维护，执行事实由系统记录。";
 
 /// (工具名, 描述, input_schema JSON)。
 pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
@@ -103,6 +103,26 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
         "update_workspace_state",
         "成员更新自己的工作区状态（plan=工作规划与待办、context=背景与关键约定；整文件覆盖，按当前会话工作区写入）。执行中更新关键进展、阻塞和下一步，收尾时保存后续所需上下文。",
         r#"{"type":"object","properties":{"file":{"type":"string","enum":["plan","context"],"description":"目标文件"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["file","content"]}"#,
+    ),
+    (
+        "create_workspace_task",
+        "在当前工作区创建成员任务：系统分配稳定编号（task_id），后续更新/读取/回报都以该编号定位——任务名称只是显示字段。初始内容为完整任务正文（目标/完成条件/发起者/回报接收者）。",
+        r#"{"type":"object","properties":{"title":{"type":"string","description":"任务标题（显示用）"},"content":{"type":"string","description":"完整任务正文（markdown，含目标/完成条件/发起者/关联运行等）"}},"required":["title"]}"#,
+    ),
+    (
+        "update_workspace_task",
+        "按稳定编号更新成员任务（整文件覆盖）：更新目标、进展、阻塞、结论和下一步。",
+        r#"{"type":"object","properties":{"task_id":{"type":"string","description":"创建时分配的稳定编号"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["task_id","content"]}"#,
+    ),
+    (
+        "read_workspace_task",
+        "按稳定编号读取成员任务全文。",
+        r#"{"type":"object","properties":{"task_id":{"type":"string"}},"required":["task_id"]}"#,
+    ),
+    (
+        "list_workspace_tasks",
+        "列出当前工作区的全部成员任务（编号+标题）。",
+        r#"{"type":"object","properties":{}}"#,
     ),
     (
         "save_task_note",
