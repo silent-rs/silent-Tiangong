@@ -2,7 +2,14 @@ use super::*;
 use serde_json::{Value, json};
 
 fn assert_request_prefix(previous: &Value, current: &Value) {
-    for field in ["model", "instructions", "tools", "tool_choice", "reasoning"] {
+    for field in [
+        "model",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "reasoning",
+        "prompt_cache_key",
+    ] {
         assert_eq!(previous[field], current[field], "请求的 {field} 不应漂移");
     }
     let old = previous["input"].as_array().unwrap();
@@ -100,7 +107,7 @@ impl ToolOverrideHandler for CacheProbeTool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_reload() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let completed = Arc::new(Mutex::new(Vec::new()));
     let tool: Arc<dyn ToolOverrideHandler> = Arc::new(CacheProbeTool {
         completed: completed.clone(),
@@ -225,6 +232,7 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
 
         for _ in 0..3 {
             let request = responses_request(&server, request_index).await;
+            assert_eq!(request["prompt_cache_key"], harness.ctx.session.id);
             assert!(
                 !request.to_string().contains("cache_hit_rate"),
                 "统计元数据不能发送给模型"
@@ -277,7 +285,7 @@ async fn complex_turns_preserve_every_sent_item_across_errors_injections_and_rel
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_steering_preserves_the_inflight_request_prefix() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     Mock::given(method("POST"))
         .and(path("/responses"))
         .respond_with(
@@ -328,7 +336,7 @@ async fn responses_steering_preserves_the_inflight_request_prefix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn successive_continuations_do_not_merge_previously_sent_assistant_messages() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     for text in [
         "[NEED_MORE_WORK] 第一段进展",
         "[NEED_MORE_WORK] 第二段进展",
@@ -361,7 +369,8 @@ async fn successive_continuations_do_not_merge_previously_sent_assistant_message
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_response_keeps_received_usage_without_polluting_model_history() {
-    let server = MockServer::start().await;
+    // 断言请求序号时使用独立服务，避免池中旧请求在取消后迟到。
+    let server = MockServer::builder().start().await;
     let chunks = [json!({"type":"response.failed", "response":{
         "error":{"message":"upstream failed after processing"},
         "usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110,
@@ -442,7 +451,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose, StreamTiming};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let mut harness = TestHarness::new_with_protocol(
         &server,
         ProviderProtocol::OpenAi,

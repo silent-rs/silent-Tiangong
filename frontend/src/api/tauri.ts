@@ -630,6 +630,7 @@ export interface ServerConfig {
 // 模型配置（Provider + Model + Routing 三层架构）
 
 export interface ProviderConfigView {
+  headers?: Record<string, string>;
   base_url: string;
   api_key: string;
   timeout_ms: number;
@@ -1043,8 +1044,9 @@ export const api = {
     apiKey: string,
     timeoutMs?: number,
     protocol?: string,
+    headers?: Record<string, string>,
   ): Promise<string[]> =>
-    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol }),
+    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol, headers }),
 
   probeEmbeddingDimension: (
     baseUrl: string,

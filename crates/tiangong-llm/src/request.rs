@@ -85,6 +85,8 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub system: Option<String>,
     pub messages: Vec<ChatMessage>,
     #[serde(default)]

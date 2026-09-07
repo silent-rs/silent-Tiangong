@@ -6,6 +6,7 @@ pub type RetryNotifier = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 /// DeepSeek provider 配置。
 #[derive(Clone)]
 pub struct DeepSeekConfig {
+    pub headers: reqwest::header::HeaderMap,
     pub api_key: String,
     pub base_url: Option<String>,
     pub timeout: Duration,
@@ -28,6 +29,7 @@ impl std::fmt::Debug for DeepSeekConfig {
 impl DeepSeekConfig {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
+            headers: Default::default(),
             api_key: api_key.into(),
             base_url: None,
             timeout: Duration::from_secs(60),

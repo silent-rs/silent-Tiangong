@@ -33,7 +33,7 @@ impl ResponsesClient {
     }
 
     pub async fn complete(&self, model: &str, payload: Value) -> Result<Value, LlmError> {
-        let client = self.build_client();
+        let client = self.build_client()?;
         let responses = client.responses();
         timeout(
             self.config.timeout,
@@ -55,11 +55,13 @@ impl ResponsesClient {
         let url = format!("{base}/responses");
         let api_key = self.config.api_key.clone();
         let request_timeout = self.config.timeout;
+        let headers = self.config.headers.clone();
         self.with_retry("openai_stream", model, true, move || {
             let url = url.clone();
             let api_key = api_key.clone();
             let payload = payload.clone();
             let request_timeout = request_timeout;
+            let headers = headers.clone();
             async move {
                 use crate::providers::openai_chatcompletions::client::{
                     StreamBody, resolve_stream_body, stream_timeout_error,
@@ -67,7 +69,9 @@ impl ResponsesClient {
                 // 建连、等待响应头与一次性响应体的读取均受用户配置的请求
                 // 超时约束。SSE 流本身允许长时间增量生成，建流成功后不再
                 // 受总时限限制。
-                let client = reqwest::Client::builder().build()?;
+                let client = reqwest::Client::builder()
+                    .default_headers(headers)
+                    .build()?;
                 let mut request = client
                     .post(&url)
                     .header(reqwest::header::ACCEPT, "text/event-stream")
@@ -119,18 +123,26 @@ impl ResponsesClient {
             &self.config.base_url,
             self.config.timeout,
             "openai",
+            &self.config.headers,
         )
         .await
     }
 
-    fn build_client(&self) -> async_openai::Client<async_openai::config::OpenAIConfig> {
-        let config = async_openai::config::OpenAIConfig::new()
+    fn build_client(
+        &self,
+    ) -> Result<async_openai::Client<async_openai::config::OpenAIConfig>, LlmError> {
+        let mut config = async_openai::config::OpenAIConfig::new()
             .with_api_key(self.config.api_key.clone())
             .with_api_base(
                 normalize_api_base(&self.config.base_url)
                     .unwrap_or_else(|_| self.config.base_url.clone()),
             );
-        async_openai::Client::with_config(config)
+        for (name, value) in &self.config.headers {
+            config = config
+                .with_header(name.clone(), value.as_bytes())
+                .map_err(|_| LlmError::Configuration(format!("请求头 {name} 的值无效")))?;
+        }
+        Ok(async_openai::Client::with_config(config))
     }
 
     async fn with_retry<F, Fut, T>(

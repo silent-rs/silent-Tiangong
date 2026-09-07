@@ -240,6 +240,8 @@ impl ModelCapability {
 /// Provider 连接配置
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
     pub base_url: String,
     pub api_key: String, // 支持 ${ENV_VAR} 引用
     #[serde(default = "default_timeout_ms")]
@@ -392,6 +394,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
 /// 解析后的完整模型配置（Provider + Model 合并）
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
+    pub headers: std::collections::BTreeMap<String, String>,
     pub provider: String,
     pub base_url: String,
     pub api_key: String, // 已解析环境变量
@@ -408,6 +411,13 @@ pub struct ResolvedModel {
 // ---------------------------------------------------------------------------
 
 impl ModelsConfig {
+    pub fn validate_headers(&self) -> Result<(), String> {
+        for (name, provider) in &self.providers {
+            crate::headers::resolve_headers(&provider.headers, "validation-session")
+                .map_err(|error| format!("模型服务 {name}：{error}"))?;
+        }
+        Ok(())
+    }
     /// 检查指定能力是否已配置可用
     /// 对于 Multimodal，除了检查独立路由外，也检查 chat 模型是否自带此能力
     pub fn has_capability(&self, capability: ModelCapability) -> bool {
@@ -467,6 +477,7 @@ impl ModelsConfig {
         let provider = self.providers.get(&entry.provider)?;
 
         Some(ResolvedModel {
+            headers: provider.headers.clone(),
             provider: entry.provider.clone(),
             base_url: provider.base_url.clone(),
             api_key: Self::resolve_api_key(&provider.api_key),
@@ -522,6 +533,7 @@ impl ModelsConfig {
         self.providers.insert(
             name.to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: base_url.to_string(),
                 api_key: api_key.to_string(),
                 timeout_ms,
@@ -722,6 +734,7 @@ mod tests {
         config.providers.insert(
             "test".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
@@ -762,6 +775,7 @@ mod tests {
         config.providers.insert(
             "test".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
@@ -852,6 +866,7 @@ mod tests {
         config.providers.insert(
             "test".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.test.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,
@@ -901,6 +916,7 @@ mod tests {
 
     fn sample_provider() -> ProviderConfig {
         ProviderConfig {
+            headers: Default::default(),
             base_url: "https://api.deepseek.com".to_string(),
             api_key: "${DEEPSEEK_API_KEY}".to_string(),
             timeout_ms: 60_000,

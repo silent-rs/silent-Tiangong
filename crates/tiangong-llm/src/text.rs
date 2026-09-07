@@ -72,6 +72,7 @@ pub async fn complete_text_with_usage(
 ) -> Result<(String, Option<crate::usage::TokenUsageData>), LlmError> {
     let provider = build_provider(config)?;
     let request = ProviderRequest {
+        session_id: None,
         model: config.model.clone(),
         system: Some(system.to_string()),
         messages: vec![ChatMessage::text(MessageRole::User, prompt)],

@@ -270,7 +270,10 @@ fn spawn_title_generation(ctx: &TurnContext) {
     else {
         return;
     };
-    let lite_client = ctx.lite_client().clone();
+    let lite_client = ctx
+        .lite_client()
+        .clone()
+        .with_session_id(ctx.session.id.clone());
     let session_id = ctx.session.id.clone();
     tokio::task::spawn_blocking(move || {
         let Ok(title) = lite_client.complete_lite(&input) else {

@@ -1,6 +1,7 @@
 use crate::app::TiangongApp;
 use crate::view::*;
 use base64::{engine::general_purpose, Engine as _};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
@@ -3362,9 +3363,7 @@ where
             return Err(format!("停止 bot 失败，自动运行状态仍为关闭：{stop_error}"));
         }
         return match store.set_enabled(id, true) {
-            Ok(_) => Err(format!(
-                "停止 bot 失败，已恢复自动运行状态：{stop_error}"
-            )),
+            Ok(_) => Err(format!("停止 bot 失败，已恢复自动运行状态：{stop_error}")),
             Err(restore_error) => Err(format!(
                 "停止 bot 失败，且自动运行状态恢复失败；请立即检查运行状态：停止错误={stop_error}，恢复错误={restore_error}"
             )),
@@ -3969,6 +3968,7 @@ pub async fn fetch_provider_models(
     api_key: String,
     timeout_ms: Option<u64>,
     protocol: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<String>, String> {
     use tiangong_core::model::{ProviderProtocol, SingleProviderClient};
     use tiangong_llm::models_config::ModelsConfig;
@@ -3976,6 +3976,7 @@ pub async fn fetch_provider_models(
 
     let resolved_key = ModelsConfig::resolve_api_key(&api_key);
     let endpoint = ModelEndpoint {
+        headers: headers.unwrap_or_default(),
         base_url,
         api_key: resolved_key,
         model: String::new(),

@@ -129,10 +129,12 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn from_config(config: AnthropicConfig) -> Result<Self, AnthropicError> {
         let http_client = reqwest::Client::builder()
+            .default_headers(config.headers.clone())
             .timeout(config.timeout)
             .build()
             .map_err(|err| AnthropicError::Transport(err.to_string()))?;
         let stream_http_client = reqwest::Client::builder()
+            .default_headers(config.headers.clone())
             .build()
             .map_err(|err| AnthropicError::Transport(err.to_string()))?;
         Ok(Self {
@@ -435,6 +437,7 @@ mod tests {
 
     fn client_with_base_url(base_url: &str) -> AnthropicClient {
         AnthropicClient::from_config(AnthropicConfig {
+            headers: Default::default(),
             api_key: "test-key".to_string(),
             base_url: base_url.to_string(),
             timeout: Duration::from_secs(1),

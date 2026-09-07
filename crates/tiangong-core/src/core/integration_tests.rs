@@ -18,7 +18,7 @@ use crate::session::MessageRole;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plain_question_completes_with_done_event() {
     let (env, sid) = TestEnv::new("plain");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -57,7 +57,8 @@ async fn plain_question_completes_with_done_event() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_roundtrip_executes_plugin_and_answers() {
     let (env, sid) = TestEnv::new("tool");
-    let server = MockServer::start().await;
+    // 断言请求序号时使用独立服务，避免池中旧请求在取消后迟到。
+    let server = MockServer::builder().start().await;
     let tool = RecordingTool::succeed("echo");
     let plugin = Arc::new(ToolPlugin {
         id: "echo-plugin",
@@ -124,7 +125,7 @@ async fn tool_roundtrip_executes_plugin_and_answers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steering_message_aborts_and_restarts_current_turn() {
     let (env, sid) = TestEnv::new("steer");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![
@@ -197,7 +198,7 @@ async fn steering_message_aborts_and_restarts_current_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_running_turn_ends_cancelled() {
     let (env, sid) = TestEnv::new("cancel");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -231,7 +232,7 @@ async fn cancel_running_turn_ends_cancelled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_injection_deferred_into_next_request() {
     let (env, sid) = TestEnv::new("inject");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -281,7 +282,7 @@ async fn idle_injection_deferred_into_next_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn high_pressure_triggers_pre_request_compression() {
     let (env, sid) = TestEnv::new("compress");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![
@@ -348,7 +349,7 @@ async fn high_pressure_triggers_pre_request_compression() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_compression_applies_summary() {
     let (env, sid) = TestEnv::new("manual-compress");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -389,7 +390,7 @@ async fn manual_compression_applies_summary() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_failure_propagates_failed_status() {
     let (env, sid) = TestEnv::new("llm-fail");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -420,7 +421,7 @@ async fn llm_failure_propagates_failed_status() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn next_turn_reads_latest_session() {
     let (env, sid) = TestEnv::new("next-latest");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let marker = format!("A-FINAL-{sid}");
     let routes = mount_prompt_router(
         &server,
@@ -467,7 +468,7 @@ async fn next_turn_reads_latest_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handoff_during_commit_starts_next_turn_from_pending_slot() {
     let (env, sid) = TestEnv::new("commit-handoff");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let marker = format!("HANDOFF-A-FINAL-{sid}");
     let routes = mount_prompt_router(
         &server,
@@ -523,7 +524,7 @@ async fn handoff_during_commit_starts_next_turn_from_pending_slot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_messages_share_single_channel_without_busy() {
     let (env, sid) = TestEnv::new("busy");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![
@@ -594,7 +595,7 @@ async fn multiple_messages_share_single_channel_without_busy() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_not_yet_saved_message_survives_shutdown() {
     let (env, sid) = TestEnv::new("survive-unsaved");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![PromptRoute::new(
@@ -645,7 +646,7 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_next_turn_runs_after_current_turn_completes() {
     let (env, sid) = TestEnv::new("continuous-done");
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let routes = mount_prompt_router(
         &server,
         vec![

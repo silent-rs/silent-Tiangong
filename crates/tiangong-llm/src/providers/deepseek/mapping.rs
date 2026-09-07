@@ -53,7 +53,7 @@ pub fn to_deepseek_request(
         thinking,
         reasoning_effort,
         response_format: build_response_format(req),
-        user_id: None,
+        user_id: req.session_id.clone(),
     })
 }
 
@@ -514,6 +514,7 @@ mod tests {
     #[test]
     fn assistant_thinking_is_passed_back_as_reasoning_content() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![ChatMessage::new(
@@ -557,6 +558,7 @@ mod tests {
     #[test]
     fn internal_plugin_injection_tool_call_gets_reasoning_fallback() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![
@@ -614,6 +616,7 @@ mod tests {
     #[test]
     fn internal_plugin_injection_skips_reasoning_fallback_when_thinking_disabled() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![ChatMessage::new(
@@ -694,6 +697,7 @@ mod tests {
         // 仅含思考内容（纯思考轮次）、无 text 无 tool_calls 时，
         // content 必须填空字符串占位，否则新版 API 报 "content or tool_calls must be set"。
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![ChatMessage::new(
@@ -771,6 +775,7 @@ mod tests {
     #[test]
     fn reasoning_effort_low_maps_to_low() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-flash".to_string(),
             system: None,
             messages: Vec::new(),
@@ -794,6 +799,7 @@ mod tests {
     fn reasoning_effort_medium_high_max_mapping() {
         fn map(effort: ReasoningEffort) -> tiangong_deepseek::types::ReasoningEffort {
             let req = ProviderRequest {
+                session_id: None,
                 model: "deepseek-v4-pro".to_string(),
                 system: None,
                 messages: Vec::new(),
@@ -818,6 +824,7 @@ mod tests {
     #[test]
     fn temperature_top_p_omitted_when_thinking_enabled() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: Vec::new(),
@@ -838,6 +845,7 @@ mod tests {
     #[test]
     fn temperature_top_p_sent_when_thinking_disabled() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: Vec::new(),
@@ -863,6 +871,7 @@ mod tests {
             Value::String("json_object".to_string()),
         );
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: Vec::new(),
@@ -885,6 +894,7 @@ mod tests {
     #[test]
     fn response_format_absent_without_metadata() {
         let req = ProviderRequest {
+            session_id: None,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: Vec::new(),

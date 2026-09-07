@@ -3,6 +3,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { RequestHeadersEditor } from './RequestHeadersEditor';
 import { Badge } from './ui/badge';
 import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
@@ -813,7 +814,7 @@ function ProviderModelsView({
     }
     setIsFetchingModels(true);
     try {
-      const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol);
+      const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
       if (models.length === 0) showError('无可用模型', '该供应商未返回任何模型');
       setAvailableModels(models);
     } catch (error) {
@@ -840,7 +841,7 @@ function ProviderModelsView({
       if (!provider?.base_url || !provider?.api_key) return;
       setIsFetchingModels(true);
       try {
-        const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol);
+        const models = await api.fetchProviderModels(provider.base_url, provider.api_key, provider.timeout_ms, provider.protocol, provider.headers);
         if (cancelled || models.length === 0) return;
         const next = { ...config };
         for (const modelId of models) {
@@ -1040,6 +1041,7 @@ function ProviderModelsView({
                   </div>
                 </div>
                 {/* DeepSeek 余额查询 */}
+                <RequestHeadersEditor headers={selectedConfig.headers} onChange={(headers) => updateProviderField('headers', headers)} />
                 {activeProvider === 'DeepSeek' && selectedConfig.api_key.trim() && (
                   <ProviderBalanceSection providerName={activeProvider} />
                 )}
@@ -1294,6 +1296,7 @@ function ProviderForm({
           </SelectContent>
         </Select>
       </div>
+      <RequestHeadersEditor headers={draft.headers} onChange={(headers) => setDraft({ ...draft, headers })} />
       <div className="flex justify-end gap-2 pt-1">
         <Button variant="ghost" size="sm" onClick={onCancel}>
           取消

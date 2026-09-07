@@ -110,6 +110,7 @@ pub fn update_models(
     current: &TiangongConfig,
     new_models: tiangong_llm::models_config::ModelsConfig,
 ) -> anyhow::Result<TiangongConfig> {
+    new_models.validate_headers().map_err(anyhow::Error::msg)?;
     let mut next = current.clone();
     let dir = next.storage_root.clone();
     // 先写盘——失败则内存不变。
@@ -193,6 +194,7 @@ mod tests {
         m.providers.insert(
             "p".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.test.com".to_string(),
                 api_key: "k".to_string(),
                 timeout_ms: 60_000,

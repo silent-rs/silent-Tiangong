@@ -54,6 +54,7 @@ pub fn resolve_for_model_key(key: &str) -> Result<ResolvedModel> {
         .get(&entry.provider)
         .ok_or_else(|| anyhow::anyhow!("provider '{}' 未配置", entry.provider))?;
     Ok(ResolvedModel {
+        headers: provider.headers.clone(),
         provider: entry.provider.clone(),
         base_url: provider.base_url.clone(),
         api_key: ModelsConfig::resolve_api_key(&provider.api_key),

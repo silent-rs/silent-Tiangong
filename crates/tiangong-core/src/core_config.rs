@@ -50,6 +50,7 @@ impl LlmConfig {
         let resolve = |slot: RoutingSlot| -> Option<ModelEndpoint> {
             let resolved = models.resolve_slot(slot)?;
             Some(ModelEndpoint {
+                headers: resolved.headers,
                 base_url: resolved.base_url,
                 api_key: resolved.api_key,
                 model: resolved.model,
@@ -120,6 +121,7 @@ impl CoreConfigBuilder {
     /// 设置 Chat 端点（最常用的快捷方式）
     pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
         self.config.llm.chat = ModelEndpoint {
+            headers: Default::default(),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -282,6 +284,7 @@ mod tests {
         models.providers.insert(
             "anthropic".to_string(),
             crate::models_config::ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.anthropic.com".into(),
                 api_key: "sk-ant".into(),
                 timeout_ms: 30_000,

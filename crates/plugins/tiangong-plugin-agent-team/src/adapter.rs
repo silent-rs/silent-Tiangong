@@ -517,6 +517,7 @@ mod tests {
         let server = ParentChildSseServer::start();
         let mut config = CoreConfig::default();
         config.llm.chat = ModelEndpoint {
+            headers: Default::default(),
             base_url: server.base_url.clone(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
@@ -663,6 +664,7 @@ mod tests {
 
         let mut config = CoreConfig::default();
         config.llm.chat = ModelEndpoint {
+            headers: Default::default(),
             base_url: server.base_url.clone(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),

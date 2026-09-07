@@ -538,6 +538,7 @@ impl AgentLoopState {
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     ModelRequest {
+        session_id: Some(ctx.session.id.clone()),
         user_input: String::new(),
         context: ctx.session.context(),
         reasoning_effort: ctx.agent_config.reasoning_effort,

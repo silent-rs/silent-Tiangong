@@ -538,6 +538,7 @@ mod tests {
         session.bind_storage_root(root.path());
         let (stream_tx, _) = std::sync::mpsc::channel();
         let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
             base_url: "http://127.0.0.1:1".to_string(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
