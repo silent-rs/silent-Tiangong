@@ -406,7 +406,7 @@ function AgentTurnView({
       )}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
-      <CallUsageDetails messages={messages} />
+      {!selectedAgentTab && <CallUsageDetails messages={messages} />}
       {turnStatusMeta && !isActive && (
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
           <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>
