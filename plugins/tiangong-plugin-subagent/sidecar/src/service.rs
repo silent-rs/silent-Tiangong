@@ -417,7 +417,7 @@ fn handle_cli_event(
     let _ = store.save_run(&run);
     sync_task_status(store, &run);
     if run.status.is_terminal() {
-        release_collab_activation(store, &run);
+        release_collab_activation(store, &run.activation_id);
     }
     if run.status == RunStatus::Completed
         && let Some(summary) = run.summary.as_deref()
@@ -517,34 +517,34 @@ async fn handle_exit(
     }
     let _ = store.save_run(&run);
     sync_task_status(store, &run);
+    release_collab_activation(store, &run.activation_id);
     notify_run_status(&run);
 }
 
-/// 协作激活释放（自由函数版，终态出口共用）：协作激活（collab- 前缀）
-/// 下已无活跃运行时解除登记，写占用随终态消失。
-fn release_collab_activation(store: &RuntimeStore, run: &RunRecord) {
-    if !run.activation_id.starts_with("collab-") {
+/// 协作激活释放（自由函数版，终态出口与启动失败回滚共用）：协作激活
+/// （collab- 前缀）下已无活跃运行时解除登记，写占用随终态消失。
+fn release_collab_activation(store: &RuntimeStore, activation_id: &str) {
+    if !activation_id.starts_with("collab-") {
         return;
     }
-    let still_busy = store.list_runs().into_iter().any(|other| {
-        other.activation_id == run.activation_id
-            && other.run_id != run.run_id
-            && other.status.is_alive()
-    });
+    let still_busy = store
+        .list_runs()
+        .into_iter()
+        .any(|other| other.activation_id == activation_id && other.status.is_alive());
     if still_busy {
         return;
     }
     let Some(mut activation) = store
         .activations()
         .into_iter()
-        .find(|activation| activation.activation_id == run.activation_id)
+        .find(|activation| activation.activation_id == activation_id)
     else {
         return;
     };
     if activation.active() {
         activation.deactivated_at = Some(now_string());
         if let Err(error) = store.replace_activation(activation) {
-            tracing::warn!(run_id = %run.run_id, %error, "释放协作激活登记失败");
+            tracing::warn!(%activation_id, %error, "释放协作激活登记失败");
         }
     }
 }
@@ -1079,7 +1079,7 @@ impl SubagentService {
     /// 协作激活释放：该协作激活下已无活跃运行时解除登记（终态统一出口
     /// 调用；普通激活由停用路径管理，不经过此处）。
     fn release_collab_activation_if_idle(&self, run: &RunRecord) {
-        release_collab_activation(&self.store, run);
+        release_collab_activation(&self.store, &run.activation_id);
     }
 
     async fn send_message_core(
@@ -1214,7 +1214,27 @@ impl SubagentService {
     }
 
     /// 启动运行（持 ops 锁调用）：CLI 后端启动子进程，会话后端投递关联会话。
+    /// 启动失败时回滚协作登记（无活跃运行即释放），不留残留占用。
     async fn spawn_run(
+        &self,
+        config: &AgentConfig,
+        activation: &ActivationRecord,
+        kind: RunKind,
+        task: Option<&TaskRecord>,
+        message: Option<&str>,
+        origin: Option<&CollabOrigin<'_>>,
+    ) -> Result<RunRecord> {
+        let collab_activation = activation.activation_id.clone();
+        let result = self
+            .spawn_run_inner(config, activation, kind, task, message, origin)
+            .await;
+        if result.is_err() {
+            release_collab_activation(&self.store, &collab_activation);
+        }
+        result
+    }
+
+    async fn spawn_run_inner(
         &self,
         config: &AgentConfig,
         activation: &ActivationRecord,
@@ -1465,27 +1485,50 @@ impl SubagentService {
         }
         let timestamp = now_string();
         if run.pid.is_none() {
-            if let Err(error) = self.notify_source_session(&run, "取消请求").await {
-                tracing::warn!(run_id = %run.run_id, %error, "取消通知投递失败（取消为终态裁定，仍落终态）");
+            // 会话后端：取消是「不再需要结果」的裁定，不等于执行已停止——
+            // 投递失败如实上抛（取消未送达）；成功后任务逻辑取消、运行置
+            // Stopping（占用保留），待成员会话本轮收尾归因确认实际停止。
+            self.notify_source_session(&run, "取消请求").await?;
+            run.status = RunStatus::Stopping;
+            run.summary = Some("任务已取消，停止请求已投递，等待执行侧收尾确认".to_string());
+            let _ = self.store.save_run(&run);
+            // 任务层记录逻辑取消（run 保持 Stopping，占用到收尾归因释放）。
+            if let Some(task_id) = run.task_id.clone()
+                && let Ok(mut task) = self.store.load_task(&task_id)
+                && task.status != TaskStatus::Completed
+            {
+                task.status = TaskStatus::Cancelled;
+                task.updated_at = now_string();
+                let _ = self.store.save_task(&task);
             }
-        } else {
-            self.runner
-                .write_line(run_id, &json!({ "type": "cancel" }))
-                .await
-                .ok();
-            // 先断 stdin（协议约定 EOF 即退出），再等信号宽限；
-            // 沙箱内信号被拒时靠 EOF 与宿主退出级联兜底。
-            self.runner.close_stdin(run_id).await.ok();
-            self.runner
-                .terminate(run_id, Duration::from_secs(3))
-                .await?;
+            append_event(
+                &self.store,
+                &run,
+                "cancel_requested",
+                &json!({}),
+                &timestamp,
+            );
+            notify_run_status(&run);
+            return Ok(());
         }
+        self.runner
+            .write_line(run_id, &json!({ "type": "cancel" }))
+            .await
+            .ok();
+        // 先断 stdin（协议约定 EOF 即退出），再等信号宽限；
+        // 沙箱内信号被拒时靠 EOF 与宿主退出级联兜底。terminate 确认进程
+        // 退出后才落终态——CLI 的取消即实际停止。
+        self.runner.close_stdin(run_id).await.ok();
+        self.runner
+            .terminate(run_id, Duration::from_secs(3))
+            .await?;
         run.status = RunStatus::Cancelled;
         run.finished_at = Some(timestamp.clone());
         run.updated_at = timestamp.clone();
         run.summary = Some("已取消".to_string());
         let _ = self.store.save_run(&run);
         sync_task_status(&self.store, &run);
+        self.release_collab_activation_if_idle(&run);
         append_event(&self.store, &run, "cancelled", &json!({}), &now_string());
         notify_run_status(&run);
         Ok(())
@@ -1543,40 +1586,47 @@ impl SubagentService {
                     && agent_ids.contains(&run.agent_id.as_str())
             })
             .collect();
-        // 归因：投递正文携带「（运行标记 r-短码）」时精确匹配对应运行。
-        // 标记存在但匹配不到（运行已终态的迟到回报 / 重复回报）一律忽略，
-        // 绝不回退到其他活跃运行；无标记（早期投递）才回退最新。
+        // 控制通知（停止/取消请求）触发的回复不是任务结果，忽略——
+        // 其正文以【Subagent 控制】开头。
+        if request.user_text.contains("【Subagent 控制】") {
+            return Ok("本轮为控制通知的回复，不归因任何运行".to_string());
+        }
+        // 归因只认运行标记：无标记的轮次（用户在成员会话直接对话等）
+        // 不属于任何任务投递，忽略；绝不泛化为「最新活跃运行」。
         let tag = request
             .user_text
             .split("（运行标记 r-")
             .nth(1)
             .and_then(|rest| rest.split('）').next())
-            .map(str::to_string);
-        let target = match tag.as_deref() {
-            Some(tag) if !tag.is_empty() => {
-                let Some(run) = alive_runs
-                    .iter()
-                    .find(|run| run.run_id.ends_with(tag))
-                    .cloned()
-                else {
-                    return Ok(format!(
-                        "运行标记 r-{tag} 无匹配的活跃运行（迟到或重复回报），忽略"
-                    ));
-                };
-                Some(run)
-            }
-            _ => alive_runs.into_iter().max_by_key(|run| run.run_id.clone()),
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(tag) = tag else {
+            return Ok("本轮回报缺少运行标记（非任务投递触发），忽略".to_string());
         };
-        let Some(mut run) = target else {
-            return Ok("源会话上没有等待回复的运行，忽略".to_string());
+        let Some(mut run) = alive_runs
+            .iter()
+            .find(|run| run.run_id.ends_with(&tag))
+            .cloned()
+        else {
+            return Ok(format!(
+                "运行标记 r-{tag} 无匹配的活跃运行（迟到或重复回报），忽略"
+            ));
         };
         let timestamp = now_string();
-        let status = match request.turn_status.as_deref() {
-            Some("cancelled") => RunStatus::Cancelled,
-            Some("failed") => RunStatus::Failed,
-            _ => RunStatus::Completed,
+        // Stopping（停止/取消请求已投递）的运行：执行侧收尾确认即实际停止，
+        // 终态一律 Cancelled——本轮回复内容不改变已作出的取消裁定。
+        let status = if run.status == RunStatus::Stopping {
+            RunStatus::Cancelled
+        } else {
+            match request.turn_status.as_deref() {
+                Some("cancelled") => RunStatus::Cancelled,
+                Some("failed") => RunStatus::Failed,
+                _ => RunStatus::Completed,
+            }
         };
-        let text = if request.assistant_text.trim().is_empty() {
+        let text = if run.status == RunStatus::Stopping {
+            "执行侧已收尾，取消确认".to_string()
+        } else if request.assistant_text.trim().is_empty() {
             match status {
                 RunStatus::Cancelled => "运行被取消".to_string(),
                 RunStatus::Failed => "运行失败（无回复文本）".to_string(),
