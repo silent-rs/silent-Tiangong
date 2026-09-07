@@ -166,6 +166,32 @@ fn new_path_messages_increment_across_turns() {
 }
 
 #[test]
+fn unchanged_system_prompt_is_stable_across_rebuilds_and_reload() {
+    let mut session = helper_session();
+    let config = SystemPromptConfig::from_plugin_sections(vec!["固定身份与规则".into()]);
+    session.rebuild_system_prompt(&config);
+    session.append_message(MessageRole::User, "初始问题");
+    let mut previous = serde_json::to_value(session.context()).unwrap();
+    for turn in 0..10 {
+        session.title = format!("自动标题 {turn}");
+        session.rebuild_system_prompt(&config);
+        let current = serde_json::to_value(session.context()).unwrap();
+        assert!(
+            current
+                .as_array()
+                .unwrap()
+                .starts_with(previous.as_array().unwrap()),
+            "重建相同提示不能改变历史消息"
+        );
+        session.append_message(MessageRole::Assistant, format!("回复 {turn}"));
+        session.append_message(MessageRole::User, format!("追问 {turn}"));
+        previous = serde_json::to_value(session.context()).unwrap();
+        session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(session.context()).unwrap(), previous);
+    }
+}
+
+#[test]
 fn new_path_tool_calls_preserved_in_context() {
     let mut session = helper_session();
     // 模拟一轮带工具调用的对话

@@ -133,6 +133,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
     context.push(user_message);
 
     let request = ModelRequest {
+        session_id: None,
         user_input: String::new(),
         context,
         reasoning_effort: tiangong_llm::request::ReasoningEffort::None,

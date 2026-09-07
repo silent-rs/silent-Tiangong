@@ -1099,6 +1099,7 @@ fn sse_response(events: &str) -> Vec<u8> {
 
 fn mock_client(addr: &str) -> crate::client::DeepSeekClient {
     crate::client::DeepSeekClient::from_config(crate::config::DeepSeekConfig {
+        headers: Default::default(),
         api_key: "test-key".into(),
         base_url: format!("http://{addr}"),
         timeout: std::time::Duration::from_secs(5),

@@ -160,6 +160,12 @@ fn parse_stream_event_with_state(
             }));
         }
         "response.failed" | "response.incomplete" => {
+            if let Some(usage) = payload
+                .get("response")
+                .and_then(|response| response.get("usage"))
+            {
+                events.push(Ok(ProviderStreamEvent::Usage(parse_usage(usage))));
+            }
             let message = payload
                 .get("response")
                 .and_then(|r| r.get("error"))

@@ -37,6 +37,7 @@ impl NativeAnthropicTransport {
         native.timeout = config.timeout;
         native.api_version = config.resolve_api_version();
         native.beta = config.beta.clone();
+        native.headers = config.headers.clone();
 
         let client = NativeAnthropicClient::from_config(native).map_err(map_anthropic_error)?;
         Ok(Self { client })

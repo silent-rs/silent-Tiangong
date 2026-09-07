@@ -27,6 +27,14 @@ pub fn normalize_api_base(base_url: &str) -> Result<String> {
 pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> {
     let mut payload = serde_json::Map::new();
     payload.insert("model".to_string(), json!(req.model));
+    if let Some(key) = req
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        payload.insert("prompt_cache_key".to_string(), json!(key));
+    }
 
     // Responses API 的 instructions 只能承载单个系统提示，而消息流中可能
     // 插入额外 System 消息（记忆检索结果、错误提示等）。将主 system 与流中
@@ -481,6 +489,7 @@ mod tests {
     #[test]
     fn streaming_request_uses_regular_mode() {
         let req = ProviderRequest {
+            session_id: None,
             model: "gpt-5.6-sol".to_string(),
             system: None,
             messages: vec![ChatMessage::text(MessageRole::User, "你好")],
@@ -584,6 +593,7 @@ mod tests {
     #[test]
     fn request_rebuilds_function_call_and_output_items() {
         let req = ProviderRequest {
+            session_id: None,
             model: "o3".to_string(),
             system: None,
             messages: vec![
@@ -632,6 +642,7 @@ mod tests {
     #[test]
     fn request_rebuilds_latest_function_call_item() {
         let req = ProviderRequest {
+            session_id: None,
             model: "o3".to_string(),
             system: None,
             messages: vec![ChatMessage::new(
@@ -662,6 +673,7 @@ mod tests {
     #[test]
     fn builds_request_payload() {
         let req = ProviderRequest {
+            session_id: None,
             model: "gpt-4o".to_string(),
             system: Some("你是助手".to_string()),
             messages: vec![crate::message::ChatMessage::text(MessageRole::User, "你好")],
@@ -689,6 +701,7 @@ mod tests {
         // 消息流中的 System 消息（如记忆检索结果）应拼入 instructions，
         // 而非静默丢弃。
         let req = ProviderRequest {
+            session_id: None,
             model: "gpt-4o".to_string(),
             system: Some("主系统提示".to_string()),
             messages: vec![
@@ -717,6 +730,7 @@ mod tests {
     #[test]
     fn builds_request_with_tools() {
         let req = ProviderRequest {
+            session_id: None,
             model: "gpt-4o".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(MessageRole::User, "天气")],
@@ -744,6 +758,7 @@ mod tests {
     fn reasoning_effort_requests_summary_auto() {
         // reasoning_effort 分支必须带上 summary: "auto"，否则服务端不返回思考摘要。
         let req = ProviderRequest {
+            session_id: None,
             model: "o3".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],
@@ -765,6 +780,7 @@ mod tests {
     fn thinking_budget_requests_summary_auto() {
         // thinking 分支（默认 medium effort）同样必须带上 summary。
         let req = ProviderRequest {
+            session_id: None,
             model: "o3".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],
@@ -785,6 +801,7 @@ mod tests {
     #[test]
     fn thinking_disabled_omits_reasoning() {
         let req = ProviderRequest {
+            session_id: None,
             model: "gpt-4o".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(MessageRole::User, "hi")],

@@ -410,6 +410,7 @@ fn resolved_model_by_key(models: &ModelsConfig, model_key: &str) -> Result<Resol
     let resolve_entry = |entry: &ModelEntry| {
         let provider = models.providers.get(&entry.provider)?;
         Some(ResolvedModel {
+            headers: provider.headers.clone(),
             provider: entry.provider.clone(),
             base_url: provider.base_url.clone(),
             api_key: ModelsConfig::resolve_api_key(&provider.api_key),

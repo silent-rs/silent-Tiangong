@@ -56,6 +56,7 @@ impl PromptSectionProvider for WhitespaceProvider {
 /// 用 dummy 端点构造 RuntimeEngine（不发起真实请求，仅供 prompt 组装测试）。
 fn test_engine() -> RuntimeEngine {
     let client = SingleProviderClient::new(ModelEndpoint {
+        headers: Default::default(),
         base_url: "http://127.0.0.1:0/v1".to_string(),
         api_key: "test-key".to_string(),
         model: "test-model".to_string(),

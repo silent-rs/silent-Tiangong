@@ -50,6 +50,12 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
         .total_tokens
         .max(next.total_tokens)
         .max(computed_total);
+    if let Some(hit) = next.prompt_cache_hit_tokens {
+        current.prompt_cache_hit_tokens = Some(hit);
+    }
+    if let Some(miss) = next.prompt_cache_miss_tokens {
+        current.prompt_cache_miss_tokens = Some(miss);
+    }
 }
 
 fn collect_openai_stream_tool_calls(
@@ -103,6 +109,8 @@ fn append_stream_tool_call_arguments(raw_args: &mut String, partial_json: &str) 
 pub struct ModelRequest {
     pub user_input: String,
     pub context: Vec<Message>,
+    /// 会话级缓存路由标识，不参与消息内容构造。
+    pub session_id: Option<String>,
     /// 思考强度：None 关闭思考，其余档位开启。
     pub reasoning_effort: ReasoningEffort,
     /// 该请求允许的最大输出 token 数。
@@ -304,6 +312,7 @@ pub type OnRetryCallback = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SingleProviderClient {
+    session_id: String,
     cfg: ModelEndpoint,
     /// 重试时的回调通知（可选）
     on_retry: Option<OnRetryCallback>,
@@ -319,6 +328,42 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
+    fn build_provider_request(
+        &self,
+        req: &ModelRequest,
+        model: &str,
+        max_tokens: u32,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ProviderRequest> {
+        let (system, messages) = build_provider_messages(req)?;
+        Ok(ProviderRequest {
+            session_id: req
+                .session_id
+                .clone()
+                .or_else(|| Some(self.session_id.clone())),
+            model: model.to_string(),
+            system: (!system.trim().is_empty()).then_some(system),
+            messages,
+            tools: functions.to_vec(),
+            tool_choice: tool_choice
+                .or_else(|| (!functions.is_empty()).then_some(LlmToolChoice::Auto)),
+            max_tokens,
+            temperature: configured_temperature_f32(),
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            reasoning_effort: req.reasoning_effort,
+        })
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+    pub fn model_name(&self) -> &str {
+        self.cfg.model.trim()
+    }
     /// 可取消的非流式主模型调用。调用方丢弃 future 时底层 HTTP 请求随之终止。
     pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
         let timeout_ms = self.cfg.timeout_ms;
@@ -326,9 +371,9 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
         let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
-        let request = build_provider_request(req, model, max_tokens, &[], None)?;
+        let request = self.build_provider_request(req, model, max_tokens, &[], None)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
@@ -343,6 +388,7 @@ impl SingleProviderClient {
 
     pub fn new(cfg: ModelEndpoint) -> Self {
         Self {
+            session_id: scru128::new().to_string(),
             cfg,
             on_retry: None,
         }
@@ -362,21 +408,36 @@ impl SingleProviderClient {
 
         let timeout_ms = cfg.timeout_ms;
         let mut models = if cfg.protocol == ProviderProtocol::Anthropic {
-            let provider = build_anthropic_provider_from_config(cfg, timeout_ms, None)?;
+            let provider = build_anthropic_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+            )?;
             provider
                 .list_models()
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
         } else if cfg.protocol == ProviderProtocol::DeepSeek {
-            let provider = build_deepseek_provider_from_config(cfg, timeout_ms, None)?;
+            let provider = build_deepseek_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+            )?;
             provider
                 .list_models()
                 .await
                 .map(|items| items.into_iter().map(|item| item.id).collect::<Vec<_>>())
                 .map_err(map_llm_error)?
         } else {
-            let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
+            let provider = build_openai_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+            )?;
             provider
                 .list_models()
                 .await
@@ -396,7 +457,12 @@ impl SingleProviderClient {
 
         let timeout_ms = cfg.timeout_ms;
         if cfg.protocol == ProviderProtocol::Anthropic {
-            let provider = build_anthropic_provider_from_config(cfg, timeout_ms, None)?;
+            let provider = build_anthropic_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+            )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
                 .build()
@@ -410,7 +476,12 @@ impl SingleProviderClient {
             return Ok(models);
         }
         if cfg.protocol == ProviderProtocol::DeepSeek {
-            let provider = build_deepseek_provider_from_config(cfg, timeout_ms, None)?;
+            let provider = build_deepseek_provider_from_config(
+                cfg,
+                timeout_ms,
+                None,
+                &scru128::new().to_string(),
+            )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
                 .build()
@@ -423,7 +494,8 @@ impl SingleProviderClient {
             models.dedup();
             return Ok(models);
         }
-        let provider = build_openai_provider_from_config(cfg, timeout_ms, None)?;
+        let provider =
+            build_openai_provider_from_config(cfg, timeout_ms, None, &scru128::new().to_string())?;
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -442,23 +514,44 @@ impl SingleProviderClient {
     }
 
     fn build_anthropic_provider(&self, timeout_ms: u64) -> Result<AnthropicProvider> {
-        build_anthropic_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())
+        build_anthropic_provider_from_config(
+            &self.cfg,
+            timeout_ms,
+            self.on_retry.clone(),
+            &self.session_id,
+        )
     }
 
-    fn build_provider_dispatch(&self, timeout_ms: u64) -> Result<ProviderDispatch> {
+    fn build_provider_dispatch(
+        &self,
+        timeout_ms: u64,
+        session_id: Option<&str>,
+    ) -> Result<ProviderDispatch> {
+        let session_id = session_id.unwrap_or(&self.session_id);
         match self.protocol() {
             ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
-                self.build_anthropic_provider(timeout_ms)?,
+                build_anthropic_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                )?,
             ))),
             ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
                 build_openai_responses_provider_from_config(
                     &self.cfg,
                     timeout_ms,
                     self.on_retry.clone(),
+                    session_id,
                 )?,
             ))),
             ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
-                build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
+                build_openai_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                )?,
             ))),
             ProviderProtocol::DeepSeek => {
                 let mut config = DeepSeekConfig::new(self.cfg.api_key.trim().to_string());
@@ -470,6 +563,7 @@ impl SingleProviderClient {
                 config.timeout = Duration::from_millis(timeout_ms);
                 config.max_retries = MAX_RETRIES;
                 config.retry_notifier = self.on_retry.clone();
+                config.headers = crate::headers::resolve_headers(&self.cfg.headers, session_id)?;
                 Ok(ProviderDispatch::DeepSeek(Box::new(
                     DeepSeekProvider::from_config(config)?,
                 )))
@@ -513,6 +607,7 @@ impl SingleProviderClient {
 
         let provider = self.build_anthropic_provider(timeout_ms)?;
         let request = ProviderRequest {
+            session_id: Some(self.session_id.clone()),
             model: model.to_string(),
             system: Some(
                 "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
@@ -551,8 +646,8 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
         }
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let request = self.build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
         consume_provider_stream(provider, request, &mut on_delta)
     }
 
@@ -590,8 +685,9 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
         }
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let request =
+            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
         convert_stream_to_function_response(provider, request, on_delta)
     }
 
@@ -609,8 +705,9 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms, None)?;
         let request = ProviderRequest {
+            session_id: Some(self.session_id.clone()),
             model: model.to_string(),
             system: Some(
                 "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
@@ -643,6 +740,7 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
         }
         let request = ProviderRequest {
+            session_id: Some(self.session_id.clone()),
             model: model.to_string(),
             system: Some(system.to_string()),
             messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
@@ -662,7 +760,7 @@ impl SingleProviderClient {
                 .trim()
                 .to_string());
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms, None)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(collect_provider_text(&response).trim().to_string())
     }
@@ -711,12 +809,13 @@ impl SingleProviderClient {
                 "API_MODEL 不能为空，无法发起 async 流式工具模型请求"
             ));
         }
-        let request = build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let request =
+            self.build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let preserve_tool_call_order = matches!(
             self.protocol(),
             ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
         );
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
 
         let mut text = String::new();
         let mut reasoning_content = String::new();
@@ -821,7 +920,7 @@ impl SingleProviderClient {
 
         Ok(ModelFunctionResponse {
             text: text.trim().to_string(),
-            reasoning_content: reasoning_content.trim().to_string(),
+            reasoning_content,
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
             stop_reason,
             usage: usage.into(),
@@ -852,8 +951,9 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
+        let request =
+            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let response = self.block_on_llm(provider.complete(request))?;
         convert_provider_response_to_function_response(response)
     }
@@ -881,8 +981,9 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
+        let request =
+            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
         convert_provider_response_to_function_response(response)
     }
@@ -951,9 +1052,9 @@ impl ModelClient for SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
-        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
         let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
-        let request = build_provider_request(req, model, max_tokens, &[], None)?;
+        let request = self.build_provider_request(req, model, max_tokens, &[], None)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
@@ -1002,6 +1103,7 @@ fn build_anthropic_provider_from_config(
     cfg: &ModelEndpoint,
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
+    session_id: &str,
 ) -> Result<AnthropicProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1013,6 +1115,7 @@ fn build_anthropic_provider_from_config(
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     AnthropicProvider::from_config(config).map_err(map_llm_error)
 }
 
@@ -1020,6 +1123,7 @@ fn build_openai_responses_provider_from_config(
     cfg: &ModelEndpoint,
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
+    session_id: &str,
 ) -> Result<OpenAiResponsesProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1031,6 +1135,7 @@ fn build_openai_responses_provider_from_config(
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiResponsesProvider::new(config))
 }
 
@@ -1038,6 +1143,7 @@ fn build_openai_provider_from_config(
     cfg: &ModelEndpoint,
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
+    session_id: &str,
 ) -> Result<OpenAiChatCompletionsProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1047,6 +1153,7 @@ fn build_openai_provider_from_config(
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiChatCompletionsProvider::new(config))
 }
 
@@ -1054,6 +1161,7 @@ fn build_deepseek_provider_from_config(
     cfg: &ModelEndpoint,
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
+    session_id: &str,
 ) -> Result<DeepSeekProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1068,30 +1176,8 @@ fn build_deepseek_provider_from_config(
     config.timeout = Duration::from_millis(timeout_ms);
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
+    config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     DeepSeekProvider::from_config(config).map_err(|err| anyhow!("{err}"))
-}
-
-fn build_provider_request(
-    req: &ModelRequest,
-    model: &str,
-    max_tokens: u32,
-    functions: &[ToolSpec],
-    tool_choice: Option<ToolChoice>,
-) -> Result<ProviderRequest> {
-    let (system, messages) = build_provider_messages(req)?;
-    Ok(ProviderRequest {
-        model: model.to_string(),
-        system: (!system.trim().is_empty()).then_some(system),
-        messages,
-        tools: functions.to_vec(),
-        tool_choice: tool_choice.or_else(|| (!functions.is_empty()).then_some(LlmToolChoice::Auto)),
-        max_tokens,
-        temperature: configured_temperature_f32(),
-        top_p: None,
-        stop_sequences: Vec::new(),
-        metadata: None,
-        reasoning_effort: req.reasoning_effort,
-    })
 }
 
 fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessage>)> {
@@ -1187,7 +1273,7 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
     let mut content = Vec::new();
     if !msg.reasoning_content.trim().is_empty() {
         content.push(LlmMessageContent::Thinking(LlmThinkingContent {
-            thinking: msg.reasoning_content.trim().to_string(),
+            thinking: msg.reasoning_content.clone(),
             signature: msg.reasoning_signature.clone(),
         }));
     }
@@ -1304,7 +1390,7 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
 
         if !has_tool_calls {
             if assistant.role != LlmMessageRole::Tool {
-                push_merged_provider_message(&mut output, assistant);
+                push_provider_message(&mut output, assistant);
             }
             index += 1;
             continue;
@@ -1363,7 +1449,7 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
             _ => true,
         });
         if !assistant.content.is_empty() {
-            push_merged_provider_message(&mut output, assistant);
+            push_provider_message(&mut output, assistant);
         }
 
         let paired_results = call_order
@@ -1372,13 +1458,13 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
             .map(LlmMessageContent::ToolResult)
             .collect::<Vec<_>>();
         if !paired_results.is_empty() {
-            push_merged_provider_message(
+            push_provider_message(
                 &mut output,
                 ChatMessage::new(LlmMessageRole::Tool, paired_results),
             );
         }
         for context in deferred_contexts {
-            push_merged_provider_message(&mut output, context);
+            push_provider_message(&mut output, context);
         }
         index = cursor;
     }
@@ -1405,17 +1491,12 @@ fn is_internal_tool_context_message(message: &ChatMessage) -> bool {
         })
 }
 
-fn push_merged_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
+fn push_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
     if message.content.is_empty() {
         return;
     }
-    if let Some(last) = messages.last_mut()
-        && last.role == message.role
-    {
-        merge_provider_message_content(last, message);
-    } else {
-        messages.push(message);
-    }
+    // 保留已发送消息的边界；合并连续 User/Assistant 会改写下一请求的历史前缀。
+    messages.push(message);
 }
 
 fn is_empty_provider_message(message: &ChatMessage) -> bool {
@@ -1423,22 +1504,6 @@ fn is_empty_provider_message(message: &ChatMessage) -> bool {
         LlmMessageContent::Text(text) => text.trim().is_empty(),
         _ => false,
     })
-}
-
-fn merge_provider_message_content(target: &mut ChatMessage, source: ChatMessage) {
-    for content in source.content {
-        match (target.content.last_mut(), content) {
-            (Some(LlmMessageContent::Text(current)), LlmMessageContent::Text(next)) => {
-                if !next.trim().is_empty() {
-                    if !current.trim().is_empty() {
-                        current.push_str("\n\n");
-                    }
-                    current.push_str(next.trim());
-                }
-            }
-            (_, content) => target.content.push(content),
-        }
-    }
 }
 
 fn convert_provider_response_to_function_response(
@@ -1896,8 +1961,57 @@ fn resolve_function_timeout_ms(base_timeout_ms: u64, custom_timeout_ms: Option<u
 }
 
 #[cfg(test)]
+#[path = "session_tests.rs"]
+mod session_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_usage_preserves_cache_details_across_partial_and_final_events() {
+        let mut current = TokenUsageData::default();
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 4000,
+                completion_tokens: 0,
+                total_tokens: 4000,
+                prompt_cache_hit_tokens: Some(3072),
+                prompt_cache_miss_tokens: Some(928),
+            },
+        );
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 0,
+                completion_tokens: 20,
+                total_tokens: 4020,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+            },
+        );
+        assert_eq!(current.prompt_cache_hit_tokens, Some(3072));
+        assert_eq!(current.prompt_cache_miss_tokens, Some(928));
+        assert_eq!(current.total_tokens, 4020);
+        // 明确的零命中必须保留，不能当成缺失，也不能跨事件累加缓存量。
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 4000,
+                completion_tokens: 20,
+                total_tokens: 4020,
+                prompt_cache_hit_tokens: Some(0),
+                prompt_cache_miss_tokens: Some(4000),
+            },
+        );
+        assert_eq!(current.prompt_cache_hit_tokens, Some(0));
+        assert_eq!(current.prompt_cache_miss_tokens, Some(4000));
+        let mut absent = TokenUsageData::default();
+        merge_stream_usage(&mut absent, TokenUsageData::default());
+        assert_eq!(absent.prompt_cache_hit_tokens, None);
+        assert_eq!(absent.prompt_cache_miss_tokens, None);
+    }
     use tiangong_types::{
         ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
     };
@@ -1942,6 +2056,7 @@ mod tests {
             content: vec![ContentBlock::text("你好")],
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -1957,6 +2072,7 @@ mod tests {
             turn_status: None,
         };
         let req = ModelRequest {
+            session_id: None,
             user_input: String::new(),
             context: vec![user_msg],
             reasoning_effort: ReasoningEffort::None,
@@ -2210,6 +2326,7 @@ mod tests {
             .await;
 
         let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
             base_url: server.uri(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
@@ -2218,6 +2335,7 @@ mod tests {
             options: serde_json::Value::Object(serde_json::Map::new()),
         });
         let request = ModelRequest {
+            session_id: None,
             user_input: "检查项目".to_string(),
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
@@ -2279,6 +2397,7 @@ mod tests {
             .await;
 
         let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
             base_url: server.uri(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
@@ -2287,6 +2406,7 @@ mod tests {
             options: serde_json::Value::Object(serde_json::Map::new()),
         });
         let request = ModelRequest {
+            session_id: None,
             user_input: "检查项目".to_string(),
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
@@ -2355,6 +2475,7 @@ mod tests {
         .await;
 
         let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
             base_url: server.uri(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
@@ -2363,6 +2484,7 @@ mod tests {
             options: Value::Object(serde_json::Map::new()),
         });
         let request = ModelRequest {
+            session_id: None,
             user_input: "检查项目".to_string(),
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
@@ -2695,6 +2817,7 @@ mod tests {
             content,
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -2728,6 +2851,7 @@ mod tests {
             content: vec![ContentBlock::text("你是通用助手。")],
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -2744,6 +2868,7 @@ mod tests {
         };
 
         let req = ModelRequest {
+            session_id: None,
             user_input: String::new(),
             context: vec![system_msg, user_msg],
             reasoning_effort: ReasoningEffort::None,

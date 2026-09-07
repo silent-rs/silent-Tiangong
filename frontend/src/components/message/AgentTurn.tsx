@@ -32,6 +32,7 @@ import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { ToolGroup } from "./ToolGroup";
 import { CollapsibleUserText } from "./CollapsibleUserText";
+import { CallUsageDetails } from "./CallUsageDetails";
 
 interface AgentTurnProps {
   messages: MessageItem[];
@@ -124,6 +125,7 @@ function AgentTurnView({
   };
 
   for (const msg of messages) {
+    if (msg.role === "notice" && msg.usage) continue;
     if (msg.role === "user") {
       flushTools();
       fragments.push({ type: "user", msg });
@@ -220,6 +222,11 @@ function AgentTurnView({
     }
   }
 
+  // 同一轮的合计只挂在最后一个带操作栏的回复上。
+  const usageAnchor = [...summaryFrags].reverse().find((frag) =>
+    frag.type === "assistant" && !frag.isStreaming && displayTextContent(frag.msg) && !parseAgentReply(displayTextContent(frag.msg))
+  );
+  const usageAnchorId = usageAnchor?.type === "assistant" ? usageAnchor.msg.id : null;
   // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
   const lastToolGroupIndex = (() => {
     for (let i = mergedFragments.length - 1; i >= 0; i--) {
@@ -329,7 +336,7 @@ function AgentTurnView({
                     text={visibleText}
                     showTts={hasTts}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
-                    generationMs={!isStreaming ? msg.text_elapsed_ms : undefined}
+                    usageMessages={!selectedAgentTab && msg.id === usageAnchorId ? messages : undefined}
                   />
                 </div>
               )}
@@ -405,7 +412,7 @@ function AgentTurnView({
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
       {turnStatusMeta && !isActive && (
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
           <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>
             <span className={`inline-block w-1.5 h-1.5 rounded-full ${turnStatusMeta.dot}`} />
             {turnStatusMeta.label}
@@ -413,8 +420,10 @@ function AgentTurnView({
           {turnElapsedMs != null && (
             <span title="本轮执行总时长">⏱ {formatDuration(turnElapsedMs)}</span>
           )}
+          {!selectedAgentTab && !usageAnchorId && <CallUsageDetails messages={messages} />}
         </div>
       )}
+      {!selectedAgentTab && !usageAnchorId && (!turnStatusMeta || isActive) && <CallUsageDetails messages={messages} />}
     </div>
   );
 }

@@ -19,10 +19,12 @@ pub struct DeepSeekClient {
 impl DeepSeekClient {
     pub fn from_config(config: DeepSeekConfig) -> Result<Self, DeepSeekError> {
         let http_client = reqwest::Client::builder()
+            .default_headers(config.headers.clone())
             .timeout(config.timeout)
             .build()
             .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
         let stream_http_client = reqwest::Client::builder()
+            .default_headers(config.headers.clone())
             .build()
             .map_err(|err| DeepSeekError::Transport(err.to_string()))?;
         Ok(Self {

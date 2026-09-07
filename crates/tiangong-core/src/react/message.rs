@@ -86,7 +86,7 @@ pub(crate) fn append_assistant_tool_call_message(
     let mut message = Message::with_reasoning(
         MessageRole::Assistant,
         text.trim().to_string(),
-        reasoning_content.trim().to_string(),
+        reasoning_content.to_string(),
     )
     .with_phase(crate::session::MessagePhase::React);
     message.id = message_id;

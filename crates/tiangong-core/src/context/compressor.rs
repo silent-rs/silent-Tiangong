@@ -137,6 +137,7 @@ impl ContextCompressor {
         ));
 
         ModelRequest {
+            session_id: Some(session.id.clone()),
             user_input: String::new(),
             context,
             reasoning_effort: crate::model::ReasoningEffort::None,
@@ -213,6 +214,7 @@ mod tests {
         session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
 
         let request = ContextCompressor::summary_request(&session, 2, 10_000);
+        assert_eq!(request.session_id.as_deref(), Some(session.id.as_str()));
 
         assert_eq!(request.max_output_tokens, Some(10_000));
         assert_eq!(request.context.len(), 4);

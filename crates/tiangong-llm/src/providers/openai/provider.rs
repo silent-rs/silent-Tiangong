@@ -165,6 +165,7 @@ mod tests {
         config.max_retries = 0;
         let provider = OpenAiResponsesProvider::new(config);
         let request = ProviderRequest {
+            session_id: None,
             model: "gpt-5.6-sol".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(
@@ -220,6 +221,7 @@ mod tests {
         config.max_retries = 0;
         let provider = OpenAiResponsesProvider::new(config);
         let request = ProviderRequest {
+            session_id: None,
             model: "gpt-5.6-sol".to_string(),
             system: None,
             messages: vec![crate::message::ChatMessage::text(

@@ -97,6 +97,17 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  prompt_cache_hit_tokens?: number | null;
+  prompt_cache_miss_tokens?: number | null;
+  cache_hit_rate?: number | null;
+}
+
+export interface MessageUsage extends TokenUsage {
+  model: string;
+  agent_id: string;
+  turn_id: string | null;
+  source: string;
+  status: TurnStatus;
 }
 
 export interface TokenStats {
@@ -212,6 +223,7 @@ export interface Message {
   role: MessageRole;
   content: ContentBlock[];
   reasoning_content: string;
+  usage?: MessageUsage | null;
   worker_id?: string;
   media?: MediaAsset[];
   tool_calls?: { id: string; name: string; arguments?: unknown }[];
@@ -618,6 +630,7 @@ export interface ServerConfig {
 // 模型配置（Provider + Model + Routing 三层架构）
 
 export interface ProviderConfigView {
+  headers?: Record<string, string>;
   base_url: string;
   api_key: string;
   timeout_ms: number;
@@ -1031,8 +1044,9 @@ export const api = {
     apiKey: string,
     timeoutMs?: number,
     protocol?: string,
+    headers?: Record<string, string>,
   ): Promise<string[]> =>
-    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol }),
+    invoke('fetch_provider_models', { baseUrl, apiKey, timeoutMs, protocol, headers }),
 
   probeEmbeddingDimension: (
     baseUrl: string,

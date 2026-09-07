@@ -2,6 +2,7 @@ pub mod client;
 pub mod embedding;
 pub mod endpoint;
 pub mod error;
+mod headers;
 pub mod message;
 pub mod model;
 pub mod models_config;

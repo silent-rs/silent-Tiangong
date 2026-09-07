@@ -5,6 +5,7 @@ pub type RetryNotifier = Arc<dyn Fn(u32, u32, u64, &str) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct OpenAiChatConfig {
+    pub headers: reqwest::header::HeaderMap,
     pub api_key: String,
     pub base_url: String,
     pub timeout: Duration,
@@ -15,6 +16,7 @@ pub struct OpenAiChatConfig {
 impl OpenAiChatConfig {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
+            headers: Default::default(),
             api_key: api_key.into(),
             base_url: base_url.into(),
             timeout: Duration::from_secs(60),

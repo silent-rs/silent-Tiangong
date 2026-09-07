@@ -2,8 +2,10 @@ import { useState } from "react";
 import { Copy, Check, Volume2, Square, Loader2, Clock } from "lucide-react";
 import { api } from "@/api/tauri";
 import { formatDuration } from "./utils";
+import { CallUsageDetails } from "./CallUsageDetails";
+import type { MessageItem } from "./types";
 
-export function MessageActions({ text, showTts, durationMs, generationMs }: { text: string; showTts: boolean; durationMs?: number | null; generationMs?: number | null }) {
+export function MessageActions({ text, showTts, durationMs, usageMessages }: { text: string; showTts: boolean; durationMs?: number | null; usageMessages?: MessageItem[] }) {
   const [copied, setCopied] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [ttsLoading, setTtsLoading] = useState(false);
@@ -36,7 +38,7 @@ export function MessageActions({ text, showTts, durationMs, generationMs }: { te
 
   const btnClass = "p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors";
   return (
-    <div className="flex items-center gap-0.5 mt-1">
+    <div className="flex flex-wrap items-center gap-0.5 mt-1">
       <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
@@ -45,18 +47,13 @@ export function MessageActions({ text, showTts, durationMs, generationMs }: { te
           {ttsLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : playing ? <Square className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
         </button>
       )}
-      {generationMs != null && generationMs > 0 && (
-        <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="回复生成耗时">
-          <Clock className="w-3 h-3" />
-          {formatDuration(generationMs)}
-        </span>
-      )}
       {durationMs != null && durationMs > 0 && (
         <span className="inline-flex items-center gap-0.5 ml-1 pl-1 border-l border-border/60 text-[11px] text-muted-foreground/70 tabular-nums" title="本轮执行总时长">
           <Clock className="w-3 h-3" />
           {formatDuration(durationMs)}
         </span>
       )}
+      {usageMessages && <CallUsageDetails messages={usageMessages} />}
     </div>
   );
 }

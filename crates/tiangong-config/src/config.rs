@@ -332,6 +332,7 @@ mod tests {
         config.models.providers.insert(
             "provider".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://example.com".to_string(),
                 api_key: "key".to_string(),
                 timeout_ms: 60_000,

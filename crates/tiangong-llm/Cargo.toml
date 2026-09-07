@@ -5,6 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
+scru128 = { workspace = true }
 tiangong-anthropic = { workspace = true }
 tiangong-deepseek = { workspace = true }
 tiangong-types = { workspace = true }

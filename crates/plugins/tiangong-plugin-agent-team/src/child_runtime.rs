@@ -1434,6 +1434,7 @@ mod tests {
             .join(&agent_id);
         let mut config = CoreConfig::default();
         config.llm.chat = ModelEndpoint {
+            headers: Default::default(),
             base_url: server.base_url.clone(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
@@ -1576,6 +1577,7 @@ mod tests {
         let stalling_server = StallingServer::start();
         let mut stalling_config = CoreConfig::default();
         stalling_config.llm.chat = ModelEndpoint {
+            headers: Default::default(),
             base_url: stalling_server.base_url.clone(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),

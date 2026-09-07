@@ -21,6 +21,8 @@ pub fn default_context_limit() -> usize {
 /// 模型端点配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEndpoint {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
     /// API 基础 URL
     pub base_url: String,
     /// API 密钥
@@ -44,6 +46,7 @@ fn default_timeout_ms() -> u64 {
 impl Default for ModelEndpoint {
     fn default() -> Self {
         Self {
+            headers: Default::default(),
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -61,6 +64,7 @@ impl ModelEndpoint {
     /// 不依赖 `LlmConfig` 的端点字段。
     pub fn from_resolved(resolved: crate::models_config::ResolvedModel) -> Self {
         Self {
+            headers: resolved.headers,
             base_url: resolved.base_url,
             api_key: resolved.api_key,
             model: resolved.model,
@@ -76,6 +80,7 @@ impl ModelEndpoint {
     /// 避免插件每次调用都走 `ModelsConfig::resolve_for_capability` 的完整路由解析。
     pub fn to_resolved(&self) -> crate::models_config::ResolvedModel {
         crate::models_config::ResolvedModel {
+            headers: self.headers.clone(),
             provider: String::new(),
             base_url: self.base_url.clone(),
             api_key: self.api_key.clone(),

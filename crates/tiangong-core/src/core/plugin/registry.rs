@@ -10,6 +10,7 @@ use crate::tool_override::ToolOverrideHandler;
 use super::{Plugin, injection_tool_spec};
 
 pub(crate) struct PreparedPlugins {
+    pub plugins: Vec<Arc<dyn Plugin>>,
     pub tools: Vec<ToolSpec>,
     pub tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
 }
@@ -20,9 +21,13 @@ pub(crate) fn prepare_plugins(
     trust_mode: TrustMode,
     session: &Session,
 ) -> PreparedPlugins {
-    // 保证 prompt 插件排在最前（identity/rules 段落必须在 system prompt 开头）。
+    // 提示与工具共用固定顺序，避免加载顺序变化改写请求前缀。
     let mut sorted: Vec<Arc<dyn Plugin>> = plugins.to_vec();
-    sorted.sort_by_key(|p| p.id() != "prompt");
+    sorted.sort_by(|left, right| {
+        (left.id() != "prompt")
+            .cmp(&(right.id() != "prompt"))
+            .then_with(|| left.id().cmp(right.id()))
+    });
 
     let plugins = sorted.as_slice();
     let workspace_path = std::path::Path::new(&session.cwd);
@@ -49,7 +54,9 @@ pub(crate) fn prepare_plugins(
     let mut tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
     let mut seen_tool_names = HashSet::new();
     for plugin in plugins {
-        for spec in plugin.tool_specs() {
+        let mut plugin_tools = plugin.tool_specs();
+        plugin_tools.sort_by(|left, right| left.name.cmp(&right.name));
+        for spec in plugin_tools {
             if seen_tool_names.insert(spec.name.clone()) {
                 tool_overrides.insert(spec.name.clone(), plugin.clone());
                 tools.push(spec);
@@ -64,6 +71,7 @@ pub(crate) fn prepare_plugins(
     }
 
     PreparedPlugins {
+        plugins: sorted,
         tools,
         tool_overrides,
     }

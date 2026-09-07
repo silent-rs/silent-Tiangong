@@ -250,6 +250,8 @@ pub struct Message {
     pub reasoning_content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Box<crate::token::MessageUsage>>,
     /// 多 Worker 模式下标识消息所属 Worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
@@ -564,6 +566,7 @@ impl<'de> Deserialize<'de> for Message {
             #[serde(default)]
             reasoning_content: String,
             reasoning_signature: Option<String>,
+            usage: Option<Box<crate::token::MessageUsage>>,
             worker_id: Option<String>,
             /// 旧格式 media 字段：反序列化时捕获，随即并入 content，不保留为结构字段。
             #[serde(default)]
@@ -599,6 +602,7 @@ impl<'de> Deserialize<'de> for Message {
             content,
             reasoning_content: raw.reasoning_content,
             reasoning_signature: raw.reasoning_signature,
+            usage: raw.usage,
             worker_id: raw.worker_id,
             tool_calls: raw.tool_calls,
             tool_call_id: raw.tool_call_id,
@@ -624,6 +628,7 @@ impl Message {
             content: vec![ContentBlock::text(content.into())],
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -652,6 +657,7 @@ impl Message {
             content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning.into(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,

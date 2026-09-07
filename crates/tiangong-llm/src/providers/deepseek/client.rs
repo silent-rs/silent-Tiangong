@@ -36,6 +36,7 @@ impl NativeDeepSeekTransport {
         let mut native = tiangong_deepseek::DeepSeekConfig::new(config.api_key.clone());
         native.base_url = config.resolved_base_url();
         native.timeout = config.timeout;
+        native.headers = config.headers.clone();
 
         let client =
             tiangong_deepseek::DeepSeekClient::from_config(native).map_err(map_deepseek_error)?;

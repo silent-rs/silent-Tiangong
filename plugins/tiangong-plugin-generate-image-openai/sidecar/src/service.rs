@@ -157,6 +157,7 @@ fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedModel> {
         anyhow::bail!("已缓存端点缺少 api_key");
     }
     Ok(ResolvedModel {
+        headers: Default::default(),
         provider: config.source.key().to_string(),
         base_url: resolved.base_url.clone(),
         api_key,

@@ -538,6 +538,7 @@ impl AgentLoopState {
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     ModelRequest {
+        session_id: Some(ctx.session.id.clone()),
         user_input: String::new(),
         context: ctx.session.context(),
         reasoning_effort: ctx.agent_config.reasoning_effort,
@@ -723,6 +724,10 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
+    ctx.turn_id = ctx
+        .session
+        .latest_user_message_index()
+        .map(|index| ctx.session.messages[index].id.clone());
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
     let context_organizer = ContextOrganizer::new(context_limit);
@@ -892,7 +897,7 @@ pub(super) async fn execute_turn(
                         if let Some(chunk) = chunk {
                             if let Some(chunk_usage) = &chunk.usage {
                                 let usage: TokenUsage = chunk_usage.clone().into();
-                                active.streaming_usage.accumulate(&usage);
+                                active.streaming_usage.merge_snapshot(&usage);
                             }
                             if !chunk.reasoning_content.is_empty() {
                                 active.timing.reasoning.record();
@@ -915,6 +920,7 @@ pub(super) async fn execute_turn(
                             streamed_text,
                             streamed_reasoning,
                             timing,
+                            streaming_usage,
                             ..
                         } = active;
                         let reasoning_elapsed_ms = timing.reasoning.elapsed_ms();
@@ -936,6 +942,7 @@ pub(super) async fn execute_turn(
                             reasoning_elapsed_ms,
                             text_elapsed_ms,
                             response_result,
+                            streaming_usage,
                         );
                         let next_phase = match next {
                             NextStep::Phase(phase) => phase,
@@ -1012,6 +1019,7 @@ fn complete_llm_request(
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
     response_result: anyhow::Result<ModelFunctionResponse>,
+    streaming_usage: TokenUsage,
 ) -> NextStep {
     let context_limit = ctx.context_limit;
     match purpose {
@@ -1026,9 +1034,25 @@ fn complete_llm_request(
                 reasoning_elapsed_ms,
                 text_elapsed_ms,
             );
-            let response = match response_result {
+            let mut response = match response_result {
                 Ok(response) => response,
                 Err(error) => {
+                    state.accumulated_usage.accumulate(&streaming_usage);
+                    super::context::record_call_usage(
+                        ctx,
+                        &pending_msg_id,
+                        &streaming_usage,
+                        "react",
+                        tiangong_types::TurnStatus::Failed,
+                    );
+                    emit_token_usage(
+                        stream_tx,
+                        &streaming_usage,
+                        None,
+                        context_limit,
+                        "react-failed",
+                        None,
+                    );
                     let error_message = format!("{error:#}");
                     let should_compress = error_message.contains("context_window_exceeded")
                         || error_message.contains("context_length_exceeded")
@@ -1047,6 +1071,9 @@ fn complete_llm_request(
                 }
             };
 
+            let mut final_usage = streaming_usage;
+            final_usage.merge_snapshot(&response.usage);
+            response.usage = final_usage;
             state.accumulated_usage.accumulate(&response.usage);
             emit_token_usage(
                 stream_tx,
@@ -1063,7 +1090,8 @@ fn complete_llm_request(
             state.last_observed_tokens = observed_tokens;
             ctx.session.current_tokens = observed_tokens;
 
-            if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
+            let next = if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty()
+            {
                 append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
                 NextStep::Phase(ExecutionPhase::NeedModel)
             } else if response.tool_calls.is_empty() {
@@ -1078,7 +1106,7 @@ fn complete_llm_request(
                     ctx,
                     state,
                     injections,
-                    pending_msg_id,
+                    pending_msg_id.clone(),
                     disposition,
                     request_injection_generation,
                 ))
@@ -1096,10 +1124,19 @@ fn complete_llm_request(
                     ready_tools: Vec::new(),
                     prepared_keys: HashSet::new(),
                     invalid_tool_calls: response.invalid_tool_calls,
-                    response_usage: response.usage,
+                    response_usage: response.usage.clone(),
                     needs_failure_recovery: false,
                 })
-            }
+            };
+            super::context::record_call_usage(
+                ctx,
+                &pending_msg_id,
+                &response.usage,
+                "react",
+                tiangong_types::TurnStatus::Success,
+            );
+            ctx.session.persist_to_disk();
+            next
         }
     }
 }

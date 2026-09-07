@@ -260,6 +260,7 @@ fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
             .ok_or_else(|| anyhow!("模型 {target} 的 provider {} 不存在", entry.provider))?;
         let resolved_api_key = ModelsConfig::resolve_api_key(&provider.api_key);
         ModelEndpoint {
+            headers: provider.headers.clone(),
             base_url: provider.base_url.clone(),
             api_key: resolved_api_key,
             model: entry.model.clone(),

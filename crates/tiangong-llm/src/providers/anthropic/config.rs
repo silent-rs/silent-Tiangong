@@ -10,6 +10,7 @@ const DEFAULT_API_VERSION: &str = "2023-06-01";
 /// Anthropic provider 配置。
 #[derive(Clone)]
 pub struct AnthropicConfig {
+    pub headers: reqwest::header::HeaderMap,
     pub api_key: String,
     pub base_url: Option<String>,
     pub timeout: Duration,
@@ -36,6 +37,7 @@ impl std::fmt::Debug for AnthropicConfig {
 impl AnthropicConfig {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
+            headers: Default::default(),
             api_key: api_key.into(),
             base_url: None,
             timeout: Duration::from_secs(60),

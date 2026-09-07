@@ -28,7 +28,7 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     let mut request_args_binding = CreateChatCompletionRequestArgs::default();
     let mut request_args = request_args_binding
         .model(req.model.clone())
-        .messages(messages)
+        .messages(Vec::<ChatCompletionRequestMessage>::new())
         .stream(stream);
     if let Some(temperature) = req.temperature {
         request_args = request_args.temperature(temperature);
@@ -36,6 +36,7 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     let request = request_args.build().context("构建 OpenAI 请求失败")?;
 
     let mut payload = serde_json::to_value(request).context("序列化 OpenAI 请求失败")?;
+    payload["messages"] = Value::Array(messages);
     inject_max_tokens_config(&mut payload, req.max_tokens);
     if stream {
         inject_stream_usage_option(&mut payload);
@@ -56,16 +57,15 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
     Ok(payload)
 }
 
-fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequestMessage>> {
+fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<Value>> {
     let mut messages = Vec::new();
     if let Some(system) = req.system.as_ref().filter(|value| !value.trim().is_empty()) {
-        messages.push(
+        messages.push(serde_json::to_value(ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(system.clone())
                 .build()
-                .context("构建 system 消息失败")?
-                .into(),
-        );
+                .context("构建 system 消息失败")?,
+        ))?);
     }
 
     for message in &req.messages {
@@ -73,7 +73,7 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
             MessageRole::System => {}
             MessageRole::User => {
                 if let Some(message) = build_openai_user_message(message)? {
-                    messages.push(message);
+                    messages.push(serde_json::to_value(message)?);
                 }
             }
             MessageRole::Tool => {
@@ -85,16 +85,44 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
                         crate::tool::ToolResultContent::Text(text) => text.clone(),
                         crate::tool::ToolResultContent::Json(value) => value.to_string(),
                     };
-                    messages.push(ChatCompletionRequestMessage::Tool(
+                    messages.push(serde_json::to_value(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
                             content: content.into(),
                             tool_call_id: result.tool_call_id.clone(),
                         },
-                    ));
+                    ))?);
                 }
             }
             MessageRole::Assistant => {
                 let text = extract_message_text(message);
+                let mut reasoning = message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        MessageContent::Thinking(thinking) => Some(thinking.thinking.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .concat();
+                let calls = message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        MessageContent::ToolCall(call) => Some(call),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                // 内部注入并非模型输出，DeepSeek 思考模式仍要求其携带思考字段。
+                if reasoning.is_empty()
+                    && req.model.to_ascii_lowercase().contains("deepseek")
+                    && req.reasoning_effort.is_thinking_enabled()
+                    && !calls.is_empty()
+                    && calls.iter().all(|call| call.name == "plugin_injection")
+                {
+                    reasoning =
+                        "内部上下文注入：将外部运行时反馈作为工具结果传回，以便继续处理当前任务。"
+                            .into();
+                }
                 let tool_calls = message
                     .content
                     .iter()
@@ -113,15 +141,22 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                if !text.is_empty() || !tool_calls.is_empty() {
+                if !text.is_empty() || !tool_calls.is_empty() || !reasoning.is_empty() {
                     let mut args = ChatCompletionRequestAssistantMessageArgs::default();
-                    if !text.is_empty() {
+                    if !text.is_empty() || tool_calls.is_empty() {
                         args.content(text);
                     }
                     if !tool_calls.is_empty() {
                         args.tool_calls(tool_calls);
                     }
-                    messages.push(args.build().context("构建 assistant 消息失败")?.into());
+                    // SDK 消息类型不包含兼容服务的 reasoning_content 扩展字段。
+                    let mut value = serde_json::to_value(ChatCompletionRequestMessage::Assistant(
+                        args.build().context("构建 assistant 消息失败")?,
+                    ))?;
+                    if !reasoning.is_empty() {
+                        value["reasoning_content"] = Value::String(reasoning);
+                    }
+                    messages.push(value);
                 }
             }
         }
@@ -307,12 +342,22 @@ pub fn parse_usage(usage: &Value) -> TokenUsageData {
         .get("total_tokens")
         .and_then(Value::as_u64)
         .unwrap_or((prompt + completion) as u64) as usize;
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .map(|value| value as usize);
     TokenUsageData {
         prompt_tokens: prompt,
         completion_tokens: completion,
         total_tokens: total,
-        prompt_cache_hit_tokens: None,
-        prompt_cache_miss_tokens: None,
+        prompt_cache_hit_tokens: cached,
+        prompt_cache_miss_tokens: usage
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .or_else(|| cached.map(|hit| prompt.saturating_sub(hit))),
     }
 }
 
@@ -442,6 +487,104 @@ pub fn strip_think_tags(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::message::{ImageContent, MessageContent};
+
+    #[test]
+    fn reasoning_history_survives_rounds_reload_and_internal_injection() {
+        let mut req: ProviderRequest = serde_json::from_value(json!({
+            "model":"deepseek-v4-flash", "system":"固定提示", "messages":[],
+            "max_tokens":1024, "temperature":null, "top_p":null,
+            "reasoning_effort":"high", "tools":[{
+                "name":"read_file", "description":"读取", "input_schema":{"type":"object"}
+            }]
+        }))
+        .unwrap();
+        let mut prefix = Vec::new();
+        for round in 0..4 {
+            req.messages.push(ChatMessage::text(
+                MessageRole::User,
+                format!("轮次 {round}"),
+            ));
+            for (index, tool_name) in [Some("read_file"), None, Some("plugin_injection")]
+                .into_iter()
+                .enumerate()
+            {
+                let reasoning = format!("  思考 {round}/{index}\n保持空白\n");
+                let mut content = Vec::new();
+                if tool_name != Some("plugin_injection") {
+                    content.push(MessageContent::Thinking(crate::message::ThinkingContent {
+                        thinking: reasoning.clone(),
+                        signature: None,
+                    }));
+                }
+                let id = format!("call_{round}_{index}");
+                if let Some(name) = tool_name {
+                    content.push(MessageContent::ToolCall(crate::tool::ToolCall {
+                        id: id.clone(),
+                        name: name.into(),
+                        arguments: json!({"path":"a.rs"}),
+                    }));
+                }
+                req.messages
+                    .push(ChatMessage::new(MessageRole::Assistant, content));
+                for stream in [false, true] {
+                    let payload = build_request_json(&req, stream).unwrap();
+                    let messages = payload["messages"].as_array().unwrap();
+                    assert_eq!(&messages[..prefix.len()], prefix.as_slice());
+                    let assistant = messages.last().unwrap();
+                    assert_eq!(assistant["role"], "assistant");
+                    if tool_name != Some("plugin_injection") {
+                        assert_eq!(assistant["reasoning_content"], reasoning);
+                    } else {
+                        assert!(
+                            assistant["reasoning_content"]
+                                .as_str()
+                                .unwrap()
+                                .contains("内部上下文注入")
+                        );
+                    }
+                    prefix = messages.clone();
+                }
+                if tool_name.is_some() {
+                    req.messages.push(ChatMessage::new(
+                        MessageRole::Tool,
+                        vec![MessageContent::ToolResult(crate::tool::ToolResult {
+                            tool_call_id: id,
+                            content: crate::tool::ToolResultContent::Text("结果".into()),
+                            is_error: round == 2,
+                        })],
+                    ));
+                }
+                req = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+            }
+        }
+        req.messages.push(ChatMessage::text(
+            MessageRole::Assistant,
+            "没有思考的旧消息",
+        ));
+        let payload = build_request_json(&req, false).unwrap();
+        assert!(
+            payload["messages"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .get("reasoning_content")
+                .is_none()
+        );
+        for (model, effort) in [
+            ("other-model", ReasoningEffort::High),
+            ("deepseek-v4-flash", ReasoningEffort::None),
+        ] {
+            req.model = model.into();
+            req.reasoning_effort = effort;
+            let payload = build_request_json(&req, false).unwrap();
+            for message in payload["messages"].as_array().unwrap() {
+                if message["tool_calls"][0]["function"]["name"] == "plugin_injection" {
+                    assert!(message.get("reasoning_content").is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn multimodal_user_content_preserves_interleaved_order() {

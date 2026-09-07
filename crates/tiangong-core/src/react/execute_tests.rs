@@ -33,6 +33,9 @@ use tokio::sync::{Barrier, Notify};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "context_cache_tests.rs"]
+mod context_cache_tests;
+
 /// 构造一条 OpenAI SSE chunk(`data: {json}\n\n`),末尾追加 `[DONE]`。
 fn sse_body(chunks: &[serde_json::Value]) -> Vec<u8> {
     let mut body = String::new();
@@ -298,6 +301,7 @@ fn tool_spec(name: &str) -> ToolSpec {
 /// 构造一个指向 mock 服务器的 ModelEndpoint。
 fn endpoint_with_protocol(server: &MockServer, protocol: ProviderProtocol) -> ModelEndpoint {
     ModelEndpoint {
+        headers: Default::default(),
         base_url: server.uri(),
         api_key: "test-key".to_string(),
         model: "test-model".to_string(),
@@ -415,7 +419,7 @@ impl TestHarness {
 /// 首轮纯文本响应应直接作为最终回复,返回 `Success`(跳过总结阶段)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completes_with_direct_text_answer() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     // 单次请求:纯文本 "你好,我是测试助手。",首轮无工具 → can_promote_direct_answer。
     mount_sse(
         &server,
@@ -444,7 +448,7 @@ async fn completes_with_direct_text_answer() {
 /// 命中后保留该过程消息并继续请求模型，直到得到普通最终回复。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn need_more_work_marker_continues_model_loop() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![
@@ -485,7 +489,7 @@ async fn need_more_work_marker_continues_model_loop() {
 /// 在发起模型请求前压缩（ALR-303），摘要与 resume 持久化到磁盘。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compression_persists_summary_and_keeps_recent_interaction() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     // 第一段：大用量文本完成，建立跨 turn 的压力信号。
     mount_sse(
         &server,
@@ -568,7 +572,7 @@ async fn compression_persists_summary_and_keeps_recent_interaction() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_request_error(&server, "context_window_exceeded").await;
     mount_completion(
         &server,
@@ -652,7 +656,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
 /// session 保持原状（请求前压缩路径，ALR-303）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn truncated_compression_does_not_advance_summary_boundary() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
@@ -698,7 +702,7 @@ async fn truncated_compression_does_not_advance_summary_boundary() {
 ///（请求前压缩路径，ALR-303）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistence_failure_keeps_original_compression_state() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
@@ -756,7 +760,7 @@ async fn persistence_failure_keeps_original_compression_state() {
 /// 且不应用任何压缩结果（ALR-303/306）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_interrupts_active_context_compression() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
@@ -817,7 +821,7 @@ async fn cancel_interrupts_active_context_compression() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_interrupts_manual_context_compression() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_completion(
         &server,
         "[[SUMMARY]]\n历史摘要",
@@ -828,7 +832,16 @@ async fn cancel_interrupts_manual_context_compression() {
     )
     .await;
 
-    let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    // 必须存在可压缩历史，否则压缩会立即失败，与取消命令发生竞态。
+    harness
+        .ctx
+        .session
+        .append_message(MessageRole::Assistant, "较早回答");
+    harness
+        .ctx
+        .session
+        .append_message(MessageRole::User, "最近问题");
     let TestHarness {
         ctx,
         stream_rx,
@@ -882,7 +895,7 @@ async fn cancel_interrupts_manual_context_compression() {
 /// oneshot 取消传播路径)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn returns_cancelled_on_cancel_command() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     // 挂一条延迟 2s 的响应,确保 cancel 能在模型请求完成前到达。
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -961,7 +974,7 @@ async fn returns_cancelled_on_cancel_command() {
 /// 覆盖最小模型—工具循环的完整链路（任务 15：不再进入总结阶段）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runs_tool_then_completes() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let invocations = Arc::new(Mutex::new(Vec::new()));
 
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1016,7 +1029,7 @@ async fn runs_tool_then_completes() {
 /// 最终终态和 Session 使用封口前最新累计用量。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accumulated_usage_is_aggregated_across_requests() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let invocations = Arc::new(Mutex::new(Vec::new()));
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
     overrides.insert(
@@ -1057,7 +1070,7 @@ async fn accumulated_usage_is_aggregated_across_requests() {
 /// 重构后事件顺序需保持。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_execution_emits_start_before_result_event() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let invocations = Arc::new(Mutex::new(Vec::new()));
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
     overrides.insert(
@@ -1108,7 +1121,7 @@ async fn tool_execution_emits_start_before_result_event() {
 async fn run_turn_emits_single_done_and_anchors_status_to_latest_user_message() {
     use super::super::turn::run_turn;
 
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("你好,我是测试助手。"), usage_chunk(10, 5)],
@@ -1186,7 +1199,7 @@ fn wait_for_counter(counter: &AtomicU32, expected: u32) {
 async fn run_turn_invokes_lifecycle_hooks_exactly_once() {
     use super::super::turn::run_turn;
 
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("你好,我是测试助手。"), usage_chunk(10, 5)],
@@ -1218,7 +1231,7 @@ async fn run_turn_invokes_lifecycle_hooks_exactly_once() {
 /// 确认接收，并从新意图重启直至成功。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inject_user_message_interrupts_tools_and_restarts() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1305,7 +1318,7 @@ async fn inject_user_message_interrupts_tools_and_restarts() {
 async fn final_status_anchors_to_injected_latest_user_message() {
     use super::super::turn::run_turn;
 
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1434,7 +1447,7 @@ impl Plugin for CancelCountingPlugin {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inject_does_not_cancel_plugins_but_explicit_cancel_does() {
     use super::super::turn::run_turn;
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1525,7 +1538,7 @@ async fn inject_does_not_cancel_plugins_but_explicit_cancel_does() {
 /// 两者都执行并产出结果，协议完整后进入完成度检查（不变量 3：任务↔记录对应）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn parallel_tool_batch_executes_both_and_closes_protocol() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let invocations = Arc::new(Mutex::new(Vec::new()));
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
     overrides.insert(
@@ -1582,7 +1595,7 @@ async fn parallel_tool_batch_executes_both_and_closes_protocol() {
 /// 正常完成（ALR-102/303）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inject_during_compression_cancels_and_restarts_without_applying_summary() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     // 1) 第一段：大用量文本完成（建立压力信号）。
     mount_sse(
         &server,
@@ -1669,7 +1682,7 @@ async fn inject_during_compression_cancels_and_restarts_without_applying_summary
 /// 消息并重启，随后的取消形成最终取消终态（不被重启意图覆盖）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consecutive_inject_then_cancel_terminates_in_order() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1731,7 +1744,7 @@ async fn consecutive_inject_then_cancel_terminates_in_order() {
 /// 最终一次成功终态；锚点为最后一条注入消息。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consecutive_injects_are_all_saved_and_restart_in_order() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1820,7 +1833,7 @@ async fn consecutive_injects_are_all_saved_and_restart_in_order() {
 /// 副作用（标题、用量）生效。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_storm_is_processed_in_order_without_panicking() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
@@ -1923,7 +1936,7 @@ async fn command_storm_is_processed_in_order_without_panicking() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reasoning_effort_update_applies_to_next_model_request() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![
@@ -1987,7 +2000,7 @@ async fn reasoning_effort_update_applies_to_next_model_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn returns_failed_when_react_request_fails() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_request_error(&server, "execute turn request rejected").await;
 
     let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
@@ -2009,7 +2022,7 @@ async fn returns_failed_when_react_request_fails() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handles_runtime_feedback_while_request_is_running() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(header("authorization", "Bearer test-key"))
@@ -2125,7 +2138,7 @@ async fn handles_runtime_feedback_while_request_is_running() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn returns_cancelled_when_tool_execution_is_cancelled() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![
@@ -2185,7 +2198,7 @@ async fn returns_cancelled_when_tool_execution_is_cancelled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn continues_after_tool_failure_with_recovery_context() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![
@@ -2229,7 +2242,7 @@ async fn continues_after_tool_failure_with_recovery_context() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![
@@ -2301,7 +2314,7 @@ async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalling_plugin_finish_does_not_swallow_terminal() {
     use super::super::turn::run_turn;
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     mount_sse(
         &server,
         vec![text_delta_chunk("普通答复。"), usage_chunk(10, 2)],

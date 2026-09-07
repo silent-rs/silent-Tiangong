@@ -410,6 +410,7 @@ impl Session {
             content: blocks,
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             elapsed_ms: None,
             turn_status: None,
@@ -438,6 +439,7 @@ impl Session {
             content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             elapsed_ms: None,
             turn_status: None,
@@ -484,6 +486,7 @@ impl Session {
             content: blocks,
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             elapsed_ms: None,
             turn_status: None,
@@ -508,6 +511,7 @@ impl Session {
             content,
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             elapsed_ms: None,
             turn_status: None,
@@ -722,6 +726,7 @@ impl Session {
             content: vec![ContentBlock::text(content.into())],
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
+            usage: None,
             worker_id: Some(worker_id.to_string()),
             elapsed_ms: None,
             turn_status: None,
@@ -1055,6 +1060,13 @@ impl Session {
     /// - 清空上下文后
     pub fn rebuild_system_prompt(&mut self, config: &crate::prompt::SystemPromptConfig) {
         let msg = crate::prompt::sections::build_full_system_prompt(self, config);
+        if self
+            .system_prompt_message
+            .as_ref()
+            .is_some_and(|previous| previous.content == msg.content)
+        {
+            return;
+        }
         self.system_prompt_message = Some(msg);
     }
 

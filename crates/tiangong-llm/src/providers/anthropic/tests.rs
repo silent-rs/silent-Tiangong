@@ -61,6 +61,7 @@ impl AnthropicTransport for MockAnthropicTransport {
 
 fn sample_request() -> ProviderRequest {
     ProviderRequest {
+        session_id: None,
         model: "claude-3-7-sonnet".to_string(),
         system: Some("你是测试助手".to_string()),
         messages: vec![
@@ -235,6 +236,7 @@ async fn test_provider_complete_and_stream_behavior() {
     let provider = AnthropicProvider::new(AnthropicClient::new(
         transport,
         AnthropicConfig {
+            headers: Default::default(),
             api_key: "test".to_string(),
             base_url: None,
             timeout: std::time::Duration::from_secs(30),

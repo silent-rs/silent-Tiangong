@@ -378,6 +378,7 @@ mod tests {
         config.providers.insert(
             "p".to_string(),
             ProviderConfig {
+                headers: Default::default(),
                 base_url: "https://api.test.com".to_string(),
                 api_key: "k".to_string(),
                 timeout_ms: 60_000,

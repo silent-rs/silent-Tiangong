@@ -54,7 +54,10 @@ pub(super) async fn prepare_before_request(
             compression.complete(ctx, result, Some(accumulated_usage));
             RequestPreparation::Ready
         }
-        Err(interrupt) => RequestPreparation::Interrupted(interrupted_deferred(interrupt)),
+        Err(interrupt) => {
+            accumulated_usage.accumulate(&compression.cancelled_usage);
+            RequestPreparation::Interrupted(interrupted_deferred(interrupt))
+        }
     }
 }
 
@@ -77,7 +80,10 @@ pub(super) async fn recover_context_overflow(
                 ContextRecovery::Exhausted
             }
         }
-        Err(interrupt) => ContextRecovery::Interrupted(interrupted_deferred(interrupt)),
+        Err(interrupt) => {
+            accumulated_usage.accumulate(&compression.cancelled_usage);
+            ContextRecovery::Interrupted(interrupted_deferred(interrupt))
+        }
     }
 }
 

@@ -30,6 +30,9 @@ use typed_builder::TypedBuilder;
     build_method(vis = "pub(crate)")
 )]
 pub struct TurnContext {
+    /// 一轮执行的初始用户消息，运行中追加要求不改变用量归属。
+    #[builder(default)]
+    pub(crate) turn_id: Option<String>,
     /// 模型请求客户端
     pub client: SingleProviderClient,
     /// 轻量任务客户端（标题生成等）。未配置 lite 模型时为 None，回退到 chat client。

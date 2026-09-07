@@ -269,6 +269,8 @@ pub struct CapabilityAvailabilityInfo {
 /// Provider 连接配置（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfigView {
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     pub base_url: String,
     pub api_key: String,
     pub timeout_ms: u64,
@@ -306,6 +308,7 @@ impl ModelsConfigView {
                 (
                     k.clone(),
                     ProviderConfigView {
+                        headers: v.headers.clone(),
                         base_url: v.base_url.clone(),
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
@@ -380,6 +383,7 @@ impl ModelsConfigView {
                 (
                     k.clone(),
                     ProviderConfig {
+                        headers: v.headers.clone(),
                         base_url: v.base_url.clone(),
                         api_key: v.api_key.clone(),
                         timeout_ms: v.timeout_ms,
