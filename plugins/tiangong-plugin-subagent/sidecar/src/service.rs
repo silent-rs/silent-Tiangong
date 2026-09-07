@@ -475,6 +475,24 @@ async fn handle_exit(
     run.finished_at = Some(timestamp.clone());
     run.updated_at = timestamp.clone();
     let interrupt_sent = runner.interrupt_sent(run_id).await;
+    if run.status == RunStatus::Stopping {
+        // 停止请求（停用/取消）后的退出通知：以停止意图收尾，正常退出
+        // 码不改写为完成。
+        run.status = RunStatus::Interrupted;
+        run.summary = Some("停止请求后进程退出，运行已收尾".to_string());
+        append_event(
+            store,
+            &run,
+            "interrupted",
+            &json!({ "text": run.summary.clone() }),
+            &timestamp,
+        );
+        let _ = store.save_run(&run);
+        sync_task_status(store, &run);
+        release_collab_activation(store, &run.activation_id);
+        notify_run_status(&run);
+        return;
+    }
     if info.code == Some(0) {
         run.status = RunStatus::Completed;
         let text = last_message
@@ -922,56 +940,61 @@ impl SubagentService {
     }
 
     /// 停用核心：中断该激活上的活跃运行 → 释放 Workspace/worktree → 记录。
-    async fn deactivate_agent_in_session(&self, agent_id: &str, session_id: &str) -> Result<()> {
+    async fn deactivate_agent_in_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>> {
         let _guard = self.ops.lock().await;
+        let mut notes = Vec::new();
         for mut activation in self.store.activations() {
             if activation.active()
                 && activation.agent_id == agent_id
                 && activation.session_id == session_id
             {
-                self.release_activation_locked(&mut activation).await?;
+                notes.extend(self.release_activation_locked(&mut activation).await?);
             }
         }
-        Ok(())
+        Ok(notes)
     }
 
-    /// 释放单个激活（持 ops 锁调用）。
-    async fn release_activation_locked(&self, activation: &mut ActivationRecord) -> Result<()> {
-        // 中断该激活上的活跃运行（取消语义，有限宽限）。
+    /// 释放单个激活（持 ops 锁调用）。返回各运行的停止状态摘要（供停用
+    /// 入口如实反馈：已发送/发送失败/已随退出通知结束）。
+    async fn release_activation_locked(
+        &self,
+        activation: &mut ActivationRecord,
+    ) -> Result<Vec<String>> {
         let timestamp = now_string();
-        for mut run in self.store.list_runs() {
-            if run.activation_id == activation.activation_id && run.status.is_alive() {
-                if run.pid.is_none() {
-                    // 会话后端停止为通知语义（宿主内 turn 无法硬取消）：
-                    // 投递失败如实上抛、状态与占用不动；成功则置 Stopping，
-                    // 占用由运行维持到本轮收尾归因，写互斥不会失守。
-                    if let Err(error) = self.notify_source_session(&run, "停用中断请求").await
-                    {
-                        bail!(
-                            "停止请求投递失败，运行仍在继续（{}）；未确认停止，激活与占用保留",
-                            error
-                        );
-                    }
-                    run.status = RunStatus::Stopping;
-                    run.summary = Some("停止请求已投递，等待成员会话本轮收尾确认".to_string());
-                } else {
-                    let _ = self
-                        .runner
-                        .terminate(&run.run_id, Duration::from_secs(3))
-                        .await;
-                    run.status = RunStatus::Interrupted;
-                    run.summary = Some("停用激活时中断".to_string());
+        let mut stop_notes = Vec::new();
+        for run in self.store.list_runs() {
+            if run.activation_id != activation.activation_id || !run.status.is_alive() {
+                continue;
+            }
+            if run.pid.is_none() {
+                // 会话后端停止为通知语义（宿主内 turn 无法硬取消）：
+                // 投递失败如实上抛、状态与占用不动；成功则置 Stopping，
+                // 占用由运行维持到本轮收尾归因，写互斥不会失守。
+                if let Err(error) = self.notify_source_session(&run, "停用中断请求").await {
+                    bail!(
+                        "停止请求投递失败，运行仍在继续（{}）；未确认停止，激活与占用保留",
+                        error
+                    );
                 }
-                run.finished_at = if run.status.is_terminal() {
-                    Some(timestamp.clone())
-                } else {
-                    None
-                };
+                let mut run = run;
+                run.status = RunStatus::Stopping;
+                run.summary = Some("停止请求已投递，等待成员会话本轮收尾确认".to_string());
                 run.updated_at = timestamp.clone();
                 let _ = self.store.save_run(&run);
-                sync_task_status(&self.store, &run);
                 notify_run_status(&run);
+                stop_notes.push("停止请求已投递，后台收尾尚未确认".to_string());
+                continue;
             }
+            // CLI 后端：温和停止——最多 3 次中断（协议帧 + SIGINT，间隔约
+            // 1 秒），期间收到退出通知立即停止重试；未确认退出前运行保持
+            // Stopping（占用保留），由既有退出通知路径收尾。强杀与退出确认
+            // 保留给取消路径的终态裁定。
+            let note = self.graceful_stop_cli_run(&run).await;
+            stop_notes.push(note);
         }
         if activation.workspace_policy == WorkspacePolicy::IsolatedWorktree {
             activation.worktree_retained = !self.remove_worktree(activation)?;
@@ -985,7 +1008,60 @@ impl SubagentService {
             "active": false,
             "worktree_retained": activation.worktree_retained,
         }));
-        Ok(())
+        Ok(stop_notes)
+    }
+
+    /// CLI 运行的温和停止：最多三次中断尝试（协议帧尽力 + SIGINT 信号），
+    /// 间隔约 1 秒；每轮先查运行是否已随退出通知结束。返回如实摘要——
+    /// 已发送次数、失败原因或已确认结束，绝不把「已发送」说成「已退出」。
+    async fn graceful_stop_cli_run(&self, run: &RunRecord) -> String {
+        const MAX_ATTEMPTS: usize = 3;
+        let mut sent = 0usize;
+        let mut last_error: Option<String> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            if attempt > 1 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            // 退出通知（独立事件管线）可能在间隔内已收尾：先查再发。
+            match self.store.load_run(&run.run_id) {
+                Ok(fresh) if !fresh.status.is_alive() => {
+                    return format!(
+                        "运行已随退出通知结束（{}）",
+                        fresh.summary.as_deref().unwrap_or("进程退出")
+                    );
+                }
+                _ => {}
+            }
+            // 协议帧为约定通道尽力送达；SIGINT 为真中断信号，发送失败如实记录。
+            self.runner
+                .write_line(&run.run_id, &json!({ "type": "interrupt" }))
+                .await
+                .ok();
+            match self.runner.interrupt(&run.run_id).await {
+                Ok(()) => {
+                    sent += 1;
+                    last_error = None;
+                }
+                Err(error) => {
+                    last_error = Some(format!("第 {attempt} 次发送失败：{error}"));
+                }
+            }
+        }
+        let summary = match (&last_error, sent) {
+            (Some(error), 0) => format!("停用中断全部发送失败（{error}）"),
+            (Some(error), n) => format!("中断已发送 {n} 次，{error}"),
+            (None, n) => format!("中断已发送 {n} 次，等待后台退出通知"),
+        };
+        if let Ok(mut fresh) = self.store.load_run(&run.run_id)
+            && fresh.status.is_alive()
+        {
+            fresh.status = RunStatus::Stopping;
+            fresh.summary = Some(summary.clone());
+            fresh.updated_at = now_string();
+            let _ = self.store.save_run(&fresh);
+            notify_run_status(&fresh);
+        }
+        format!("停用后运行停止请求中：{summary}")
     }
 
     /// 查找 (agent, session) 的活跃激活。
@@ -1958,9 +2034,14 @@ impl SubagentService {
     async fn tool_deactivate(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let (session_id, _) = Self::require_context()?;
         let request: AgentIdRequest = parse_request(payload)?;
-        self.deactivate_agent_in_session(&request.agent_id, &session_id)
+        let notes = self
+            .deactivate_agent_in_session(&request.agent_id, &session_id)
             .await?;
-        Ok(tool_ok("已在当前会话停用该 Subagent".to_string()))
+        let mut summary = "已在当前会话停用该 Subagent，不再接收新任务".to_string();
+        if !notes.is_empty() {
+            summary.push_str(&format!("；{}", notes.join("；")));
+        }
+        Ok(tool_ok(summary))
     }
 
     async fn tool_list_active(&self) -> Result<serde_json::Value> {
