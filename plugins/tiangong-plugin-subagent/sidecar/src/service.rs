@@ -2738,6 +2738,133 @@ impl SubagentService {
         )))
     }
 
+    /// 外部凭据回报（MCP 接入层）：运行标记即关联凭据（标记只在投递
+    /// 正文给出——收到任务的一方才知道）；验证运行存在且未终结后按
+    /// 内部回报同一语义收尾（取消裁定备查规则一致），投递按发起关系路由。
+    pub async fn report_by_marker(
+        &self,
+        marker: &str,
+        result: &str,
+        status: &str,
+        note: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let result = result.trim();
+        if result.is_empty() {
+            bail!("回报结果不能为空");
+        }
+        let status = match status.trim() {
+            "" | "completed" => RunStatus::Completed,
+            "failed" => RunStatus::Failed,
+            "blocked" => RunStatus::Blocked,
+            other => bail!("未知的回报状态「{other}」（completed / failed / blocked）"),
+        };
+        let marker = marker.trim().trim_start_matches("r-");
+        if marker.is_empty() {
+            bail!("外部回报必须携带运行标记（任务消息尾部的 r-短码）");
+        }
+        let _guard = self.ops.lock().await;
+        let mut run = self
+            .store
+            .list_runs()
+            .into_iter()
+            .find(|run| run.run_id.ends_with(marker) && run.status.is_alive())
+            .ok_or_else(|| {
+                anyhow::anyhow!("运行标记 r-{marker} 无匹配的等待中工作（迟到、重复或已终结）")
+            })?;
+        self.finalize_report(&mut run, result, status, note).await
+    }
+
+    /// 回报收尾核心（内部成员会话与外部凭据入口共用）：终态化（含停止
+    /// 备查语义）、事件、Hook 投递发起方、归档与协作释放。
+    async fn finalize_report(
+        &self,
+        run: &mut RunRecord,
+        result: &str,
+        status: RunStatus,
+        note: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        // 取消/停用裁定优先：停止请求中的工作收到成果时保留备查，
+        // 不恢复为正常完成——是否继续由主 Agent 重新安排。
+        if run.status == RunStatus::Stopping {
+            let timestamp = now_string();
+            run.status = RunStatus::Cancelled;
+            run.summary = Some(format!("[停止请求中收到的成果备查] {result}"));
+            run.finished_at = Some(timestamp.clone());
+            run.updated_at = timestamp.clone();
+            self.store.save_run(run)?;
+            sync_task_status(&self.store, run);
+            self.release_collab_activation_if_idle(run);
+            append_event(
+                &self.store,
+                run,
+                "cancelled",
+                &json!({ "text": "停止确认；后续送达的成果已备查" }),
+                &timestamp,
+            );
+            let agents_ref = Some(&self.agents);
+            enqueue_hook(
+                &self.store,
+                agents_ref,
+                run,
+                HookEventType::Message,
+                json!({ "text": format!("已请求停止的工作收到成果（备查，不改变取消裁定）：{result}") }),
+                &timestamp,
+            );
+            notify_run_status(run);
+            return Ok(tool_ok(
+                "该工作已请求停止：成果已备查并转达发起方，取消裁定保持不变".to_string(),
+            ));
+        }
+        let timestamp = now_string();
+        if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
+            run.summary = Some(format!("{result}\n（{note}）"));
+        } else {
+            run.summary = Some(result.to_string());
+        }
+        run.status = status;
+        run.finished_at = status.is_terminal().then(|| timestamp.clone());
+        run.updated_at = timestamp.clone();
+        self.store.save_run(run)?;
+        sync_task_status(&self.store, run);
+        self.release_collab_activation_if_idle(run);
+        let (event_type, payload) = match status {
+            RunStatus::Completed => ("completed", json!({ "text": result })),
+            RunStatus::Failed => ("failed", json!({ "text": result })),
+            _ => ("blocked", json!({ "text": result })),
+        };
+        append_event(&self.store, run, event_type, &payload, &timestamp);
+        if status == RunStatus::Completed {
+            let agents_ref = Some(&self.agents);
+            archive_completion(&self.store, agents_ref, run, result);
+        }
+        let agents_ref = Some(&self.agents);
+        enqueue_hook(
+            &self.store,
+            agents_ref,
+            run,
+            match status {
+                RunStatus::Completed => HookEventType::Completed,
+                RunStatus::Failed => HookEventType::Failed,
+                _ => HookEventType::Blocked,
+            },
+            payload,
+            &timestamp,
+        );
+        notify_run_status(run);
+        Ok(tool_ok(format!(
+            "已回报给发起方（{}，run …{}）",
+            run.status.label(),
+            run.run_id
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        )))
+    }
+
     /// 指令受控成长：向成员长期指令追加稳定规则（不覆盖既有内容）。
     /// 权限——主会话可操作任意成员；成员后端会话只能操作自己。
     async fn tool_append_instructions(

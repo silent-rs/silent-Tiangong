@@ -43,6 +43,12 @@ fn mcp_tools() -> Vec<(&'static str, &'static str, Value, &'static str)> {
             "submit_agent_task",
         ),
         (
+            "report_run_result",
+            "外部执行体回报工作结果：凭任务消息尾部的运行标记（run_marker，只在任务投递正文中给出——收到任务的一方才持有）关联，回报送达该工作的发起方并终结对应运行；completed/failed/blocked，blocked 为等待发起方补充（非终态）。",
+            json!({"type":"object","properties":{"run_marker":{"type":"string","description":"运行标记（任务消息尾部的 r-短码，必填）"},"result":{"type":"string","description":"回报结果正文"},"status":{"type":"string","enum":["completed","failed","blocked"],"description":"回报状态，默认 completed"},"note":{"type":"string","description":"可选备注"}},"required":["run_marker","result"]}),
+            "__external_report",
+        ),
+        (
             "list_pending_work",
             "查看等待中的工作与协作关系（谁在为谁执行、谁在等结果，含 workspace 域）。",
             json!({"type":"object","properties":{"agent_id":{"type":"string","description":"可选：只看某成员"}}}),
@@ -162,10 +168,10 @@ pub async fn run_mcp(
                     .unwrap_or_default()
                     .to_string();
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
-                let Some((_, _, _, operation)) = mcp_tools()
+                let found = mcp_tools()
                     .into_iter()
-                    .find(|(name, _, _, _)| *name == tool)
-                else {
+                    .find(|(name, _, _, _)| *name == tool);
+                let Some((_, _, _, operation)) = found else {
                     let _ = writeln!(
                         out,
                         "{}",
@@ -174,13 +180,34 @@ pub async fn run_mcp(
                     out.flush()?;
                     continue;
                 };
-                let request = Request {
-                    protocol_version: PROTOCOL_VERSION.to_string(),
-                    request_id: format!("mcp-{seq}"),
-                    operation: operation.to_string(),
-                    payload: arguments,
+                // 外部凭据回报走独立入口（运行标记即关联凭据，不依赖成员会话）。
+                let result = if operation == "__external_report" {
+                    let marker = arguments
+                        .get("run_marker")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let text = arguments
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let status = arguments
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("completed");
+                    let note = arguments.get("note").and_then(Value::as_str);
+                    match service.report_by_marker(marker, text, status, note).await {
+                        Ok(value) => value,
+                        Err(error) => json!({ "ok": false, "summary": error.to_string() }),
+                    }
+                } else {
+                    let request = Request {
+                        protocol_version: PROTOCOL_VERSION.to_string(),
+                        request_id: format!("mcp-{seq}"),
+                        operation: operation.to_string(),
+                        payload: arguments,
+                    };
+                    service.dispatch_inner_public(&request).await
                 };
-                let result = service.dispatch_inner_public(&request).await;
                 let text =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 // 业务失败如实映射为 MCP 错误（外部 Agent 可可靠判断后续动作）。
