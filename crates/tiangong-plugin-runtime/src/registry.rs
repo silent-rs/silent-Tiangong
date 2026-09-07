@@ -36,7 +36,83 @@ static INVALID_PLUGINS: OnceLock<Mutex<Vec<InvalidPluginEntry>>> = OnceLock::new
 static SIDECAR_CONNECTIONS: OnceLock<
     Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>,
 > = OnceLock::new();
-static LOAD_OPERATION: Mutex<()> = Mutex::new(());
+static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
+#[cfg(windows)]
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+pub(crate) fn persistent_grants_path(storage_root: &Path, plugin_id: &str) -> PathBuf {
+    let key = hex::encode(sha2::Sha256::digest(plugin_id.as_bytes()));
+    storage_root
+        .join("sandbox")
+        .join("grants")
+        .join(format!("{key}.json"))
+}
+
+/// 配置撤权时先停用旧连接，再撤销已登记的文件身份并按新配置重建。
+#[cfg(windows)]
+pub fn invalidate_persistent_grants(storage_root: &Path) -> Result<()> {
+    let _operation = LOAD_OPERATION
+        .write()
+        .map_err(|_| anyhow::anyhow!("插件操作锁已损坏"))?;
+    let directory = storage_root.join("sandbox").join("grants");
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let targets = loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+        .values()
+        .filter(|loaded| loaded.manifest.should_preload_sidecar())
+        .map(|loaded| (loaded.manifest.id.clone(), loaded.directory.clone()))
+        .collect::<Vec<_>>();
+    for (id, path) in &targets {
+        stop_loaded_sidecar(id)?;
+        stop_connection_for_directory(path)?;
+    }
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|value| value == "json")
+            && path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.len() == 64 && value.bytes().all(|value| value.is_ascii_hexdigit())
+                })
+        {
+            tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&path)?;
+        }
+    }
+    let mut failures = Vec::new();
+    for (id, _) in targets {
+        if let Err(error) = find_installed_plugin(storage_root, &id)
+            .and_then(|installed| reload_plugin_inner(storage_root, &installed))
+        {
+            set_runtime_error(&id, format!("{error:#}"));
+            failures.push(format!("{id}: {error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        bail!(failures.join("; "));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn sidecars_shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(windows)]
+pub fn begin_sidecar_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(windows)]
+pub(crate) fn background_sidecar_operation() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
+    let guard = LOAD_OPERATION.write().ok()?;
+    (!sidecars_shutting_down()).then_some(guard)
+}
 
 /// 按需启动 sidecar 的沙箱策略在进程启动后不可扩权，因此连接缓存必须
 /// 同时按安装目录和会话工作区区分，不能让默认连接遮蔽当前对话的可写域。
@@ -378,6 +454,10 @@ pub fn on_sandbox_setting_changed() {
 /// sidecar 经 `setsid()` 脱离进程组独立运行，不会随宿主自动退出。
 /// 宿主必须在退出前调用本函数主动终止它们，否则会残留孤儿进程占用端口与资源。
 pub fn shutdown_all_sidecars() {
+    #[cfg(windows)]
+    begin_sidecar_shutdown();
+    #[cfg(windows)]
+    let _operation = LOAD_OPERATION.write().ok();
     crate::ts_tools::cancel_all_calls();
     let connections = sidecar_connections()
         .lock()
@@ -441,18 +521,30 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
+    #[cfg(windows)]
+    if sidecars_shutting_down() {
+        return 0;
+    }
     migrate_legacy_plugin_ids(storage_root);
 
-    let Ok(_operation) = LOAD_OPERATION.lock() else {
+    let Ok(_operation) = LOAD_OPERATION.write() else {
         tracing::warn!("插件加载操作锁已损坏");
         return 0;
     };
+    #[cfg(windows)]
+    if sidecars_shutting_down() {
+        return 0;
+    }
 
     let (installed_plugins, discovered_invalid) = discover_installed_plugins(storage_root);
     if let Ok(mut registered) = invalid_plugins().lock() {
         *registered = discovered_invalid;
     }
     for installed in &installed_plugins {
+        #[cfg(windows)]
+        if sidecars_shutting_down() {
+            return 0;
+        }
         // 幂等跳过仅当登记属于本次扫描到的同一安装目录：同 id 但目录
         // 不同（如测试以不同 storage root 反复预加载）必须以最后一次
         // 为准，否则注册表沿用已失效的旧目录，桥接等按目录推导的路径
@@ -473,7 +565,8 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         {
             remove_sidecar_connection(&previous.directory);
         }
-        let loaded = load_plugin_record(storage_root, installed.clone());
+        let loaded =
+            load_plugin_record_with_prewarm(storage_root, installed.clone(), !cfg!(windows));
         if let Ok(mut plugins) = loaded_plugins().lock() {
             plugins.insert(installed.manifest.id.clone(), loaded);
         }
@@ -481,6 +574,8 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。
     crate::verification::reverify_installed_sidecars(storage_root);
+    #[cfg(windows)]
+    prewarm_resident_sidecars(storage_root);
 
     installed_plugins.len()
 }
@@ -538,7 +633,7 @@ fn remove_invalid_plugin_if_registered(
 /// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
 /// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
 pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
-    let Ok(_operation) = LOAD_OPERATION.lock() else {
+    let Ok(_operation) = LOAD_OPERATION.write() else {
         tracing::warn!("插件加载操作锁已损坏");
         return Vec::new();
     };
@@ -654,7 +749,7 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
 /// 从磁盘读取插件新版本。全部 UI/Core 实例成功创建后才切换。
 pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
-        .lock()
+        .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if loaded_plugin_matches(&installed)? {
@@ -1516,6 +1611,14 @@ pub fn load_wasm_plugin_at(
 }
 
 fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> LoadedPlugin {
+    load_plugin_record_with_prewarm(storage_root, installed, true)
+}
+
+fn load_plugin_record_with_prewarm(
+    storage_root: &Path,
+    installed: InstalledPlugin,
+    prewarm: bool,
+) -> LoadedPlugin {
     // 连接构造失败（解释器不可发现、签名/信任/权限不合法）属于安装
     // 前提类错误：写入 load_error，安装路径据此回滚。
     let sidecar_result = resolve_sidecar(storage_root, &installed, false);
@@ -1531,7 +1634,8 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
     // 常驻 sidecar 启动失败是运行异常：保留安装，插件管理显示启动异常
     //（重试验证/修复环境后恢复），不作为安装回滚条件。
     let mut runtime_error = None;
-    if installed.enabled
+    if prewarm
+        && installed.enabled
         && installed.manifest.should_preload_sidecar()
         && verified_sidecar.is_some()
         && let Some(connection) = &sidecar
@@ -1868,7 +1972,7 @@ fn install_staged_plugin_inner(
     let total_started = Instant::now();
     let lock_started = Instant::now();
     let _operation = LOAD_OPERATION
-        .lock()
+        .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
 
@@ -1999,8 +2103,34 @@ pub fn prewarm_resident_sidecars(storage_root: &Path) {
             .map(|loaded| loaded.manifest.id.clone())
             .collect()
     };
+    #[cfg(not(windows))]
     for plugin_id in targets {
         prewarm_plugin_sidecar(storage_root, &plugin_id);
+    }
+    #[cfg(windows)]
+    {
+        let mut targets = targets;
+        targets.sort_unstable();
+        let storage_root = storage_root.to_path_buf();
+        let spawned = std::thread::Builder::new()
+            .name("prewarm-resident-sidecars".into())
+            .spawn(move || {
+                let started = Instant::now();
+                tracing::info!(plugins = targets.len(), "开始逐个准备常驻插件");
+                for plugin_id in targets {
+                    if sidecars_shutting_down() {
+                        break;
+                    }
+                    prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id);
+                }
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "常驻插件准备批次结束"
+                );
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "创建插件后台准备线程失败");
+        }
     }
 }
 
@@ -2011,24 +2141,51 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
     let plugin_id = plugin_id.to_string();
     let spawned = std::thread::Builder::new()
         .name(format!("prewarm-sidecar-{plugin_id}"))
-        .spawn(move || {
-            let Ok(installed) = find_installed_plugin(&storage_root, &plugin_id) else {
-                return;
-            };
-            if !installed.enabled || !installed.manifest.should_preload_sidecar() {
-                return;
-            }
-            match sidecar_connection(&storage_root, &installed, false)
-                .and_then(|connection| connection.ensure_running())
-            {
-                Ok(()) => tracing::info!(plugin_id, "插件 sidecar 预热完成"),
-                Err(error) => {
-                    tracing::debug!(plugin_id, %error, "插件 sidecar 预热失败（使用时重试）")
-                }
-            }
-        });
+        .spawn(move || prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id));
     if let Err(error) = spawned {
         tracing::debug!(%error, "创建 sidecar 预热线程失败");
+    }
+}
+
+fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) {
+    // 准备任务可共享读锁；安装、卸载、补验证和退出仍独占写锁。
+    #[cfg(windows)]
+    let Ok(_operation) = LOAD_OPERATION.read() else {
+        return;
+    };
+    #[cfg(windows)]
+    if sidecars_shutting_down() {
+        return;
+    }
+    let Ok(installed) = find_installed_plugin(storage_root, plugin_id) else {
+        return;
+    };
+    if !installed.enabled || !installed.manifest.should_preload_sidecar() {
+        return;
+    }
+    #[cfg(windows)]
+    if crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest)
+        .is_none()
+    {
+        return;
+    }
+    match sidecar_connection(storage_root, &installed, false)
+        .and_then(|connection| connection.ensure_running())
+    {
+        Ok(()) => {
+            #[cfg(windows)]
+            if let Ok(mut plugins) = loaded_plugins().lock()
+                && let Some(loaded) = plugins.get_mut(plugin_id)
+            {
+                loaded.runtime_error = None;
+            }
+            tracing::info!(plugin_id, "插件 sidecar 预热完成");
+        }
+        Err(error) => {
+            #[cfg(windows)]
+            set_runtime_error(plugin_id, format!("{error:#}"));
+            tracing::debug!(plugin_id, %error, "插件 sidecar 预热失败（使用时重试）")
+        }
     }
 }
 
@@ -2039,7 +2196,7 @@ pub fn set_plugin_enabled(
     enabled: bool,
 ) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
-        .lock()
+        .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     if installed.enabled == enabled {
@@ -2194,7 +2351,7 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
-        .lock()
+        .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let current = find_installed_plugin(storage_root, plugin_id)?;
     let rollback = rollback_directory(&current.directory, plugin_id);
@@ -2240,8 +2397,17 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 /// 校验，先查无效插件登记表，命中则直接走同一删除路径后返回。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let _operation = LOAD_OPERATION
-        .lock()
+        .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    #[cfg(windows)]
+    {
+        let cache = persistent_grants_path(storage_root, plugin_id);
+        if cache.is_file() {
+            stop_loaded_sidecar(plugin_id)?;
+            stop_connection_for_directory(&plugin_directory(storage_root, plugin_id))?;
+            tiangong_sandbox::sandbox::windows::revoke_persistent_grants(&cache)?;
+        }
+    }
     if remove_invalid_plugin_if_registered(storage_root, plugin_id, keep_data)? {
         return Ok(());
     }

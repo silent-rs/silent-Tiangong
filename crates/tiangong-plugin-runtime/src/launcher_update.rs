@@ -9,6 +9,9 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
+#[cfg(windows)]
+mod windows_cache;
+
 pub const LAUNCHER_MANIFEST_ENDPOINT: &str = tiangong_sandbox::update::DEFAULT_MANIFEST_URL;
 const MANIFEST_URL_OVERRIDE: &str = "TIANGONG_LAUNCHER_MANIFEST_URL";
 
@@ -132,6 +135,8 @@ impl LauncherUpdater {
     pub async fn install_or_update(&self, storage_root: &Path) -> Result<String> {
         let _guard = launcher_update_lock().lock().await;
         invalidate_launcher_check();
+        #[cfg(windows)]
+        windows_cache::invalidate(storage_root)?;
         let directory = host_install_directory(storage_root);
         let status = tiangong_sandbox::update::SelfUpdater::new(self.manifest_url.clone())?
             .install_to(&directory)
@@ -188,7 +193,28 @@ fn verified_launcher_version(storage_root: &Path) -> Result<String> {
     {
         return Ok(version.clone());
     }
-    let version = verify_launcher_self_check(&launcher)?;
+    #[cfg(windows)]
+    let persistent_key = windows_cache::Key::new(&launcher).ok();
+    #[cfg(windows)]
+    if let Some(fingerprint) = &persistent_key
+        && let Some(version) = windows_cache::read(storage_root, fingerprint)
+        && launcher_cache_key(&launcher).is_ok_and(|current| current == key)
+    {
+        tracing::info!("复用本次系统启动内的 Sandbox 完整自检结果");
+        *cache = Some((key, version.clone()));
+        return Ok(version);
+    }
+    let (version, fully_checked) = verify_launcher_self_check(&launcher)?;
+    #[cfg(not(windows))]
+    let _ = fully_checked;
+    #[cfg(windows)]
+    if fully_checked
+        && let Some(key) = persistent_key
+        && windows_cache::Key::new(&launcher).is_ok_and(|current| current == key)
+        && let Err(error) = windows_cache::save(storage_root, key, &version)
+    {
+        tracing::warn!(%error, "保存 Sandbox 自检复用记录失败，下次重新检查");
+    }
     if launcher_cache_key(&launcher).is_ok_and(|current| current == key) {
         *cache = Some((key, version.clone()));
     }
@@ -204,7 +230,7 @@ fn launcher_cache_key(launcher: &Path) -> Result<LauncherCacheKey> {
         modified: metadata.modified().ok(),
     })
 }
-fn verify_launcher_self_check(binary: &Path) -> Result<String> {
+fn verify_launcher_self_check(binary: &Path) -> Result<(String, bool)> {
     let mut command = std::process::Command::new(binary);
     command.arg("--self-check");
     let output = tiangong_toolkit::configure_no_window(&mut command)
@@ -226,11 +252,12 @@ fn verify_launcher_self_check(binary: &Path) -> Result<String> {
     {
         bail!("Sandbox 自报协议或策略版本与宿主不兼容");
     }
-    report["product_version"]
+    let version = report["product_version"]
         .as_str()
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
-        .context("Sandbox 自检报告缺少产品版本")
+        .context("Sandbox 自检报告缺少产品版本")?;
+    Ok((version, output.status.success()))
 }
 
 #[cfg(test)]

@@ -57,6 +57,8 @@ const GIT_METADATA_PROBE_MARKER: &str = "GITWRITE";
 /// Launcher 启动指令（宿主经 fd3 写入）。
 #[derive(Debug, Deserialize)]
 struct LaunchRequest {
+    #[serde(default)]
+    grant_cache: Option<PathBuf>,
     protocol_version: u32,
     policy_schema: u32,
     policy: tiangong_sandbox::SandboxPolicy,
@@ -209,6 +211,7 @@ fn run_policy_file(args: &[String]) -> Result<()> {
         .with_context(|| format!("解析命令失败: {}", program.display()))?;
     let program_root = program.parent().context("命令缺少父目录")?.to_path_buf();
     let request = LaunchRequest {
+        grant_cache: parsed.grant_cache,
         protocol_version: PROTOCOL_VERSION,
         policy_schema: POLICY_SCHEMA,
         policy: parsed.policy,
@@ -230,6 +233,9 @@ fn run_policy_file(args: &[String]) -> Result<()> {
     about = "使用策略文件或直接策略参数执行受限命令"
 )]
 struct RunArgs {
+    /// Windows 持久授权记录，必须位于策略禁止读取的宿主管理目录内。
+    #[arg(long, value_name = "FILE")]
+    grant_cache: Option<PathBuf>,
     /// SandboxPolicy JSON 文件；不能与直接策略参数同时使用。
     #[arg(long, value_name = "FILE", conflicts_with_all = INLINE_POLICY_ARGS)]
     policy: Option<PathBuf>,
@@ -297,6 +303,7 @@ fn parse_run_args(args: &[String]) -> Result<ParsedRun> {
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let command = parsed.command.clone();
+    let grant_cache = parsed.grant_cache.clone();
     let policy = if let Some(policy_path) = parsed.policy.as_ref() {
         serde_json::from_slice(
             &std::fs::read(policy_path)
@@ -306,11 +313,16 @@ fn parse_run_args(args: &[String]) -> Result<ParsedRun> {
     } else {
         inline_policy(parsed)?
     };
-    Ok(ParsedRun { policy, command })
+    Ok(ParsedRun {
+        policy,
+        command,
+        grant_cache,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedRun {
+    grant_cache: Option<PathBuf>,
     policy: tiangong_sandbox::SandboxPolicy,
     command: Vec<String>,
 }
@@ -483,7 +495,7 @@ fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()
         }
         let program_root = std::fs::canonicalize(&request.program_root)
             .context("规范化 Windows command 插件根目录失败")?;
-        let exit_code = tiangong_sandbox::sandbox::windows::launch(
+        let exit_code = tiangong_sandbox::sandbox::windows::launch_with_grant_cache(
             tiangong_sandbox::sandbox::windows::WindowsLaunchRequest {
                 program: &program_path,
                 program_root: &program_root,
@@ -493,11 +505,16 @@ fn execute_request(request: LaunchRequest, inherited_request: bool) -> Result<()
                 stop_event_name: stop_event.as_deref(),
                 timeout: None,
             },
+            request.grant_cache.as_deref(),
         )?;
         std::process::exit(exit_code);
     }
 
     // Unix 平台沙箱包装（seatbelt / bwrap）；不可用时 fail-closed。
+    #[cfg(unix)]
+    if request.grant_cache.is_some() {
+        bail!("持久授权仅支持 Windows");
+    }
     #[cfg(unix)]
     let wrapped = match tiangong_sandbox::wrap(&request.policy) {
         tiangong_sandbox::SandboxedProgram::Wrapped { program, prefix } => (program, prefix),
@@ -2289,6 +2306,7 @@ mod tests {
 
     fn request(root: &Path, program: &Path) -> LaunchRequest {
         LaunchRequest {
+            grant_cache: None,
             protocol_version: PROTOCOL_VERSION,
             policy_schema: POLICY_SCHEMA,
             policy: tiangong_sandbox::SandboxPolicy::workspace_write(root),

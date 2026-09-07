@@ -693,6 +693,20 @@ impl StdioSidecarConnection {
                     "args": target_args,
                     "interpreter": self.config.interpreter.is_some(),
                 });
+                #[cfg(windows)]
+                let request = {
+                    let mut request = request;
+                    if !self.config.sandbox_follows_user_switch
+                        && self.config.lifecycle == crate::manifest::SidecarLifecycle::Resident
+                    {
+                        request["grant_cache"] =
+                            serde_json::json!(crate::registry::persistent_grants_path(
+                                &self.config.storage_root,
+                                &self.config.plugin_id
+                            ));
+                    }
+                    request
+                };
                 let mut command = Command::new(&sandbox_bin);
                 policy_fd_guard = Some(preparation(prepare_policy_fd(
                     &mut command,
@@ -768,6 +782,12 @@ impl StdioSidecarConnection {
                 WindowsJob::new(None).context("创建 sidecar Job Object 失败"),
             )?),
         };
+        #[cfg(windows)]
+        if crate::registry::sidecars_shutting_down() {
+            return Err(SpawnAttemptError::Preparation(anyhow!(
+                "应用正在退出，取消插件启动"
+            )));
+        }
         let mut child = command.spawn().map_err(|error| {
             let display = spawned_program.as_deref().unwrap_or(&program);
             let context = format!("启动 stdio sidecar 失败: {}", display.display());

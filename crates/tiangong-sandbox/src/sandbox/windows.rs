@@ -71,6 +71,9 @@ use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCE
 
 use super::{SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
+mod persistent;
+pub use persistent::revoke as revoke_persistent_grants;
+
 const SE_GROUP_ENABLED: u32 = 4;
 const SE_GROUP_LOGON_ID: u32 = 0xc000_0000;
 const ACL_MUTATION_MUTEX: &str = "Local\\TiangongSandboxAclMutation-v1";
@@ -115,27 +118,60 @@ pub fn availability() -> SandboxAvailability {
 
 /// 创建、运行并清理一次 Windows AppContainer 调用。
 pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
+    launch_with_grant_cache(request, None)
+}
+
+pub fn launch_with_grant_cache(
+    request: WindowsLaunchRequest<'_>,
+    cache: Option<&Path>,
+) -> Result<i32> {
     trace_self_check(&request, "校验启动请求");
     validate_launch_request(&request)?;
     trace_self_check(&request, "创建网络能力集合");
-    let capabilities = CapabilitySet::new(request.policy.allow_network)?;
+    let mut capabilities = CapabilitySet::new(request.policy.allow_network)?;
+    if cache.is_some() {
+        trace_self_check(&request, "检查持久目录授权");
+    }
+    let lease = cache
+        .map(|path| persistent::prepare(&request, path, &mut capabilities))
+        .transpose()?;
     trace_self_check(&request, "创建临时 AppContainer 身份");
     let mut profile = AppContainerProfile::create(&capabilities)?;
     trace_self_check(&request, "创建临时受限身份");
-    let restriction = RestrictionSid::new()?;
+    let temporary_restriction = if lease.is_none() {
+        Some(RestrictionSid::new()?)
+    } else {
+        None
+    };
+    let restriction = lease
+        .as_ref()
+        .map(|lease| &lease.restriction)
+        .or(temporary_restriction.as_ref())
+        .expect("已创建受限身份");
     trace_self_check(&request, "应用临时目录授权");
-    let mut grants = AclGrants::apply(
-        profile.sid,
-        restriction.sid,
-        request.program,
-        request.policy,
-    )?;
+    let mut grants = if lease.is_none() {
+        Some(AclGrants::apply(
+            profile.sid,
+            restriction.sid,
+            request.program,
+            request.policy,
+        )?)
+    } else {
+        None
+    };
 
     trace_self_check(&request, "启动受限目标进程");
-    let execution = run_restricted_process(&request, &profile, &restriction, &capabilities);
+    let execution = run_restricted_process(&request, &profile, restriction, &capabilities);
     trace_self_check(&request, "受限目标进程已结束");
-    let acl_cleanup = grants.revoke();
-    trace_self_check(&request, "临时目录授权已撤销");
+    let acl_cleanup = grants.as_mut().map_or(Ok(()), AclGrants::revoke);
+    trace_self_check(
+        &request,
+        if lease.is_some() {
+            "持久文件授权已保留"
+        } else {
+            "临时目录授权已撤销"
+        },
+    );
     let profile_cleanup = profile.delete();
     trace_self_check(&request, "临时 AppContainer 身份已删除");
 
@@ -159,8 +195,10 @@ pub fn launch(request: WindowsLaunchRequest<'_>) -> Result<i32> {
 }
 
 fn trace_self_check(request: &WindowsLaunchRequest<'_>, stage: &str) {
-    if request.timeout.is_some() {
-        eprintln!("Windows AppContainer 自检阶段: {stage}");
+    if request.timeout.is_some() || std::env::var_os("TIANGONG_SANDBOX_DIAGNOSTICS").is_some() {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let elapsed = START.get_or_init(Instant::now).elapsed().as_millis();
+        eprintln!("Windows AppContainer 阶段 elapsed_ms={elapsed}: {stage}");
     }
 }
 
@@ -223,6 +261,12 @@ fn validate_launch_request(request: &WindowsLaunchRequest<'_>) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     for root in &writable_roots {
+        if writable_roots
+            .iter()
+            .any(|parent| parent != root && root.starts_with(parent))
+        {
+            continue;
+        }
         validate_writable_tree(root, &writable_roots)
             .with_context(|| format!("Windows 可写目录不安全: {}", root.display()))?;
     }
@@ -233,32 +277,51 @@ fn validate_writable_tree(root: &Path, writable_roots: &[PathBuf]) -> Result<()>
     if !root.is_absolute() || !root.is_dir() {
         bail!("可写根必须是已存在的绝对目录");
     }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if path != root && error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("读取路径元数据失败: {}", path.display()));
-            }
-        };
+    let metadata = std::fs::symlink_metadata(root)
+        .with_context(|| format!("读取路径元数据失败: {}", root.display()))?;
+    let mut pending = vec![(root.to_path_buf(), metadata)];
+    while let Some((path, metadata)) = pending.pop() {
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
         }
         if metadata.is_file() {
-            let link_count = file_link_count(&path)?;
+            let link_count = match file_link_count(&path) {
+                Ok(count) => count,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if link_count > 1 {
                 validate_hardlink_aliases(&path, link_count, writable_roots)?;
             }
         }
         if metadata.is_dir() {
+            // 子目录可能在枚举后被替换；遍历前重新检查，不能跟随新出现的链接。
+            let current = match std::fs::symlink_metadata(&path) {
+                Ok(current) => current,
+                Err(error) if path != root && error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error).context("复核可写目录失败"),
+            };
+            if current.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                bail!("可写目录包含重解析点，拒绝授予权限: {}", path.display());
+            }
             for entry in std::fs::read_dir(&path)
                 .with_context(|| format!("扫描可写目录失败: {}", path.display()))?
             {
-                pending.push(entry?.path());
+                let entry = entry?;
+                // Windows 的目录枚举已携带元数据；复用它，不再按路径重查每个文件。
+                match entry.metadata() {
+                    Ok(metadata) => pending.push((entry.path(), metadata)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("读取目录项元数据失败"),
+                }
             }
         }
     }
@@ -285,6 +348,9 @@ fn file_link_count(path: &Path) -> Result<u32> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(raw_handle(&handle), &mut info) } == 0 {
         return Err(std::io::Error::last_os_error()).context("读取文件硬链接数量失败");
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        bail!("硬链接检查遇到重解析点，拒绝授予权限");
     }
     Ok(info.nNumberOfLinks)
 }
@@ -492,7 +558,10 @@ struct RestrictionSid {
 
 impl RestrictionSid {
     fn new() -> Result<Self> {
-        let value = scru128::new().to_u128();
+        Self::from_value(scru128::new().to_u128())
+    }
+
+    fn from_value(value: u128) -> Result<Self> {
         let mut sid = std::ptr::null_mut();
         let created = unsafe {
             AllocateAndInitializeSid(
@@ -771,7 +840,7 @@ impl Drop for AppContainerProfile {
 }
 
 struct AclRoot {
-    sid: PSID,
+    sids: Vec<PSID>,
     path: PathBuf,
 }
 
@@ -795,13 +864,7 @@ impl AclGrants {
             // AppContainer 保留目录穿越能力；修改祖先 DACL 会让 Windows 向整棵
             // 子树传播继承项，因此只授权最终程序和策略根。
             grants.add(
-                appcontainer_sid,
-                program,
-                FILE_PROGRAM_ACCESS,
-                NO_INHERITANCE,
-            )?;
-            grants.add(
-                restriction_sid,
+                &[appcontainer_sid, restriction_sid],
                 program,
                 FILE_PROGRAM_ACCESS,
                 NO_INHERITANCE,
@@ -809,13 +872,7 @@ impl AclGrants {
             let writable = policy.writable_roots();
             for root in &writable {
                 grants.add(
-                    appcontainer_sid,
-                    root,
-                    FILE_WORKSPACE_ACCESS,
-                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                )?;
-                grants.add(
-                    restriction_sid,
+                    &[appcontainer_sid, restriction_sid],
                     root,
                     FILE_WORKSPACE_ACCESS,
                     OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
@@ -853,19 +910,25 @@ impl AclGrants {
         Ok(grants)
     }
 
-    fn add(&mut self, sid: PSID, path: &Path, permissions: u32, inheritance: u32) -> Result<()> {
-        modify_acl(path, sid, permissions, inheritance, GRANT_ACCESS)?;
+    fn add(
+        &mut self,
+        sids: &[PSID],
+        path: &Path,
+        permissions: u32,
+        inheritance: u32,
+    ) -> Result<()> {
+        modify_acl(path, sids, permissions, inheritance, GRANT_ACCESS)?;
         self.roots.push(AclRoot {
-            sid,
+            sids: sids.to_vec(),
             path: path.to_path_buf(),
         });
         Ok(())
     }
 
     fn deny(&mut self, sid: PSID, path: &Path, permissions: u32, inheritance: u32) -> Result<()> {
-        modify_acl(path, sid, permissions, inheritance, DENY_ACCESS)?;
+        modify_acl(path, &[sid], permissions, inheritance, DENY_ACCESS)?;
         self.roots.push(AclRoot {
-            sid,
+            sids: vec![sid],
             path: path.to_path_buf(),
         });
         Ok(())
@@ -880,16 +943,17 @@ impl AclGrants {
         let mut entries = self
             .roots
             .iter()
-            .map(|root| (root.path.clone(), root.sid))
+            .map(|root| (root.path.clone(), root.sids.clone()))
             .collect::<Vec<_>>();
         entries.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
         let mut seen = HashSet::new();
         let mut failures = Vec::new();
-        for (path, sid) in entries {
-            if !seen.insert((path.clone(), sid as usize)) || !path.exists() {
+        for (path, mut sids) in entries {
+            sids.retain(|sid| seen.insert((path.clone(), *sid as usize)));
+            if sids.is_empty() || !path.exists() {
                 continue;
             }
-            if let Err(error) = modify_acl(&path, sid, 0, NO_INHERITANCE, REVOKE_ACCESS) {
+            if let Err(error) = modify_acl(&path, &sids, 0, NO_INHERITANCE, REVOKE_ACCESS) {
                 failures.push(format!("{}: {error:#}", path.display()));
             }
         }
@@ -910,7 +974,13 @@ impl Drop for AclGrants {
     }
 }
 
-fn modify_acl(path: &Path, sid: PSID, permissions: u32, inheritance: u32, mode: i32) -> Result<()> {
+fn modify_acl(
+    path: &Path,
+    sids: &[PSID],
+    permissions: u32,
+    inheritance: u32,
+    mode: i32,
+) -> Result<()> {
     let _mutation_lock = AclMutationLock::acquire()?;
     let path_wide = wide_os(path.as_os_str());
     let mut old_acl = std::ptr::null_mut();
@@ -931,18 +1001,25 @@ fn modify_acl(path: &Path, sid: PSID, permissions: u32, inheritance: u32, mode: 
         return Err(win32_error(status)).context("读取 ACL 失败");
     }
 
-    let mut trustee = Default::default();
-    unsafe {
-        BuildTrusteeWithSidW(&mut trustee, sid);
-    }
-    let access = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: permissions,
-        grfAccessMode: mode,
-        grfInheritance: inheritance,
-        Trustee: trustee,
-    };
+    // 一次更新同一路径上的全部身份，避免每个身份都触发整棵目录继承传播。
+    let access = sids
+        .iter()
+        .map(|sid| {
+            let mut trustee = Default::default();
+            unsafe {
+                BuildTrusteeWithSidW(&mut trustee, *sid);
+            }
+            EXPLICIT_ACCESS_W {
+                grfAccessPermissions: permissions,
+                grfAccessMode: mode,
+                grfInheritance: inheritance,
+                Trustee: trustee,
+            }
+        })
+        .collect::<Vec<_>>();
     let mut new_acl = std::ptr::null_mut();
-    let acl_status = unsafe { SetEntriesInAclW(1, &access, old_acl, &mut new_acl) };
+    let acl_status =
+        unsafe { SetEntriesInAclW(access.len() as u32, access.as_ptr(), old_acl, &mut new_acl) };
     if acl_status != ERROR_SUCCESS {
         unsafe {
             LocalFree(security_descriptor);

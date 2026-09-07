@@ -3,32 +3,7 @@ import { Loader2, RefreshCw, LogOut, ArrowRight } from 'lucide-react';
 import { Button } from './ui/button';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-
-/** 启动准备步骤状态。 */
-type StepState = 'done' | 'active' | 'pending';
-
-interface PrepareStep {
-  id: string;
-  label: string;
-}
-
-/** 首装启动准备步骤清单（Launcher 首装直接激活，无需重启选择；
- * 插件保持既有"可选引导安装"模型，不进入必需准备流程）。 */
-const STEPS: PrepareStep[] = [
-  { id: 'config', label: '检查应用配置' },
-  { id: 'launcher', label: '准备沙箱程序（下载、校验并激活）' },
-  { id: 'done', label: '启动就绪' },
-];
-
-function stepStateOf(id: string, activeId: string | null, failed: boolean): StepState {
-  const order = STEPS.map((step) => step.id);
-  const current = activeId ? order.indexOf(activeId) : order.length;
-  const mine = order.indexOf(id);
-  if (failed && mine >= current) return 'pending';
-  if (mine < current) return 'done';
-  if (mine === current) return 'active';
-  return 'pending';
-}
+import appLogo from '../../../src-tauri/icons/128x128.png';
 
 /**
  * 启动准备门（首装引导，非强制门）：Launcher 缺失时默认先自动完成
@@ -42,16 +17,13 @@ function stepStateOf(id: string, activeId: string | null, failed: boolean): Step
 export function StartupPrepareGate({ children }: { children: React.ReactNode }) {
   const [checked, setChecked] = useState(false);
   const [ready, setReady] = useState(false);
-  const [activeStep, setActiveStep] = useState<string | null>('config');
   const [failed, setFailed] = useState<string | null>(null);
   const [enterRequested, setEnterRequested] = useState(false);
 
   const runPrepare = useCallback(async () => {
     setFailed(null);
-    setActiveStep('launcher');
     try {
       await api.prepareStartupResources();
-      setActiveStep('done');
       // 状态机复检：以后端权威状态放行主界面。
       const state = await api.getSandboxUpdateState();
       if (state.status === 'ready') {
@@ -79,7 +51,6 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
         setChecked(true);
         if (state.status === 'failed' && state.failure) {
           setFailed(state.failure);
-          setActiveStep('launcher');
           return;
         }
         void runPrepare();
@@ -104,10 +75,18 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
 
   if (!checked) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-background">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          正在启动天工…
+      <div className="flex min-h-screen w-full items-center justify-center bg-background p-6">
+        <div className="w-full max-w-sm space-y-6 text-center" role="status" aria-live="polite" aria-busy="true">
+          <div className="relative mx-auto flex h-20 w-20 items-center justify-center">
+            <Loader2 className="absolute inset-0 h-20 w-20 animate-spin text-muted-foreground/40 motion-reduce:animate-none" strokeWidth={1} aria-hidden="true" />
+            <img src={appLogo} alt="" className="h-12 w-12 object-contain motion-safe:animate-pulse" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-semibold">天工</h1>
+            <p className="text-sm text-muted-foreground">
+              天工正在启动中
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -118,35 +97,19 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
       <div className="flex h-screen w-full items-center justify-center bg-background p-6">
         <div className="w-full max-w-md space-y-6">
           <div className="space-y-1.5">
-            <h1 className="text-lg font-semibold">正在准备运行环境</h1>
+            <h1 className="flex items-center gap-2 text-lg font-semibold">
+              {!failed && <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />}
+              天工正在启动中
+            </h1>
             <p className="text-sm text-muted-foreground">
               首次使用会自动下载并验证沙箱程序，完成后按需 Sidecar 功能即可用。
               对话与浏览不依赖沙箱，可随时先进入应用继续使用。
             </p>
           </div>
-          <ol className="space-y-2.5">
-            {STEPS.map((step) => {
-              const state = stepStateOf(step.id, failed ? 'launcher' : activeStep, failed !== null);
-              return (
-                <li key={step.id} className="flex items-center gap-2.5 text-sm">
-                  {state === 'done' ? (
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-primary">✓</span>
-                  ) : state === 'active' ? (
-                    <Loader2 className="h-5 w-5 animate-spin text-primary" />
-                  ) : (
-                    <span className="flex h-5 w-5 items-center justify-center rounded-full border text-muted-foreground/60">○</span>
-                  )}
-                  <span className={state === 'pending' ? 'text-muted-foreground/60' : ''}>
-                    {step.label}
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
           {failed && (
             <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-3">
               <p className="text-xs leading-relaxed text-destructive">
-                沙箱程序准备失败：{failed}
+                运行环境准备失败：{failed}
                 <br />
                 不影响对话与浏览；可稍后在设置 → 沙箱程序更新中重试。
               </p>

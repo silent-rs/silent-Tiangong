@@ -18,6 +18,7 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
+    plugin_preload: tokio::sync::watch::Sender<Option<Result<(), String>>>,
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     /// 子 Agent 的过程消息仅供桌面端视图展示，不能进入父 Session 权威状态。
     ///
@@ -177,6 +178,7 @@ impl TiangongApp {
             storage_root: storage_root.clone(),
         });
         Self {
+            plugin_preload: tokio::sync::watch::channel(Some(Ok(()))).0,
             state,
             agent_worker_views: Mutex::new(HashMap::new()),
             session_send_locks: Mutex::new(HashMap::new()),
@@ -197,6 +199,44 @@ impl TiangongApp {
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
+    }
+
+    #[cfg(windows)]
+    pub fn start_plugin_preload(&self) {
+        self.plugin_preload.send_replace(None);
+        let completion = self.plugin_preload.clone();
+        let storage_root = tiangong_config::io::storage_root();
+        tauri::async_runtime::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let _ = tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
+                tracing::info!("启动沙箱检查结束，开始后台加载插件");
+                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
+                if tiangong_plugin_runtime::registry::sidecars_shutting_down() {
+                    Err("应用正在退出，插件加载已取消".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+            .await
+            .map_err(|error| format!("插件预加载失败：{error}"))
+            .and_then(|result| result);
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                success = result.is_ok(),
+                "桌面插件后台预加载结束"
+            );
+            completion.send_replace(Some(result));
+        });
+    }
+
+    pub async fn wait_plugin_preload(&self) -> Result<(), String> {
+        let mut completion = self.plugin_preload.subscribe();
+        let result = completion
+            .wait_for(|result| result.is_some())
+            .await
+            .map_err(|_| "插件加载任务已关闭".to_string())?;
+        result.as_ref().expect("已等待插件加载结果").clone()
     }
 
     pub(crate) fn merge_agent_output_view(
@@ -424,6 +464,13 @@ impl TiangongApp {
                 let ensured = app_state
                     .ensure_core(&session_id, None, None, None, stream_tx)
                     .await;
+                let ensured = match ensured {
+                    Ok(ensured) => ensured,
+                    Err(error) => {
+                        tracing::warn!(%error, session_id, "插件未完成加载，取消自动恢复 Core");
+                        continue;
+                    }
+                };
                 if ensured.is_new {
                     crate::commands::start_stream_consumer(
                         app_handle.clone(),
@@ -752,7 +799,8 @@ impl TiangongApp {
         initial_trust_mode: Option<tiangong_types::TrustMode>,
         initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
-    ) -> EnsuredCore {
+    ) -> Result<EnsuredCore, String> {
+        self.wait_plugin_preload().await?;
         let (app_config, agent_config, default_workspace_dir) = self
             .with_state_read(|state| {
                 Ok((
@@ -791,10 +839,10 @@ impl TiangongApp {
             })
             .await
             .expect("ensure_core 不应失败");
-        EnsuredCore {
+        Ok(EnsuredCore {
             session_id: ensured.session_id,
             is_new: ensured.is_new,
-        }
+        })
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
@@ -940,6 +988,26 @@ async fn run_plugin_auto_upgrade(app_handle: tauri::AppHandle) -> anyhow::Result
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plugin_preload_wait_is_async_and_preserves_failure() {
+        let app = TiangongApp::new();
+        app.plugin_preload.send_replace(None);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            app.wait_plugin_preload()
+        )
+        .await
+        .is_err());
+        app.plugin_preload.send_replace(Some(Ok(())));
+        assert!(app.wait_plugin_preload().await.is_ok());
+        app.plugin_preload
+            .send_replace(Some(Err("preload failed".into())));
+        assert_eq!(
+            app.wait_plugin_preload().await.unwrap_err(),
+            "preload failed"
+        );
+    }
 
     #[tokio::test]
     async fn same_session_core_creation_uses_one_serial_boundary() {
