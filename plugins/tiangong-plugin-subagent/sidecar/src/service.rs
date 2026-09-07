@@ -228,6 +228,7 @@ impl SubagentService {
             TOOL_APPEND_AGENT_MEMORY => self.tool_append_memory(&payload).await,
             TOOL_APPEND_AGENT_INSTRUCTIONS => self.tool_append_instructions(&payload).await,
             TOOL_REPORT_AGENT_RESULT => self.tool_report_result(&payload).await,
+            TOOL_LIST_PENDING_WORK => self.tool_list_pending_work(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -2357,6 +2358,98 @@ impl SubagentService {
         )?;
         notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
         Ok(tool_ok(format!("已追加到长期记忆（memory/{name}）")))
+    }
+
+    /// 协作关系视图：谁在为谁执行、每个发起方在等谁的结果——从运行
+    /// 记录派生（含停止请求中，那是占用事实），供主 Agent 调度参考。
+    async fn tool_list_pending_work(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let request: ListPendingWorkRequest = parse_request(payload)?;
+        let agents = self.agents.list();
+        let name_of = |agent_id: &str| {
+            agents
+                .iter()
+                .find(|config| config.id == agent_id)
+                .map(|config| config.name.clone())
+                .unwrap_or_else(|| agent_id.to_string())
+        };
+        // 发起方标定：发起会话是某成员的后端会话 → 该成员；否则主会话。
+        let origin_label = |session_id: &str| {
+            agents
+                .iter()
+                .find(|config| config.session_id.as_deref() == Some(session_id))
+                .map(|config| format!("成员「{}」", config.name))
+                .unwrap_or_else(|| "主会话".to_string())
+        };
+        let pending: Vec<RunRecord> = self
+            .store
+            .list_runs()
+            .into_iter()
+            .filter(|run| {
+                run.status.is_alive()
+                    && run
+                        .agent_id
+                        .as_str()
+                        .contains(request.agent_id.as_deref().unwrap_or(""))
+            })
+            .collect();
+        let mut lines_by_member: Vec<String> = Vec::new();
+        let mut lines_by_origin: Vec<String> = Vec::new();
+        let mut rows = Vec::new();
+        for run in &pending {
+            let goal = run
+                .task_id
+                .as_deref()
+                .and_then(|task_id| self.store.load_task(task_id).ok())
+                .map(|task| task.goal)
+                .unwrap_or_else(|| "（消息往返）".to_string());
+            let origin = run
+                .origin_session
+                .as_deref()
+                .map(origin_label)
+                .unwrap_or_else(|| "主会话".to_string());
+            lines_by_member.push(format!(
+                "- 为 {origin}：{goal}（{}，run …{}）",
+                run.status.label(),
+                run.run_id
+                    .chars()
+                    .rev()
+                    .take(6)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            ));
+            lines_by_origin.push(format!(
+                "- {} → 成员「{}」：{goal}（{}）",
+                origin,
+                name_of(&run.agent_id),
+                run.status.label()
+            ));
+            rows.push(json!({
+                "run_id": run.run_id,
+                "agent_id": run.agent_id,
+                "agent_name": name_of(&run.agent_id),
+                "origin": origin,
+                "origin_session": run.origin_session,
+                "goal": goal,
+                "status": run.status.label(),
+                "task_id": run.task_id,
+            }));
+        }
+        let mut text = String::new();
+        if rows.is_empty() {
+            text.push_str("当前没有等待中的 Subagent 工作。");
+        } else {
+            text.push_str(&format!(
+                "按执行成员：\n{}\n\n按发起方（谁在等结果）：\n{}",
+                lines_by_member.join("\n"),
+                lines_by_origin.join("\n")
+            ));
+        }
+        Ok(tool_detail(text, json!({ "pending": rows })))
     }
 
     /// 成员主动回报：成员在自己的后端会话内调用，把当前工作的结果
