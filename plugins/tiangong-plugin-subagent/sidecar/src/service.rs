@@ -227,6 +227,7 @@ impl SubagentService {
             TOOL_GET_AGENT_MEMORY => self.tool_get_memory(&payload).await,
             TOOL_APPEND_AGENT_MEMORY => self.tool_append_memory(&payload).await,
             TOOL_APPEND_AGENT_INSTRUCTIONS => self.tool_append_instructions(&payload).await,
+            TOOL_REPORT_AGENT_RESULT => self.tool_report_result(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -1729,7 +1730,9 @@ impl SubagentService {
             request.assistant_text.trim().to_string()
         };
         run.status = status;
-        run.summary = Some(text.clone());
+        // 轮次收尾抓取是未主动回报时的兜底：结果来源明确标记，供发起方
+        // 与观测区分「成员主动投递」和「系统抓取的最终回复」。
+        run.summary = Some(format!("[轮次收尾兜底] {text}"));
         run.finished_at = Some(timestamp.clone());
         run.updated_at = timestamp.clone();
         self.store.save_run(&run)?;
@@ -2297,6 +2300,92 @@ impl SubagentService {
         )?;
         notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
         Ok(tool_ok(format!("已追加到长期记忆（memory/{name}）")))
+    }
+
+    /// 成员主动回报：成员在自己的后端会话内调用，把当前工作的结果
+    /// 主动投递给发起方（主会话或协作发起成员），并终结对应的运行记录。
+    /// 回报是成员的主动投递动作，带明确任务归属——轮次收尾抓取仅为
+    /// 未回报时的兜底路径。
+    async fn tool_report_result(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let (session_id, _) = Self::require_context()?;
+        let request: ReportAgentResultRequest = parse_request(payload)?;
+        let result = request.result.trim();
+        if result.is_empty() {
+            bail!("回报结果不能为空");
+        }
+        let status = match request.status.as_deref().map(str::trim) {
+            None | Some("") | Some("completed") => RunStatus::Completed,
+            Some("failed") => RunStatus::Failed,
+            Some("blocked") => RunStatus::Blocked,
+            Some(other) => bail!("未知的回报状态「{other}」（completed / failed / blocked）"),
+        };
+        let _guard = self.ops.lock().await;
+        // 发起会话即成员后端会话：归属成员 = 以该会话为源的那个成员。
+        let target = self
+            .agents
+            .list()
+            .into_iter()
+            .find(|config| {
+                matches!(
+                    config.backend,
+                    BackendKind::TiangongSession | BackendKind::AgentTeam
+                ) && config.session_id.as_deref() == Some(session_id.as_str())
+            })
+            .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话，无法回报"))?;
+        // 关联到该成员在此会话上最新的活跃运行（正在处理的工作）。
+        let mut run = self
+            .store
+            .list_runs()
+            .into_iter()
+            .filter(|run| run.agent_id == target.id && run.status.is_alive() && run.pid.is_none())
+            .max_by_key(|run| run.run_id.clone())
+            .ok_or_else(|| anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）"))?;
+        let timestamp = now_string();
+        if let Some(note) = request
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            run.summary = Some(format!("{result}\n（{note}）"));
+        } else {
+            run.summary = Some(result.to_string());
+        }
+        run.status = status;
+        run.finished_at = status.is_terminal().then(|| timestamp.clone());
+        run.updated_at = timestamp.clone();
+        self.store.save_run(&run)?;
+        sync_task_status(&self.store, &run);
+        self.release_collab_activation_if_idle(&run);
+        let (event_type, payload) = match status {
+            RunStatus::Completed => ("completed", json!({ "text": result })),
+            RunStatus::Failed => ("failed", json!({ "text": result })),
+            _ => ("blocked", json!({ "text": result })),
+        };
+        append_event(&self.store, &run, event_type, &payload, &timestamp);
+        if status == RunStatus::Completed {
+            let agents_ref = Some(&self.agents);
+            archive_completion(&self.store, agents_ref, &run, result);
+        }
+        let agents_ref = Some(&self.agents);
+        enqueue_hook(
+            &self.store,
+            agents_ref,
+            &run,
+            match status {
+                RunStatus::Completed => HookEventType::Completed,
+                RunStatus::Failed => HookEventType::Failed,
+                _ => HookEventType::Blocked,
+            },
+            payload,
+            &timestamp,
+        );
+        notify_run_status(&run);
+        Ok(tool_ok(format!(
+            "已回报给发起方（{}，run {}）",
+            run.status.label(),
+            run.run_id
+        )))
     }
 
     /// 指令受控成长：向成员长期指令追加稳定规则（不覆盖既有内容）。

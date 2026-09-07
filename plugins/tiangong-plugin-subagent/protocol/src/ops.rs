@@ -30,6 +30,7 @@ pub const TOOL_GET_AGENT_ARTIFACTS: &str = "get_agent_artifacts";
 pub const TOOL_GET_AGENT_MEMORY: &str = "get_agent_memory";
 pub const TOOL_APPEND_AGENT_MEMORY: &str = "append_agent_memory";
 pub const TOOL_APPEND_AGENT_INSTRUCTIONS: &str = "append_agent_instructions";
+pub const TOOL_REPORT_AGENT_RESULT: &str = "report_agent_result";
 
 /// 全部工具操作名（与 WASM tool-specs 一一对应）。
 pub const TOOL_OPERATIONS: &[&str] = &[
@@ -51,6 +52,7 @@ pub const TOOL_OPERATIONS: &[&str] = &[
     TOOL_GET_AGENT_MEMORY,
     TOOL_APPEND_AGENT_MEMORY,
     TOOL_APPEND_AGENT_INSTRUCTIONS,
+    TOOL_REPORT_AGENT_RESULT,
 ];
 
 // ── UI 操作名 ──────────────────────────────────────────────────
@@ -301,6 +303,20 @@ pub struct AppendAgentInstructionsRequest {
     pub agent_id: String,
     /// 追加的稳定规则（带日期分段写入，不覆盖既有内容）。
     pub addition: String,
+}
+
+/// 成员主动回报：向当前工作的发起方投递结果（带状态与任务归属），
+/// 并终结对应的运行记录。
+#[derive(Debug, Deserialize)]
+pub struct ReportAgentResultRequest {
+    /// 回报结果正文。
+    pub result: String,
+    /// 回报状态：completed（默认）/ failed / blocked。
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 可选备注（产物位置、后续建议等）。
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 // ── 响应类型 ───────────────────────────────────────────────────
