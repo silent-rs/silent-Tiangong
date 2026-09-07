@@ -593,24 +593,6 @@ impl Coordinator {
         }
     }
 
-    pub(crate) fn roster_prompt(&self) -> String {
-        let records = self.alive_records();
-        if records.is_empty() {
-            return "当前团队尚无子 Agent。".to_string();
-        }
-        let roster = records
-            .into_iter()
-            .map(|record| {
-                format!(
-                    "- @{}：{}（Session ID={}）",
-                    record.descriptor.role, record.descriptor.label, record.descriptor.agent_id
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("当前团队成员：\n{roster}")
-    }
-
     fn start_record(
         self: &Arc<Self>,
         parent: &Session,
