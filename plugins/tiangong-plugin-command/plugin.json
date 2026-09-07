@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "command",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "wasm": {
     "binary": "tiangong_plugin_command_wasm.wasm"
   },
