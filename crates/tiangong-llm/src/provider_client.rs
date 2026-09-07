@@ -50,6 +50,12 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
         .total_tokens
         .max(next.total_tokens)
         .max(computed_total);
+    if let Some(hit) = next.prompt_cache_hit_tokens {
+        current.prompt_cache_hit_tokens = Some(hit);
+    }
+    if let Some(miss) = next.prompt_cache_miss_tokens {
+        current.prompt_cache_miss_tokens = Some(miss);
+    }
 }
 
 fn collect_openai_stream_tool_calls(
@@ -1304,7 +1310,7 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
 
         if !has_tool_calls {
             if assistant.role != LlmMessageRole::Tool {
-                push_merged_provider_message(&mut output, assistant);
+                push_provider_message(&mut output, assistant);
             }
             index += 1;
             continue;
@@ -1363,7 +1369,7 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
             _ => true,
         });
         if !assistant.content.is_empty() {
-            push_merged_provider_message(&mut output, assistant);
+            push_provider_message(&mut output, assistant);
         }
 
         let paired_results = call_order
@@ -1372,13 +1378,13 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
             .map(LlmMessageContent::ToolResult)
             .collect::<Vec<_>>();
         if !paired_results.is_empty() {
-            push_merged_provider_message(
+            push_provider_message(
                 &mut output,
                 ChatMessage::new(LlmMessageRole::Tool, paired_results),
             );
         }
         for context in deferred_contexts {
-            push_merged_provider_message(&mut output, context);
+            push_provider_message(&mut output, context);
         }
         index = cursor;
     }
@@ -1405,17 +1411,12 @@ fn is_internal_tool_context_message(message: &ChatMessage) -> bool {
         })
 }
 
-fn push_merged_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
+fn push_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
     if message.content.is_empty() {
         return;
     }
-    if let Some(last) = messages.last_mut()
-        && last.role == message.role
-    {
-        merge_provider_message_content(last, message);
-    } else {
-        messages.push(message);
-    }
+    // 保留已发送消息的边界；合并连续 User/Assistant 会改写下一请求的历史前缀。
+    messages.push(message);
 }
 
 fn is_empty_provider_message(message: &ChatMessage) -> bool {
@@ -1423,22 +1424,6 @@ fn is_empty_provider_message(message: &ChatMessage) -> bool {
         LlmMessageContent::Text(text) => text.trim().is_empty(),
         _ => false,
     })
-}
-
-fn merge_provider_message_content(target: &mut ChatMessage, source: ChatMessage) {
-    for content in source.content {
-        match (target.content.last_mut(), content) {
-            (Some(LlmMessageContent::Text(current)), LlmMessageContent::Text(next)) => {
-                if !next.trim().is_empty() {
-                    if !current.trim().is_empty() {
-                        current.push_str("\n\n");
-                    }
-                    current.push_str(next.trim());
-                }
-            }
-            (_, content) => target.content.push(content),
-        }
-    }
 }
 
 fn convert_provider_response_to_function_response(
@@ -1898,6 +1883,51 @@ fn resolve_function_timeout_ms(base_timeout_ms: u64, custom_timeout_ms: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_usage_preserves_cache_details_across_partial_and_final_events() {
+        let mut current = TokenUsageData::default();
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 4000,
+                completion_tokens: 0,
+                total_tokens: 4000,
+                prompt_cache_hit_tokens: Some(3072),
+                prompt_cache_miss_tokens: Some(928),
+            },
+        );
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 0,
+                completion_tokens: 20,
+                total_tokens: 4020,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+            },
+        );
+        assert_eq!(current.prompt_cache_hit_tokens, Some(3072));
+        assert_eq!(current.prompt_cache_miss_tokens, Some(928));
+        assert_eq!(current.total_tokens, 4020);
+        // 明确的零命中必须保留，不能当成缺失，也不能跨事件累加缓存量。
+        merge_stream_usage(
+            &mut current,
+            TokenUsageData {
+                prompt_tokens: 4000,
+                completion_tokens: 20,
+                total_tokens: 4020,
+                prompt_cache_hit_tokens: Some(0),
+                prompt_cache_miss_tokens: Some(4000),
+            },
+        );
+        assert_eq!(current.prompt_cache_hit_tokens, Some(0));
+        assert_eq!(current.prompt_cache_miss_tokens, Some(4000));
+        let mut absent = TokenUsageData::default();
+        merge_stream_usage(&mut absent, TokenUsageData::default());
+        assert_eq!(absent.prompt_cache_hit_tokens, None);
+        assert_eq!(absent.prompt_cache_miss_tokens, None);
+    }
     use tiangong_types::{
         ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
     };

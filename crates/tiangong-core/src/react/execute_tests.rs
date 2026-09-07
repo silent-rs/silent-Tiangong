@@ -33,6 +33,9 @@ use tokio::sync::{Barrier, Notify};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "context_cache_tests.rs"]
+mod context_cache_tests;
+
 /// 构造一条 OpenAI SSE chunk(`data: {json}\n\n`),末尾追加 `[DONE]`。
 fn sse_body(chunks: &[serde_json::Value]) -> Vec<u8> {
     let mut body = String::new();

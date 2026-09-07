@@ -163,6 +163,15 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     events.assert_single_success_terminal();
     let second = chat_request_at(&server, 1).await;
     assert!(second.role_message_contains("user", "STEER-NEW-INTENT"));
+    let requests = server.received_requests().await.unwrap();
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let previous = first["messages"].as_array().unwrap();
+    let current = second["messages"].as_array().unwrap();
+    assert!(
+        current.starts_with(previous),
+        "追加用户指令不能改写已发送的消息边界"
+    );
     let session = env.load_session(&sid);
     assert_eq!(
         session
