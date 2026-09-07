@@ -16,6 +16,7 @@ mod runner;
 mod runtime_store;
 mod service;
 mod sessions;
+mod workspace_state;
 
 use std::sync::Arc;
 

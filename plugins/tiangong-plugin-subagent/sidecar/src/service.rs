@@ -260,6 +260,9 @@ impl SubagentService {
             TOOL_APPEND_AGENT_INSTRUCTIONS => self.tool_append_instructions(&payload).await,
             TOOL_REPORT_AGENT_RESULT => self.tool_report_result(&payload).await,
             TOOL_LIST_PENDING_WORK => self.tool_list_pending_work(&payload).await,
+            TOOL_LOAD_WORKSPACE_STATE => self.tool_load_workspace_state(&payload).await,
+            TOOL_UPDATE_WORKSPACE_STATE => self.tool_update_workspace_state(&payload).await,
+            TOOL_SAVE_TASK_NOTE => self.tool_save_task_note(&payload).await,
             // ── UI 操作（显式携带会话） ──
             UI_STATE_SNAPSHOT => self.ui_state_snapshot(&payload).await,
             UI_AGENT_CREATE => self.ui_agent_create(&payload).await,
@@ -1593,6 +1596,13 @@ impl SubagentService {
         if !memory.is_empty() {
             body.push_str(&format!("\n\n【长期记忆】\n{memory}"));
         }
+        // 成员自维护工作区状态注入：工作含义由成员维护，sidecar 只透传。
+        let state_section = crate::workspace_state::injection_summary(
+            &self.agents,
+            &config.id,
+            &activation.workspace,
+        );
+        body.push_str(&state_section);
         body.push_str("\n\n【成长约定】完成本次工作后：把可复用经验（成功做法、踩坑、用户偏好等，一行一条、结论式）用 append_agent_memory 追加到 lessons.md；确实学到稳定的新规则时，用 append_agent_instructions 并入你的长期指令（追加式，勿重复已有内容）。");
         if let Some(run_tag) = run_tag {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
@@ -2492,6 +2502,84 @@ impl SubagentService {
         )?;
         notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
         Ok(tool_ok(format!("已追加到长期记忆（memory/{name}）")))
+    }
+
+    /// 成员自维护工作区状态（读）：按当前会话上下文的工作区解析稳定
+    /// 身份后读取 plan/context/任务笔记——sidecar 只存取不理解。
+    async fn tool_load_workspace_state(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let request: AgentIdRequest = parse_request(payload)?;
+        let (_, workspace) = Self::require_context()?;
+        let state = crate::workspace_state::load(&self.agents, &request.agent_id, &workspace)?;
+        Ok(json!({ "ok": true, "state": state }))
+    }
+
+    /// 成员写工作状态（plan/context）：写入方为该成员自己的会话
+    /// （其他成员/主会话不得代写——工作含义由成员自己维护）。
+    async fn tool_update_workspace_state(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let (session_id, workspace) = Self::require_context()?;
+        let request: UpdateWorkspaceStateRequest = parse_request(payload)?;
+        let agent_id = request.agent_id.as_deref().unwrap_or_default();
+        let target = if agent_id.is_empty() {
+            // 缺省=成员自己：当前会话须是其后端会话。
+            self.collaboration_origin(&session_id)
+                .map(|config| config.id)
+                .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话；主 Agent 侧请显式指定 agent_id 仅在查询场景"))?
+        } else {
+            agent_id.to_string()
+        };
+        // 写入仅限成员自己（主会话/他成员不代写业务状态）。
+        if !agent_id.is_empty() {
+            let is_self = self.agents.list().into_iter().any(|config| {
+                config.id == target && config.session_id.as_deref() == Some(session_id.as_str())
+            });
+            if !is_self {
+                bail!("工作区状态由成员自己维护：只有成员自己的执行会话可写入 plan/context");
+            }
+        }
+        let id = crate::workspace_state::write(
+            &self.agents,
+            &target,
+            &workspace,
+            &request.file,
+            &request.content,
+        )?;
+        Ok(json!({ "ok": true, "workspace_id": id }))
+    }
+
+    /// 任务笔记：tasks/ 独立文件（多任务互不覆盖），限成员自己写入。
+    async fn tool_save_task_note(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
+        let (session_id, workspace) = Self::require_context()?;
+        let request: SaveTaskNoteRequest = parse_request(payload)?;
+        let agent_id = request.agent_id.as_deref().unwrap_or_default();
+        let target = if agent_id.is_empty() {
+            self.collaboration_origin(&session_id)
+                .map(|config| config.id)
+                .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话"))?
+        } else {
+            agent_id.to_string()
+        };
+        if !agent_id.is_empty() {
+            let is_self = self.agents.list().into_iter().any(|config| {
+                config.id == target && config.session_id.as_deref() == Some(session_id.as_str())
+            });
+            if !is_self {
+                bail!("任务笔记由成员自己维护：只有成员自己的执行会话可写入");
+            }
+        }
+        let id = crate::workspace_state::save_task_note(
+            &self.agents,
+            &target,
+            &workspace,
+            &request.note_name,
+            &request.content,
+        )?;
+        Ok(json!({ "ok": true, "workspace_id": id, "note": request.note_name }))
     }
 
     /// 协作关系视图：谁在为谁执行、每个发起方在等谁的结果——从运行

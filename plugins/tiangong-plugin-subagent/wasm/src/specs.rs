@@ -1,6 +1,6 @@
 //! 工具规格与系统提示注入（与 protocol::ops::TOOL_OPERATIONS 一一对应）。
 
-pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory；安排分工或判断进度时先用 list_pending_work 查看待处理工作与协作关系（谁在为谁执行、谁在等结果）。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续用 send_agent_message 与更多成员协作。Subagent 具备成长进化能力：完成一项工作后，先用 report_agent_result 主动向发起方回报结果（这是正式的收尾动作，回报会送达发起本次工作的主会话或成员）；随后把可复用经验（成功做法、踩坑、用户偏好，一行一条结论式）用 append_agent_memory（memory_name 指定 lessons.md）沉淀为经验记忆（后续运行优先注入）；确有稳定下来的新规则时，用 append_agent_instructions 追加进自己的长期指令——只记结论，不记流水。";
+pub const PROMPT_SECTION: &str = "Subagent 工具使用规范：需要帮手时先用 create_agent 招募（同名成员会复用并延续其长期指令与记忆；默认创建后立即在当前会话激活，随后可直接派活）。招募通常选原生后端 agent_team（无需任何会话或命令参数，系统为其建立专属天工运行时会话并跨任务延续上下文），仅在需要关联某个已有会话（tiangong_session，需 session_id 或 session_query）或接入外部命令（cli，需 command）时选用其他后端。list_agents 查看全部持久 Subagent；向某个 Subagent 交办工作前必须已在当前会话激活（自动绑定当前 Workspace）。用户消息以「@成员名」开头或包含 @ 提及时，表示希望把内容定向交给该 Subagent：把去除 @ 标记后的内容用 send_agent_message 转达给对应成员（必要时先 activate_agent）。追问、补充背景、纠正方向用 send_agent_message；有明确目标和完成条件的正式工作用 submit_agent_task（立即返回，完成、阻塞、审批或失败会自动反馈到本会话，无需轮询等待）。跟踪进度用 list_agent_events / get_agent_run / get_agent_task；需要停止时用 interrupt_agent_run（可恢复现场）或 cancel_agent_run（终态）。读取与积累 Subagent 的长期记忆用 get_agent_memory / append_agent_memory；安排分工或判断进度时先用 list_pending_work 查看待处理工作与协作关系（谁在为谁执行、谁在等结果）。同一 Workspace 同时只有一个写入者，激活被拒时说明工作区被占用。成员之间可组成集群协同作业：执行中需要同伴（其他 Subagent 成员）协助、提供信息或接续工作时，用 send_agent_message 向该成员发送协作消息（对方完成后的回复会自动送回本会话）；收到「【Subagent 消息】来自成员「XX」」即同伴的协作请求，处理后在最终回复中给出结果即可，也可继续用 send_agent_message 与更多成员协作。Subagent 具备成长进化能力：完成一项工作后，先用 report_agent_result 主动向发起方回报结果（这是正式的收尾动作，回报会送达发起本次工作的主会话或成员）；随后把可复用经验（成功做法、踩坑、用户偏好，一行一条结论式）用 append_agent_memory（memory_name 指定 lessons.md）沉淀为经验记忆（后续运行优先注入）；确有稳定下来的新规则时，用 append_agent_instructions 追加进自己的长期指令——只记结论，不记流水。成员维护自己的工作状态：收到消息先用 load_workspace_state 加载本工作区状态，判断其意图（新工作/补充/协作结果/控制）后决定关联、拆分或调整（不默认当作新任务）；执行中用 update_workspace_state 更新规划与进展、save_task_note 记任务笔记；收尾回报后保存下一步所需上下文——工作的含义由你维护，执行事实由系统记录。";
 
 /// (工具名, 描述, input_schema JSON)。
 pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
@@ -93,6 +93,21 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
         "append_agent_instructions",
         "向某个 Subagent 的长期指令追加一条稳定下来的新规则（职责要求、工作方式、用户长期偏好；带日期分段追加，不覆盖既有内容）。成员只能追加自己的指令，主会话可操作任意成员。临时性内容请改用 append_agent_memory。",
         r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"Agent ID（成员身份发起时只能是自己）"},"addition":{"type":"string","description":"要追加的规则（简洁、可长期遵循，勿与既有指令重复）"}},"required":["agent_id","addition"]}"#,
+    ),
+    (
+        "load_workspace_state",
+        "读取成员在某工作区的自维护工作状态（工作规划 plan、背景约定 context、任务笔记清单）——收到消息后先加载，判断新工作/补充/协作结果/控制意图，决定关联、拆分或调整。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID（缺省=自己）"}},"required":["agent_id"]}"#,
+    ),
+    (
+        "update_workspace_state",
+        "成员更新自己的工作区状态（plan=工作规划与待办、context=背景与关键约定；整文件覆盖，按当前会话工作区写入）。执行中更新关键进展、阻塞和下一步，收尾时保存后续所需上下文。",
+        r#"{"type":"object","properties":{"file":{"type":"string","enum":["plan","context"],"description":"目标文件"},"content":{"type":"string","description":"完整新内容（markdown）"}},"required":["file","content"]}"#,
+    ),
+    (
+        "save_task_note",
+        "成员保存任务笔记（独立文件，多任务互不覆盖）：任务目标、发起者、进展、结论——回报与验收的依据。",
+        r#"{"type":"object","properties":{"note_name":{"type":"string","description":"笔记名（如任务名或编号）"},"content":{"type":"string","description":"笔记内容（markdown）"}},"required":["note_name","content"]}"#,
     ),
     (
         "list_pending_work",
