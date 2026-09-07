@@ -1,10 +1,11 @@
-import type { ContentBlock, MessagePhase, MessageRole } from "@/api/tauri";
+import type { ContentBlock, MessagePhase, MessageRole, MessageUsage } from "@/api/tauri";
 
 export interface MessageItem {
   id: string;
   role: MessageRole;
   content: ContentBlock[];
   reasoning_content: string;
+  usage?: MessageUsage | null;
   worker_id?: string;
   media?: {
     kind: "image" | "video" | "audio" | "file";

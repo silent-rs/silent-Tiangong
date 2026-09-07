@@ -43,6 +43,8 @@ pub(crate) enum CompressionInterrupt {
 pub(crate) struct ContextCompression {
     task: CompressionTask,
     kind: CompressionKind,
+    call_id: String,
+    pub(super) cancelled_usage: TokenUsage,
 }
 
 impl ContextCompression {
@@ -93,12 +95,34 @@ impl ContextCompression {
                 compression_split_point(&ctx.session),
             ),
             kind,
+            call_id: scru128::new().to_string(),
+            cancelled_usage: TokenUsage::default(),
         }
     }
 
     /// 取消压缩任务并通知取消（压缩被命令中断时）。
-    pub(crate) async fn cancel(&mut self, ctx: &TurnContext) {
-        cancel_task(std::mem::replace(&mut self.task, noop_task()), ctx).await;
+    pub(crate) async fn cancel(&mut self, ctx: &mut TurnContext) {
+        let task = std::mem::replace(&mut self.task, noop_task());
+        if let Ok(result) = abort_and_join(task).await {
+            let usage = match &result {
+                Ok(update) => &update.usage,
+                Err(error) => &error.usage,
+            };
+            super::context::record_call_usage(
+                ctx,
+                &self.call_id,
+                usage,
+                "context_summary",
+                tiangong_types::TurnStatus::Cancelled,
+            );
+            self.cancelled_usage = usage.clone();
+            if matches!(self.kind, CompressionKind::Manual { .. }) {
+                ctx.session.token_usage.accumulate(usage);
+            }
+            notify_usage(ctx, usage, None, "context_summary_cancelled");
+            ctx.session.persist_to_disk();
+        }
+        notify_result(ctx, ContextCompressAction::Cancelled);
     }
 
     /// 压缩与命令双路等待：命令优先（biased）；到达时取消压缩并上抛。
@@ -135,8 +159,18 @@ impl ContextCompression {
         result: CompressionResult,
         turn_usage: Option<&mut TokenUsage>,
     ) {
-        let Self { kind, task } = self;
+        let Self {
+            kind,
+            task,
+            call_id,
+            ..
+        } = self;
         drop(task);
+        let (usage, status) = match &result {
+            Ok(update) => (&update.usage, tiangong_types::TurnStatus::Success),
+            Err(error) => (&error.usage, tiangong_types::TurnStatus::Failed),
+        };
+        super::context::record_call_usage(ctx, &call_id, usage, "context_summary", status);
         match kind {
             CompressionKind::Forced => {
                 let observed_tokens = ctx.context_limit;
@@ -313,11 +347,6 @@ fn resolve_task_result(
     result: std::result::Result<CompressionResult, tokio::task::JoinError>,
 ) -> CompressionResult {
     result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())))
-}
-
-async fn cancel_task(task: CompressionTask, ctx: &TurnContext) {
-    abort_and_join(task).await;
-    notify_result(ctx, ContextCompressAction::Cancelled);
 }
 
 fn complete_manual(ctx: &mut TurnContext, result: CompressionResult) {
@@ -639,5 +668,90 @@ mod tests {
                 .all(|message| message.phase != MessagePhase::CompressedResume),
             "压缩不注入合成续接消息"
         );
+    }
+
+    #[tokio::test]
+    async fn manual_compression_records_usage_and_counts_it_once() {
+        let mut session = Session::new("usage-summary");
+        for text in ["旧问题", "新问题"] {
+            session.append_message(MessageRole::User, text);
+        }
+        let (mut ctx, root) = test_context(session);
+        let mut update = update_for(&ctx.session, 0, "摘要", 1);
+        update.usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: Some(80),
+            prompt_cache_miss_tokens: Some(20),
+        };
+        let task = tokio::spawn(async { Err(CompressionError::new("unused")) });
+        let call_id = scru128::new().to_string();
+        ContextCompression {
+            task,
+            kind: CompressionKind::Manual { observed_tokens: 0 },
+            call_id: call_id.clone(),
+            cancelled_usage: TokenUsage::default(),
+        }
+        .complete(&mut ctx, Ok(update), None);
+        assert_eq!(ctx.session.token_usage.total_tokens, 120);
+        let loaded = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+        let message = loaded
+            .messages
+            .iter()
+            .find(|message| message.id == call_id)
+            .unwrap();
+        assert_eq!(message.role, MessageRole::Notice);
+        assert_eq!(message.usage.as_ref().unwrap().source, "context_summary");
+        assert_eq!(
+            message.usage.as_ref().unwrap().tokens.cache_hit_rate(),
+            Some(0.8)
+        );
+        assert!(!loaded.context().iter().any(|message| message.id == call_id));
+    }
+
+    #[tokio::test]
+    async fn completed_compression_usage_survives_a_racing_cancel() {
+        let (mut ctx, root) = test_context(Session::new("cancel-summary-usage"));
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: Some(80),
+            prompt_cache_miss_tokens: Some(20),
+        };
+        let task = tokio::spawn(async move {
+            Err(CompressionError {
+                message: "摘要不完整".into(),
+                usage,
+            })
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let call_id = scru128::new().to_string();
+        let mut compression = ContextCompression {
+            task,
+            kind: CompressionKind::Manual { observed_tokens: 0 },
+            call_id: call_id.clone(),
+            cancelled_usage: TokenUsage::default(),
+        };
+        compression.cancel(&mut ctx).await;
+        assert_eq!(ctx.session.token_usage.total_tokens, 120);
+        let loaded = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+        let record = loaded
+            .messages
+            .iter()
+            .find(|message| message.id == call_id)
+            .unwrap()
+            .usage
+            .as_ref()
+            .unwrap();
+        assert_eq!(record.status, tiangong_types::TurnStatus::Cancelled);
+        assert_eq!(record.tokens.total_tokens, 120);
     }
 }

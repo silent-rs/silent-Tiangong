@@ -831,7 +831,16 @@ async fn cancel_interrupts_manual_context_compression() {
     )
     .await;
 
-    let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+    // 必须存在可压缩历史，否则压缩会立即失败，与取消命令发生竞态。
+    harness
+        .ctx
+        .session
+        .append_message(MessageRole::Assistant, "较早回答");
+    harness
+        .ctx
+        .session
+        .append_message(MessageRole::User, "最近问题");
     let TestHarness {
         ctx,
         stream_rx,

@@ -229,6 +229,7 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.role === right.role
     && sameJsonValue(left.content, right.content)
     && left.reasoning_content === right.reasoning_content
+    && sameJsonValue(left.usage, right.usage)
     && left.worker_id === right.worker_id
     && left.tool_call_id === right.tool_call_id
     && left.tool_name === right.tool_name
@@ -261,6 +262,7 @@ function mergeLoadedWithStreamMessages(
         ? streamed.reasoning_content
         : loaded.reasoning_content,
       tool_calls: streamed.tool_calls?.length ? streamed.tool_calls : loaded.tool_calls,
+      usage: streamed.usage ?? loaded.usage,
       phase: streamed.phase || loaded.phase,
     };
   });

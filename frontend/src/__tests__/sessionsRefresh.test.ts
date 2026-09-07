@@ -87,6 +87,20 @@ function resetStore(overrides: Partial<StoreState> = {}) {
 }
 
 describe('loadSessions refresh contract', () => {
+  it('只补充用量的消息更新也必须进入当前会话', () => {
+    const original = loadedSession('usage-live').messages[0];
+    resetStore({ activeSessionId: 'usage-live', messages: [original] });
+    const usage = { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110,
+      prompt_cache_hit_tokens: 80, prompt_cache_miss_tokens: 20, cache_hit_rate: 0.8,
+      model: 'test-model', agent_id: 'usage-live', turn_id: 'turn-1', source: 'react', status: 'success' as const };
+    useStore.getState().applyStreamEvents([{ session_id: 'usage-live', event: {
+      type: 'session_message_upsert', message: { ...original, usage },
+    } }]);
+    expect(useStore.getState().messages).toHaveLength(1);
+    expect(useStore.getState().messages[0].usage).toEqual(usage);
+    expect(useStore.getState().messages[0].content).toEqual(original.content);
+  });
+
   beforeEach(() => {
     getSessionsMock.mockReset();
     getReasoningEffortMock.mockReset();

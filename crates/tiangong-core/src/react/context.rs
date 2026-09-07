@@ -9,6 +9,44 @@ use crate::session::Session;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
+pub(super) fn record_call_usage(
+    ctx: &mut TurnContext,
+    message_id: &str,
+    usage: &TokenUsage,
+    source: &str,
+    status: tiangong_types::TurnStatus,
+) {
+    if !usage.has_usage() {
+        return;
+    }
+    let record = tiangong_types::token::MessageUsage {
+        tokens: usage.clone(),
+        model: ctx.client.model_name().to_string(),
+        agent_id: ctx.session.id.clone(),
+        turn_id: ctx.turn_id.clone(),
+        source: source.to_string(),
+        status,
+    };
+    if let Some(message) = ctx
+        .session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == message_id)
+    {
+        message.usage = Some(Box::new(record));
+    } else {
+        // 无正文调用的用量不会进入模型历史。
+        let mut message = crate::session::Message::new(
+            crate::session::MessageRole::Notice,
+            format!("[调用用量] {source}"),
+        );
+        message.id = message_id.to_string();
+        message.usage = Some(Box::new(record));
+        ctx.session.messages.push(message);
+    }
+    crate::react::message::emit_session_message_upsert(ctx, message_id);
+}
+
 /// 从本轮插件快照收集段落并重建 session 的 system prompt。
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`

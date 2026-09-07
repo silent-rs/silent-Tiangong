@@ -62,14 +62,26 @@ pub(super) async fn interrupt_active_work(
                 pending_msg_id,
                 sink,
                 task,
-                streamed_text,
-                streamed_reasoning,
-                streaming_usage,
+                mut streamed_text,
+                mut streamed_reasoning,
+                mut streaming_usage,
+                mut chunk_rx,
                 timing,
                 ..
             } = active;
             sink.finish();
-            abort_and_join(task).await;
+            let completed_response = abort_and_join(task).await.ok().and_then(Result::ok);
+            // 命令优先可能抢在最后一帧之前，取消后排空已接收的累计用量。
+            while let Ok(chunk) = chunk_rx.try_recv() {
+                if let Some(usage) = chunk.usage {
+                    streaming_usage.merge_snapshot(&usage.into());
+                }
+                streamed_text.push_str(&chunk.content);
+                streamed_reasoning.push_str(&chunk.reasoning_content);
+            }
+            if let Some(response) = completed_response {
+                streaming_usage.merge_snapshot(&response.usage);
+            }
             let _ = downgrade_summary;
             persist_interrupted_llm_output(
                 ctx,
@@ -82,6 +94,14 @@ pub(super) async fn interrupt_active_work(
             );
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);
+            super::context::record_call_usage(
+                ctx,
+                &pending_msg_id,
+                &streaming_usage,
+                "react",
+                tiangong_types::TurnStatus::Cancelled,
+            );
+            ctx.session.persist_to_disk();
         }
         ExecutionPhase::PendingFinish(_) => {
             // 无在途活动；悬空调用由下方统一闭合。

@@ -325,6 +325,9 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
+    pub fn model_name(&self) -> &str {
+        self.cfg.model.trim()
+    }
     /// 可取消的非流式主模型调用。调用方丢弃 future 时底层 HTTP 请求随之终止。
     pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
         let timeout_ms = self.cfg.timeout_ms;
@@ -1972,6 +1975,7 @@ mod tests {
             content: vec![ContentBlock::text("你好")],
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -2725,6 +2729,7 @@ mod tests {
             content,
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -2758,6 +2763,7 @@ mod tests {
             content: vec![ContentBlock::text("你是通用助手。")],
             reasoning_content: String::new(),
             reasoning_signature: None,
+            usage: None,
             worker_id: None,
             tool_calls: Vec::new(),
             tool_call_id: None,

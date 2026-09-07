@@ -28,7 +28,9 @@ pub(super) fn emit_cancel_usage(
 }
 
 /// 请求取消异步 LLM 任务并等待其真正退出，确保它不再越过轮次屏障发送迟到事件。
-pub(super) async fn abort_and_join<T>(handle: tokio::task::JoinHandle<T>) {
+pub(super) async fn abort_and_join<T>(
+    handle: tokio::task::JoinHandle<T>,
+) -> Result<T, tokio::task::JoinError> {
     handle.abort();
-    let _ = handle.await;
+    handle.await
 }

@@ -32,6 +32,7 @@ import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { ToolGroup } from "./ToolGroup";
 import { CollapsibleUserText } from "./CollapsibleUserText";
+import { CallUsageDetails } from "./CallUsageDetails";
 
 interface AgentTurnProps {
   messages: MessageItem[];
@@ -124,6 +125,7 @@ function AgentTurnView({
   };
 
   for (const msg of messages) {
+    if (msg.role === "notice" && msg.usage) continue;
     if (msg.role === "user") {
       flushTools();
       fragments.push({ type: "user", msg });
@@ -404,6 +406,7 @@ function AgentTurnView({
       )}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
+      <CallUsageDetails messages={messages} />
       {turnStatusMeta && !isActive && (
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
           <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>

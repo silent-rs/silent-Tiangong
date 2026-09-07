@@ -435,6 +435,7 @@ fn test_session_with_user_message() -> Session {
         }],
         reasoning_content: String::new(),
         reasoning_signature: None,
+        usage: None,
         worker_id: None,
         tool_calls: Vec::new(),
         tool_call_id: None,

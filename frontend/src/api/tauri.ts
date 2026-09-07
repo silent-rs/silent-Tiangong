@@ -97,6 +97,17 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  prompt_cache_hit_tokens?: number | null;
+  prompt_cache_miss_tokens?: number | null;
+  cache_hit_rate?: number | null;
+}
+
+export interface MessageUsage extends TokenUsage {
+  model: string;
+  agent_id: string;
+  turn_id: string | null;
+  source: string;
+  status: TurnStatus;
 }
 
 export interface TokenStats {
@@ -212,6 +223,7 @@ export interface Message {
   role: MessageRole;
   content: ContentBlock[];
   reasoning_content: string;
+  usage?: MessageUsage | null;
   worker_id?: string;
   media?: MediaAsset[];
   tool_calls?: { id: string; name: string; arguments?: unknown }[];

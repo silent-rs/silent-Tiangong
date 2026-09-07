@@ -104,6 +104,7 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         content: vec![crate::session::ContentBlock::text(parts.join("\n\n"))],
         reasoning_content: String::new(),
         reasoning_signature: None,
+        usage: None,
         worker_id: None,
         elapsed_ms: None,
         turn_status: None,
