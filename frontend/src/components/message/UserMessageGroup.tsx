@@ -246,6 +246,8 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   // Subagent 回报：Hook 消息以 [Subagent·成员名] 开头，渲染为卡片
   // 而非普通用户消息气泡。
   const subagentMatch = messageText.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
+  // Subagent 任务投递：专属会话中收到的任务/消息以【Subagent 消息/任务】开头。
+  const subagentTaskMatch = messageText.match(/^【Subagent (消息|任务)】来自(.+?)：\n?([\s\S]*)$/);
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const searchQuery = useSearchStore((s) => s.searchQuery);
@@ -361,7 +363,32 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
         </div>
       ) : (
         <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-          {subagentMatch ? (() => {
+          {subagentTaskMatch ? (() => {
+            const [, kind, source, body] = subagentTaskMatch;
+            return (
+              <div className="w-full max-w-[92%] sm:max-w-[85%]">
+                <div className="rounded-lg border bg-card shadow-sm overflow-hidden">
+                  <div className="flex items-center gap-2 px-3 py-1.5 border-b text-xs font-medium text-muted-foreground bg-muted/30 border-border">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold shrink-0">S</span>
+                    <span className="font-semibold">{kind === '任务' ? '任务指派' : '协作消息'}</span>
+                    <span className="text-muted-foreground/60">来自{source.trim()}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground/60">{formatMessageTime(message.created_at)}</span>
+                    <button
+                      type="button"
+                      aria-label="复制"
+                      className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded text-muted-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-colors"
+                      onClick={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    </button>
+                  </div>
+                  <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+                    {renderUserText(body.trim())}
+                  </div>
+                </div>
+              </div>
+            );
+          })() : subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
             const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
             const status = statusMatch ? statusMatch[1] : "消息";
@@ -455,7 +482,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           )}
         </div>
       )}
-      {messageText && !isEditing && !subagentMatch && (
+      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && (
         <div className="flex justify-end">
           <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
         </div>
