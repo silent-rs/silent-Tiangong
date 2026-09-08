@@ -618,7 +618,6 @@ impl StdioSidecarConnection {
             if self.config.sensitive_storage.mcp_config {
                 exempt_mcp_config_write(&mut policy, &self.config.storage_root);
             }
-            // 证书服务授权依赖最终网络权限，必须先赋值，不能读取默认的禁网状态。
             policy.allow_network = self.config.sandbox_network;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
@@ -2166,13 +2165,8 @@ fn exempt_authorized_user_credentials(
     policy: &mut tiangong_sandbox::SandboxPolicy,
     access: crate::host_policy::UserCredentialReadAccess,
 ) {
-    // 文件凭据（~/.ssh 等）经 denied_read 豁免；系统凭据服务（Keychain、
-    // OpenDirectory、trustd）经 allow_credential_services 放行——沙箱内
-    // ssh 解析 uid、gh 读钥匙串都依赖后者，缺任一都会功能回退。
-    // TLS 证书验证（trustd/SecurityServer）是 HTTPS 的基础系统服务，
-    // 网络放行时必须随之放行——否则任何插件的 HTTPS 调用都会因证书
-    // 验证不可用而失败（generate-image 侧的真实故障）。
-    policy.allow_credential_services = access.ssh || access.github_cli || policy.allow_network;
+    // 网络证书验证由 Launcher 根据 allow_network 独立开放，不授予凭据访问。
+    policy.allow_credential_services = access.ssh || access.github_cli;
     let Some(home) = crate::interpreter_env::user_home_dir() else {
         return;
     };
@@ -2298,6 +2292,21 @@ mod sensitive_access_tests {
 
     #[test]
     fn git_workflow_credentials_are_readable_but_remain_write_protected() {
+        for network in [false, true] {
+            for ssh in [false, true] {
+                for github_cli in [false, true] {
+                    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+                    policy.allow_network = network;
+                    exempt_authorized_user_credentials(
+                        &mut policy,
+                        crate::host_policy::UserCredentialReadAccess { ssh, github_cli },
+                    );
+                    assert_eq!(policy.allow_credential_services, ssh || github_cli);
+                    assert_eq!(policy.allow_network, network);
+                }
+            }
+        }
+
         let Some(home) = crate::interpreter_env::user_home_dir() else {
             return;
         };

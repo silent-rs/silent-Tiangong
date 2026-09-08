@@ -143,7 +143,7 @@ fn compile_profile_explicit_categories(
     } else {
         sbpl.push_str("(deny network*)\n");
     }
-    append_credential_service_rules(&mut sbpl, policy);
+    append_system_service_rules(&mut sbpl, policy);
     sbpl.push_str("(allow process-exec*)\n(allow process-fork)\n");
     // Rust/C 运行时启动需读 sysctl（页大小——guard page 计算），zsh 5.9
     // 同样读 hw.* sysctl（Tahoe 上多方踩坑）；不显式放行直接崩。
@@ -187,22 +187,29 @@ fn compile_profile_legacy(policy: &SandboxPolicy, writable: &[std::path::PathBuf
     if !policy.allow_network {
         sbpl.push_str("(deny network*)\n");
     }
-    append_credential_service_rules(&mut sbpl, policy);
+    append_system_service_rules(&mut sbpl, policy);
     sbpl
 }
-/// GitHub CLI 使用 macOS Keychain 取登录令牌，并由 Security.framework 通过
-/// trustd 校验 HTTPS 证书；OpenSSH 通过 opendirectoryd 解析当前用户
-/// （libinfo 查 uid/名称映射，membership 查组成员关系——缺任一都会让
-/// 沙箱内 ssh 报 "No user exists for uid"）。只为宿主显式授权的策略
-/// 开放这些精确服务。
-fn append_credential_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
-    if !policy.allow_credential_services {
-        return;
+/// 证书验证随网络授权开放；Keychain 与用户身份解析只随凭据授权开放。
+/// 两组均限制到精确服务名，不允许任意系统服务查询。
+fn append_system_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
+    if policy.allow_network {
+        // 与系统 system.sb 的证书验证服务一致，覆盖系统及当前用户的 trustd。
+        sbpl.push_str(
+            "(allow mach-lookup (global-name \"com.apple.trustd\"))\n\
+             (allow mach-lookup (global-name \"com.apple.trustd.agent\"))\n",
+        );
     }
-    // 网络放行时 mach-lookup 全放行：TLS 证书验证（trustd 的 XPC 变体）、
-    // DNS 解析（mDNSResponder）、系统时间等服务名在不同 macOS 版本上枚举
-    // 不全——逐项白名单始终有遗漏，直接放行整个类别。
-    sbpl.push_str("(allow mach-lookup)\n");
+    if policy.allow_credential_services {
+        sbpl.push_str(
+            "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))\n\
+             (allow mach-lookup (global-name \"com.apple.securityd.xpc\"))\n\
+             (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))\n\
+             (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.membership\"))\n",
+        );
+    }
+    // 显式拒绝名单之外的服务，也约束未提及类别默认放行的旧系统。
+    sbpl.push_str("(deny mach-lookup)\n");
 }
 
 /// 路径可安全进入 SBPL 文本：必须是 UTF-8 且不含控制字符
@@ -231,17 +238,48 @@ mod tests {
 
     #[test]
     fn credential_services_rules_follow_explicit_authorization() {
-        // 默认（未授权）：不出现任何凭据服务放行。
-        let mut policy = crate::sandbox::policy::SandboxPolicy::workspace_write("/tmp/ws");
-        let sbpl = compile_profile(&policy);
-        assert!(!sbpl.contains("mach-lookup"));
-
-        // 宿主显式授权时按当前策略放行该类别，名称不能带无效通配符。
-        policy.allow_credential_services = true;
-        let sbpl = compile_profile(&policy);
-        assert!(sbpl.contains("(allow mach-lookup)\n"));
-        assert!(!sbpl.contains("mach-lookup*"));
+        for network in [false, true] {
+            for credentials in [false, true] {
+                let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
+                policy.allow_network = network;
+                policy.allow_credential_services = credentials;
+                // 两种编译路径都必须保留精确授权边界。
+                for sbpl in [
+                    compile_profile_explicit_categories(&policy, &policy.writable_roots()),
+                    compile_profile_legacy(&policy, &policy.writable_roots()),
+                ] {
+                    assert!(!sbpl.contains("(allow mach-lookup)"));
+                    assert!(!sbpl.contains("mach-lookup*"));
+                    assert!(sbpl.contains("(deny mach-lookup)"));
+                    for service in ["com.apple.trustd", "com.apple.trustd.agent"] {
+                        assert_eq!(
+                            sbpl.contains(&format!(
+                                "(allow mach-lookup (global-name \"{service}\"))"
+                            )),
+                            network,
+                            "证书服务 {service} 必须只随网络授权开放"
+                        );
+                    }
+                    for service in [
+                        "com.apple.SecurityServer",
+                        "com.apple.securityd.xpc",
+                        "com.apple.system.opendirectoryd.libinfo",
+                        "com.apple.system.opendirectoryd.membership",
+                    ] {
+                        assert_eq!(
+                            sbpl.contains(&format!(
+                                "(allow mach-lookup (global-name \"{service}\"))"
+                            )),
+                            credentials,
+                            "凭据服务 {service} 必须独立授权"
+                        );
+                    }
+                    assert_eq!(sbpl.contains("(deny network*)"), !network);
+                }
+            }
+        }
     }
+
     #[test]
     fn profile_denies_write_outside_roots_and_network() {
         let mut policy = SandboxPolicy::workspace_write("/tmp/ws");
