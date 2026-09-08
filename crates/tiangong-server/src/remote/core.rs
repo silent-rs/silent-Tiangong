@@ -337,7 +337,10 @@ impl ServerCoreManager {
             let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
-                tiangong_plugin_runtime::registry::RuntimeKind::Server,
+                // 嵌入 server 跑在桌面进程内，共享桌面端运行时——插件
+                // 集合与桌面一致（含 generate-image 等原生 sidecar 能力），
+                // subagent 专属会话由此获得与主会话相同的工具集。
+                tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
             ));
             // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
             // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
