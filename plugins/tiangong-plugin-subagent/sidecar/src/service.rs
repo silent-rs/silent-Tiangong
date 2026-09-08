@@ -1263,7 +1263,7 @@ impl SubagentService {
         &self,
         agent_id: &str,
         session_id: &str,
-        _workspace: &str,
+        workspace: &str,
         content: &str,
     ) -> Result<SendOutcome> {
         if content.trim().is_empty() {
@@ -1379,7 +1379,7 @@ impl SubagentService {
             Some(origin_agent) => {
                 self.synthetic_collab_activation(&config, origin_agent, session_id)?
             }
-            None => self.auto_activate(&config, session_id, _workspace)?,
+            None => self.auto_activate(&config, session_id, workspace)?,
         };
         let run = self
             .spawn_run(
@@ -1402,7 +1402,7 @@ impl SubagentService {
         &self,
         agent_id: &str,
         session_id: &str,
-        _workspace: &str,
+        workspace: &str,
         goal: &str,
         completion_criteria: Option<&str>,
     ) -> Result<SubmitOutcome> {
@@ -1420,7 +1420,7 @@ impl SubagentService {
             Some(origin_agent) => {
                 self.synthetic_collab_activation(&config, origin_agent, session_id)?
             }
-            None => self.auto_activate(&config, session_id, _workspace)?,
+            None => self.auto_activate(&config, session_id, workspace)?,
         };
         let timestamp = now_string();
         let task = TaskRecord {
@@ -1614,7 +1614,7 @@ impl SubagentService {
             }
         }
         body.push_str(&format!(
-            "\n任务工作区：{}\n（请在该工作区语境下处理本次请求；完成后你的最终回复会作为结果返回发起会话；如需其他成员协助，可用 send_agent_message 向其发送协作消息。）",
+            "\n【任务工作区】{}\n本次任务的所有文件操作（读/写/搜索/执行命令）都必须在此目录下进行——这是发起会话的工作区，你的会话默认目录可能与它不同，请始终使用基于此目录的绝对路径。完成后你的最终回复会作为结果返回发起会话；如需其他成员协助，可用 send_agent_message 向其发送协作消息。",
             activation.workspace
         ));
         if !instructions.trim().is_empty() {
