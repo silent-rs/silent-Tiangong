@@ -385,6 +385,14 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                       {statusIcon[status] || "•"} {status}
                     </span>
                     <span className="ml-auto text-[10px] text-muted-foreground/60">{formatMessageTime(message.created_at)}</span>
+                    <button
+                      type="button"
+                      aria-label="复制"
+                      className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded text-muted-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-colors"
+                      onClick={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    </button>
                   </div>
                   <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
                     {renderUserText(content.trim())}
@@ -447,7 +455,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           )}
         </div>
       )}
-      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && (
+      {messageText && !isEditing && !subagentMatch && (
         <div className="flex justify-end">
           <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
         </div>
