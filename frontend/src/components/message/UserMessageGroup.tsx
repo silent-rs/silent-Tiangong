@@ -63,9 +63,10 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   let coreContent = body.slice(0, firstMarkerIdx).trimEnd();
   coreContent = coreContent.replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '').trim();
 
-  const TRUNCATE_LEN = 300;
-  const isLong = coreContent.length > TRUNCATE_LEN;
-  const displayContent = expanded || !isLong ? coreContent : coreContent.slice(0, TRUNCATE_LEN) + '…';
+  const MAX_LINES = 5;
+  const lines = coreContent.split('\n');
+  const isLong = lines.length > MAX_LINES;
+  const displayContent = expanded || !isLong ? coreContent : lines.slice(0, MAX_LINES).join('\n') + '…';
 
   const isTask = kind === '任务';
 
@@ -94,7 +95,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '收起' : `展开全部（${coreContent.length} 字）`}
+              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
             </button>
           )}
         </div>
@@ -153,9 +154,10 @@ function SubagentReportCard({ agentName, status, content, time, onCopy, renderTe
   const ac = accentColor[status] || accentColor['消息'];
   const ib = iconBg[status] || iconBg['消息'];
   const pc = pillColor[status] || pillColor['消息'];
-  const TRUNCATE_LEN = 300;
-  const isLong = content.length > TRUNCATE_LEN;
-  const displayContent = expanded || !isLong ? content : content.slice(0, TRUNCATE_LEN) + '…';
+  const MAX_LINES = 5;
+  const lines = content.split('\n');
+  const isLong = lines.length > MAX_LINES;
+  const displayContent = expanded || !isLong ? content : lines.slice(0, MAX_LINES).join('\n') + '…';
   return (
     <div className="w-full max-w-[92%] sm:max-w-[80%]">
       <div className={`rounded-xl border border-border/60 border-l-[3px] ${ac} bg-card shadow-sm overflow-hidden`}>
@@ -188,7 +190,7 @@ function SubagentReportCard({ agentName, status, content, time, onCopy, renderTe
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '收起' : `展开全部（${content.length} 字）`}
+              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
             </button>
           )}
         </div>
