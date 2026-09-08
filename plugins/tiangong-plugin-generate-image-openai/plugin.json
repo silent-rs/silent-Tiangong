@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "generate-image-openai",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "wasm": {
     "binary": "tiangong_plugin_generate_image_openai_wasm.wasm"
   },
@@ -29,5 +29,17 @@
   ],
   "mention": {
     "hint": "根据文字描述生成图片（OpenAI）"
+  },
+  "ui": {
+    "contributions": [
+      {
+        "slot": "settings.plugin-page",
+        "id": "generate-image-openai",
+        "title": "OpenAI 生图",
+        "description": "通过 Responses API 生成图片的配置",
+        "entry": "ui/settings.html",
+        "icon": "image"
+      }
+    ]
   }
 }

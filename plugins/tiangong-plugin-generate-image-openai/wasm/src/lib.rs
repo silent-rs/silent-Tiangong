@@ -149,38 +149,18 @@ fn handle_generate(call: &ToolCall) -> Result<ToolResult, PluginError> {
 }
 
 // ── UI 能力（设置页）──
-
-const SETTINGS_HTML: &str = include_str!("settings.html");
-const SETTINGS_CSS: &str = include_str!("settings.css");
-const SETTINGS_JS: &str = include_str!("settings.js");
-
-fn settings_html() -> String {
-    SETTINGS_HTML
-        .replace("/*__SETTINGS_CSS__*/", SETTINGS_CSS)
-        .replace("/*__SETTINGS_JS__*/", SETTINGS_JS)
-}
+// v2：设置页贡献与页面文件由 manifest `ui.contributions` 声明（ui/settings.html），
+// 本组件只保留 iframe/Shadow 容器到 sidecar 的配置读写桥接。
 
 impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
-        Ok(vec![Contribution {
-            id: "generate-image-openai-settings".to_string(),
-            title: "OpenAI 生图".to_string(),
-            description: "通过 Responses API 生成图片的配置".to_string(),
-            icon: "image".to_string(),
-            group: "plugins".to_string(),
-            has_view: true,
-        }])
+        Ok(Vec::new())
     }
 
     fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
-        if contribution_id != "generate-image-openai-settings" {
-            return Err(plugin_err(format!(
-                "未知的 contribution: {contribution_id}"
-            )));
-        }
-        Ok(ViewResponse {
-            html: settings_html(),
-        })
+        Err(plugin_err(format!(
+            "未知的 contribution: {contribution_id}"
+        )))
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {

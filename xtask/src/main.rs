@@ -381,6 +381,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
             &["dist/index.html"]
         }
+        // 无前端构建的静态 UI：源文件直接随包分发
+        "generate-image-openai" => &["ui/settings.html"],
         _ => &[],
     }
 }
@@ -724,28 +726,50 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
 
     // CI 对无 UI 插件会传空串占位，空值视为未设置。
     let prebuilt = non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
-    if prebuilt.is_none() {
-        let plugin_root = workspace_root.join(config.plugin_root);
+    let plugin_root = workspace_root.join(config.plugin_root);
+    // 无 package.json 的插件是纯静态 UI：跳过构建，入口同目录文件（css/js 等）
+    // 随入口一起拷贝。
+    let static_ui = prebuilt.is_none() && !plugin_root.join("package.json").is_file();
+    if prebuilt.is_none() && !static_ui {
         eprintln!("[xtask] 安装并构建 {} UI...", config.name);
         run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
         run_yarn(&plugin_root, &["build"])?;
-    } else if entries.len() != 1 {
+    } else if prebuilt.is_some() && entries.len() != 1 {
         return Err(invalid_input(
             "TIANGONG_PLUGIN_PREBUILT_UI 仅支持单入口 UI 插件",
         ));
+    }
+    if static_ui {
+        eprintln!("[xtask] 静态 UI 拷贝（{} 无前端构建）...", config.name);
     }
 
     for entry in entries {
         let source = prebuilt
             .as_ref()
             .cloned()
-            .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(entry));
+            .unwrap_or_else(|| plugin_root.join(entry));
         require_file(&source)?;
         let destination = staging.join(entry);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(&source, &destination)?;
+        if static_ui
+            && let Some(dir) = source.parent()
+            && let Some(dir_name) = dir.file_name()
+        {
+            let entry_name = source.file_name().unwrap_or_default();
+            for sibling in std::fs::read_dir(dir)? {
+                let sibling = sibling?;
+                if !sibling.metadata()?.is_file() || sibling.file_name() == entry_name {
+                    continue;
+                }
+                std::fs::copy(
+                    sibling.path(),
+                    staging.join(dir_name).join(sibling.file_name()),
+                )?;
+            }
+        }
     }
     Ok(())
 }
