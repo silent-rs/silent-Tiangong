@@ -199,13 +199,10 @@ fn append_credential_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
     if !policy.allow_credential_services {
         return;
     }
-    sbpl.push_str(
-        "(allow mach-lookup (global-name \"com.apple.SecurityServer\"))\n\
-         (allow mach-lookup (global-name \"com.apple.securityd.xpc\"))\n\
-         (allow mach-lookup (global-name \"com.apple.trustd.agent\"))\n\
-         (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))\n\
-         (allow mach-lookup (global-name \"com.apple.system.opendirectoryd.membership\"))\n",
-    );
+    // 网络放行时 mach-lookup 全放行：TLS 证书验证（trustd 的 XPC 变体）、
+    // DNS 解析（mDNSResponder）、系统时间等服务名在不同 macOS 版本上枚举
+    // 不全——逐项白名单始终有遗漏，直接放行整个类别。
+    sbpl.push_str("(allow mach-lookup*)\n");
 }
 
 /// 路径可安全进入 SBPL 文本：必须是 UTF-8 且不含控制字符
