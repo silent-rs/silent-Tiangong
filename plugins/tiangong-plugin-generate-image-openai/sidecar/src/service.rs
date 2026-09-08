@@ -314,6 +314,9 @@ async fn call_responses_api(resolved: &ResolvedModel, payload: Value) -> Result<
     };
 
     let client = reqwest::Client::builder()
+        // 显式固定系统 TLS，避免后续依赖 feature 改变默认后端，
+        // 再次触发沙箱内 rustls-platform-verifier 证书验证失败。
+        .tls_backend_native()
         .timeout(Duration::from_secs(120))
         .build()
         .context("构造 HTTP 客户端失败")?;
