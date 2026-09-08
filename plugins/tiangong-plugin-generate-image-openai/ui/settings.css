@@ -1,39 +1,40 @@
-:root {
-  color-scheme: light;
-  --bg: hsl(var(--host-background, 210 20% 98%));
-  --surface: hsl(var(--host-card, 0 0% 100%));
-  --text: hsl(var(--host-foreground, 222 47% 11%));
-  --muted: hsl(var(--host-muted-foreground, 215 16% 47%));
-  --border: hsl(var(--host-border, 214 18% 88%));
-  --primary: hsl(var(--host-primary, 222 47% 11%));
-  --primary-foreground: hsl(var(--host-primary-foreground, 210 40% 98%));
-  --accent: hsl(var(--host-accent, 210 40% 96%));
-}
+/*
+ * Shadow 容器样式：直接消费宿主同名设计 token（HSL 分量串），
+ * 经 Shadow DOM 继承链自动跟随 App 主题切换，无需脚本注入。
+ * 中间层用 --pg-* 前缀，避免与宿主 --border 等同名变量自引用。
+ */
+.page {
+  --pg-bg: hsl(var(--background, 210 20% 98%));
+  --pg-card: hsl(var(--card, 0 0% 100%));
+  --pg-text: hsl(var(--foreground, 222 47% 11%));
+  --pg-muted: hsl(var(--muted-foreground, 215 16% 47%));
+  --pg-border: hsl(var(--border, 214 18% 88%));
+  --pg-primary: hsl(var(--primary, 222 47% 11%));
+  --pg-primary-fg: hsl(var(--primary-foreground, 210 40% 98%));
+  --pg-accent: hsl(var(--accent, 210 40% 96%));
 
-:root[data-theme="dark"] { color-scheme: dark; }
-
-* { box-sizing: border-box; }
-[hidden] { display: none !important; }
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--host-font-family, Inter, ui-sans-serif, system-ui, sans-serif);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 640px;
+  background: var(--pg-bg);
+  color: var(--pg-text);
   font-size: 14px;
   line-height: 1.5;
 }
 
-.page { padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 .header h2 { margin: 0 0 4px; font-size: 18px; }
-.header .desc { margin: 0; color: var(--muted); font-size: 13px; }
+.header .desc { margin: 0; color: var(--pg-muted); font-size: 13px; }
 
 .card {
   padding: 16px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--pg-border);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--pg-card);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -43,7 +44,7 @@ body {
 
 .radio-group { display: flex; gap: 20px; }
 .radio { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.radio input { margin: 0; }
+.radio input { margin: 0; accent-color: var(--pg-primary); }
 
 .sub-section { display: flex; flex-direction: column; gap: 12px; }
 
@@ -54,37 +55,31 @@ body {
 .input {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--pg-border);
   border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--pg-bg);
+  color: var(--pg-text);
   font: inherit;
 }
-.input:focus { outline: none; border-color: var(--primary); }
+.input:focus { outline: none; border-color: var(--pg-primary); }
 .textarea { resize: vertical; min-height: 60px; }
 
-.checkbox-field {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-}
-
-.hint { color: var(--muted); font-size: 12px; }
+.hint { color: var(--pg-muted); font-size: 12px; }
 
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
 
-.status { color: var(--muted); font-size: 13px; flex: 1; }
-.status.error { color: hsl(0 84% 60%); }
-.status.success { color: hsl(142 71% 35%); }
+.status { color: var(--pg-muted); font-size: 13px; flex: 1; }
+.status.error { color: hsl(var(--status-error, 0 84% 60%)); }
+.status.success { color: hsl(var(--status-success, 142 71% 35%)); }
 
 .btn {
   padding: 8px 20px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--pg-border);
   border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
+  background: var(--pg-card);
+  color: var(--pg-text);
   cursor: pointer;
   font-weight: 500;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+.btn-primary { background: var(--pg-primary); border-color: var(--pg-primary); color: var(--pg-primary-fg); }
