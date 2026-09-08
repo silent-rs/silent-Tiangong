@@ -58,6 +58,21 @@ export function PluginIframe({
     );
   }, [channel, instanceId, sessionId, theme, visible, workspace]);
 
+  // 插件页面用 ES 模块脚本（延迟执行），iframe onLoad 时其 message
+  // 监听器可能尚未建立——上下文消息会丢失、桥接永远等不到通道。
+  // 短间隔重发直到桥接消费（SDK 收到即设 channel，后续消息被忽略）。
+  const sendHostContextUntilReceived = useCallback(() => {
+    if (!iframeRef.current?.contentWindow) return;
+    let attempts = 0;
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      sendHostContext();
+      if (attempts >= 10) window.clearInterval(timer);
+    }, 200);
+    // 组件卸载时清理
+    return () => window.clearInterval(timer);
+  }, [sendHostContext]);
+
   useEffect(() => {
     sendHostContext();
   }, [sendHostContext]);
@@ -156,7 +171,10 @@ export function PluginIframe({
         srcDoc={html}
         className={`block min-h-0 min-w-0 w-full flex-1 border-0 ${maskColor ? 'relative z-[91]' : ''}`}
         sandbox="allow-scripts"
-        onLoad={sendHostContext}
+        onLoad={() => {
+          sendHostContext();
+          sendHostContextUntilReceived();
+        }}
       />
     </div>
   );
