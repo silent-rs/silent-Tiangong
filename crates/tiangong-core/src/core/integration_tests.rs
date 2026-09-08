@@ -28,6 +28,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
         id: &'static str,
         names: [&'static str; 2],
         calls: AtomicUsize,
+        prompt_reads: AtomicUsize,
     }
     impl Plugin for OrderedPlugin {
         fn id(&self) -> &str {
@@ -38,6 +39,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     impl ToolOverrideHandler for OrderedPlugin {}
     impl PromptSectionProvider for OrderedPlugin {
         fn prompt_sections(&self) -> Vec<String> {
+            self.prompt_reads.fetch_add(1, Ordering::SeqCst);
             vec![format!("插件提示:{}", self.id)]
         }
     }
@@ -87,6 +89,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     .into_iter()
     .enumerate()
     {
+        let mut instances = Vec::new();
         let plugins: Vec<Arc<dyn Plugin>> = order
             .into_iter()
             .map(|index| {
@@ -95,11 +98,14 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                     ("prompt", ["identity_b", "identity_a"]),
                     ("alpha", ["z_first", "y_first"]),
                 ][index];
-                Arc::new(OrderedPlugin {
+                let plugin = Arc::new(OrderedPlugin {
                     id,
                     names,
                     calls: AtomicUsize::new(generation),
-                }) as Arc<dyn Plugin>
+                    prompt_reads: AtomicUsize::new(0),
+                });
+                instances.push(plugin.clone());
+                plugin as Arc<dyn Plugin>
             })
             .collect();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -165,6 +171,11 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             }
             system_id = Some(current_id);
         }
+        for plugin in instances {
+            let reads = usize::from(generation == 0);
+            assert_eq!(plugin.calls.load(Ordering::SeqCst), generation + reads);
+            assert_eq!(plugin.prompt_reads.load(Ordering::SeqCst), reads);
+        }
         core.shutdown_join().unwrap();
     }
 }
@@ -206,6 +217,66 @@ async fn plain_question_completes_with_done_event() {
     assert!(request.role_message_contains("user", "解释一下贪心算法"));
     routes["plain-answer"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history() {
+    let (env, sid) = TestEnv::new("legacy-declarations");
+    let server = MockServer::builder().start().await;
+    mount_prompt_router(
+        &server,
+        vec![PromptRoute::new(
+            "answer",
+            |_| true,
+            MockReply::sse(stream_text_chunks(&["完成"])),
+        )],
+    )
+    .await;
+    let (core, _) = core_for(&env, &sid, &server.uri());
+    let mut legacy = env.load_session(&sid);
+    legacy.system_prompt_message = Some(crate::session::Message::new(
+        MessageRole::System,
+        "旧系统提示，必须原样保留",
+    ));
+    legacy.context_summary = Some("旧摘要".into());
+    legacy.try_persist_to_disk().unwrap();
+    send_message(&core, "legacy-first", "继续");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "legacy-first").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    let before = env.load_session(&sid);
+    assert_eq!(
+        serde_json::to_value(&before.system_prompt_message).unwrap(),
+        serde_json::to_value(&legacy.system_prompt_message).unwrap()
+    );
+    assert_eq!(before.plugin_declarations.as_deref().unwrap().len(), 1);
+    assert!(
+        before.plugin_declarations.as_ref().unwrap()[0]
+            .plugin_id
+            .is_empty()
+    );
+    fail_all_persistence_for_session(&sid);
+    assert!(core.deliver(AgentInputKind::reset_context()).is_err());
+    assert_eq!(
+        serde_json::to_value(env.load_session(&sid)).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    // 解除故障后再次清理，必须同时移除旧摘要并重建系统提示。
+    clear_persistent_persistence_failure(&sid);
+    core.deliver(AgentInputKind::reset_context()).unwrap();
+    let reset = env.load_session(&sid);
+    assert!(reset.context_summary.is_none());
+    assert_eq!(reset.summary_up_to, reset.messages.len());
+    assert!(
+        !reset
+            .system_prompt_message
+            .unwrap()
+            .text_content()
+            .contains("旧系统提示")
+    );
+    core.shutdown_join().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -482,8 +553,12 @@ async fn high_pressure_triggers_pre_request_compression() {
 
     let compression = chat_request_at(&server, 1).await;
     assert!(compression.any_message_contains("AUTO-COMPRESS-FIRST"));
-    assert!(!compression.any_message_contains("AUTO-COMPRESS-SECOND"));
-    assert!(compression.defined_tools().is_empty());
+    assert!(compression.any_message_contains("AUTO-COMPRESS-SECOND"));
+    assert_eq!(
+        compression.defined_tools(),
+        chat_request_at(&server, 0).await.defined_tools()
+    );
+    assert!(!compression.allows_tool_calls());
     assert!(
         !compression.is_stream(),
         "压缩沿生产接口使用非流式 completion"

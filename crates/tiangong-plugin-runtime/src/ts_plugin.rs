@@ -45,6 +45,20 @@ pub struct TsPluginAdapter {
 }
 
 impl TsPluginAdapter {
+    pub(crate) fn notify_tools_recovered(&self, names: &[String]) {
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        if names.is_empty() {
+            return;
+        }
+        if let Some(feedback) = self.feedback_tx.read().ok().and_then(|value| value.clone()) {
+            feedback.inject_tool(
+                "plugin_availability",
+                serde_json::json!({"plugin_id":self.id,"available":true,"tools":names}),
+            );
+        }
+    }
     pub(crate) fn from_manifest(
         manifest: &PluginManifest,
         enabled: bool,
@@ -152,10 +166,13 @@ impl ToolOverrideHandler for TsPluginAdapter {
         actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         if !self.is_enabled() {
-            return Box::pin(async { None });
+            let failure = sidecar_tool_failure(&self.id, "插件已停用，工具不可用");
+            return Box::pin(async move { Some(failure) });
         }
         let Some(tool) = self.tool(&call.name) else {
-            return Box::pin(async { None });
+            let failure =
+                sidecar_tool_failure(&self.id, "当前插件已不提供该工具，请重新加载会话能力");
+            return Box::pin(async move { Some(failure) });
         };
         let plugin_id = self.id.clone();
         let call = call.clone();

@@ -1155,6 +1155,116 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
+        use crate::verification::SidecarVerification;
+        use std::cell::RefCell;
+
+        let root = tempfile::tempdir().unwrap();
+        let id = format!("verify-{}", scru128::new());
+        let directory = root.path().join("plugins").join(&id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "id":id, "version":"0.1.0",
+            "permissions":["sidecar.invoke"],
+            "sidecar":{"runtime":"node","entry":"must-not-run.mjs"}
+        }))
+        .unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(directory.join(MANIFEST_FILE), &manifest_bytes).unwrap();
+        loaded_plugins().lock().unwrap().insert(
+            id.clone(),
+            LoadedPlugin {
+                directory: directory.clone(),
+                manifest,
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 1,
+                instances: Vec::new(),
+                ts_instances: Vec::new(),
+                sidecar: None,
+                verified_sidecar: None,
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
+        let record = SidecarVerification {
+            plugin_id: id.clone(),
+            plugin_version: "0.1.0".into(),
+            artifact_digest: crate::verification::artifact_digest(&directory).unwrap(),
+            protocol_version: crate::protocol::PROTOCOL_VERSION.into(),
+            capabilities: vec!["tool:probe".into()],
+            verified_at: chrono::Local::now().naive_local().to_string(),
+        };
+
+        // 连续模拟验证失败、保存失败、恢复成功；整个过程不创建外部进程。
+        for failure in ["verify", "save", "none"] {
+            let operations = RefCell::new(Vec::new());
+            post_install_sidecar_check_with(
+                &id,
+                || {
+                    operations.borrow_mut().push("verify");
+                    if failure == "verify" {
+                        return Err(anyhow::anyhow!("模拟验证失败"))
+                            .context("sidecar 完整验证失败");
+                    }
+                    Ok(record.clone())
+                },
+                |verified| {
+                    operations.borrow_mut().push("save");
+                    assert_eq!(verified.plugin_id, id);
+                    assert_eq!(verified.capabilities, record.capabilities);
+                    assert!(
+                        loaded_verified_sidecar(&id).is_none(),
+                        "保存成功前不能发布能力"
+                    );
+                    if failure == "save" {
+                        return Err(anyhow::anyhow!("模拟磁盘写入失败"))
+                            .context("保存验证记录失败");
+                    }
+                    Ok(())
+                },
+            );
+            assert_eq!(
+                std::fs::read(directory.join(MANIFEST_FILE)).unwrap(),
+                manifest_bytes,
+                "失败不能回滚或删除已安装插件"
+            );
+            assert!(loaded_plugins().lock().unwrap().contains_key(&id));
+            if failure == "none" {
+                assert_eq!(
+                    loaded_verified_sidecar(&id),
+                    Some(record.capabilities.clone())
+                );
+                assert!(loaded_runtime_error(&id).is_none(), "恢复后应清除异常");
+            } else {
+                assert!(loaded_verified_sidecar(&id).is_none());
+                let error = loaded_runtime_error(&id).expect("失败应登记异常");
+                assert!(
+                    error.contains(if failure == "verify" {
+                        "模拟验证失败"
+                    } else {
+                        "模拟磁盘写入失败"
+                    }),
+                    "{error}"
+                );
+            }
+            assert_eq!(
+                *operations.borrow(),
+                if failure == "verify" {
+                    vec!["verify"]
+                } else {
+                    vec!["verify", "save"]
+                }
+            );
+        }
+        loaded_plugins().lock().unwrap().remove(&id);
+    }
+
+    #[test]
     fn group_按kind分组保持顺序() {
         let groups = group_mention_candidates(
             vec![
@@ -1807,6 +1917,38 @@ fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plu
     Some(adapter)
 }
 
+pub(crate) fn dispatch_tools_recovered(plugin_id: &str, payload: &str) {
+    let Ok(event) = serde_json::from_str::<crate::protocol::ToolsRecovered>(payload) else {
+        return;
+    };
+    let (wasm, ts) = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get(plugin_id).filter(|plugin| plugin.enabled) else {
+            return;
+        };
+        (
+            loaded
+                .instances
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>(),
+            loaded
+                .ts_instances
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>(),
+        )
+    };
+    for adapter in wasm {
+        adapter.notify_tools_recovered(&event.tools);
+    }
+    for adapter in ts {
+        adapter.notify_tools_recovered(&event.tools);
+    }
+}
+
 /// 编译产物：纯 UI 插件（无 wasm）三项均为 None。
 type CompiledPlugin = (
     Option<Arc<wasmtime::component::Component>>,
@@ -2071,11 +2213,24 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
     let Ok(installed) = find_installed_plugin(storage_root, plugin_id) else {
         return;
     };
-    let check_result = crate::verification::verify_installed_sidecar(storage_root, &installed)
-        .and_then(|record| {
-            crate::verification::save_verification(&installed.directory, &record)?;
-            Ok(record)
-        });
+    post_install_sidecar_check_with(
+        plugin_id,
+        || crate::verification::verify_installed_sidecar(storage_root, &installed),
+        |record| crate::verification::save_verification(&installed.directory, record),
+    );
+}
+
+// 验证和保存是两个外部操作，状态处理只依赖它们的结果。
+// 单元测试可分别注入失败，无需启动真实 sidecar 或改变目录权限。
+fn post_install_sidecar_check_with(
+    plugin_id: &str,
+    verify: impl FnOnce() -> Result<crate::verification::SidecarVerification>,
+    save: impl FnOnce(&crate::verification::SidecarVerification) -> Result<()>,
+) {
+    let check_result = verify().and_then(|record| {
+        save(&record)?;
+        Ok(record)
+    });
     match check_result {
         Ok(record) => {
             refresh_verified_sidecar(plugin_id, record.capabilities);
@@ -2087,7 +2242,7 @@ fn post_install_sidecar_check(storage_root: &Path, plugin_id: &str) {
                 %error,
                 "安装后 sidecar 运行检查失败：插件保持安装，标记运行异常（可重试验证）"
             );
-            set_runtime_error(plugin_id, error.to_string());
+            set_runtime_error(plugin_id, format!("{error:#}"));
         }
     }
 }

@@ -293,6 +293,9 @@ impl McpService {
                             exit_code: 1,
                             ..Default::default()
                         });
+                if result.ok {
+                    self.capability.record_success(&target.server_name);
+                }
                 Ok(serde_json::to_value(result)?)
             }
             tiangong_plugin_mcp_protocol::env::ENV_COLLECT_OPERATION => {

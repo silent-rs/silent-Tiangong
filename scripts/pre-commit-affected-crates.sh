@@ -102,6 +102,9 @@ case "$sub" in
       fi
     done
     if [[ "$prepare_runtime_test_binaries" == "true" ]]; then
+      timeout 120 rustup target add wasm32-wasip2
+      timeout 300 cargo build -p tiangong-plugin-mcp-wasm \
+        -p tiangong-plugin-skill-wasm --target wasm32-wasip2
       cargo build -p tiangong-sandbox --bin tiangong-sandbox \
         -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
         -p tiangong-plugin-sidecar --bin test-stdio-host

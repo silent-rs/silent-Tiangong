@@ -31,6 +31,10 @@ pub trait ToolOverrideHandler: Send + Sync + 'static {
 /// Plugin 通过此机制向 Agent 注入新的工具定义（ToolSpec）。
 /// 注册后，新工具会与 core 内置工具合并，统一暴露给 LLM。
 pub trait ToolSpecProvider: Send + Sync + 'static {
+    /// 整理会话时保留读取错误，避免把暂时不可用当成删除全部工具。
+    fn try_tool_specs(&self) -> Result<Vec<ToolSpec>, String> {
+        Ok(self.tool_specs())
+    }
     /// 返回该 plugin 暴露的所有工具规格。默认返回空，不暴露新工具的插件无需覆写。
     fn tool_specs(&self) -> Vec<ToolSpec> {
         Vec::new()
@@ -44,6 +48,9 @@ pub trait ToolSpecProvider: Send + Sync + 'static {
 /// 相同配置下必须保持稳定，不应包含当前时间、轮次、自动提取的记忆或成员状态。
 /// 动态信息应经工具结果或追加消息进入上下文，避免改写已发送的请求前缀。
 pub trait PromptSectionProvider: Send + Sync + 'static {
+    fn try_prompt_sections(&self) -> Result<Vec<String>, String> {
+        Ok(self.prompt_sections())
+    }
     /// 返回该 plugin 暴露的所有 prompt 段落（每段会作为独立块拼接到 system prompt）。
     /// 默认返回空，不注入 prompt 的插件无需覆写。
     fn prompt_sections(&self) -> Vec<String> {

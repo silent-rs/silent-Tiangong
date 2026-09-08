@@ -77,12 +77,12 @@ impl Guest for Component {
     }
 
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
-        // 动态工具：每次从 sidecar 拉取健康 server 的工具列表。
+        // 声明与健康状态分离；通信失败由宿主保留最近一次成功快照。
         let response: ListToolsResponse = match sidecar_client::invoke::<ListTools>(&Empty {}) {
             Ok(response) => response,
             Err(error) => {
                 tracing_like_warn(&format!("MCP tool_specs 拉取失败: {error}"));
-                return Ok(Vec::new());
+                return Err(plugin_err(format!("读取 MCP 工具声明失败: {error}")));
             }
         };
         let specs = response

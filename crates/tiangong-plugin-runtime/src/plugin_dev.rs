@@ -515,6 +515,7 @@ mod tests {
     /// 初始化测试配置并准备测试 Launcher 信任链：sidecar 恒走沙箱
     ///（策略表不接受关闭输入），本组测试以测试密钥签名的真实 Launcher
     /// 覆盖安装/签名/调用契约的完整链路。
+    /// 使用此准备步骤的测试以 integration_ 开头，供 nextest 限制重型测试并发。
     fn init_config_with_launcher(root: &Path) {
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -768,7 +769,7 @@ await runSidecar({
     /// 插件写会话工作区成功，写存储根之外的路径被沙箱拒绝。
     #[test]
     #[serial_test::serial]
-    fn 按需sidecar_新版上下文工作区成为沙箱写域() {
+    fn integration_按需sidecar_新版上下文工作区成为沙箱写域() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -875,7 +876,7 @@ await runSidecar({
     /// 记录缺失时重新验证入口恢复、卸载清理记录。
     #[test]
     #[serial_test::serial]
-    fn sidecar验证记录_安装生成_重验恢复_卸载清理() {
+    fn integration_sidecar验证记录_安装生成_重验恢复_卸载清理() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -938,62 +939,7 @@ await runSidecar({
 
     #[test]
     #[serial_test::serial]
-    #[cfg(unix)]
-    fn 验证记录保存失败_插件保留并标记异常() {
-        let Some(_node) = find_node_for_test() else {
-            eprintln!("跳过：PATH 中未找到 node");
-            return;
-        };
-        let root = tempfile::tempdir().unwrap();
-        require_native_sandbox!();
-        init_config_with_launcher(root.path());
-        let id = "verify-save-fail-demo";
-        make_project(root.path(), id);
-        make_node_sidecar_release(root.path(), id);
-        // 预先创建只读验证记录目录：sidecar 运行检查成功但记录保存必然
-        // 失败。运行异常不回滚安装——插件保留、标记异常，用户可重试。
-        let verifications = root.path().join("plugins").join(".verifications");
-        std::fs::create_dir_all(&verifications).unwrap();
-        let mut permissions = std::fs::metadata(&verifications).unwrap().permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&verifications, permissions).unwrap();
-
-        let result = install(root.path(), id, None).expect("记录保存失败不得回滚安装");
-        assert_eq!(result.plugin_id, id);
-        assert!(
-            root.path().join("plugins").join(id).exists(),
-            "插件目录必须保留"
-        );
-        assert!(
-            crate::registry::loaded_verified_sidecar(id).is_none(),
-            "记录保存失败时不得有内存能力快照"
-        );
-        let runtime_error =
-            crate::registry::loaded_runtime_error(id).expect("运行检查失败应登记插件异常状态");
-        assert!(
-            runtime_error.contains("验证记录"),
-            "异常状态应指向记录保存失败: {runtime_error}"
-        );
-
-        // 恢复可写后重新验证：记录恢复，能力快照立即生效。
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&verifications, permissions).unwrap();
-        crate::registry::reverify_plugin_sidecar(root.path(), id).expect("重新验证应恢复记录");
-        assert_eq!(
-            crate::registry::loaded_verified_sidecar(id),
-            Some(Vec::new()),
-            "重新验证后内存能力快照应立即可见"
-        );
-        assert!(
-            crate::registry::loaded_runtime_error(id).is_none(),
-            "运行检查重新成功后应清除启动异常状态"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn 解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {
+    fn integration_解释器sidecar_创作链自动签名安装_真实调用与篡改拒绝() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1055,7 +1001,7 @@ await runSidecar({
     /// 调用方插件为已安装的 node demo 插件（install 本体直调装好）。
     #[test]
     #[serial_test::serial]
-    fn 安装授权_五场景() {
+    fn integration_安装授权_五场景() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1128,7 +1074,7 @@ await runSidecar({
     /// 成功安装消费登记（再次安装需重新构建）。
     #[test]
     #[serial_test::serial]
-    fn 指纹核验_篡改产物拒绝与安装消费() {
+    fn integration_指纹核验_篡改产物拒绝与安装消费() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1202,7 +1148,7 @@ await runSidecar({
     /// 失败构建撤销：note(None) 语义清除旧登记后不可安装。
     #[test]
     #[serial_test::serial]
-    fn 失败构建_撤销登记后不可安装() {
+    fn integration_失败构建_撤销登记后不可安装() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1248,7 +1194,7 @@ await runSidecar({
     /// 的机制基础）。
     #[test]
     #[serial_test::serial]
-    fn sidecar观察者_成功调用触发() {
+    fn integration_sidecar观察者_成功调用触发() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1316,7 +1262,7 @@ await runSidecar({
     /// → sidecar 真实调用 → 移除公钥后失效。
     #[test]
     #[serial_test::serial]
-    fn 三方导入_签名归档安装与移除公钥后失效() {
+    fn integration_三方导入_签名归档安装与移除公钥后失效() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1453,7 +1399,7 @@ await runSidecar({
     /// 两种信任来源同时存在时启动门槛必须拒绝（来源不明确）。
     #[test]
     #[serial_test::serial]
-    fn 解释器sidecar_官方签名与本地信任混用拒绝() {
+    fn integration_解释器sidecar_官方签名与本地信任混用拒绝() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1542,7 +1488,7 @@ await runSidecar({
     /// 产物（release/）由 `yarn package` 生成、不入库：CI 无产物时跳过。
     #[test]
     #[serial_test::serial]
-    fn creator真实产物_安装与devkit_init全链路() {
+    fn integration_creator真实产物_安装与devkit_init全链路() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1594,7 +1540,7 @@ await runSidecar({
     #[test]
     #[ignore = "真实 yarn 构建需数分钟与网络，按需显式运行"]
     #[serial_test::serial]
-    fn 从零创建node_sidecar插件_完整旅程() {
+    fn integration_从零创建node_sidecar插件_完整旅程() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1681,7 +1627,7 @@ await runSidecar({
     /// 修改产物被拒，重新登记（等价重新构建）后放行。
     #[test]
     #[serial_test::serial]
-    fn 纯ui插件_构建指纹核验() {
+    fn integration_纯ui插件_构建指纹核验() {
         let root = tempfile::tempdir().unwrap();
         // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
         init_config_with_launcher(root.path());
@@ -1727,7 +1673,7 @@ await runSidecar({
     /// 工具契约（操作名=工具名、ToolOutcome 形状）经 sidecar 真实往返。
     #[test]
     #[serial_test::serial]
-    fn 无界面纯工具插件_安装与工具契约() {
+    fn integration_无界面纯工具插件_安装与工具契约() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1790,7 +1736,7 @@ await runSidecar({
     /// 字节与 MIME（read 走 loaded_plugins 内存表，install 后可用）。
     #[test]
     #[serial_test::serial]
-    fn 插件图标_安装与读取往返() {
+    fn integration_插件图标_安装与读取往返() {
         let root = tempfile::tempdir().unwrap();
         // 纯 UI 产物无 sidecar：安装不触发沙箱内验证，无需原生沙箱环境。
         init_config_with_launcher(root.path());
@@ -1827,7 +1773,7 @@ await runSidecar({
     #[test]
     #[ignore = "Agent Handler 不再自动超时；仅显式取消终止"]
     #[serial_test::serial]
-    fn 直连工具_超时终止进程() {
+    fn integration_直连工具_超时终止进程() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;
@@ -1931,7 +1877,7 @@ await runSidecar({
     #[test]
     #[ignore = "Agent Handler 不再自动超时；并发取消由显式取消链路覆盖"]
     #[serial_test::serial]
-    fn 直连工具_并发隔离与取消归属() {
+    fn integration_直连工具_并发隔离与取消归属() {
         let Some(_node) = find_node_for_test() else {
             eprintln!("跳过：PATH 中未找到 node");
             return;

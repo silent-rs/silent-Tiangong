@@ -1,6 +1,18 @@
 [test-groups]
 memory-integration = { max-threads = 1 }
+plugin-runtime-integration = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'package(=tiangong-memory)'
 test-group = 'memory-integration'
+
+# 只限制 integration_ 标记的真实安装及 WASM/Launcher 集成测试。
+# 规则、状态处理、文件保存等普通单元测试继续按默认并发运行。
+[[profile.default.overrides]]
+filter = '''
+package(=tiangong-plugin-runtime) & (
+    test(plugin_dev::tests::integration_) |
+    binary(/^(declaration_stability|load_and_call|ephemeral_route|official_catalog_e2e|m0_slot_bridge|v2_manifest_contribution|tool_ui_launcher)$/)
+)
+'''
+test-group = 'plugin-runtime-integration'

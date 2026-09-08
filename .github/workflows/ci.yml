@@ -226,6 +226,9 @@ jobs:
           cargo build -p tiangong-sandbox --bin tiangong-sandbox \
             -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
             -p tiangong-plugin-sidecar --bin test-stdio-host
+          timeout 120 rustup target add wasm32-wasip2
+          timeout 300 env RUSTFLAGS= cargo build -p tiangong-plugin-mcp-wasm \
+            -p tiangong-plugin-skill-wasm --target wasm32-wasip2
       - name: Test crates
         env:
           MATRIX: ${{ needs.changes.outputs.matrix }}

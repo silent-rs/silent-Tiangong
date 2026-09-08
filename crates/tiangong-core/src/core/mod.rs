@@ -65,7 +65,8 @@ pub struct TiangongCore {
     /// 事件输出通道(会话级,跨 turn;clone 给每个 turn task 的 forwarder)。
     stream_tx: Sender<StreamEvent>,
     /// 进程内插件(会话级,跨 turn)。
-    plugins: Vec<Arc<dyn Plugin>>,
+    #[builder(setter(transform = |plugins: Vec<Arc<dyn Plugin>>| Arc::new(std::sync::Mutex::new(crate::core::plugin::PreparedPlugins { plugins, ..Default::default() }))))]
+    plugins: Arc<std::sync::Mutex<crate::core::plugin::PreparedPlugins>>,
     /// on_session_ready 是否已对本 Core 实例执行过（会话级一次性状态，不落盘）。
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
@@ -83,9 +84,15 @@ impl TiangongCore {
 
     /// 替换该 Core 的独立配置。
     ///
-    /// 配置在下一次 turn 构建 engine 时自动生效（每 turn 现建 engine 会读取最新
-    /// generation），无需显式通知 worker。
+    /// 运行配置在后续 turn 生效；工具及提示声明仅在压缩成功或清理上下文时重新采集。
     pub fn replace_config(&self, config: CoreConfig) -> Result<(), CoreError> {
+        let changed = serde_json::to_value(&*self.config.snapshot()).ok()
+            != serde_json::to_value(&config).ok();
+        if changed && self.session_ready.load(Ordering::Acquire) {
+            for plugin in self.plugin_instances() {
+                plugin.on_config_updated(&config);
+            }
+        }
         self.config.replace(config);
         Ok(())
     }
@@ -106,7 +113,7 @@ impl TiangongCore {
     pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
         // Core 和插件立即使用新值；Session 字段由活跃 turn 或下一轮统一写入。
         *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
-        for plugin in &self.plugins {
+        for plugin in self.plugin_instances() {
             plugin.set_trust_mode(mode);
         }
         if self.is_busy() {
@@ -136,7 +143,7 @@ impl TiangongCore {
     /// 同一 trait。宿主（src-tauri 的 `get_mention_candidates` 命令）经 CoreManager
     /// 调用本方法，不再硬编码 skill/mcp。
     pub fn get_mentions(&self) -> Vec<crate::MentionCandidate> {
-        self.plugins
+        self.plugin_instances()
             .iter()
             .flat_map(|plugin| plugin.mention_candidates())
             .collect()
@@ -233,7 +240,6 @@ impl TiangongCore {
 
         let config = self.config.snapshot();
         let stream_tx = self.stream_tx.clone();
-        let plugins = self.plugins.clone();
         let retry_tx = stream_tx.clone();
         let on_retry: crate::model::OnRetryCallback =
             Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
@@ -259,17 +265,19 @@ impl TiangongCore {
             SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone());
         #[cfg(not(test))]
         let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
-        let prepared_plugins =
-            crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
-        // 工具规格与 prompt 段落全部来自 Plugin trait（含声明式插件适配器）。
-        let turn_tools = prepared_plugins.tools;
+        let prepared = self
+            .plugins
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
 
         Ok(TurnContext::builder()
             .client(client)
             .lite_client(lite_client)
             .session(session)
             .stream_tx(stream_tx)
-            .plugins(prepared_plugins.plugins)
+            .plugins(prepared.plugins)
+            .prompt_sections(prepared.prompt_sections)
             .context_limit(config.context_limit)
             .agent_config(crate::agent_config::AgentConfig {
                 trust_mode,
@@ -279,9 +287,59 @@ impl TiangongCore {
             })
             .trust_mode(trust_mode)
             .observer(crate::observe::Observer::new(self.storage_root.clone()))
-            .tool_overrides(prepared_plugins.tool_overrides)
-            .tools(turn_tools)
+            .tool_overrides(prepared.tool_overrides)
+            .tools(prepared.tools)
             .build())
+    }
+
+    fn plugin_instances(&self) -> Vec<Arc<dyn Plugin>> {
+        self.plugins
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .plugins
+            .clone()
+    }
+
+    fn initialize_plugins(&self, ctx: &mut TurnContext) -> Result<(), CoreError> {
+        let initializing = !self.session_ready.load(Ordering::Acquire);
+        let needs_persist = initializing || ctx.session.system_prompt_message.is_none();
+        let mut prepared = self
+            .plugins
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if initializing {
+            let initialized = crate::core::plugin::prepare_plugins(
+                &prepared.plugins,
+                &self.config.snapshot(),
+                ctx.trust_mode,
+                &mut ctx.session,
+            );
+            *prepared = initialized;
+        } else if let Some(declarations) = &ctx.session.plugin_declarations {
+            *prepared = crate::core::plugin::PreparedPlugins::restore(
+                prepared.plugins.clone(),
+                declarations,
+            );
+        }
+        ctx.plugins = prepared.plugins.clone();
+        ctx.tools = prepared.tools.clone();
+        ctx.tool_overrides = prepared.tool_overrides.clone();
+        ctx.prompt_sections = prepared.prompt_sections.clone();
+        drop(prepared);
+        if ctx.session.system_prompt_message.is_none() {
+            crate::react::context::rebuild_system_prompt_for_session(
+                &mut ctx.session,
+                &ctx.prompt_sections,
+            );
+        }
+        if needs_persist {
+            ctx.session.try_persist_to_disk().map_err(|error| {
+                tracing::error!(%error, "保存会话插件声明失败");
+                CoreError::WorkerStopped
+            })?;
+        }
+        self.session_ready.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// 空闲起轮：构建上下文 → 校验并保存用户消息（成功才确认）→ spawn turn task。
@@ -307,28 +365,9 @@ impl TiangongCore {
             content_blocks: tiangong_types::stable_content_blocks(&content),
             media: Vec::new(),
         });
-        let session_ready = self.session_ready.clone();
         let core = self.clone();
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
-            if session_ready
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                for plugin in &ctx.plugins {
-                    plugin.on_session_ready(&mut ctx.session);
-                }
-            }
-            let prompt_sections = ctx
-                .plugins
-                .iter()
-                .flat_map(|plugin| plugin.prompt_sections())
-                .collect();
-            ctx.session.rebuild_system_prompt(
-                &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
-            );
-            if let Err(error) = ctx.session.try_persist_to_disk() {
-                tracing::warn!(%error, "持久化本轮系统提示失败");
-            }
+            core.initialize_plugins(&mut ctx)?;
             let mut cmd_rx = cmd_rx;
             Ok(async move {
                 run_turn(ctx, &mut cmd_rx).await;
@@ -418,14 +457,7 @@ impl TiangongCore {
         crate::shared_runtime::spawn_turn(ctx, move |mut ctx, mut cmd_rx| {
             // 防御性重建 system prompt：压缩请求需要它承载旧摘要（裸 session 直接
             // 手动压缩时可能缺失）。
-            let prompt_sections = ctx
-                .plugins
-                .iter()
-                .flat_map(|plugin| plugin.prompt_sections())
-                .collect();
-            ctx.session.rebuild_system_prompt(
-                &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
-            );
+            core.initialize_plugins(&mut ctx)?;
             Ok(async move {
                 if let Some(crate::react::compression::CompressionInterrupt::Command(command)) =
                     crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
@@ -474,7 +506,9 @@ impl TiangongCore {
         if self.is_busy() {
             return Err(CoreError::Busy);
         }
-        let mut session = self.load_session()?;
+        let mut ctx = self.build_turn_context()?;
+        self.initialize_plugins(&mut ctx)?;
+        let mut session = ctx.session.clone();
         let total = session.messages.len();
         session.summary_up_to = total;
         crate::context::compressor::mark_compact_boundary(&mut session.messages, total);
@@ -482,10 +516,26 @@ impl TiangongCore {
         session.current_tokens = 0;
         session.active_agent_current_tokens = 0;
         session.agent_current_tokens.clear();
+        session.plugin_declarations = Some(crate::core::plugin::collect_declarations(
+            &ctx.plugins,
+            session.plugin_declarations.as_deref().unwrap_or_default(),
+        ));
+        let prepared = crate::core::plugin::PreparedPlugins::restore(
+            ctx.plugins,
+            session.plugin_declarations.as_deref().unwrap(),
+        );
+        crate::react::context::rebuild_system_prompt_for_session(
+            &mut session,
+            &prepared.prompt_sections,
+        );
         session.try_persist_to_disk().map_err(|error| {
             tracing::warn!(%error, session_id = %self.session_id, "清空上下文落盘失败");
             CoreError::WorkerStopped
         })?;
+        *self
+            .plugins
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = prepared;
         crate::react::compression::notify_cleared(&self.stream_tx, &session);
         Ok(())
     }
@@ -517,7 +567,7 @@ impl TiangongCore {
     /// 通知型钩子：后台线程投递、不等待完成——关闭会话/退出应用不被任何插件
     /// 无限阻塞（issue #404）。钩子收到只读快照，收尾成败与产出由插件自行负责。
     fn finalize_plugins(&self, session: &Session) {
-        crate::core::plugin::notify_session_ended(&self.plugins, session);
+        crate::core::plugin::notify_session_ended(&self.plugin_instances(), session);
     }
 }
 

@@ -48,5 +48,6 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+wiremock = { workspace = true }
 serial_test = { workspace = true }
 tiangong-plugin-command-protocol = { workspace = true }

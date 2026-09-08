@@ -12,6 +12,14 @@ pub const PROTOCOL_VERSION: &str = "0.1.0";
 /// 由运行时发起的健康检查操作。
 pub const HANDSHAKE_OPERATION: &str = "runtime.handshake";
 
+/// 检测到工具恢复时通知当前活动 Agent，不修改工具声明。
+pub const TOOLS_RECOVERED_CHANNEL: &str = "runtime.tools_recovered";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsRecovered {
+    pub tools: Vec<String>,
+}
+
 /// 随工具请求透传的宿主权威调用上下文。
 ///
 /// 字段均由宿主调用边界产生。sidecar 不应从页面状态或工具参数推断会话

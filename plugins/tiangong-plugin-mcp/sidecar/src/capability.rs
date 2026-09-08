@@ -220,6 +220,7 @@ impl McpCapabilityIndex {
                     guard.insert(server.name.clone(), capability);
                 }
             } else {
+                emit_recovery_if_needed(&server.name, guard.get(&server.name), &capability);
                 guard.insert(server.name.clone(), capability);
             }
         }
@@ -266,18 +267,29 @@ impl McpCapabilityIndex {
             .map(|entry| entry.tools.clone())
     }
 
-    /// 读取所有 healthy server 的工具列表（供 tool spec 生成）。
+    /// 工具声明沿用已发现缓存，健康状态仅用于执行及界面显示。
     pub fn cached_active_tools(&self) -> Vec<(String, Vec<McpToolMeta>)> {
         self.index
             .read()
             .map(|guard| {
                 guard
                     .iter()
-                    .filter(|(_, capability)| capability.healthy)
                     .map(|(name, capability)| (name.clone(), capability.tools.clone()))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    pub fn record_success(&self, server_name: &str) {
+        if let Ok(mut index) = self.index.write()
+            && let Some(current) = index.get_mut(server_name)
+            && !current.healthy
+        {
+            let previous = current.clone();
+            current.healthy = true;
+            current.last_error = None;
+            emit_recovery_if_needed(server_name, Some(&previous), current);
+        }
     }
 
     /// 所有 server 的健康状态（供前端健康面板）。
@@ -303,6 +315,116 @@ impl McpCapabilityIndex {
 impl Default for McpCapabilityIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn emit_recovery_if_needed(
+    name: &str,
+    previous: Option<&McpServerCapability>,
+    current: &McpServerCapability,
+) {
+    let Some(event) = recovery_event(name, previous, current) else {
+        return;
+    };
+    if let Ok(payload) = serde_json::to_string(&event) {
+        tiangong_plugin_sidecar::server::emit_notification(
+            tiangong_plugin_runtime::protocol::TOOLS_RECOVERED_CHANNEL,
+            payload,
+        );
+    }
+}
+
+fn recovery_event(
+    name: &str,
+    previous: Option<&McpServerCapability>,
+    current: &McpServerCapability,
+) -> Option<tiangong_plugin_runtime::protocol::ToolsRecovered> {
+    if !previous.is_some_and(|previous| !previous.healthy) || !current.healthy {
+        return None;
+    }
+    let tools = current
+        .tools
+        .iter()
+        .map(|tool| crate::execution::resolve_mcp_function_name(name, &tool.name))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return None;
+    }
+    Some(tiangong_plugin_runtime::protocol::ToolsRecovered { tools })
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+    #[test]
+    fn unhealthy_tools_remain_declared_after_disk_reload() {
+        let index = McpCapabilityIndex::new();
+        let tools = vec![serde_json::from_value(serde_json::json!({"name":"read","description":"fixed","input_schema":{"type":"object"}})).unwrap()];
+        let healthy = McpServerCapability {
+            tools,
+            healthy: true,
+            ..Default::default()
+        };
+        index
+            .index
+            .write()
+            .unwrap()
+            .insert("probe".into(), healthy.clone());
+        let before = serde_json::to_value(index.cached_active_tools()).unwrap();
+        index
+            .index
+            .write()
+            .unwrap()
+            .get_mut("probe")
+            .unwrap()
+            .healthy = false;
+        assert_eq!(
+            serde_json::to_value(index.cached_active_tools()).unwrap(),
+            before
+        );
+        assert!(!index.health_statuses()[0].healthy);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cache.json");
+        index.persist_cache(&path).unwrap();
+        let restored = McpCapabilityIndex::new();
+        restored.load_cache(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored.cached_active_tools()).unwrap(),
+            before
+        );
+        let offline = restored.index.read().unwrap()["probe"].clone();
+        assert!(recovery_event("probe", Some(&healthy), &healthy).is_none());
+        assert!(recovery_event("probe", None, &healthy).is_none());
+        let event = recovery_event("probe", Some(&offline), &healthy).unwrap();
+        assert_eq!(event.tools, vec!["mcp__probe__read"]);
+        restored.record_success("probe");
+        assert_eq!(
+            serde_json::to_value(restored.cached_active_tools()).unwrap(),
+            before
+        );
+        assert!(restored.health_statuses()[0].healthy);
+    }
+
+    #[tokio::test]
+    async fn explicit_disable_still_blocks_declarations_and_execution() {
+        let config: McpConfig = serde_json::from_value(serde_json::json!({"enabled":false,"servers":[{"name":"probe","command":"must-not-run"}]})).unwrap();
+        let declared = vec![(
+            "probe".into(),
+            vec![serde_json::from_value(serde_json::json!({"name":"read"})).unwrap()],
+        )];
+        assert!(
+            crate::execution::list_tools_response(&config, declared)
+                .servers
+                .is_empty()
+        );
+        let target = crate::execution::McpFunctionTarget {
+            server_name: "probe".into(),
+            tool_name: "read".into(),
+        };
+        let error = crate::execution::execute_tool(&target, serde_json::json!({}), &config, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("已停用"));
     }
 }
 
@@ -363,6 +485,7 @@ fn refresh_mcp_capabilities(
                 }
                 continue;
             }
+            emit_recovery_if_needed(&name, guard.get(&name), &capability);
             guard.insert(name, capability);
         }
         // 清理已移除或禁用的服务器
