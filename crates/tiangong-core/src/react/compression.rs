@@ -89,7 +89,12 @@ impl ContextCompression {
         notify_started(ctx);
         Self {
             task: start_task(
-                ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
+                ContextCompressor::new(
+                    ctx.session.clone(),
+                    ctx.client.clone(),
+                    ctx.tools.clone(),
+                    ctx.agent_config.reasoning_effort,
+                ),
                 organizer,
                 observed_tokens,
                 compression_split_point(&ctx.session),
@@ -233,7 +238,12 @@ pub(crate) async fn run_manual_context_compression(
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
 
-    let compressor = ContextCompressor::new(ctx.session.clone(), ctx.client.clone());
+    let compressor = ContextCompressor::new(
+        ctx.session.clone(),
+        ctx.client.clone(),
+        ctx.tools.clone(),
+        ctx.agent_config.reasoning_effort,
+    );
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
         return None;
@@ -650,7 +660,7 @@ mod tests {
             session.append_message(MessageRole::User, format!("{round}问题"));
             session.append_message(MessageRole::Assistant, format!("{round}回答"));
         }
-        let (mut ctx, _root) = test_context(session);
+        let (mut ctx, root) = test_context(session);
 
         // 模拟压缩分割点：保留第三轮（最近交互），折叠前两轮。
         let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
@@ -658,6 +668,18 @@ mod tests {
 
         assert_eq!(ctx.session.context_summary.as_deref(), Some("前两轮摘要"));
         assert_eq!(ctx.session.summary_up_to, 4);
+        let saved_prompt = serde_json::to_vec(&ctx.session.system_prompt_message).unwrap();
+        let mut restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+        assert_eq!(restored.context_summary, ctx.session.context_summary);
+        assert_eq!(restored.summary_up_to, ctx.session.summary_up_to);
+        for question in ["继续", "再核对一次"] {
+            restored.append_message(MessageRole::User, question);
+            rebuild_system_prompt_for_session(&mut restored, &ctx.plugins);
+            assert_eq!(
+                serde_json::to_vec(&restored.system_prompt_message).unwrap(),
+                saved_prompt
+            );
+        }
         let context = ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
         assert_eq!(context[1].text_content(), "第三轮问题");

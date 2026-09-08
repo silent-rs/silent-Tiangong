@@ -348,7 +348,7 @@ impl SingleProviderClient {
             tools: functions.to_vec(),
             tool_choice: tool_choice
                 .or_else(|| (!functions.is_empty()).then_some(LlmToolChoice::Auto)),
-            max_tokens,
+            max_tokens: req.max_output_tokens.unwrap_or(max_tokens),
             temperature: configured_temperature_f32(),
             top_p: None,
             stop_sequences: Vec::new(),
@@ -366,6 +366,16 @@ impl SingleProviderClient {
     }
     /// 可取消的非流式主模型调用。调用方丢弃 future 时底层 HTTP 请求随之终止。
     pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
+        self.complete_async_with_tools(req, &[], None).await
+    }
+
+    /// 保留工具定义的非流式调用；返回原始终态和用量，由调用方校验摘要等输出。
+    pub async fn complete_async_with_tools(
+        &self,
+        req: &ModelRequest,
+        tools: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ModelResponse> {
         let timeout_ms = self.cfg.timeout_ms;
         let model = self.cfg.model.trim();
         if model.is_empty() {
@@ -373,15 +383,24 @@ impl SingleProviderClient {
         }
         let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
         let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
-        let request = self.build_provider_request(req, model, max_tokens, &[], None)?;
+        let request = self.build_provider_request(req, model, max_tokens, tools, tool_choice)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
+        let tool_calls = response
+            .assistant_message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                LlmMessageContent::ToolCall(call) => Some(call.clone()),
+                _ => None,
+            })
+            .collect();
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
             stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
-            tool_calls: Vec::new(),
+            tool_calls,
             invalid_tool_calls: Vec::new(),
         })
     }

@@ -482,8 +482,12 @@ async fn high_pressure_triggers_pre_request_compression() {
 
     let compression = chat_request_at(&server, 1).await;
     assert!(compression.any_message_contains("AUTO-COMPRESS-FIRST"));
-    assert!(!compression.any_message_contains("AUTO-COMPRESS-SECOND"));
-    assert!(compression.defined_tools().is_empty());
+    assert!(compression.any_message_contains("AUTO-COMPRESS-SECOND"));
+    assert_eq!(
+        compression.defined_tools(),
+        chat_request_at(&server, 0).await.defined_tools()
+    );
+    assert!(!compression.allows_tool_calls());
     assert!(
         !compression.is_stream(),
         "压缩沿生产接口使用非流式 completion"

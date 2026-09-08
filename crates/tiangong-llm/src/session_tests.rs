@@ -76,8 +76,10 @@ async fn session_headers_reach_streaming_and_non_streaming_openai_requests() {
             let payload: Value = serde_json::from_slice(&request.body).unwrap();
             if protocol == ProviderProtocol::OpenAi {
                 assert_eq!(payload["prompt_cache_key"], session_id);
+                assert_eq!(payload["max_output_tokens"], 256);
             } else {
                 assert!(payload.get("prompt_cache_key").is_none());
+                assert_eq!(payload["max_tokens"], 256);
             }
             assert!(payload.get("session_id").is_none());
         }

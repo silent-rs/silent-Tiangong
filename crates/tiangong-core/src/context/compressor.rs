@@ -1,4 +1,7 @@
-use crate::model::{ModelRequest, SingleProviderClient, StopReason, TokenUsage};
+use crate::model::{
+    ModelRequest, ReasoningEffort, SingleProviderClient, StopReason, TokenUsage, ToolChoice,
+    ToolSpec,
+};
 use crate::session::{Message, MessagePhase, MessageRole, Session};
 
 /// 判断消息是否为可压缩的有效消息。
@@ -12,6 +15,8 @@ pub(crate) fn is_compressible(message: &Message) -> bool {
 pub struct ContextCompressor {
     session: Session,
     client: SingleProviderClient,
+    tools: Vec<ToolSpec>,
+    reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Debug, Clone)]
@@ -54,8 +59,18 @@ impl std::fmt::Display for CompressionError {
 impl std::error::Error for CompressionError {}
 
 impl ContextCompressor {
-    pub fn new(session: Session, client: SingleProviderClient) -> Self {
-        Self { session, client }
+    pub fn new(
+        session: Session,
+        client: SingleProviderClient,
+        tools: Vec<ToolSpec>,
+        reasoning_effort: ReasoningEffort,
+    ) -> Self {
+        Self {
+            session,
+            client,
+            tools,
+            reasoning_effort,
+        }
     }
 
     pub fn has_pending_messages(&self) -> bool {
@@ -87,13 +102,24 @@ impl ContextCompressor {
         }
 
         let boundary_message_id = self.session.messages[split_point - 1].id.clone();
-        let request = Self::summary_request(&self.session, split_point, max_output_tokens);
+        let request = Self::summary_request(
+            &self.session,
+            split_point,
+            max_output_tokens,
+            self.reasoning_effort,
+        );
         let response = self
             .client
-            .complete_async(&request)
+            .complete_async_with_tools(&request, &self.tools, Some(ToolChoice::None))
             .await
             .map_err(|error| CompressionError::new(error.to_string()))?;
         let usage = response.usage.clone();
+        if !response.tool_calls.is_empty() || !response.invalid_tool_calls.is_empty() {
+            return Err(CompressionError::with_usage(
+                "上下文压缩返回了工具调用，拒绝提交摘要",
+                usage,
+            ));
+        }
         if response.stop_reason == Some(StopReason::MaxTokens) {
             return Err(CompressionError::with_usage(
                 "上下文压缩输出达到最大 token 限制，拒绝提交截断摘要",
@@ -116,36 +142,29 @@ impl ContextCompressor {
         session: &Session,
         split_point: usize,
         max_output_tokens: u32,
+        reasoning_effort: ReasoningEffort,
     ) -> ModelRequest {
         let split_point = split_point.min(session.messages.len());
-        let start = session.summary_up_to.min(split_point);
-        let mut context = Vec::with_capacity((split_point - start) + 2);
-        if let Some(system) = session.system_prompt_message.as_ref() {
-            context.push(system.clone());
-        }
-        context.extend(
-            session.messages[start..split_point]
-                .iter()
-                .filter(|message| {
-                    is_compressible(message) || message.phase == MessagePhase::CompressedResume
-                })
-                .cloned(),
-        );
+        let mut context = session.context();
         context.push(Message::new(
             MessageRole::User,
-            Self::compress_instruction(session, max_output_tokens),
+            Self::compress_instruction(session, split_point, max_output_tokens),
         ));
 
         ModelRequest {
             session_id: Some(session.id.clone()),
             user_input: String::new(),
             context,
-            reasoning_effort: crate::model::ReasoningEffort::None,
+            reasoning_effort,
             max_output_tokens: Some(max_output_tokens),
         }
     }
 
-    fn compress_instruction(session: &Session, max_output_tokens: u32) -> String {
+    fn compress_instruction(
+        session: &Session,
+        split_point: usize,
+        max_output_tokens: u32,
+    ) -> String {
         let existing_summary = session
             .context_summary
             .as_deref()
@@ -156,8 +175,17 @@ impl ContextCompressor {
         } else {
             ""
         };
+        // 边界说明仅追加在请求末尾，不向原历史插入标记或重复整段工具输出。
+        let boundary = session.messages[..split_point].iter().rev().find(|message| {
+            message.role != MessageRole::System && message.role != MessageRole::Notice
+        }).map(|message| {
+            let tail: String = message.text_content().chars().rev().take(512).collect::<Vec<_>>().into_iter().rev().collect();
+            serde_json::json!({"role":message.role,"tool_call_id":message.tool_call_id,"tool_call_ids":message.tool_calls.iter().map(|call|&call.id).collect::<Vec<_>>(),"text_end":tail})
+        }).unwrap_or(serde_json::Value::Null);
         format!(
             "请压缩以上对话历史。{merge_hint}\
+             以上完整上下文供你理解任务。摘要截止于最后一条符合以下边界描述的历史消息（包含该消息）：{boundary}。\n\
+             边界之后的消息将原样保留，只供参考，不要重复写入摘要。不要调用工具。\n\
              总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
              保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
              不要回答用户，严格按以下格式输出：\n\n\
@@ -213,8 +241,10 @@ mod tests {
         session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
         session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
 
-        let request = ContextCompressor::summary_request(&session, 2, 10_000);
+        let request =
+            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::High);
         assert_eq!(request.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(request.reasoning_effort, ReasoningEffort::High);
 
         assert_eq!(request.max_output_tokens, Some(10_000));
         assert_eq!(request.context.len(), 4);
@@ -231,7 +261,7 @@ mod tests {
         let mut session = Session::new("test");
         session.context_summary = Some("不应重复出现的旧摘要正文".to_string());
 
-        let instruction = ContextCompressor::compress_instruction(&session, 50_000);
+        let instruction = ContextCompressor::compress_instruction(&session, 0, 50_000);
 
         assert!(instruction.contains("系统提示中已经包含此前对话摘要"));
         assert!(!instruction.contains("不应重复出现的旧摘要正文"));
@@ -247,7 +277,8 @@ mod tests {
         resume.phase = MessagePhase::CompressedResume;
         session.messages = vec![resume, assistant("后续交互")];
 
-        let request = ContextCompressor::summary_request(&session, 2, 10_000);
+        let request =
+            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
 
         assert_eq!(request.context[1].role, MessageRole::User);
         assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
