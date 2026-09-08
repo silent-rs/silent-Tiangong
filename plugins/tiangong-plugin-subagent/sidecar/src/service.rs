@@ -1118,6 +1118,39 @@ impl SubagentService {
     }
 
     /// 查找 (agent, session) 的活跃激活。
+    /// 自动激活：成员在当前会话未激活时自动建立激活（默认只读策略）。
+    /// Subagent 创建后所有会话自动可用——@成员或派活即被调度，
+    /// 无需手动激活步骤。
+    fn auto_activate(
+        &self,
+        config: &AgentConfig,
+        session_id: &str,
+        workspace: &str,
+    ) -> Result<ActivationRecord> {
+        if let Ok(activation) = self.active_activation(&config.id, session_id) {
+            return Ok(activation);
+        }
+        self.validate_activation(config)?;
+        let activation = ActivationRecord {
+            activation_id: format!("auto-{}", new_id()),
+            agent_id: config.id.clone(),
+            session_id: session_id.to_string(),
+            workspace: workspace.to_string(),
+            workspace_policy: WorkspacePolicy::ReadOnly,
+            source_workspace: workspace.to_string(),
+            activated_at: now_string(),
+            deactivated_at: None,
+            worktree_retained: false,
+        };
+        self.store.replace_activation(activation.clone())?;
+        tracing::info!(
+            agent_id = %config.id,
+            session_id,
+            "成员自动激活到当前会话（默认只读）"
+        );
+        Ok(activation)
+    }
+
     fn active_activation(&self, agent_id: &str, session_id: &str) -> Result<ActivationRecord> {
         self.store
             .activations()
@@ -1346,10 +1379,7 @@ impl SubagentService {
             Some(origin_agent) => {
                 self.synthetic_collab_activation(&config, origin_agent, session_id)?
             }
-            None => {
-                self.validate_activation(&config)?;
-                self.active_activation(&config.id, session_id)?
-            }
+            None => self.auto_activate(&config, session_id, _workspace)?,
         };
         let run = self
             .spawn_run(
@@ -1390,10 +1420,7 @@ impl SubagentService {
             Some(origin_agent) => {
                 self.synthetic_collab_activation(&config, origin_agent, session_id)?
             }
-            None => {
-                self.validate_activation(&config)?;
-                self.active_activation(&config.id, session_id)?
-            }
+            None => self.auto_activate(&config, session_id, _workspace)?,
         };
         let timestamp = now_string();
         let task = TaskRecord {

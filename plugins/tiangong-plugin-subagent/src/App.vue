@@ -202,15 +202,18 @@ const COLLAB_EVENT_LABELS: Record<string, string> = {
 
 async function refresh() {
   try {
+    console.log('[subagent] refresh: sessionId =', JSON.stringify(sessionId.value));
     const body = await sidecarCall<StateSnapshot>('ui_state_snapshot', {
       session_id: sessionId.value,
     });
+    console.log('[subagent] refresh: agents =', body?.agents?.length);
     if (!disposed) {
       snapshot.value = body;
       connectionError.value = '';
       loaded.value = true;
     }
   } catch (error) {
+    console.error('[subagent] refresh error:', error);
     if (!disposed) {
       connectionError.value = String((error as Error).message ?? error);
       loaded.value = true;
@@ -484,6 +487,7 @@ function sessionShort(agent: AgentSummary): string {
 }
 
 onMounted(async () => {
+  console.log('[subagent] mounted: initialHostContext =', JSON.stringify(props.initialHostContext?.session));
   applyContext(props.initialHostContext);
   if (props.subscribeHostContext) {
     stopHostContext = props.subscribeHostContext((context) => {
@@ -614,7 +618,7 @@ onUnmounted(() => {
           <button
             class="btn btn-primary"
             type="button"
-            :disabled="busyAgentId === agent.config.id || !agent.activated_in_session"
+            :disabled="busyAgentId === agent.config.id"
             @click="submitTask(agent)"
           >
             提交任务
@@ -642,7 +646,6 @@ onUnmounted(() => {
         </div>
 
         <div
-          v-if="agent.activated_in_session"
           class="message-row"
         >
           <input
