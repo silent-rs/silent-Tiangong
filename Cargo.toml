@@ -81,7 +81,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.16.3"
+version = "0.16.4"
 
 [workspace.dependencies]
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
