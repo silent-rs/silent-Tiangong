@@ -96,6 +96,33 @@ pub fn session_workspace(session_id: &str) -> Option<String> {
         .filter(|cwd| std::path::Path::new(cwd).is_dir())
 }
 
+/// 确保专属会话的 cwd 与发起会话的工作区一致：不一致时更新会话文件。
+/// agent 专属会话由服务端按默认工作区创建，首次使用或发起会话切换
+/// 项目后，须对齐才能让成员在正确的项目目录下工作。
+pub fn ensure_session_workspace(session_id: &str, workspace: &str) {
+    let Ok(mut session) = load_session_json(session_id) else {
+        return;
+    };
+    let current = session
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if current == workspace.trim() {
+        return;
+    }
+    if let Some(cwd) = session.get_mut("cwd") {
+        *cwd = Value::String(workspace.trim().to_string());
+    }
+    let Ok(body) = serde_json::to_string_pretty(&session) else {
+        return;
+    };
+    if let Ok(dir) = sessions_dir() {
+        let _ = std::fs::write(dir.join(format!("{session_id}.json")), body);
+    }
+}
+
 pub fn session_exists(session_id: &str) -> bool {
     validate_session_id(session_id).is_ok()
         && sessions_dir()

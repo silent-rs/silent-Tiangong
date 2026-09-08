@@ -1634,6 +1634,9 @@ impl SubagentService {
         if let Some(run_tag) = run_tag {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
         }
+        // 工作区对齐：专属会话的 cwd 若与本次激活工作区不一致（服务端
+        // 按默认创建），先更新会话文件再投递——成员在正确的项目目录工作。
+        crate::sessions::ensure_session_workspace(source_session, &activation.workspace);
         crate::delivery::deliver_message(&self.http, source_session, &body).await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
