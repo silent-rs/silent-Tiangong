@@ -155,7 +155,12 @@ impl ContextCompressor {
             session_id: Some(session.id.clone()),
             user_input: String::new(),
             context,
-            reasoning_effort,
+            // 摘要只需整理已有事实，降低强度但不切换思考开关。
+            reasoning_effort: if reasoning_effort.is_thinking_enabled() {
+                ReasoningEffort::Low
+            } else {
+                ReasoningEffort::None
+            },
             max_output_tokens: Some(max_output_tokens),
             ..Default::default()
         }
@@ -187,6 +192,7 @@ impl ContextCompressor {
             "请压缩以上对话历史。{merge_hint}\
              以上完整上下文供你理解任务。摘要截止于最后一条符合以下边界描述的历史消息（包含该消息）：{boundary}。\n\
              边界之后的消息将原样保留，只供参考，不要重复写入摘要。不要调用工具。\n\
+             只整理已有信息，尽量缩短思考，仅做必要的简短核对；不要重新推导、扩展分析或解决任务，把输出预算优先用于完整摘要。\n\
              总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
              保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
              不要回答用户，严格按以下格式输出：\n\n\
@@ -245,7 +251,7 @@ mod tests {
         let request =
             ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::High);
         assert_eq!(request.session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(request.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(request.reasoning_effort, ReasoningEffort::Low);
 
         assert_eq!(request.max_output_tokens, Some(10_000));
         assert_eq!(request.context.len(), 4);
@@ -255,6 +261,34 @@ mod tests {
         let instruction = request.context[3].text_content();
         assert!(instruction.contains("不得超过 10000 tokens"));
         assert!(instruction.contains("[[SUMMARY]]"));
+    }
+
+    #[test]
+    fn summary_lowers_effort_without_rewriting_thinking_history() {
+        let mut session = Session::new("thinking-history");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "固定系统提示"));
+        let mut reply = assistant("已完成核对");
+        reply.reasoning_content = "  保留原始思考\n及空白  ".into();
+        reply.reasoning_signature = Some("original-signature".into());
+        session.messages = vec![user("核对记录"), reply, user("后续问题")];
+        let original = serde_json::to_value(&session).unwrap();
+        let history = serde_json::to_value(session.context()).unwrap();
+
+        for (effort, expected) in [
+            (ReasoningEffort::None, ReasoningEffort::None),
+            (ReasoningEffort::Low, ReasoningEffort::Low),
+            (ReasoningEffort::Medium, ReasoningEffort::Low),
+            (ReasoningEffort::High, ReasoningEffort::Low),
+            (ReasoningEffort::Max, ReasoningEffort::Low),
+        ] {
+            let request = ContextCompressor::summary_request(&session, 2, 10_000, effort);
+            assert_eq!(request.reasoning_effort, expected);
+            let (instruction, prefix) = request.context.split_last().unwrap();
+            assert_eq!(serde_json::to_value(prefix).unwrap(), history);
+            assert_eq!(instruction.role, MessageRole::User);
+            assert!(instruction.text_content().contains("尽量缩短思考"));
+            assert_eq!(serde_json::to_value(&session).unwrap(), original);
+        }
     }
 
     #[test]

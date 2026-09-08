@@ -2,7 +2,7 @@ use super::*;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn compression_request_preserves_full_prefix_tools_and_reasoning() {
+async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort() {
     use crate::context::compressor::ContextCompressor;
     for protocol in [
         ProviderProtocol::OpenAi,
@@ -64,6 +64,10 @@ async fn compression_request_preserves_full_prefix_tools_and_reasoning() {
         assert_eq!(update.summary, "先前结论摘要");
         assert_eq!(update.summary_up_to, 2);
         assert_eq!(
+            harness.ctx.agent_config.reasoning_effort,
+            crate::model::ReasoningEffort::High
+        );
+        assert_eq!(
             serde_json::to_vec(&harness.ctx.session).unwrap(),
             before_session
         );
@@ -76,13 +80,19 @@ async fn compression_request_preserves_full_prefix_tools_and_reasoning() {
         assert_eq!(after["tool_choice"], "none");
         let field = if protocol == ProviderProtocol::OpenAi {
             assert_eq!(before["instructions"], after["instructions"]);
-            assert_eq!(before["reasoning"], after["reasoning"]);
+            assert_eq!(before["reasoning"]["effort"], "high");
+            assert_eq!(after["reasoning"]["effort"], "low");
+            assert_eq!(
+                before["reasoning"]["summary"],
+                after["reasoning"]["summary"]
+            );
             assert_eq!(before["prompt_cache_key"], after["prompt_cache_key"]);
             assert_eq!(after["max_output_tokens"], 4096);
             "input"
         } else {
             assert_eq!(before["thinking"], after["thinking"]);
-            assert_eq!(before["reasoning_effort"], after["reasoning_effort"]);
+            assert_eq!(before["reasoning_effort"], "high");
+            assert_eq!(after["reasoning_effort"], "low");
             assert_eq!(after["max_tokens"], 4096);
             "messages"
         };
@@ -92,6 +102,7 @@ async fn compression_request_preserves_full_prefix_tools_and_reasoning() {
         assert_eq!(&new[..old.len()], old.as_slice());
         assert!(new.last().unwrap().to_string().contains("先前结论"));
         assert!(new.last().unwrap().to_string().contains("不要调用工具"));
+        assert!(new.last().unwrap().to_string().contains("尽量缩短思考"));
     }
 }
 
