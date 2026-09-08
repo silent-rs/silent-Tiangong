@@ -42,6 +42,8 @@ pub struct McpService {
     capability: McpCapabilityIndex,
     capability_cache_path: PathBuf,
     mcp_config_path: PathBuf,
+    /// 启动时配置文件加载失败的原因；存在期间拒绝任何写回，防止默认空配置覆盖磁盘上的真实配置。
+    config_load_error: RwLock<Option<String>>,
     /// 当前会话工作目录（由 reconfigure 注入，stdio MCP 子进程用）。
     workspace: RwLock<Option<PathBuf>>,
 }
@@ -56,7 +58,7 @@ impl McpService {
     }
 
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Result<Self> {
-        let mcp_config = load_mcp_config_from_path(&mcp_config_path);
+        let (mcp_config, config_load_error) = load_mcp_config_from_path(&mcp_config_path);
         let capability = McpCapabilityIndex::new();
         let _ = capability.load_cache(&capability_cache_path);
         Ok(Self {
@@ -65,6 +67,7 @@ impl McpService {
             capability,
             capability_cache_path,
             mcp_config_path,
+            config_load_error: RwLock::new(config_load_error),
             workspace: RwLock::new(None),
         })
     }
@@ -307,11 +310,29 @@ impl McpService {
     }
 
     fn apply_config(&self, next: McpConfig, affected_server: Option<&str>) -> Result<()> {
+        // 启动时配置加载失败（文件损坏/不可读）且文件仍在磁盘上：内存里是
+        // 兜底默认配置，一旦写回会把磁盘上的真实配置整体抹掉，必须拒绝。
+        if let Some(error) = self
+            .config_load_error
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            && self.mcp_config_path.exists()
+        {
+            return Err(anyhow!(
+                "MCP 配置文件加载失败，拒绝写回以防覆盖现有配置：{}（{error}）",
+                self.mcp_config_path.display()
+            ));
+        }
         write_mcp_config_to_path(&self.mcp_config_path, &next)?;
         if let Ok(mut guard) = self.mcp_config.write() {
             *guard = next.clone();
         } else {
             return Err(anyhow!("MCP 配置锁中毒"));
+        }
+        // 写回内容来自内存快照序列化，必然可解析，清除加载失败状态。
+        if let Ok(mut guard) = self.config_load_error.write() {
+            *guard = None;
         }
         self.capability.configure_scheduler(
             next.clone(),
@@ -501,28 +522,34 @@ impl McpService {
     }
 }
 
-/// 从指定路径加载 MCP 配置；文件不存在或解析失败时返回默认配置。
-fn load_mcp_config_from_path(path: &std::path::Path) -> McpConfig {
+/// 从指定路径加载 MCP 配置；返回（配置, 加载失败原因）。
+///
+/// 文件不存在是首装常态，返回默认配置且无错误；文件存在但读取/解析失败时
+/// 同样返回默认配置供只读展示，但记录错误原因——`apply_config` 依赖它拒绝
+/// 写回，避免默认空配置覆盖磁盘上的真实配置。
+fn load_mcp_config_from_path(path: &std::path::Path) -> (McpConfig, Option<String>) {
     if !path.exists() {
-        return McpConfig::default();
+        return (McpConfig::default(), None);
     }
     match std::fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str::<McpConfig>(&content) {
-            Ok(config) => config,
+            Ok(config) => (config, None),
             Err(err) => {
+                let reason = format!("解析失败：{err}");
                 tracing::warn!(
-                    "MCP 配置解析失败，回退为默认配置：path={} error={err}",
+                    "MCP 配置解析失败，回退为默认配置（写回已禁止）：path={} error={err}",
                     path.display()
                 );
-                McpConfig::default()
+                (McpConfig::default(), Some(reason))
             }
         },
         Err(err) => {
+            let reason = format!("读取失败：{err}");
             tracing::warn!(
-                "MCP 配置读取失败，回退为默认配置：path={} error={err}",
+                "MCP 配置读取失败，回退为默认配置（写回已禁止）：path={} error={err}",
                 path.display()
             );
-            McpConfig::default()
+            (McpConfig::default(), Some(reason))
         }
     }
 }
@@ -633,5 +660,83 @@ impl tiangong_plugin_sidecar::SidecarService for McpService {
         request: tiangong_plugin_runtime::protocol::Request,
     ) -> tiangong_plugin_runtime::protocol::Response {
         McpService::dispatch(self, request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn register_request(name: &str) -> RegisterMcpServerRequest {
+        RegisterMcpServerRequest {
+            name: name.to_string(),
+            command: "echo".to_string(),
+            args: vec![],
+            tags: vec![],
+            enabled: true,
+            options: Default::default(),
+        }
+    }
+
+    #[test]
+    fn register_rejected_when_config_file_corrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        std::fs::write(&config_path, "{ 损坏的配置").unwrap();
+        let service =
+            McpService::with_paths(config_path.clone(), dir.path().join("cache.json")).unwrap();
+        let error = service
+            .register_server(register_request("new-server"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("拒绝写回"),
+            "损坏配置下注册应拒绝写回，实际：{error}"
+        );
+        // 磁盘文件保持原样，未被默认空配置覆盖。
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "{ 损坏的配置"
+        );
+    }
+
+    #[test]
+    fn register_succeeds_when_config_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let service =
+            McpService::with_paths(dir.path().join("mcp.json"), dir.path().join("cache.json"))
+                .unwrap();
+        let message = service
+            .register_server(register_request("first-server"))
+            .unwrap();
+        assert!(message.contains("first-server"));
+    }
+
+    #[test]
+    fn register_appends_to_valid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        let existing = serde_json::to_string_pretty(&McpConfig {
+            servers: vec![McpServerConfig {
+                name: "existing".to_string(),
+                transport: Default::default(),
+                command: "echo".to_string(),
+                args: vec![],
+                endpoint: String::new(),
+                auth_header: String::new(),
+                headers: BTreeMap::new(),
+                env: BTreeMap::new(),
+                enabled: true,
+                tags: vec![],
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(&config_path, existing).unwrap();
+        let service =
+            McpService::with_paths(config_path.clone(), dir.path().join("cache.json")).unwrap();
+        service.register_server(register_request("added")).unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("\"existing\""));
+        assert!(content.contains("\"added\""));
     }
 }
