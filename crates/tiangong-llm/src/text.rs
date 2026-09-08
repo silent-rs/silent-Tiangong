@@ -5,14 +5,11 @@
 
 use std::time::Duration;
 
+use crate::endpoint::ModelEndpoint;
 use crate::error::LlmError;
 use crate::message::{ChatMessage, MessageContent, MessageRole};
 use crate::model::ProviderProtocol;
-use crate::provider::LlmProvider;
-use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
-use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
-use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
+use crate::provider_client::{ProviderDispatch, SingleProviderClient};
 use crate::request::ProviderRequest;
 use crate::request::ReasoningEffort;
 
@@ -89,43 +86,23 @@ pub async fn complete_text_with_usage(
     Ok((message_text(&response.assistant_message), response.usage))
 }
 
-fn build_provider(config: &LlmEndpointConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
-    match config.protocol {
-        ProviderProtocol::OpenAi => {
-            let mut provider_config =
-                OpenAiResponsesConfig::new(config.api_key.clone(), config.base_url.clone());
-            provider_config.timeout = config.timeout;
-            provider_config.max_retries = config.max_retries;
-            Ok(Box::new(OpenAiResponsesProvider::new(provider_config)))
-        }
-        ProviderProtocol::OpenAiChatCompletions => {
-            let mut provider_config =
-                OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());
-            provider_config.timeout = config.timeout;
-            provider_config.max_retries = config.max_retries;
-            Ok(Box::new(OpenAiChatCompletionsProvider::new(
-                provider_config,
-            )))
-        }
-        ProviderProtocol::Anthropic => {
-            let mut provider_config = AnthropicConfig::new(config.api_key.clone());
-            if !config.base_url.trim().is_empty() {
-                provider_config.base_url = Some(config.base_url.clone());
-            }
-            provider_config.timeout = config.timeout;
-            provider_config.max_retries = config.max_retries;
-            Ok(Box::new(AnthropicProvider::from_config(provider_config)?))
-        }
-        ProviderProtocol::DeepSeek => {
-            let mut provider_config = DeepSeekConfig::new(config.api_key.clone());
-            if !config.base_url.trim().is_empty() {
-                provider_config.base_url = Some(config.base_url.clone());
-            }
-            provider_config.timeout = config.timeout;
-            provider_config.max_retries = config.max_retries;
-            Ok(Box::new(DeepSeekProvider::from_config(provider_config)?))
-        }
-    }
+fn build_provider(config: &LlmEndpointConfig) -> Result<ProviderDispatch, LlmError> {
+    let timeout_ms = config.timeout.as_millis().min(u64::MAX as u128) as u64;
+    SingleProviderClient::new(ModelEndpoint {
+        api_key: config.api_key.clone(),
+        base_url: config.base_url.clone(),
+        model: config.model.clone(),
+        protocol: config.protocol,
+        timeout_ms,
+        ..Default::default()
+    })
+    .build_provider_dispatch(timeout_ms, None, config.max_retries)
+    .map_err(|error| {
+        error
+            .downcast_ref::<LlmError>()
+            .cloned()
+            .unwrap_or_else(|| LlmError::Configuration(error.to_string()))
+    })
 }
 
 fn message_text(message: &ChatMessage) -> String {

@@ -62,6 +62,9 @@ fn map_event(
             ]
         }
         E::Usage(usage) => vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))],
+        E::FinishReason(reason) => vec![Ok(ProviderStreamEvent::MessageEnd {
+            stop_reason: Some(super::mapping::map_stop_reason(&reason)),
+        })],
         E::Done => vec![Ok(ProviderStreamEvent::MessageEnd { stop_reason: None })],
         E::Error(message) => vec![Err(LlmError::Provider {
             provider: "deepseek",

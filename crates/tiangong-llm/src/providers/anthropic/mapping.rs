@@ -334,12 +334,17 @@ pub(super) fn map_stream_event(
                 Ok(Vec::new())
             }
         }
-        StreamEvent::MessageDelta { usage, .. } => {
+        StreamEvent::MessageDelta { delta, usage } => {
+            let mut events = Vec::new();
             if let Some(usage) = usage {
-                Ok(vec![ProviderStreamEvent::Usage(map_usage(usage))])
-            } else {
-                Ok(Vec::new())
+                events.push(ProviderStreamEvent::Usage(map_usage(usage)));
             }
+            if let Some(reason) = delta.stop_reason {
+                events.push(ProviderStreamEvent::MessageEnd {
+                    stop_reason: Some(map_stop_reason(&reason)),
+                });
+            }
+            Ok(events)
         }
         StreamEvent::MessageStop => Ok(vec![ProviderStreamEvent::MessageEnd { stop_reason: None }]),
         StreamEvent::Error { message } => Ok(vec![ProviderStreamEvent::Error(message)]),

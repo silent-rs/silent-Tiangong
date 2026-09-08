@@ -138,6 +138,7 @@ async fn analyze(req: AnalyzeRequest) -> Result<AnalyzeResponse> {
         context,
         reasoning_effort: tiangong_llm::request::ReasoningEffort::None,
         max_output_tokens: None,
+        ..Default::default()
     };
 
     let response = client

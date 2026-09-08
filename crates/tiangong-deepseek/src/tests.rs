@@ -389,13 +389,15 @@ fn stream_chunk_emits_multiple_events() {
 }
 
 #[test]
-fn stream_empty_delta_is_skipped_not_error() {
+fn stream_empty_delta_preserves_finish_reason() {
     // OpenAI 兼容协议：role 首片和 finish_reason 结束片 delta 全空，是正常 chunk。
     let role_chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
     assert!(parse_stream_chunk(role_chunk).is_empty());
 
     let finish_chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-    assert!(parse_stream_chunk(finish_chunk).is_empty());
+    assert!(
+        matches!(parse_stream_chunk(finish_chunk).as_slice(), [Ok(StreamEvent::FinishReason(reason))] if reason == "stop")
+    );
 }
 
 #[test]
@@ -1267,6 +1269,80 @@ async fn chat_stream_accepts_server_ignoring_stream_flag() {
     }
     assert_eq!(text, "一次性完整回复");
     assert!(done, "应收到终止事件");
+}
+
+#[tokio::test]
+async fn finish_reason_survives_all_chat_response_paths() {
+    use futures_util::StreamExt;
+
+    for reason in [
+        "stop",
+        "length",
+        "content_filter",
+        "tool_calls",
+        "insufficient_system_resource",
+        "future_vendor_reason",
+    ] {
+        for (content_type, streaming) in [
+            ("application/json", false),
+            ("application/json", true),
+            ("text/event-stream", true),
+            ("application/octet-stream", true),
+        ] {
+            // 覆盖启用工具文本缓冲与普通对话两条事件转发路径。
+            for with_tools in [false, true] {
+                let usage = json!({"prompt_tokens":3,"completion_tokens":5,"total_tokens":8});
+                let body = if content_type == "application/json" {
+                    json!({"id":"finish","object":"chat.completion","created":0,"model":"deepseek-v4-flash",
+                        "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":reason}],
+                        "usage":usage}).to_string()
+                } else {
+                    // 中间片明确为 null；结束片没有文本，但必须透传原因和用量。
+                    let first = json!({"id":"finish","object":"chat.completion.chunk","created":0,"model":"deepseek-v4-flash",
+                        "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]});
+                    let last = json!({"id":"finish","object":"chat.completion.chunk","created":0,"model":"deepseek-v4-flash",
+                        "choices":[{"index":0,"delta":{},"finish_reason":reason}],"usage":usage});
+                    format!("data: {first}\n\ndata: {last}\n\ndata: [DONE]\n\n")
+                };
+                let server =
+                    MockServer::start(vec![http_response("200 OK", content_type, body.as_bytes())]);
+                let client = mock_client(&server.addr);
+                let request: ChatCompletionRequest = serde_json::from_value(json!({
+                    "model":"deepseek-v4-flash", "messages":[{"role":"user","content":"测试"}],
+                    "stream":streaming,
+                    "tools": if with_tools { json!([{"type":"function","function":{"name":"probe","parameters":{"type":"object"}}}]) } else { json!(null) }
+                })).unwrap();
+                if !streaming {
+                    let response = client.chat().create(request).await.unwrap();
+                    assert_eq!(response.choices[0].finish_reason, reason);
+                    assert_eq!(response.usage.total_tokens, 8);
+                    continue;
+                }
+                let events = client
+                    .chat()
+                    .create_stream(request)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let reasons: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        StreamEvent::FinishReason(reason) => Some(reason.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reasons, vec![reason], "{content_type}, tools={with_tools}");
+                assert!(matches!(events.last(), Some(StreamEvent::Done)));
+                assert!(events.iter().any(
+                    |event| matches!(event, StreamEvent::Usage(usage) if usage.total_tokens == 8)
+                ));
+            }
+        }
+    }
 }
 
 #[tokio::test]

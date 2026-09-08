@@ -12,6 +12,7 @@ fn request(session_id: &str) -> ModelRequest {
         ],
         reasoning_effort: ReasoningEffort::None,
         max_output_tokens: Some(256),
+        ..Default::default()
     }
 }
 
@@ -24,6 +25,205 @@ fn reply(protocol: ProviderProtocol) -> Value {
         json!({"id":"chat_test","created":0,"object":"chat.completion","model":"test-model",
             "choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"OK"}}],
             "usage":{"prompt_tokens":100,"completion_tokens":2,"total_tokens":102,"prompt_tokens_details":{"cached_tokens":80}}})
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() {
+    for protocol in [
+        ProviderProtocol::OpenAi,
+        ProviderProtocol::OpenAiChatCompletions,
+        ProviderProtocol::DeepSeek,
+        ProviderProtocol::Anthropic,
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(move |request: &wiremock::Request| {
+            let payload: Value = serde_json::from_slice(&request.body).unwrap();
+            if protocol != ProviderProtocol::Anthropic {
+                return ResponseTemplate::new(200).set_body_json(reply(protocol));
+            }
+            if payload["stream"] != true {
+                return ResponseTemplate::new(200).set_body_json(json!({"id":"m","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":2,"cache_read_input_tokens":80}}));
+            }
+            let events = [
+                json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":80}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),
+                json!({"type":"message_stop"}),
+            ];
+            ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string(events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect::<String>())
+        }).expect(4).mount(&server).await;
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test-key".into(),
+            model: "test-model".into(),
+            protocol,
+            headers: [("x-session".into(), "${session_id}".into())].into(),
+            ..Default::default()
+        });
+        let req = ModelRequest {
+            tools: vec![ToolSpec {
+                name: "probe".into(),
+                description: "固定工具".into(),
+                input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            }],
+            tool_choice: Some(ToolChoice::None),
+            temperature: Some(0.2),
+            timeout_ms: Some(5_000),
+            ..request("unified-session")
+        };
+        let first = client.complete_async(&req).await.unwrap();
+        let sync_client = client.clone();
+        let sync_req = req.clone();
+        let second = tokio::task::spawn_blocking(move || sync_client.complete(&sync_req))
+            .await
+            .unwrap()
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let third = client.clone().stream_async(req.clone(), tx).await.unwrap();
+        let chunks: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(chunks.iter().any(|chunk| chunk.usage.is_some()));
+        let (fourth, chunks) = tokio::task::spawn_blocking(move || {
+            let mut chunks = Vec::new();
+            let response = client
+                .complete_stream(&req, &mut |chunk| chunks.push(chunk.clone()))
+                .unwrap();
+            (response, chunks)
+        })
+        .await
+        .unwrap();
+        assert!(chunks.iter().any(|chunk| chunk.usage.is_some()));
+        for response in [second, third, fourth] {
+            assert_eq!(response.text, first.text);
+            assert_eq!(response.stop_reason, first.stop_reason, "{protocol:?}");
+            assert_eq!(
+                serde_json::to_value(response.usage).unwrap(),
+                serde_json::to_value(&first.usage).unwrap()
+            );
+        }
+        let requests = server.received_requests().await.unwrap();
+        let mut previous = None;
+        for request in requests {
+            assert_eq!(request.headers.get("x-session").unwrap(), "unified-session");
+            let mut payload: Value = serde_json::from_slice(&request.body).unwrap();
+            payload.as_object_mut().unwrap().remove("stream");
+            payload.as_object_mut().unwrap().remove("stream_options");
+            if let Some(previous) = previous {
+                assert_eq!(payload, previous);
+            }
+            previous = Some(payload);
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_truncated_response_preserves_stop_reason_and_usage_in_both_modes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "id":"empty","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":""}}],
+        "usage":{"prompt_tokens":100,"completion_tokens":256,"total_tokens":356,"prompt_tokens_details":{"cached_tokens":80}}
+    }))).expect(2).mount(&server).await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        ..Default::default()
+    });
+    let req = request("empty-response");
+    let first = client.complete_async(&req).await.unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let second = client.stream_async(req, tx).await.unwrap();
+    for response in [first, second] {
+        assert!(response.text.is_empty());
+        assert_eq!(
+            response.stop_reason,
+            Some(crate::response::StopReason::MaxTokens)
+        );
+        assert_eq!(response.usage.total_tokens, 356);
+        assert_eq!(response.usage.prompt_cache_hit_tokens, Some(80));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lite_and_text_helpers_preserve_their_request_options() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(reply(ProviderProtocol::OpenAiChatCompletions)),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = SingleProviderClient::new(ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test".into(),
+        model: "test-model".into(),
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        ..Default::default()
+    });
+    assert_eq!(
+        tokio::task::spawn_blocking(move || client.complete_lite("标题输入"))
+            .await
+            .unwrap()
+            .unwrap(),
+        "OK"
+    );
+    let config = crate::text::LlmEndpointConfig {
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        max_retries: 0,
+        ..crate::text::LlmEndpointConfig::new("test", server.uri(), "test-model")
+    };
+    let (text, usage) = crate::text::complete_text_with_usage(&config, "固定系统", "文本输入", 123)
+        .await
+        .unwrap();
+    assert_eq!(text, "OK");
+    assert_eq!(usage.unwrap().prompt_cache_hit_tokens, Some(80));
+    let requests = server.received_requests().await.unwrap();
+    for (request, limit, temperature) in [(&requests[0], 200, 0.3), (&requests[1], 123, 0.2)] {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["max_tokens"], limit);
+        assert!((body["temperature"].as_f64().unwrap() - temperature).abs() < 0.0001);
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+    for protocol in [
+        ProviderProtocol::OpenAiChatCompletions,
+        ProviderProtocol::OpenAi,
+    ] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let config = crate::text::LlmEndpointConfig {
+            protocol,
+            ..config.clone()
+        };
+        assert!(
+            crate::text::complete_text(&config, "固定系统", "失败输入", 123)
+                .await
+                .is_err()
+        );
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test".into(),
+            model: "test-model".into(),
+            protocol,
+            ..Default::default()
+        });
+        let provider = client.build_provider_dispatch(5_000, None, 0).unwrap();
+        assert!(
+            provider
+                .stream(client.build_provider_request(&request("no-retry")).unwrap())
+                .await
+                .is_err()
+        );
+        server.verify().await;
     }
 }
 
@@ -63,21 +263,16 @@ async fn session_headers_reach_streaming_and_non_streaming_openai_requests() {
         assert_eq!(response.text, "OK");
         assert_eq!(response.usage.prompt_cache_hit_tokens, Some(80));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        assert_eq!(
-            client
-                .stream_function_calls(req, Vec::new(), tx)
-                .await
-                .unwrap()
-                .text,
-            "OK"
-        );
+        assert_eq!(client.stream_async(req, tx).await.unwrap().text, "OK");
         let requests = server.received_requests().await.unwrap();
         for request in requests {
             let payload: Value = serde_json::from_slice(&request.body).unwrap();
             if protocol == ProviderProtocol::OpenAi {
                 assert_eq!(payload["prompt_cache_key"], session_id);
+                assert_eq!(payload["max_output_tokens"], 256);
             } else {
                 assert!(payload.get("prompt_cache_key").is_none());
+                assert_eq!(payload["max_tokens"], 256);
             }
             assert!(payload.get("session_id").is_none());
         }
@@ -125,13 +320,15 @@ async fn streamed_reasoning_is_replayed_verbatim_after_message_reload() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let response = client
             .clone()
-            .stream_function_calls(
-                req.clone(),
-                vec![ToolSpec {
-                    name: "read_probe".into(),
-                    description: "读取".into(),
-                    input_schema: json!({"type":"object"}),
-                }],
+            .stream_async(
+                req.clone().with_tools(
+                    vec![ToolSpec {
+                        name: "read_probe".into(),
+                        description: "读取".into(),
+                        input_schema: json!({"type":"object"}),
+                    }],
+                    None,
+                ),
                 tx,
             )
             .await
@@ -195,7 +392,7 @@ async fn retry_retains_the_same_session_header() {
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     client
-        .stream_function_calls(request("session_retry"), Vec::new(), tx)
+        .stream_async(request("session_retry"), tx)
         .await
         .unwrap();
     let requests = server.received_requests().await.unwrap();
@@ -322,7 +519,7 @@ async fn live_session_routing_smoke() {
                 Duration::from_secs(100),
                 client
                     .clone()
-                    .stream_function_calls(req.clone(), tools.clone(), tx),
+                    .stream_async(req.clone().with_tools(tools.clone(), None), tx),
             )
             .await
             .unwrap()
