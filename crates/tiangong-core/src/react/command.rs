@@ -43,6 +43,15 @@ pub(super) fn save_user_message_and_restart(
         session_id = %ctx.session.id,
         "运行中注入用户消息：中断当前执行并追加新消息"
     );
+    // 注入即新意图开始：重播 turn 开始钩子，让缓存会话快照的插件
+    // （如附件分析按 message_id 精确定位附件）看到刚追加的消息。
+    // ALR-108 的"物理 turn 一次"约束针对常规生命周期；不重播时插件
+    // 快照停留在 turn 开始时刻，注入消息中的附件资源永远找不到。
+    if let Some(turn_start_idx) = ctx.session.latest_user_message_index() {
+        for plugin in &ctx.plugins {
+            plugin.on_turn_started(&mut ctx.session, turn_start_idx);
+        }
+    }
     state.reset_tool_history();
     Ok(())
 }
