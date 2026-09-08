@@ -124,6 +124,79 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   );
 }
 
+
+/// Subagent Hook 回报卡片：状态色竖条+状态图标+成员名+徽章+可折叠内容。
+function SubagentReportCard({ agentName, status, content, time, onCopy, renderText }: {
+  agentName: string; status: string; content: string; time: string;
+  onCopy: () => void; renderText: (text: string) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const statusIcon: Record<string, string> = { '任务完成': '✓', '执行失败': '✗', '运行阻塞': '⏳', '等待审批': '?' };
+  const accentColor: Record<string, string> = {
+    '任务完成': 'border-l-emerald-500', '执行失败': 'border-l-red-500',
+    '运行阻塞': 'border-l-amber-500', '等待审批': 'border-l-blue-500', '消息': 'border-l-border',
+  };
+  const iconBg: Record<string, string> = {
+    '任务完成': 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+    '执行失败': 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+    '运行阻塞': 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+    '等待审批': 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+    '消息': 'bg-muted text-muted-foreground border-border',
+  };
+  const pillColor: Record<string, string> = {
+    '任务完成': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/15',
+    '执行失败': 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/15',
+    '运行阻塞': 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/15',
+    '等待审批': 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/15',
+    '消息': 'bg-muted/50 text-muted-foreground border-border',
+  };
+  const ac = accentColor[status] || accentColor['消息'];
+  const ib = iconBg[status] || iconBg['消息'];
+  const pc = pillColor[status] || pillColor['消息'];
+  const TRUNCATE_LEN = 300;
+  const isLong = content.length > TRUNCATE_LEN;
+  const displayContent = expanded || !isLong ? content : content.slice(0, TRUNCATE_LEN) + '…';
+  return (
+    <div className="w-full max-w-[92%] sm:max-w-[80%]">
+      <div className={`rounded-xl border border-border/60 border-l-[3px] ${ac} bg-card shadow-sm overflow-hidden`}>
+        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-border/30 bg-muted/[0.15]">
+          <div className={`flex items-center justify-center w-7 h-7 rounded-full border shrink-0 ${ib}`}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+              {status === '任务完成' && <path d="M20 6 9 17l-5-5"/>}
+              {status === '执行失败' && <><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>}
+              {status === '运行阻塞' && <><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>}
+              {status === '等待审批' && <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></>}
+              {status === '消息' && <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
+            </svg>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">{agentName}</span>
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${pc}`}>
+                {statusIcon[status] || '•'} {status}
+              </span>
+            </div>
+          </div>
+          <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
+          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          </button>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+            {renderText(displayContent)}
+          </div>
+          {isLong && (
+            <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
+              {expanded ? '收起' : `展开全部（${content.length} 字）`}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
@@ -280,64 +353,17 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           })() : subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
             const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
-            const status = statusMatch ? statusMatch[1] : "消息";
+            const status = statusMatch ? statusMatch[1] : '消息';
             const content = statusMatch ? body.slice(statusMatch[0].length) : body;
-            const statusIcon: Record<string, string> = { "任务完成": "✓", "执行失败": "✗", "运行阻塞": "⏳", "等待审批": "?" };
-            const accentColor: Record<string, string> = {
-              "任务完成": "border-l-emerald-500",
-              "执行失败": "border-l-red-500",
-              "运行阻塞": "border-l-amber-500",
-              "等待审批": "border-l-blue-500",
-              "消息": "border-l-border",
-            };
-            const iconBg: Record<string, string> = {
-              "任务完成": "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20",
-              "执行失败": "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20",
-              "运行阻塞": "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
-              "等待审批": "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20",
-              "消息": "bg-muted text-muted-foreground border-border",
-            };
-            const pillColor: Record<string, string> = {
-              "任务完成": "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/15",
-              "执行失败": "bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/15",
-              "运行阻塞": "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/15",
-              "等待审批": "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/15",
-              "消息": "bg-muted/50 text-muted-foreground border-border",
-            };
-            const ac = accentColor[status] || accentColor["消息"];
-            const ib = iconBg[status] || iconBg["消息"];
-            const pc = pillColor[status] || pillColor["消息"];
             return (
-              <div className="w-full max-w-[92%] sm:max-w-[80%]">
-                <div className={`rounded-xl border border-border/60 border-l-[3px] ${ac} bg-card shadow-sm overflow-hidden`}>
-                  <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-border/30 bg-muted/[0.15]">
-                    <div className={`flex items-center justify-center w-7 h-7 rounded-full border shrink-0 ${ib}`}>
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
-                        {status === "任务完成" && <path d="M20 6 9 17l-5-5"/>}
-                        {status === "执行失败" && <><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>}
-                        {status === "运行阻塞" && <><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>}
-                        {status === "等待审批" && <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></>}
-                        {status === "消息" && <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
-                      </svg>
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-foreground">{agentName.trim()}</span>
-                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${pc}`}>
-                          {statusIcon[status] || "•"} {status}
-                        </span>
-                      </div>
-                    </div>
-                    <span className="text-[10px] text-muted-foreground/50 shrink-0">{formatMessageTime(message.created_at)}</span>
-                    <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={() => navigator.clipboard.writeText(messageText).catch(() => {})}>
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                    </button>
-                  </div>
-                  <div className="px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-                    {renderUserText(content.trim())}
-                  </div>
-                </div>
-              </div>
+              <SubagentReportCard
+                agentName={agentName.trim()}
+                status={status}
+                content={content.trim()}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
             );
           })() : scheduledTask || webhook ? (
             (() => {
