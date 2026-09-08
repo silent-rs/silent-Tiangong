@@ -239,15 +239,48 @@ fn map_stop_reason(reason: &str) -> StopReason {
 }
 
 fn map_usage(usage: Usage) -> TokenUsageData {
-    TokenUsageData::new(
-        usage.input_tokens.unwrap_or(0) as usize,
+    let uncached = usage.input_tokens.unwrap_or(0) as usize;
+    let read = usage.cache_read_input_tokens.map(|value| value as usize);
+    let created = usage
+        .cache_creation_input_tokens
+        .map(|value| value as usize);
+    let miss = uncached + created.unwrap_or(0);
+    let mut mapped = TokenUsageData::new(
+        miss + read.unwrap_or(0),
         usage.output_tokens.unwrap_or(0) as usize,
-    )
+    );
+    mapped.prompt_cache_hit_tokens = read;
+    // GLM 可只返回 cache_read；完全不提供缓存字段的旧响应仍保持未知。
+    if usage.input_tokens.is_some() && (read.is_some() || created.is_some()) {
+        mapped.prompt_cache_miss_tokens = Some(miss);
+    }
+    mapped
 }
 
 #[derive(Default)]
 pub(super) struct AnthropicStreamState {
     tool_calls: BTreeMap<usize, ToolCallAccumulator>,
+    usage: Usage,
+}
+
+impl AnthropicStreamState {
+    fn merge_usage(&mut self, next: Usage) -> TokenUsageData {
+        // message_delta 通常只包含累计输出；缺失字段沿用 message_start。
+        // 必须先合并原始字段，再计算完整输入，不能把各帧的输入总量相加。
+        if next.input_tokens.is_some() {
+            self.usage.input_tokens = next.input_tokens;
+        }
+        if next.output_tokens.is_some() {
+            self.usage.output_tokens = next.output_tokens;
+        }
+        if next.cache_read_input_tokens.is_some() {
+            self.usage.cache_read_input_tokens = next.cache_read_input_tokens;
+        }
+        if next.cache_creation_input_tokens.is_some() {
+            self.usage.cache_creation_input_tokens = next.cache_creation_input_tokens;
+        }
+        map_usage(self.usage.clone())
+    }
 }
 
 #[derive(Default)]
@@ -263,7 +296,7 @@ pub(super) fn map_stream_event(
         StreamEvent::MessageStart { message } => {
             let mut events = vec![ProviderStreamEvent::MessageStart];
             if let Some(usage) = message.usage {
-                events.push(ProviderStreamEvent::Usage(map_usage(usage)));
+                events.push(ProviderStreamEvent::Usage(state.merge_usage(usage)));
             }
             Ok(events)
         }
@@ -337,7 +370,7 @@ pub(super) fn map_stream_event(
         StreamEvent::MessageDelta { delta, usage } => {
             let mut events = Vec::new();
             if let Some(usage) = usage {
-                events.push(ProviderStreamEvent::Usage(map_usage(usage)));
+                events.push(ProviderStreamEvent::Usage(state.merge_usage(usage)));
             }
             if let Some(reason) = delta.stop_reason {
                 events.push(ProviderStreamEvent::MessageEnd {

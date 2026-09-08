@@ -16,6 +16,154 @@ use crate::permission::TrustMode;
 use crate::session::MessageRole;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_continuations_failure_compression_and_reload_keep_usage_balanced() {
+    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::session::Session;
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tiangong_llm::ProviderProtocol;
+    use tiangong_types::TokenUsage;
+    use wiremock::{Mock, ResponseTemplate, matchers::method};
+
+    let (env, sid) = TestEnv::new("anthropic-usage");
+    let server = MockServer::start().await;
+    let step = AtomicUsize::new(0);
+    Mock::given(method("POST")).respond_with(move |request: &wiremock::Request| {
+        let index = step.fetch_add(1, Ordering::SeqCst);
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let (uncached, read, created, output) = [
+            (10000,0,0,20), (20,10000,0,30), (10,10020,20,10),
+            (5,10050,0,3), (15,10050,0,25),
+        ][index];
+        let usage = json!({"input_tokens":uncached,"cache_read_input_tokens":read,"cache_creation_input_tokens":created,"output_tokens":output});
+        if body["stream"] != true {
+            assert_eq!(index,4);
+            return ResponseTemplate::new(200).set_body_json(json!({"id":"summary","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"[[SUMMARY]]\n已完成前两轮，第三轮请求失败。"}],"stop_reason":"end_turn","usage":usage}));
+        }
+        let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"probe","input":{}}) } else { json!({"type":"text","text":"完成"}) };
+        let mut events = vec![
+            json!({"type":"message_start","message":{"id":format!("m{index}"),"model":"glm-5.3-flash","role":"assistant","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":block}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{},"usage":usage}),
+        ];
+        if index == 0 {
+            events.insert(2, json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}));
+        }
+        if index==3 {
+            events.push(json!({"type":"error","error":{"type":"api_error","message":"测试请求中断"}}));
+        } else {
+            events.push(json!({"type":"message_delta","delta":{"stop_reason":if index==0 {"tool_use"} else {"end_turn"}},"usage":usage}));
+            events.push(json!({"type":"message_stop"}));
+        }
+        ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+            .set_body_string(events.iter().map(|e|format!("event: {}\ndata: {e}\n\n",e["type"].as_str().unwrap())).collect::<String>())
+    }).expect(5).mount(&server).await;
+
+    let mut session = Session::new("GLM 用量验证");
+    session.id = sid.clone();
+    session.bind_storage_root(&env.root);
+    // 旧累计可能包含已经没有明细的调用，不能因重新加载而抹掉。
+    session.token_usage = TokenUsage {
+        prompt_tokens: 17,
+        completion_tokens: 5,
+        total_tokens: 22,
+        ..Default::default()
+    };
+    session.try_persist_to_disk().unwrap();
+    let tool = RecordingTool::succeed("probe");
+    let build = || {
+        let mut config = CoreConfig::builder()
+            .with_chat(&server.uri(), "test", "glm-5.3-flash")
+            .with_trust_mode(TrustMode::FullTrust)
+            .build();
+        config.llm.chat.protocol = ProviderProtocol::Anthropic;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        super::TiangongCore::builder()
+            .session_id(sid.clone())
+            .storage_root(env.root.clone())
+            .workspace_dir(env.root.to_string_lossy())
+            .trust_mode(TrustMode::FullTrust)
+            .config(CoreConfigProvider::new(config))
+            .stream_tx(tx)
+            .plugins(vec![Arc::new(ToolPlugin {
+                id: "usage-probe",
+                tool: tool.clone(),
+            })])
+            .build()
+    };
+    let assert_totals = |expected_inputs: &[usize], expected_outputs: &[usize]| {
+        let restored = env.load_session(&sid);
+        let calls: Vec<_> = restored
+            .messages
+            .iter()
+            .filter_map(|m| m.usage.as_ref())
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|u| u.tokens.prompt_tokens)
+                .collect::<Vec<_>>(),
+            expected_inputs
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .map(|u| u.tokens.completion_tokens)
+                .collect::<Vec<_>>(),
+            expected_outputs
+        );
+        let mut total = TokenUsage::default();
+        for call in calls {
+            assert!(call.tokens.cache_hit_rate().is_some());
+            total.accumulate(&call.tokens);
+        }
+        assert_eq!(restored.token_usage.prompt_tokens, 17 + total.prompt_tokens);
+        assert_eq!(
+            restored.token_usage.completion_tokens,
+            5 + total.completion_tokens
+        );
+        assert_eq!(restored.token_usage.total_tokens, 22 + total.total_tokens);
+    };
+    let core = build();
+    send_message(&core, "usage-first", "查询数据");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "usage-first").await,
+        TurnStatus::Success
+    );
+    core.shutdown_join().unwrap();
+    assert_eq!(tool.count(), 1);
+    assert_totals(&[10000, 10020], &[20, 30]);
+    let core = build();
+    send_message(&core, "usage-second", "继续");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "usage-second").await,
+        TurnStatus::Success
+    );
+    wait_idle(&sid).await;
+    assert_totals(&[10000, 10020, 10050], &[20, 30, 10]);
+    assert_eq!(env.load_session(&sid).current_tokens, 10060);
+    send_message(&core, "usage-failed", "再次继续");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "usage-failed").await,
+        TurnStatus::Failed
+    );
+    wait_idle(&sid).await;
+    assert_totals(&[10000, 10020, 10050, 10055], &[20, 30, 10, 3]);
+    core.deliver(AgentInputKind::compress_context()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while env.load_session(&sid).context_summary.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    core.shutdown_join().unwrap();
+    assert_totals(&[10000, 10020, 10050, 10055, 10065], &[20, 30, 10, 3, 25]);
+    assert_eq!(env.load_session(&sid).current_tokens, 25);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     use crate::core::plugin::Plugin;
     use crate::core_config::{CoreConfig, CoreConfigProvider};

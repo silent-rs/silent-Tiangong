@@ -161,6 +161,7 @@ fn test_tool_and_thinking_mapping_back_to_message_content() {
         usage: Some(Usage {
             input_tokens: Some(12),
             output_tokens: Some(7),
+            ..Default::default()
         }),
     };
 
@@ -195,6 +196,7 @@ async fn test_provider_complete_and_stream_behavior() {
         usage: Some(Usage {
             input_tokens: Some(10),
             output_tokens: Some(4),
+            ..Default::default()
         }),
     };
 
@@ -210,6 +212,7 @@ async fn test_provider_complete_and_stream_behavior() {
                 usage: Some(Usage {
                     input_tokens: Some(10),
                     output_tokens: Some(0),
+                    ..Default::default()
                 }),
             },
         }),
