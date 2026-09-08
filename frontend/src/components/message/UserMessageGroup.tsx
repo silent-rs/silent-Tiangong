@@ -28,24 +28,39 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   const [expanded, setExpanded] = useState(false);
   const [metaOpen, setMetaOpen] = useState(false);
 
-  const metaMarkers = ['\u3010任务工作区\u3011', '\u3010长期指令\u3011', '\u3010长期记忆\u3011', '\u3010成长约定\u3011', '\u3010工作区状态\u3011'];
-  let coreContent = body;
-  const metaSections: { title: string; content: string }[] = [];
-  for (const marker of metaMarkers) {
-    const idx = coreContent.indexOf(marker);
-    if (idx >= 0) {
-      let end = coreContent.length;
-      for (const next of metaMarkers) {
-        const nextIdx = coreContent.indexOf(next, idx + marker.length);
-        if (nextIdx >= 0 && nextIdx < end) end = nextIdx;
-      }
-      const tagIdx = coreContent.indexOf('\uff08运行标记', idx);
-      if (tagIdx >= 0 && tagIdx < end) end = tagIdx;
-      const content = coreContent.slice(idx + marker.length, end).trim();
-      if (content) metaSections.push({ title: marker.slice(1, -1), content });
-      coreContent = coreContent.slice(0, idx).trimEnd();
-    }
+  // 标记支持新旧两种格式：【任务工作区】(新) / 任务工作区：(旧)
+  const metaDefs: [string, RegExp][] = [
+    ['任务工作区', /\u3010任务工作区\u3011|任务工作区：/],
+    ['长期指令', /\u3010长期指令\u3011/],
+    ['长期记忆', /\u3010长期记忆\u3011/],
+    ['成长约定', /\u3010成长约定\u3011/],
+    ['工作区状态', /\u3010工作区状态\u3011/],
+  ];
+  // 先在全文中定位所有标记的起始位置（互不截断），再统一提取
+  const positions: { start: number; title: string; content: string }[] = [];
+  for (const [title, re] of metaDefs) {
+    const m = re.exec(body);
+    if (!m) continue;
+    positions.push({ start: m.index, title, content: '' });
   }
+  // 加上运行标记位置作为最终截断
+  const runTagIdx = body.indexOf('\uff08运行标记');
+  positions.sort((a, b) => a.start - b.start);
+  // 逐段填充内容：从标记结束到下一个标记或运行标记或末尾
+  for (let i = 0; i < positions.length; i++) {
+    const cur = positions[i];
+    const nextStart = i + 1 < positions.length ? positions[i + 1].start
+      : (runTagIdx >= 0 ? runTagIdx : body.length);
+    cur.content = body.slice(cur.start, nextStart).trim();
+  }
+  // 提取内容去掉标记行本身
+  const metaSections = positions.map(p => ({
+    title: p.title,
+    content: p.content.replace(/^\u3010?[^\u3011\n]*\u3011?\n?/, '').trim(),
+  })).filter(s => s.content);
+  // 核心内容 = 第一个标记之前的文本
+  const firstMarkerIdx = positions.length > 0 ? positions[0].start : body.length;
+  let coreContent = body.slice(0, firstMarkerIdx).trimEnd();
   coreContent = coreContent.replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '').trim();
 
   const TRUNCATE_LEN = 300;
