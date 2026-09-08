@@ -1543,6 +1543,9 @@ fn spawn_stdio_reader(
                         }
                     }
                     IpcFrame::Notification { channel, payload } => {
+                        if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
+                            crate::registry::dispatch_tools_recovered(&plugin_id, &payload);
+                        }
                         if let Some(forwarder) = crate::sidecar::sidecar_notification_forwarder() {
                             forwarder(&plugin_id, &channel, &payload);
                         }

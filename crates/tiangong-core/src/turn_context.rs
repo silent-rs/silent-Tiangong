@@ -44,6 +44,9 @@ pub struct TurnContext {
     pub stream_tx: Sender<StreamEvent>,
     /// 本轮使用的插件及生命周期钩子。
     pub plugins: Vec<Arc<dyn Plugin>>,
+    /// 从会话恢复的固定插件提示；仅在压缩成功或清理上下文时重新采集。
+    #[builder(default)]
+    pub prompt_sections: Vec<String>,
     /// 上下文 token 上限
     pub context_limit: usize,
     /// Agent 配置（reasoning_effort 等）

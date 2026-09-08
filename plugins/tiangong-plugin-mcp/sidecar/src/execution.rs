@@ -22,7 +22,7 @@ pub struct McpFunctionTarget {
     pub tool_name: String,
 }
 
-/// 构建 sidecar 的 `list_tools` 响应：每个健康 server → 其工具列表。
+/// 构建 sidecar 的声明列表；健康状态不删减声明，显式禁用仍生效。
 pub fn list_tools_response(
     mcp_config: &McpConfig,
     active: Vec<(String, Vec<McpToolMeta>)>,
@@ -121,6 +121,9 @@ pub async fn execute_tool(
     mcp_config: &McpConfig,
     workspace: Option<PathBuf>,
 ) -> Result<ExecuteToolResponse> {
+    if !mcp_config.enabled {
+        return Err(anyhow!("MCP 已停用，拒绝执行工具"));
+    }
     let started = Instant::now();
     let server = find_mcp_server(mcp_config, &target.server_name).ok_or_else(|| {
         anyhow!(

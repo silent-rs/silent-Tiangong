@@ -1455,6 +1455,9 @@ async fn run_notification_connection(
         }
         match serde_json::from_str::<crate::protocol::IpcFrame>(line.trim_end()) {
             Ok(crate::protocol::IpcFrame::Notification { channel, payload }) => {
+                if channel == crate::protocol::TOOLS_RECOVERED_CHANNEL {
+                    crate::registry::dispatch_tools_recovered(plugin_id, &payload);
+                }
                 if let Some(forwarder) = forwarder {
                     forwarder(plugin_id, &channel, &payload);
                 }

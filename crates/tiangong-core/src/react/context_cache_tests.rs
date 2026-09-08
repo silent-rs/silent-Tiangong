@@ -1,6 +1,165 @@
 use super::*;
 use serde_json::{Value, json};
 
+#[tokio::test]
+async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort() {
+    use crate::context::compressor::ContextCompressor;
+    for protocol in [
+        ProviderProtocol::OpenAi,
+        ProviderProtocol::OpenAiChatCompletions,
+    ] {
+        let server = MockServer::builder().start().await;
+        let mut harness = TestHarness::new_with_protocol(
+            &server,
+            protocol,
+            vec![tool_spec("read_file")],
+            HashMap::new(),
+            Vec::new(),
+        );
+        harness.ctx.agent_config.reasoning_effort = crate::model::ReasoningEffort::High;
+        harness.ctx.session.messages.push(Message::with_reasoning(
+            MessageRole::Assistant,
+            "先前结论",
+            "保留这段历史思考",
+        ));
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "最新问题仍需原样保留");
+        let before_session = serde_json::to_vec(&harness.ctx.session).unwrap();
+        if protocol == ProviderProtocol::OpenAi {
+            mount_responses(&server, vec![answer("正常回复")], 0, true).await;
+        } else {
+            mount_completion(&server, "正常回复", "stop", 100, 10, None).await;
+        }
+        let req = super::super::build_react_request(&harness.ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        harness
+            .ctx
+            .client
+            .clone()
+            .stream_async(req.with_tools(harness.ctx.tools.clone(), None), tx)
+            .await
+            .unwrap();
+        if protocol == ProviderProtocol::OpenAi {
+            mount_responses(
+                &server,
+                vec![answer("[[SUMMARY]]\n先前结论摘要")],
+                3904,
+                true,
+            )
+            .await;
+        } else {
+            mount_completion(&server, "[[SUMMARY]]\n先前结论摘要", "stop", 100, 10, None).await;
+        }
+        let update = ContextCompressor::new(
+            harness.ctx.session.clone(),
+            harness.ctx.client.clone(),
+            harness.ctx.tools.clone(),
+            harness.ctx.agent_config.reasoning_effort,
+        )
+        .compress(2, 4096)
+        .await
+        .unwrap();
+        assert_eq!(update.summary, "先前结论摘要");
+        assert_eq!(update.summary_up_to, 2);
+        assert_eq!(
+            harness.ctx.agent_config.reasoning_effort,
+            crate::model::ReasoningEffort::High
+        );
+        assert_eq!(
+            serde_json::to_vec(&harness.ctx.session).unwrap(),
+            before_session
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let before: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let after: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(before["model"], after["model"]);
+        assert_eq!(before["tools"], after["tools"]);
+        assert_eq!(after["tool_choice"], "none");
+        let field = if protocol == ProviderProtocol::OpenAi {
+            assert_eq!(before["instructions"], after["instructions"]);
+            assert_eq!(before["reasoning"]["effort"], "high");
+            assert_eq!(after["reasoning"]["effort"], "low");
+            assert_eq!(
+                before["reasoning"]["summary"],
+                after["reasoning"]["summary"]
+            );
+            assert_eq!(before["prompt_cache_key"], after["prompt_cache_key"]);
+            assert_eq!(after["max_output_tokens"], 4096);
+            "input"
+        } else {
+            assert_eq!(before["thinking"], after["thinking"]);
+            assert_eq!(before["reasoning_effort"], "high");
+            assert_eq!(after["reasoning_effort"], "low");
+            assert_eq!(after["max_tokens"], 4096);
+            "messages"
+        };
+        let old = before[field].as_array().unwrap();
+        let new = after[field].as_array().unwrap();
+        assert_eq!(new.len(), old.len() + 1);
+        assert_eq!(&new[..old.len()], old.as_slice());
+        assert!(new.last().unwrap().to_string().contains("先前结论"));
+        assert!(new.last().unwrap().to_string().contains("不要调用工具"));
+        assert!(new.last().unwrap().to_string().contains("尽量缩短思考"));
+    }
+}
+
+#[tokio::test]
+async fn compression_rejects_unexpected_tool_calls() {
+    let server = MockServer::builder().start().await;
+    let harness = TestHarness::new_with_protocol(
+        &server,
+        ProviderProtocol::OpenAi,
+        vec![tool_spec("cache_probe")],
+        HashMap::new(),
+        Vec::new(),
+    );
+    mount_responses(
+        &server,
+        vec![
+            answer("[[SUMMARY]]\n不能提交的摘要"),
+            call("unexpected", 0, false, false),
+        ],
+        0,
+        true,
+    )
+    .await;
+    let result = crate::context::compressor::ContextCompressor::new(
+        harness.ctx.session.clone(),
+        harness.ctx.client.clone(),
+        harness.ctx.tools.clone(),
+        crate::model::ReasoningEffort::High,
+    )
+    .compress(1, 4096)
+    .await;
+    let error = result.unwrap_err();
+    assert!(error.message.contains("返回了工具调用"));
+    assert!(error.usage.total_tokens > 0);
+    assert!(harness.ctx.session.context_summary.is_none());
+}
+
+#[tokio::test]
+async fn compression_empty_output_keeps_usage_and_original_session() {
+    let server = MockServer::builder().start().await;
+    let harness = TestHarness::new(&server, vec![tool_spec("read_file")], HashMap::new());
+    mount_completion(&server, "", "length", 100, 4096, None).await;
+    let before = serde_json::to_vec(&harness.ctx.session).unwrap();
+    let result = crate::context::compressor::ContextCompressor::new(
+        harness.ctx.session.clone(),
+        harness.ctx.client.clone(),
+        harness.ctx.tools.clone(),
+        crate::model::ReasoningEffort::High,
+    )
+    .compress(1, 4096)
+    .await;
+    let error = result.unwrap_err();
+    assert!(error.message.contains("最大 token 限制"));
+    assert_eq!(error.usage.completion_tokens, 4096);
+    assert_eq!(serde_json::to_vec(&harness.ctx.session).unwrap(), before);
+}
+
 fn assert_request_prefix(previous: &Value, current: &Value) {
     for field in [
         "model",

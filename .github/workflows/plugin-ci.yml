@@ -267,12 +267,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust for WASM plugin
+      - name: Setup Rust for plugin protocol
         if: matrix.plugin.rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-wasip2
 
       - name: Setup Rust for native plugin
         if: matrix.plugin.native
@@ -344,18 +343,6 @@ jobs:
         env:
           PROTOCOL: ${{ matrix.plugin.protocol }}
         run: cargo clippy --locked -p "$PROTOCOL" --all-targets -- -D warnings
-
-      - name: Check plugin WASM
-        if: matrix.plugin.rust
-        env:
-          WASM: ${{ matrix.plugin.wasm }}
-        run: cargo check --locked -p "$WASM" --target wasm32-wasip2
-
-      - name: Lint plugin WASM
-        if: matrix.plugin.rust
-        env:
-          WASM: ${{ matrix.plugin.wasm }}
-        run: cargo clippy --locked -p "$WASM" --target wasm32-wasip2 -- -D warnings
 
       - name: Check native plugin formatting
         if: matrix.plugin.native

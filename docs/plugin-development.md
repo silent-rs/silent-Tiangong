@@ -250,6 +250,10 @@ wit_bindgen::generate!({
 - `open-view`、`get-view-resource`、`handle-view-message`：提供页面和双向消息。
 - `shutdown`：释放 WASM 内部状态。
 
+`tool-specs` 与 `prompt-sections` 首次采集后按插件顺序保存到会话，并由 Core 的 `PreparedPlugins` 使用。普通 turn 和 Core 重建恢复这份声明，不按工具的临时健康状态重新增删。压缩成功或清理上下文时重新采集，与摘要和系统提示一起保存；读取失败沿用该插件的旧声明，不能把错误伪装成空列表。执行权限和可用性仍在调用入口检查。
+
+工具不可用时，`handle-tool` 返回明确的失败结果。sidecar 检测到恢复后，可用现有 Notification 帧发送 `runtime.tools_recovered`，payload 为 `{"tools":["模型可见的工具名"]}`。宿主通过插件反馈通道向相关的活动 Agent 追加 `plugin_availability` 信息，不修改 system prompt/tools，也不唤醒已结束 turn。后台恢复事件应只在不可用到可用的转换时发送，避免重复通知。
+
 宿主导入目前包括：
 
 - `clock.now-millis`：读取真实时间。

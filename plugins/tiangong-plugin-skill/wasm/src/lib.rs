@@ -45,11 +45,7 @@ impl Guest for Component {
     }
 
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
-        // 仅当存在 enabled skill 时才暴露 get_skill_detail 工具。
-        let summary = load_summary().unwrap_or_default();
-        if summary.items.is_empty() {
-            return Ok(Vec::new());
-        }
+        // 工具声明固定；具体 Skill 是否存在或可用，在调用时检查。
         Ok(vec![ToolSpec {
             name: TOOL_GET_SKILL_DETAIL.to_string(),
             description: "获取已安装 Skill 的完整使用说明。".to_string(),
@@ -59,7 +55,7 @@ impl Guest for Component {
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        Ok(build_prompt_sections())
+        build_prompt_sections()
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
@@ -154,11 +150,13 @@ fn handle_get_skill_detail(call: &ToolCall) -> Result<ToolResult, PluginError> {
 // ── prompt 段落组装 ─────────────────────────────────────────────
 
 /// 构造 3 段 system prompt：已安装 skill 摘要、允许文件操作目录、创建规范。
-fn build_prompt_sections() -> Vec<String> {
+fn build_prompt_sections() -> Result<Vec<String>, PluginError> {
     let mut sections = Vec::new();
 
     // 段落 1：已安装 Skills 摘要（条件注入）。
-    if let Some(summary) = load_summary() {
+    let summary = sidecar_client::invoke::<GetSkillSummary>(&Empty {})
+        .map_err(|error| plugin_err(format!("读取 Skill 提示声明失败: {error}")))?;
+    {
         if !summary.items.is_empty() {
             let mut lines = String::from(
                 "已安装的 Skills（如果 Skill 能处理用户请求，优先调用 get_skill_detail 获取完整说明，然后按文档使用 run_command/run_shell 执行对应脚本）：\n",
@@ -181,7 +179,7 @@ fn build_prompt_sections() -> Vec<String> {
         sections.push(skill_creation_guide(&summary.storage_root));
     }
 
-    sections
+    Ok(sections)
 }
 
 /// skill 创建规范模板（对齐原 prompt.rs 的 skill_creation_guide）。

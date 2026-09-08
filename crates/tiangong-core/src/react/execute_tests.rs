@@ -647,7 +647,7 @@ async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
     let compression_body = String::from_utf8_lossy(&requests[1].body);
     let retry_body = String::from_utf8_lossy(&requests[2].body);
     assert!(first_body.contains("recent-tool-output"));
-    assert!(!compression_body.contains("recent-tool-output"));
+    assert!(compression_body.contains("recent-tool-output"));
     assert!(compression_body.contains("较早回答"));
     assert!(retry_body.contains("recent-tool-output"));
 }

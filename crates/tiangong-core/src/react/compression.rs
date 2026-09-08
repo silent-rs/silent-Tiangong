@@ -89,7 +89,12 @@ impl ContextCompression {
         notify_started(ctx);
         Self {
             task: start_task(
-                ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
+                ContextCompressor::new(
+                    ctx.session.clone(),
+                    ctx.client.clone(),
+                    ctx.tools.clone(),
+                    ctx.agent_config.reasoning_effort,
+                ),
                 organizer,
                 observed_tokens,
                 compression_split_point(&ctx.session),
@@ -233,7 +238,12 @@ pub(crate) async fn run_manual_context_compression(
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
 
-    let compressor = ContextCompressor::new(ctx.session.clone(), ctx.client.clone());
+    let compressor = ContextCompressor::new(
+        ctx.session.clone(),
+        ctx.client.clone(),
+        ctx.tools.clone(),
+        ctx.agent_config.reasoning_effort,
+    );
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
         return None;
@@ -415,11 +425,22 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
-    rebuild_system_prompt_for_session(&mut candidate, &ctx.plugins);
+    candidate.plugin_declarations = Some(crate::core::plugin::collect_declarations(
+        &ctx.plugins,
+        candidate.plugin_declarations.as_deref().unwrap_or_default(),
+    ));
+    let prepared = crate::core::plugin::PreparedPlugins::restore(
+        ctx.plugins.clone(),
+        candidate.plugin_declarations.as_deref().unwrap(),
+    );
+    rebuild_system_prompt_for_session(&mut candidate, &prepared.prompt_sections);
     candidate
         .try_persist_to_disk()
         .map_err(anyhow::Error::msg)?;
     ctx.session = candidate;
+    ctx.tools = prepared.tools;
+    ctx.tool_overrides = prepared.tool_overrides;
+    ctx.prompt_sections = prepared.prompt_sections;
     Ok(current_tokens)
 }
 
@@ -650,7 +671,7 @@ mod tests {
             session.append_message(MessageRole::User, format!("{round}问题"));
             session.append_message(MessageRole::Assistant, format!("{round}回答"));
         }
-        let (mut ctx, _root) = test_context(session);
+        let (mut ctx, root) = test_context(session);
 
         // 模拟压缩分割点：保留第三轮（最近交互），折叠前两轮。
         let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
@@ -658,6 +679,22 @@ mod tests {
 
         assert_eq!(ctx.session.context_summary.as_deref(), Some("前两轮摘要"));
         assert_eq!(ctx.session.summary_up_to, 4);
+        let saved_prompt = serde_json::to_vec(&ctx.session.system_prompt_message).unwrap();
+        let mut restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+        assert_eq!(restored.context_summary, ctx.session.context_summary);
+        assert_eq!(restored.summary_up_to, ctx.session.summary_up_to);
+        for question in ["继续", "再核对一次"] {
+            restored.append_message(MessageRole::User, question);
+            let prepared = crate::core::plugin::PreparedPlugins::restore(
+                Vec::new(),
+                restored.plugin_declarations.as_deref().unwrap(),
+            );
+            rebuild_system_prompt_for_session(&mut restored, &prepared.prompt_sections);
+            assert_eq!(
+                serde_json::to_vec(&restored.system_prompt_message).unwrap(),
+                saved_prompt
+            );
+        }
         let context = ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
         assert_eq!(context[1].text_content(), "第三轮问题");
@@ -669,6 +706,107 @@ mod tests {
                 .all(|message| message.phase != MessagePhase::CompressedResume),
             "压缩不注入合成续接消息"
         );
+    }
+
+    #[test]
+    fn compression_refreshes_declarations_atomically_and_keeps_unreadable_ones() {
+        use crate::core::plugin::{Plugin, PreparedPlugins};
+        use crate::session::PluginDeclaration;
+        use crate::tool_override::{
+            MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+        };
+
+        struct ChangingPlugin {
+            fail: bool,
+        }
+        impl Plugin for ChangingPlugin {
+            fn id(&self) -> &str {
+                "changing"
+            }
+        }
+        impl MentionCandidateProvider for ChangingPlugin {}
+        impl ToolOverrideHandler for ChangingPlugin {}
+        impl ToolSpecProvider for ChangingPlugin {
+            fn try_tool_specs(&self) -> std::result::Result<Vec<crate::model::ToolSpec>, String> {
+                if self.fail {
+                    return Err("offline".into());
+                }
+                Ok(vec![crate::model::ToolSpec {
+                    name: "new_tool".into(),
+                    description: "new".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                }])
+            }
+        }
+        impl PromptSectionProvider for ChangingPlugin {
+            fn prompt_sections(&self) -> Vec<String> {
+                vec!["new prompt".into()]
+            }
+        }
+
+        for (unreadable, fail_save) in [(false, false), (true, false), (false, true)] {
+            let mut session = Session::new("整理声明");
+            session.append_message(MessageRole::User, "历史问题");
+            session.append_message(MessageRole::Assistant, "历史回答");
+            session.append_message(MessageRole::User, "当前问题");
+            session.plugin_declarations = Some(vec![PluginDeclaration {
+                plugin_id: "changing".into(),
+                tools: vec![crate::model::ToolSpec {
+                    name: "old_tool".into(),
+                    description: "old".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                }],
+                prompt_sections: vec!["old prompt".into()],
+            }]);
+            let (mut ctx, root) = test_context(session);
+            ctx.plugins = vec![std::sync::Arc::new(ChangingPlugin { fail: unreadable })];
+            let prepared = PreparedPlugins::restore(
+                ctx.plugins.clone(),
+                ctx.session.plugin_declarations.as_deref().unwrap(),
+            );
+            ctx.tools = prepared.tools;
+            ctx.prompt_sections = prepared.prompt_sections;
+            rebuild_system_prompt_for_session(&mut ctx.session, &ctx.prompt_sections);
+            ctx.session.try_persist_to_disk().unwrap();
+            let old_session = serde_json::to_value(&ctx.session).unwrap();
+            let old_tools = serde_json::to_value(&ctx.tools).unwrap();
+            if fail_save {
+                crate::core::test_support::fail_next_persistence_for_session(&ctx.session.id);
+            }
+            let update = update_for(&ctx.session, 0, "新的摘要", 2);
+            let result = apply_compression(&mut ctx, &update, false);
+            let restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+            if fail_save {
+                assert!(result.is_err());
+                assert_eq!(serde_json::to_value(&ctx.session).unwrap(), old_session);
+                assert_eq!(serde_json::to_value(&restored).unwrap(), old_session);
+                assert_eq!(serde_json::to_value(&ctx.tools).unwrap(), old_tools);
+            } else {
+                result.unwrap();
+                assert_eq!(restored.context_summary.as_deref(), Some("新的摘要"));
+                let prepared = PreparedPlugins::restore(
+                    Vec::new(),
+                    restored.plugin_declarations.as_deref().unwrap(),
+                );
+                assert_eq!(
+                    serde_json::to_value(prepared.tools).unwrap(),
+                    serde_json::to_value(&ctx.tools).unwrap()
+                );
+                assert_eq!(prepared.prompt_sections, ctx.prompt_sections);
+                assert_eq!(
+                    ctx.prompt_sections,
+                    vec![if unreadable {
+                        "old prompt"
+                    } else {
+                        "new prompt"
+                    }]
+                );
+                assert_eq!(
+                    serde_json::to_value(restored.system_prompt_message).unwrap(),
+                    serde_json::to_value(&ctx.session.system_prompt_message).unwrap()
+                );
+            }
+        }
     }
 
     #[tokio::test]
