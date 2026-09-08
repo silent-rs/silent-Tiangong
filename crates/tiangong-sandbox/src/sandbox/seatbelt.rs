@@ -202,7 +202,7 @@ fn append_credential_service_rules(sbpl: &mut String, policy: &SandboxPolicy) {
     // 网络放行时 mach-lookup 全放行：TLS 证书验证（trustd 的 XPC 变体）、
     // DNS 解析（mDNSResponder）、系统时间等服务名在不同 macOS 版本上枚举
     // 不全——逐项白名单始终有遗漏，直接放行整个类别。
-    sbpl.push_str("(allow mach-lookup*)\n");
+    sbpl.push_str("(allow mach-lookup)\n");
 }
 
 /// 路径可安全进入 SBPL 文本：必须是 UTF-8 且不含控制字符
@@ -236,22 +236,11 @@ mod tests {
         let sbpl = compile_profile(&policy);
         assert!(!sbpl.contains("mach-lookup"));
 
-        // 宿主显式授权：五个精确服务全部放行（Keychain、securityd、
-        // trustd、opendirectoryd libinfo 与 membership）。
+        // 宿主显式授权时按当前策略放行该类别，名称不能带无效通配符。
         policy.allow_credential_services = true;
         let sbpl = compile_profile(&policy);
-        for service in [
-            "com.apple.SecurityServer",
-            "com.apple.securityd.xpc",
-            "com.apple.trustd.agent",
-            "com.apple.system.opendirectoryd.libinfo",
-            "com.apple.system.opendirectoryd.membership",
-        ] {
-            assert!(
-                sbpl.contains(&format!("(allow mach-lookup (global-name \"{service}\"))")),
-                "缺少放行: {service}"
-            );
-        }
+        assert!(sbpl.contains("(allow mach-lookup)\n"));
+        assert!(!sbpl.contains("mach-lookup*"));
     }
     #[test]
     fn profile_denies_write_outside_roots_and_network() {
