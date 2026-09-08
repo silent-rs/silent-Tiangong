@@ -5171,16 +5171,27 @@ pub async fn bridge_call(
     let authoritative_workspace = if method.starts_with("sidecar.") {
         match session_id.filter(|id| !id.trim().is_empty()) {
             Some(session_id) => {
-                let session = state
-                    .inner()
-                    .core_manager
-                    .load_session(&session_id)
-                    .map_err(|error| format!("加载 sidecar 调用所属会话失败: {error}"))?;
-                let cwd = session.cwd.trim();
-                if cwd.is_empty() {
-                    return Err(format!("会话 {session_id} 未配置工作区"));
+                // 新对话在首次发消息前会话文件尚未落盘——不阻断 sidecar
+                // 调用（成员列表等全局查询与会话无关），按无工作区处理；
+                // 预加载（resident）插件的连接本就不使用会话工作区。
+                match state.inner().core_manager.load_session(&session_id) {
+                    Ok(session) => {
+                        let cwd = session.cwd.trim();
+                        if cwd.is_empty() {
+                            None
+                        } else {
+                            Some(PathBuf::from(cwd))
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            session_id,
+                            %error,
+                            "sidecar 调用所属会话未落盘（新对话），按无工作区处理"
+                        );
+                        None
+                    }
                 }
-                Some(PathBuf::from(cwd))
             }
             None => None,
         }
