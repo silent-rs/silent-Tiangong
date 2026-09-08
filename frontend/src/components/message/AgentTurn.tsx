@@ -332,7 +332,7 @@ function AgentTurnView({
                     text={visibleText}
                     showTts={hasTts}
                     durationMs={!isActive && turnStatusMeta == null ? (turnElapsedMs ?? userFrag?.msg.elapsed_ms) : undefined}
-                    usageMessages={!selectedAgentTab && msg.id === usageAnchorId ? messages : undefined}
+                    usageMessages={msg.id === usageAnchorId ? messages : undefined}
                   />
                 </div>
               )}
@@ -416,10 +416,10 @@ function AgentTurnView({
           {turnElapsedMs != null && (
             <span title="本轮执行总时长">⏱ {formatDuration(turnElapsedMs)}</span>
           )}
-          {!selectedAgentTab && !usageAnchorId && <CallUsageDetails messages={messages} />}
+          {!usageAnchorId && <CallUsageDetails messages={messages} />}
         </div>
       )}
-      {!selectedAgentTab && !usageAnchorId && (!turnStatusMeta || isActive) && <CallUsageDetails messages={messages} />}
+      {!usageAnchorId && (!turnStatusMeta || isActive) && <CallUsageDetails messages={messages} />}
     </div>
   );
 }
