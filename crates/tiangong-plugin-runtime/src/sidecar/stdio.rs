@@ -2168,7 +2168,11 @@ fn exempt_authorized_user_credentials(
     // 文件凭据（~/.ssh 等）经 denied_read 豁免；系统凭据服务（Keychain、
     // OpenDirectory、trustd）经 allow_credential_services 放行——沙箱内
     // ssh 解析 uid、gh 读钥匙串都依赖后者，缺任一都会功能回退。
-    policy.allow_credential_services = access.ssh || access.github_cli;
+    // TLS 证书验证（trustd/SecurityServer）是 HTTPS 的基础系统服务，
+    // 网络放行时必须随之放行——否则任何插件的 HTTPS 调用都会因证书
+    // 验证不可用而失败（generate-image 侧的真实故障）。
+    policy.allow_credential_services =
+        access.ssh || access.github_cli || policy.allow_network;
     let Some(home) = crate::interpreter_env::user_home_dir() else {
         return;
     };
