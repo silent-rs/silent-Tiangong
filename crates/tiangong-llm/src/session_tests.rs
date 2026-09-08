@@ -2,6 +2,97 @@ use super::*;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[tokio::test]
+async fn anthropic_usage_keeps_cache_fields_across_partial_and_repeated_frames() {
+    let cases = [
+        // Anthropic: 输入与缓存先返回，后续帧只带累计输出。
+        (
+            json!({"input_tokens":55,"output_tokens":0,"cache_read_input_tokens":2496,"cache_creation_input_tokens":128}),
+            json!({"output_tokens":3}),
+            json!({"input_tokens":55,"output_tokens":3,"cache_read_input_tokens":2496,"cache_creation_input_tokens":128}),
+            2679,
+            Some(2496),
+            Some(183),
+        ),
+        // GLM: 开始帧都是零，结束帧一次性返回用量。
+        (
+            json!({"input_tokens":0,"output_tokens":0}),
+            json!({"input_tokens":55,"output_tokens":3,"cache_read_input_tokens":2496}),
+            json!({"input_tokens":55,"output_tokens":3,"cache_read_input_tokens":2496}),
+            2551,
+            Some(2496),
+            Some(55),
+        ),
+        // 缓存读取量晚到，不能丢掉之前收到的未缓存输入与写入量。
+        (
+            json!({"input_tokens":55,"output_tokens":0,"cache_creation_input_tokens":128}),
+            json!({"output_tokens":3,"cache_read_input_tokens":2496}),
+            json!({"input_tokens":55,"output_tokens":3,"cache_read_input_tokens":2496,"cache_creation_input_tokens":128}),
+            2679,
+            Some(2496),
+            Some(183),
+        ),
+        (
+            json!({"input_tokens":20,"cache_read_input_tokens":0}),
+            json!({"output_tokens":3}),
+            json!({"input_tokens":20,"output_tokens":3,"cache_read_input_tokens":0}),
+            20,
+            Some(0),
+            Some(20),
+        ),
+        (
+            json!({"input_tokens":20}),
+            json!({"output_tokens":3}),
+            json!({"input_tokens":20,"output_tokens":3}),
+            20,
+            None,
+            None,
+        ),
+    ];
+    for (start, delta, full, input, hit, miss) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap();
+            let message = json!({"id":"usage-probe","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":full});
+            if body["stream"] != true { return ResponseTemplate::new(200).set_body_json(message); }
+            let events = [
+                json!({"type":"message_start","message":{"id":"usage-probe","model":"glm-5.3-flash","role":"assistant","content":[],"usage":start}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
+                json!({"type":"message_delta","delta":{},"usage":delta}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":delta}),
+                json!({"type":"message_stop"}),
+            ];
+            ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+                .set_body_string(events.iter().map(|e| format!("event: {}\ndata: {e}\n\n",e["type"].as_str().unwrap())).collect::<String>())
+        }).expect(2).mount(&server).await;
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test".into(),
+            model: "glm-5.3-flash".into(),
+            protocol: ProviderProtocol::Anthropic,
+            ..Default::default()
+        });
+        let req = request("cache-usage");
+        let ordinary = client.complete_async(&req).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let streamed = client.stream_async(req, tx).await.unwrap();
+        let mut snapshots = TokenUsage::default();
+        while let Some(chunk) = rx.recv().await {
+            if let Some(usage) = chunk.usage {
+                snapshots.merge_snapshot(&usage.into());
+            }
+        }
+        for usage in [ordinary.usage, streamed.usage, snapshots] {
+            assert_eq!(usage.prompt_tokens, input);
+            assert_eq!(usage.completion_tokens, 3);
+            assert_eq!(usage.total_tokens, input + 3);
+            assert_eq!(usage.prompt_cache_hit_tokens, hit);
+            assert_eq!(usage.prompt_cache_miss_tokens, miss);
+        }
+    }
+}
+
 fn request(session_id: &str) -> ModelRequest {
     ModelRequest {
         session_id: Some(session_id.to_string()),
@@ -43,10 +134,10 @@ async fn unified_sync_async_and_stream_requests_preserve_parameters_and_usage() 
                 return ResponseTemplate::new(200).set_body_json(reply(protocol));
             }
             if payload["stream"] != true {
-                return ResponseTemplate::new(200).set_body_json(json!({"id":"m","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":2,"cache_read_input_tokens":80}}));
+                return ResponseTemplate::new(200).set_body_json(json!({"id":"m","type":"message","role":"assistant","model":"test-model","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":80}}));
             }
             let events = [
-                json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":80}}}),
+                json!({"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"test-model","content":[],"usage":{"input_tokens":20,"output_tokens":0,"cache_read_input_tokens":80}}}),
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
                 json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
                 json!({"type":"content_block_stop","index":0}),
