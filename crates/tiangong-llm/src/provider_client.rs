@@ -105,7 +105,7 @@ fn append_stream_tool_call_arguments(raw_args: &mut String, partial_json: &str) 
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelRequest {
     pub user_input: String,
     pub context: Vec<Message>,
@@ -119,9 +119,23 @@ pub struct ModelRequest {
     /// 应显式设置：按 `context_limit - 预估 prompt_tokens` 计算，留出足够
     /// 摘要输出空间，避免 provider 因 `prompt + max_tokens > limit` 报错。
     pub max_output_tokens: Option<u32>,
+    /// 完整工具定义及顺序；普通对话和摘要均从这里传递。
+    pub tools: Vec<ToolSpec>,
+    /// 未指定时，有工具则允许自动调用；Some(None) 明确禁止调用但保留声明。
+    pub tool_choice: Option<ToolChoice>,
+    /// 未指定时沿用现有全局温度配置。
+    pub temperature: Option<f32>,
+    /// 显式请求超时优先于环境变量及端点配置。
+    pub timeout_ms: Option<u64>,
 }
 
 impl ModelRequest {
+    pub fn with_tools(mut self, tools: Vec<ToolSpec>, tool_choice: Option<ToolChoice>) -> Self {
+        self.tools = tools;
+        self.tool_choice = tool_choice;
+        self
+    }
+
     pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
         self.max_output_tokens = Some(max_tokens);
         self
@@ -251,60 +265,12 @@ pub trait ModelClient {
     fn api_timeout_ms(&self) -> u64;
     fn api_model(&self) -> &str;
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse>;
-    /// 流式调用，通过 on_delta 实时回调每个 chunk（thinking + content）
+    /// 流式调用，通过 on_delta 实时回调内容和用量。
     fn complete_stream(
         &self,
         req: &ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelResponse> {
-        let resp = self.complete(req)?;
-        if !resp.reasoning_content.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: String::new(),
-                reasoning_content: resp.reasoning_content.clone(),
-                usage: None,
-            });
-        }
-        if !resp.text.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: resp.text.clone(),
-                reasoning_content: String::new(),
-                usage: None,
-            });
-        }
-        Ok(resp)
-    }
-    fn complete_with_functions(
-        &self,
-        req: &ModelRequest,
-        _functions: &[ToolSpec],
-    ) -> Result<ModelFunctionResponse> {
-        self.complete(req)
-    }
-    /// 流式函数调用，通过 on_delta 实时回调 thinking chunk
-    fn complete_with_functions_stream(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        let resp = self.complete_with_functions(req, functions)?;
-        if !resp.reasoning_content.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: String::new(),
-                reasoning_content: resp.reasoning_content.clone(),
-                usage: None,
-            });
-        }
-        if !resp.text.is_empty() {
-            on_delta(&ModelStreamChunk {
-                content: resp.text.clone(),
-                reasoning_content: String::new(),
-                usage: None,
-            });
-        }
-        Ok(resp)
-    }
+    ) -> Result<ModelResponse>;
 }
 
 /// 重试回调类型：(attempt, max_attempts, delay_ms, error_text)
@@ -328,14 +294,11 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
-    fn build_provider_request(
-        &self,
-        req: &ModelRequest,
-        model: &str,
-        max_tokens: u32,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ProviderRequest> {
+    fn build_provider_request(&self, req: &ModelRequest) -> Result<ProviderRequest> {
+        let model = self.cfg.model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
+        }
         let (system, messages) = build_provider_messages(req)?;
         Ok(ProviderRequest {
             session_id: req
@@ -345,16 +308,28 @@ impl SingleProviderClient {
             model: model.to_string(),
             system: (!system.trim().is_empty()).then_some(system),
             messages,
-            tools: functions.to_vec(),
-            tool_choice: tool_choice
-                .or_else(|| (!functions.is_empty()).then_some(LlmToolChoice::Auto)),
-            max_tokens,
-            temperature: configured_temperature_f32(),
+            tools: req.tools.clone(),
+            tool_choice: req
+                .tool_choice
+                .clone()
+                .or_else(|| (!req.tools.is_empty()).then_some(LlmToolChoice::Auto)),
+            max_tokens: req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN),
+            temperature: req.temperature.or_else(configured_temperature_f32),
             top_p: None,
             stop_sequences: Vec::new(),
             metadata: None,
             reasoning_effort: req.reasoning_effort,
         })
+    }
+
+    fn prepare_request(&self, req: &ModelRequest) -> Result<(ProviderDispatch, ProviderRequest)> {
+        let request = self.build_provider_request(req)?;
+        let timeout_ms = req
+            .timeout_ms
+            .unwrap_or_else(|| function_timeout_ms(self.cfg.timeout_ms));
+        let provider =
+            self.build_provider_dispatch(timeout_ms, req.session_id.as_deref(), MAX_RETRIES)?;
+        Ok((provider, request))
     }
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
@@ -364,26 +339,38 @@ impl SingleProviderClient {
     pub fn model_name(&self) -> &str {
         self.cfg.model.trim()
     }
-    /// 可取消的非流式主模型调用。调用方丢弃 future 时底层 HTTP 请求随之终止。
+    /// 可取消的非流式调用；完整保留终态和用量，由业务调用方判断内容是否有效。
     pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        let timeout_ms = self.cfg.timeout_ms;
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
-        let request = self.build_provider_request(req, model, max_tokens, &[], None)?;
+        let (provider, request) = self.prepare_request(req)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
-        Ok(ModelResponse {
-            text: collect_provider_text(&response).trim().to_string(),
-            reasoning_content: response.reasoning_content.unwrap_or_default(),
-            reasoning_signature: None,
-            stop_reason: response.stop_reason,
-            usage: response.usage.unwrap_or_default().into(),
-            tool_calls: Vec::new(),
-            invalid_tool_calls: Vec::new(),
-        })
+        filter_invalid_openai_tool_calls(
+            self.protocol(),
+            &req.tools,
+            convert_provider_response(response),
+        )
+    }
+
+    /// 流式与非流式消费同一请求，取消 future 时关闭底层 HTTP 流。
+    pub async fn stream_async(
+        self,
+        req: ModelRequest,
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+    ) -> Result<ModelResponse> {
+        let (provider, request) = self.prepare_request(&req)?;
+        let preserve_tool_call_order = matches!(
+            self.protocol(),
+            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+        );
+        let stream = provider.stream(request).await.map_err(map_llm_error)?;
+        let response = consume_provider_stream_events_async(
+            stream,
+            &mut |chunk: &ModelStreamChunk| {
+                let _ = chunk_tx.send(chunk.clone());
+            },
+            preserve_tool_call_order,
+        )
+        .await?;
+        filter_invalid_openai_tool_calls(self.protocol(), &req.tools, response)
     }
 
     pub fn new(cfg: ModelEndpoint) -> Self {
@@ -413,6 +400,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
+                MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -425,6 +413,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
+                MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -437,6 +426,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
+                MAX_RETRIES,
             )?;
             provider
                 .list_models()
@@ -462,6 +452,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
+                MAX_RETRIES,
             )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -481,6 +472,7 @@ impl SingleProviderClient {
                 timeout_ms,
                 None,
                 &scru128::new().to_string(),
+                MAX_RETRIES,
             )?;
             let runtime = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -494,8 +486,13 @@ impl SingleProviderClient {
             models.dedup();
             return Ok(models);
         }
-        let provider =
-            build_openai_provider_from_config(cfg, timeout_ms, None, &scru128::new().to_string())?;
+        let provider = build_openai_provider_from_config(
+            cfg,
+            timeout_ms,
+            None,
+            &scru128::new().to_string(),
+            MAX_RETRIES,
+        )?;
         let runtime = TokioRuntimeBuilder::new_current_thread()
             .enable_all()
             .build()
@@ -513,19 +510,11 @@ impl SingleProviderClient {
         self.cfg.protocol
     }
 
-    fn build_anthropic_provider(&self, timeout_ms: u64) -> Result<AnthropicProvider> {
-        build_anthropic_provider_from_config(
-            &self.cfg,
-            timeout_ms,
-            self.on_retry.clone(),
-            &self.session_id,
-        )
-    }
-
-    fn build_provider_dispatch(
+    pub(crate) fn build_provider_dispatch(
         &self,
         timeout_ms: u64,
         session_id: Option<&str>,
+        max_retries: u32,
     ) -> Result<ProviderDispatch> {
         let session_id = session_id.unwrap_or(&self.session_id);
         match self.protocol() {
@@ -535,6 +524,7 @@ impl SingleProviderClient {
                     timeout_ms,
                     self.on_retry.clone(),
                     session_id,
+                    max_retries,
                 )?,
             ))),
             ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
@@ -543,6 +533,7 @@ impl SingleProviderClient {
                     timeout_ms,
                     self.on_retry.clone(),
                     session_id,
+                    max_retries,
                 )?,
             ))),
             ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
@@ -551,29 +542,24 @@ impl SingleProviderClient {
                     timeout_ms,
                     self.on_retry.clone(),
                     session_id,
+                    max_retries,
                 )?,
             ))),
-            ProviderProtocol::DeepSeek => {
-                let mut config = DeepSeekConfig::new(self.cfg.api_key.trim().to_string());
-                config.base_url = if self.cfg.base_url.trim().is_empty() {
-                    None
-                } else {
-                    Some(self.cfg.base_url.clone())
-                };
-                config.timeout = Duration::from_millis(timeout_ms);
-                config.max_retries = MAX_RETRIES;
-                config.retry_notifier = self.on_retry.clone();
-                config.headers = crate::headers::resolve_headers(&self.cfg.headers, session_id)?;
-                Ok(ProviderDispatch::DeepSeek(Box::new(
-                    DeepSeekProvider::from_config(config)?,
-                )))
-            }
+            ProviderProtocol::DeepSeek => Ok(ProviderDispatch::DeepSeek(Box::new(
+                build_deepseek_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                    session_id,
+                    max_retries,
+                )?,
+            ))),
         }
     }
 
     fn block_on_llm<F, T>(&self, future: F) -> Result<T>
     where
-        F: std::future::Future<Output = std::result::Result<T, crate::error::LlmError>> + Send,
+        F: std::future::Future<Output = Result<T>> + Send,
         T: Send,
     {
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -583,7 +569,7 @@ impl SingleProviderClient {
                         .enable_all()
                         .build()
                         .context("初始化异步运行时失败")?;
-                    runtime.block_on(future).map_err(map_llm_error)
+                    runtime.block_on(future)
                 });
                 handle.join().map_err(|_| anyhow!("LLM 请求线程 panic"))?
             });
@@ -593,435 +579,45 @@ impl SingleProviderClient {
             .enable_all()
             .build()
             .context("初始化异步运行时失败")?;
-        runtime.block_on(future).map_err(map_llm_error)
+        runtime.block_on(future)
     }
 
-    fn complete_lite_anthropic(&self, prompt: &str) -> Result<String> {
-        let timeout_ms = 120_000u64;
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!(
-                "API_MODEL 不能为空，无法发起 Anthropic 轻量模型请求"
-            ));
-        }
-
-        let provider = self.build_anthropic_provider(timeout_ms)?;
-        let request = ProviderRequest {
-            session_id: Some(self.session_id.clone()),
-            model: model.to_string(),
-            system: Some(
-                "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
-1. 标题不超过10个汉字\
-2. 直接返回标题，不要任何解释或额外文字\
-3. 标题要概括性强，简洁明了"
-                    .to_string(),
-            ),
-            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: MAX_TOKENS_LITE,
-            temperature: Some(0.3),
-            top_p: None,
-            stop_sequences: Vec::new(),
-            metadata: None,
-            reasoning_effort: ReasoningEffort::None,
-        };
-        let response = self.block_on_llm(provider.complete(request))?;
-        let text = strip_think_tags(&collect_provider_text(&response))
-            .trim()
-            .to_string();
-        Ok(text)
-    }
-
-    pub fn complete_stream_with_callback<F>(
-        &self,
-        req: &ModelRequest,
-        mut on_delta: F,
-    ) -> Result<ModelResponse>
-    where
-        F: FnMut(&ModelStreamChunk),
-    {
-        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
-        }
-        let request = self.build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        consume_provider_stream(provider, request, &mut on_delta)
-    }
-
-    /// 流式函数调用：实时输出 thinking，同时累积 tool_calls
-    pub fn complete_with_functions_stream_impl(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        self.complete_with_functions_stream_impl_with_tool_choice(req, functions, None, on_delta)
-    }
-
-    pub fn complete_with_functions_stream_impl_with_tool_choice(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        let response =
-            self.complete_with_functions_stream_once(req, functions, tool_choice, on_delta)?;
-        filter_invalid_openai_tool_calls(self.protocol(), functions, response)
-    }
-
-    fn complete_with_functions_stream_once(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
-        }
-        let request =
-            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        convert_stream_to_function_response(provider, request, on_delta)
-    }
-
-    /// 使用轻量级模型完成简单任务（如会话名称生成）
-    ///
-    /// lite 模型由调用方构造独立的 [`SingleProviderClient`]（持有 lite 端点的 `model`），
-    /// 此处直接使用 `self.cfg.model`。
-    /// 该方法使用更短的超时时间和较低温度以获得更确定的结果。
+    /// 标题生成仅提供任务参数，复用统一非流式请求。
     pub fn complete_lite(&self, prompt: &str) -> Result<String> {
-        if self.protocol() == ProviderProtocol::Anthropic {
-            return self.complete_lite_anthropic(prompt);
-        }
-        let timeout_ms = 120_000u64;
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, None)?;
-        let request = ProviderRequest {
-            session_id: Some(self.session_id.clone()),
-            model: model.to_string(),
-            system: Some(
-                "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：\
-                    1. 标题不超过10个汉字\
-                    2. 直接返回标题，不要任何解释或额外文字\
-                    3. 标题要概括性强，简洁明了"
-                    .to_string(),
-            ),
-            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: MAX_TOKENS_LITE,
-            temperature: Some(0.3),
-            top_p: None,
-            stop_sequences: Vec::new(),
-            metadata: None,
-            reasoning_effort: ReasoningEffort::None,
-        };
-        let response = self.block_on_llm(provider.complete(request))?;
-        Ok(collect_provider_text(&response).trim().to_string())
+        self.complete_lite_request(
+            "你是会话标题生成助手。根据用户输入生成简洁的标题，要求：1. 标题不超过10个汉字2. 直接返回标题，不要任何解释或额外文字3. 标题要概括性强，简洁明了",
+            prompt,
+            0.3,
+        )
     }
 
-    /// 使用自定义 system prompt 的轻量级模型调用
-    ///
-    /// 适用于检索策略判断、意图分析等简单分类任务。
     pub fn complete_lite_with_system(&self, system: &str, prompt: &str) -> Result<String> {
-        let timeout_ms = 120_000u64;
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起轻量级模型请求"));
-        }
-        let request = ProviderRequest {
-            session_id: Some(self.session_id.clone()),
-            model: model.to_string(),
-            system: Some(system.to_string()),
-            messages: vec![ChatMessage::text(LlmMessageRole::User, prompt)],
-            tools: Vec::new(),
-            tool_choice: None,
-            max_tokens: MAX_TOKENS_LITE,
-            temperature: Some(0.1),
-            top_p: None,
-            stop_sequences: Vec::new(),
-            metadata: None,
+        self.complete_lite_request(system, prompt, 0.1)
+    }
+
+    fn complete_lite_request(
+        &self,
+        system: &str,
+        prompt: &str,
+        temperature: f32,
+    ) -> Result<String> {
+        let request = ModelRequest {
+            context: vec![
+                Message::new(MessageRole::System, system),
+                Message::new(MessageRole::User, prompt),
+            ],
+            max_output_tokens: Some(MAX_TOKENS_LITE),
             reasoning_effort: ReasoningEffort::None,
+            temperature: Some(temperature),
+            timeout_ms: Some(120_000),
+            ..Default::default()
         };
-        if self.protocol() == ProviderProtocol::Anthropic {
-            let provider = self.build_anthropic_provider(timeout_ms)?;
-            let response = self.block_on_llm(provider.complete(request))?;
-            return Ok(strip_think_tags(&collect_provider_text(&response))
-                .trim()
-                .to_string());
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, None)?;
-        let response = self.block_on_llm(provider.complete(request))?;
-        Ok(collect_provider_text(&response).trim().to_string())
-    }
-
-    /// 真正的 async 流式函数调用。
-    ///
-    /// 通过 `chunk_tx` 实时发送每个 token chunk，完成后返回 `ModelFunctionResponse`。
-    /// 该方法持有 `self`（owned），可直接在 `tokio::spawn` 里使用，future 是 `Send + 'static`。
-    /// 取消 JoinHandle 后 HTTP 流会随 future drop 而断开。
-    pub async fn stream_function_calls(
-        self,
-        req: ModelRequest,
-        functions: Vec<ToolSpec>,
-        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
-    ) -> Result<ModelFunctionResponse> {
-        self.stream_function_calls_with_tool_choice(req, functions, None, chunk_tx)
-            .await
-    }
-
-    pub async fn stream_function_calls_with_tool_choice(
-        self,
-        req: ModelRequest,
-        functions: Vec<ToolSpec>,
-        tool_choice: Option<ToolChoice>,
-        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
-    ) -> Result<ModelFunctionResponse> {
-        // 流式失败直接失败，不回退非流式：中途断开时已推送内容会与非流式
-        // 完整响应拼接重复，且非流式整包等待更容易超时。不支持流式的服务不再兼容。
-        let response = self
-            .stream_function_calls_streaming(&req, &functions, tool_choice, &chunk_tx)
-            .await?;
-        filter_invalid_openai_tool_calls(self.protocol(), &functions, response)
-    }
-
-    async fn stream_function_calls_streaming(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
-    ) -> Result<ModelFunctionResponse> {
-        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
-        let model = self.cfg.model.trim().to_string();
-        if model.is_empty() {
-            return Err(anyhow!(
-                "API_MODEL 不能为空，无法发起 async 流式工具模型请求"
-            ));
-        }
-        let request =
-            self.build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let preserve_tool_call_order = matches!(
-            self.protocol(),
-            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
-        );
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-
-        let mut text = String::new();
-        let mut reasoning_content = String::new();
-        let mut reasoning_signature: Option<String> = None;
-        let mut usage = TokenUsageData::default();
-        let mut stop_reason = None;
-        let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
-        let mut tool_call_order: Vec<String> = Vec::new();
-
-        let mut stream = provider.stream(request).await.map_err(map_llm_error)?;
-        while let Some(event) = stream.next().await {
-            match event.map_err(map_llm_error)? {
-                ProviderStreamEvent::ReasoningDelta(delta) => {
-                    if !delta.is_empty() {
-                        reasoning_content.push_str(&delta);
-                        let _ = chunk_tx.send(ModelStreamChunk {
-                            content: String::new(),
-                            reasoning_content: delta,
-                            usage: None,
-                        });
-                    }
-                }
-                ProviderStreamEvent::ReasoningSignatureDelta(signature) => {
-                    if !signature.trim().is_empty() {
-                        reasoning_signature = Some(signature);
-                    }
-                }
-                ProviderStreamEvent::TextDelta(delta) => {
-                    if !delta.is_empty() {
-                        text.push_str(&delta);
-                        let _ = chunk_tx.send(ModelStreamChunk {
-                            content: delta,
-                            reasoning_content: String::new(),
-                            usage: None,
-                        });
-                    }
-                }
-                ProviderStreamEvent::ToolCallStart(call) => {
-                    let args = if call.arguments.is_null() || call.arguments == json!({}) {
-                        String::new()
-                    } else {
-                        call.arguments.to_string()
-                    };
-                    tool_call_order.push(call.id.clone());
-                    tool_calls.insert(call.id.clone(), (call.name, args));
-                }
-                ProviderStreamEvent::ToolCallDelta {
-                    call_id,
-                    partial_json,
-                } => {
-                    let actual_id = if tool_calls.contains_key(&call_id) {
-                        call_id
-                    } else if let Ok(idx) = call_id.parse::<usize>() {
-                        tool_call_order.get(idx).cloned().unwrap_or_default()
-                    } else {
-                        call_id
-                    };
-                    let entry = tool_calls
-                        .entry(actual_id)
-                        .or_insert_with(|| (String::new(), String::new()));
-                    // 某些 provider 会在 ToolCallStart 里直接给出完整 arguments，
-                    // 也可能在 delta 中再发送一遍；这里尽量避免重复拼接导致 JSON 无法解析。
-                    append_stream_tool_call_arguments(&mut entry.1, &partial_json);
-                }
-                ProviderStreamEvent::Usage(stream_usage) => {
-                    merge_stream_usage(&mut usage, stream_usage);
-                    let _ = chunk_tx.send(ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: String::new(),
-                        usage: Some(usage.clone()),
-                    });
-                }
-                ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
-                ProviderStreamEvent::MessageEnd {
-                    stop_reason: stream_stop_reason,
-                } => stop_reason = stream_stop_reason,
-                ProviderStreamEvent::MessageStart | ProviderStreamEvent::ToolCallEnd { .. } => {}
-            }
-        }
-
-        let tool_calls_vec = if preserve_tool_call_order {
-            collect_openai_stream_tool_calls(tool_calls, tool_call_order)
+        let response = self.complete(&request)?;
+        Ok(if self.protocol() == ProviderProtocol::Anthropic {
+            strip_think_tags(&response.text).trim().to_string()
         } else {
-            tool_calls
-                .into_iter()
-                .filter(|(_, (name, _))| !name.is_empty())
-                .map(|(id, (name, raw_args))| ToolCall {
-                    arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
-                    id,
-                    name,
-                })
-                .collect()
-        };
-
-        if text.trim().is_empty()
-            && reasoning_content.trim().is_empty()
-            && tool_calls_vec.is_empty()
-        {
-            return Err(anyhow!("async 流式响应缺少文本、思考内容和工具调用"));
-        }
-
-        Ok(ModelFunctionResponse {
-            text: text.trim().to_string(),
-            reasoning_content,
-            reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-            stop_reason,
-            usage: usage.into(),
-            tool_calls: tool_calls_vec,
-            invalid_tool_calls: Vec::new(),
+            response.text
         })
-    }
-
-    pub fn complete_with_functions_with_tool_choice(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ModelFunctionResponse> {
-        let response =
-            self.complete_with_functions_with_tool_choice_once(req, functions, tool_choice)?;
-        filter_invalid_openai_tool_calls(self.protocol(), functions, response)
-    }
-
-    fn complete_with_functions_with_tool_choice_once(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ModelFunctionResponse> {
-        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        let request =
-            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let response = self.block_on_llm(provider.complete(request))?;
-        convert_provider_response_to_function_response(response)
-    }
-
-    pub async fn complete_with_functions_with_tool_choice_async(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ModelFunctionResponse> {
-        let response = self
-            .complete_with_functions_with_tool_choice_async_once(req, functions, tool_choice)
-            .await?;
-        filter_invalid_openai_tool_calls(self.protocol(), functions, response)
-    }
-
-    async fn complete_with_functions_with_tool_choice_async_once(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-    ) -> Result<ModelFunctionResponse> {
-        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        let request =
-            self.build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let response = provider.complete(request).await.map_err(map_llm_error)?;
-        convert_provider_response_to_function_response(response)
-    }
-
-    pub fn complete_with_functions_stream_with_tool_choice(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        tool_choice: Option<ToolChoice>,
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        if use_stream_mode() {
-            // 流式失败直接失败，不回退非流式（同 async 路径）。
-            self.complete_with_functions_stream_impl_with_tool_choice(
-                req,
-                functions,
-                tool_choice,
-                on_delta,
-            )
-        } else {
-            let resp =
-                self.complete_with_functions_with_tool_choice(req, functions, tool_choice)?;
-            if !resp.reasoning_content.is_empty() {
-                on_delta(&ModelStreamChunk {
-                    content: String::new(),
-                    reasoning_content: resp.reasoning_content.clone(),
-                    usage: None,
-                });
-            }
-            if !resp.text.is_empty() {
-                on_delta(&ModelStreamChunk {
-                    content: resp.text.clone(),
-                    reasoning_content: String::new(),
-                    usage: None,
-                });
-            }
-            Ok(resp)
-        }
     }
 }
 
@@ -1043,47 +639,13 @@ impl ModelClient for SingleProviderClient {
         req: &ModelRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelResponse> {
-        self.complete_stream_with_callback(req, on_delta)
+        let (provider, request) = self.prepare_request(req)?;
+        let response = block_on_provider_stream(provider, request, on_delta)?;
+        filter_invalid_openai_tool_calls(self.protocol(), &req.tools, response)
     }
 
     fn complete(&self, req: &ModelRequest) -> Result<ModelResponse> {
-        let timeout_ms = self.cfg.timeout_ms;
-        let model = self.cfg.model.trim();
-        if model.is_empty() {
-            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
-        }
-        let provider = self.build_provider_dispatch(timeout_ms, req.session_id.as_deref())?;
-        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
-        let request = self.build_provider_request(req, model, max_tokens, &[], None)?;
-        let response = self.block_on_llm(provider.complete(request))?;
-        Ok(ModelResponse {
-            text: collect_provider_text(&response).trim().to_string(),
-            reasoning_content: response.reasoning_content.unwrap_or_default(),
-            reasoning_signature: None,
-            stop_reason: response.stop_reason,
-            usage: response.usage.unwrap_or_default().into(),
-            tool_calls: Vec::new(),
-            invalid_tool_calls: Vec::new(),
-        })
-    }
-
-    fn complete_with_functions(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-    ) -> Result<ModelFunctionResponse> {
-        SingleProviderClient::complete_with_functions_with_tool_choice(self, req, functions, None)
-    }
-
-    fn complete_with_functions_stream(
-        &self,
-        req: &ModelRequest,
-        functions: &[ToolSpec],
-        on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
-        SingleProviderClient::complete_with_functions_stream_with_tool_choice(
-            self, req, functions, None, on_delta,
-        )
+        self.block_on_llm(self.complete_async(req))
     }
 }
 
@@ -1104,6 +666,7 @@ fn build_anthropic_provider_from_config(
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
     session_id: &str,
+    max_retries: u32,
 ) -> Result<AnthropicProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1111,9 +674,9 @@ fn build_anthropic_provider_from_config(
     }
 
     let mut config = AnthropicConfig::new(token.to_string());
-    config.base_url = Some(cfg.base_url.clone());
+    config.base_url = (!cfg.base_url.trim().is_empty()).then(|| cfg.base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
-    config.max_retries = MAX_RETRIES;
+    config.max_retries = max_retries;
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     AnthropicProvider::from_config(config).map_err(map_llm_error)
@@ -1124,6 +687,7 @@ fn build_openai_responses_provider_from_config(
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
     session_id: &str,
+    max_retries: u32,
 ) -> Result<OpenAiResponsesProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1133,7 +697,7 @@ fn build_openai_responses_provider_from_config(
     }
     let mut config = OpenAiResponsesConfig::new(token.to_string(), cfg.base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
-    config.max_retries = MAX_RETRIES;
+    config.max_retries = max_retries;
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiResponsesProvider::new(config))
@@ -1144,6 +708,7 @@ fn build_openai_provider_from_config(
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
     session_id: &str,
+    max_retries: u32,
 ) -> Result<OpenAiChatCompletionsProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1151,7 +716,7 @@ fn build_openai_provider_from_config(
     }
     let mut config = OpenAiChatConfig::new(token.to_string(), cfg.base_url.clone());
     config.timeout = Duration::from_millis(timeout_ms);
-    config.max_retries = MAX_RETRIES;
+    config.max_retries = max_retries;
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     Ok(OpenAiChatCompletionsProvider::new(config))
@@ -1162,6 +727,7 @@ fn build_deepseek_provider_from_config(
     timeout_ms: u64,
     on_retry: Option<OnRetryCallback>,
     session_id: &str,
+    max_retries: u32,
 ) -> Result<DeepSeekProvider> {
     let token = cfg.api_key.trim();
     if token.is_empty() {
@@ -1174,7 +740,7 @@ fn build_deepseek_provider_from_config(
         Some(cfg.base_url.clone())
     };
     config.timeout = Duration::from_millis(timeout_ms);
-    config.max_retries = MAX_RETRIES;
+    config.max_retries = max_retries;
     config.retry_notifier = on_retry;
     config.headers = crate::headers::resolve_headers(&cfg.headers, session_id)?;
     DeepSeekProvider::from_config(config).map_err(|err| anyhow!("{err}"))
@@ -1506,113 +1072,24 @@ fn is_empty_provider_message(message: &ChatMessage) -> bool {
     })
 }
 
-fn convert_provider_response_to_function_response(
-    response: ProviderResponse,
-) -> Result<ModelFunctionResponse> {
-    let text = collect_provider_text(&response);
-    let reasoning_content = response.reasoning_content.clone().unwrap_or_default();
-    let tool_calls = response
-        .assistant_message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            LlmMessageContent::ToolCall(LlmToolCall {
-                id,
-                name,
-                arguments,
-            }) if !name.is_empty() => Some(ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!(
-            "Anthropic 响应缺少文本和工具调用（{}）",
-            empty_provider_response_diagnostic(&response)
-        ));
-    }
-
-    Ok(ModelFunctionResponse {
-        text: text.trim().to_string(),
-        reasoning_content,
+fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
+    ModelResponse {
+        text: collect_provider_text(&response).trim().to_string(),
+        reasoning_content: response.reasoning_content.clone().unwrap_or_default(),
         reasoning_signature: collect_provider_reasoning_signature(&response),
         stop_reason: response.stop_reason,
         usage: response.usage.unwrap_or_default().into(),
-        tool_calls,
+        tool_calls: response
+            .assistant_message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                LlmMessageContent::ToolCall(call) => Some(call.clone()),
+                _ => None,
+            })
+            .collect(),
         invalid_tool_calls: Vec::new(),
-    })
-}
-
-fn empty_provider_response_diagnostic(response: &ProviderResponse) -> String {
-    let mut parts = Vec::new();
-    if let Some(model) = response.model.as_deref().filter(|model| !model.is_empty()) {
-        parts.push(format!("model={model}"));
     }
-    if let Some(id) = response.id.as_deref().filter(|id| !id.is_empty()) {
-        parts.push(format!("id={id}"));
-    }
-    if let Some(stop_reason) = &response.stop_reason {
-        parts.push(format!("stop_reason={}", display_stop_reason(stop_reason)));
-    }
-    parts.push(format!(
-        "content_blocks={}",
-        response.assistant_message.content.len()
-    ));
-    if let Some(raw) = response.raw.as_ref()
-        && let Some(raw_summary) = summarize_provider_raw_response(raw)
-    {
-        parts.push(raw_summary);
-    }
-    parts.join(", ")
-}
-
-fn display_stop_reason(reason: &StopReason) -> String {
-    match reason {
-        StopReason::EndTurn => "end_turn".to_string(),
-        StopReason::ToolUse => "tool_use".to_string(),
-        StopReason::MaxTokens => "max_tokens".to_string(),
-        StopReason::StopSequence => "stop_sequence".to_string(),
-        StopReason::Other(value) => value.clone(),
-    }
-}
-
-fn summarize_provider_raw_response(raw: &Value) -> Option<String> {
-    let content = raw.get("content")?.as_array()?;
-    if content.is_empty() {
-        return Some("raw_content=[]".to_string());
-    }
-    let blocks = content
-        .iter()
-        .take(8)
-        .enumerate()
-        .map(|(index, block)| {
-            let block_type = block
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let keys = block
-                .as_object()
-                .map(|object| {
-                    object
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join("|")
-                })
-                .unwrap_or_default();
-            if keys.is_empty() {
-                format!("{index}:{block_type}")
-            } else {
-                format!("{index}:{block_type}[{keys}]")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(";");
-    Some(format!("raw_content={blocks}"))
 }
 
 fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
@@ -1669,11 +1146,11 @@ fn collect_provider_reasoning_signature(response: &ProviderResponse) -> Option<S
         })
 }
 
-async fn consume_provider_stream_events_async(
+async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Sized>(
     mut stream: ProviderStream,
-    on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    on_delta: &mut F,
     preserve_tool_call_order: bool,
-) -> Result<ModelFunctionResponse> {
+) -> Result<ModelResponse> {
     let mut text = String::new();
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
@@ -1736,12 +1213,21 @@ async fn consume_provider_stream_events_async(
                 append_stream_tool_call_arguments(&mut entry.1, &partial_json);
             }
             ProviderStreamEvent::Usage(stream_usage) => {
-                merge_stream_usage(&mut usage, stream_usage)
+                merge_stream_usage(&mut usage, stream_usage);
+                on_delta(&ModelStreamChunk {
+                    content: String::new(),
+                    reasoning_content: String::new(),
+                    usage: Some(usage.clone()),
+                });
             }
             ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
             ProviderStreamEvent::MessageEnd {
                 stop_reason: stream_stop_reason,
-            } => stop_reason = stream_stop_reason,
+            } => {
+                if stream_stop_reason.is_some() {
+                    stop_reason = stream_stop_reason;
+                }
+            }
             ProviderStreamEvent::MessageStart | ProviderStreamEvent::ToolCallEnd { .. } => {}
         }
     }
@@ -1760,13 +1246,9 @@ async fn consume_provider_stream_events_async(
             .collect()
     };
 
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
-        return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
-    }
-
     Ok(ModelFunctionResponse {
         text: text.trim().to_string(),
-        reasoning_content: reasoning_content.trim().to_string(),
+        reasoning_content,
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
         stop_reason,
         usage: usage.into(),
@@ -1775,7 +1257,7 @@ async fn consume_provider_stream_events_async(
     })
 }
 
-enum ProviderDispatch {
+pub(crate) enum ProviderDispatch {
     Anthropic(Box<AnthropicProvider>),
     OpenAiResponses(Box<OpenAiResponsesProvider>),
     OpenAiChat(Box<OpenAiChatCompletionsProvider>),
@@ -1783,7 +1265,7 @@ enum ProviderDispatch {
 }
 
 impl ProviderDispatch {
-    async fn complete(
+    pub(crate) async fn complete(
         self,
         request: ProviderRequest,
     ) -> std::result::Result<ProviderResponse, crate::error::LlmError> {
@@ -1806,31 +1288,6 @@ impl ProviderDispatch {
             ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
         }
     }
-}
-
-fn consume_provider_stream(
-    provider: ProviderDispatch,
-    request: ProviderRequest,
-    on_delta: &mut dyn FnMut(&ModelStreamChunk),
-) -> Result<ModelResponse> {
-    let response = block_on_provider_stream(provider, request, on_delta)?;
-    Ok(ModelResponse {
-        text: response.text,
-        reasoning_content: response.reasoning_content,
-        reasoning_signature: response.reasoning_signature,
-        stop_reason: response.stop_reason,
-        usage: response.usage,
-        tool_calls: response.tool_calls,
-        invalid_tool_calls: response.invalid_tool_calls,
-    })
-}
-
-fn convert_stream_to_function_response(
-    provider: ProviderDispatch,
-    request: ProviderRequest,
-    on_delta: &mut dyn FnMut(&ModelStreamChunk),
-) -> Result<ModelFunctionResponse> {
-    block_on_provider_stream(provider, request, on_delta)
 }
 
 fn block_on_provider_stream(
@@ -1867,7 +1324,7 @@ fn block_on_provider_stream(
                         let response =
                             runtime.block_on(run_stream(provider, request, &mut |chunk| {
                                 chunks.push(chunk.clone())
-                            }))?;
+                            }));
                         Ok::<_, anyhow::Error>((response, chunks))
                     })
                     .join()
@@ -1876,7 +1333,7 @@ fn block_on_provider_stream(
             for chunk in chunks {
                 on_delta(&chunk);
             }
-            Ok(response)
+            response
         }
         Err(_) => {
             let runtime = TokioRuntimeBuilder::new_current_thread()
@@ -1933,20 +1390,6 @@ fn configured_temperature_f32() -> Option<f32> {
         .map(|value| value as f32)
 }
 
-fn use_stream_mode() -> bool {
-    match std::env::var("API_STREAM") {
-        Ok(raw) => {
-            let normalized = raw.trim().to_ascii_lowercase();
-            !matches!(normalized.as_str(), "0" | "false" | "off" | "no")
-        }
-        Err(_) => true,
-    }
-}
-
-/// 工具调用阶段使用的超时时间。
-///
-/// - 若设置了 `API_FUNCTION_TIMEOUT_MS` 环境变量，直接采用（必须 > 0）；
-/// - 否则使用模型供应商配置的超时时间，不再附加更短的隐藏上限。
 fn function_timeout_ms(base_timeout_ms: u64) -> u64 {
     let custom_timeout_ms = std::env::var("API_FUNCTION_TIMEOUT_MS")
         .ok()
@@ -2077,6 +1520,7 @@ mod tests {
             context: vec![user_msg],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
+            ..Default::default()
         };
 
         let err = build_provider_messages(&req).unwrap_err();
@@ -2340,12 +1784,13 @@ mod tests {
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
+            ..Default::default()
         };
         let functions: Vec<ToolSpec> = Vec::new();
         let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let response = client
-            .stream_function_calls(request, functions, chunk_tx)
+            .stream_async(request.with_tools(functions, None), chunk_tx)
             .await
             .unwrap();
 
@@ -2411,12 +1856,13 @@ mod tests {
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
+            ..Default::default()
         };
         let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
         let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let response = client
-            .stream_function_calls(request, functions, chunk_tx)
+            .stream_async(request.with_tools(functions, None), chunk_tx)
             .await
             .unwrap();
 
@@ -2489,12 +1935,13 @@ mod tests {
             context: vec![Message::new(MessageRole::System, "system")],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
+            ..Default::default()
         };
         let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
         let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let response = client
-            .stream_function_calls(request, functions, chunk_tx)
+            .stream_async(request.with_tools(functions, None), chunk_tx)
             .await
             .unwrap();
 
@@ -2873,6 +2320,7 @@ mod tests {
             context: vec![system_msg, user_msg],
             reasoning_effort: ReasoningEffort::None,
             max_output_tokens: None,
+            ..Default::default()
         };
 
         let (system, messages) = build_provider_messages(&req).unwrap();

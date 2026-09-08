@@ -10883,7 +10883,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-deepseek"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bytes",
  "eventsource-stream",
@@ -11021,7 +11021,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -11029,7 +11029,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11453,7 +11453,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -11461,7 +11461,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",

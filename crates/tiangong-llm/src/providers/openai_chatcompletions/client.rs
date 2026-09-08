@@ -158,7 +158,7 @@ async fn read_complete_body_with_prefix(
     parse_complete_body(&bytes)
 }
 
-fn parse_complete_body(bytes: &[u8]) -> Result<Value, async_openai::error::OpenAIError> {
+pub(crate) fn parse_complete_body(bytes: &[u8]) -> Result<Value, async_openai::error::OpenAIError> {
     serde_json::from_slice(bytes).map_err(|err| {
         async_openai::error::OpenAIError::JSONDeserialize(
             err,
@@ -167,7 +167,57 @@ fn parse_complete_body(bytes: &[u8]) -> Result<Value, async_openai::error::OpenA
     })
 }
 
-const MAX_RETRIES: u32 = 3;
+/// 流式和非流式共用单次发送；重试由调用方统一控制，避免 SDK 再次重试。
+pub(crate) async fn send_request(
+    url: &str,
+    api_key: &str,
+    headers: &reqwest::header::HeaderMap,
+    payload: &Value,
+    request_timeout: Duration,
+    stream: bool,
+) -> Result<reqwest::Response, async_openai::error::OpenAIError> {
+    let client = reqwest::Client::builder()
+        .default_headers(headers.clone())
+        .retry(reqwest::retry::never())
+        .build()?;
+    let mut request = client
+        .post(url)
+        .header(
+            reqwest::header::ACCEPT,
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        )
+        .json(payload);
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    let response = timeout(request_timeout, request.send())
+        .await
+        .map_err(|_| stream_timeout_error(request_timeout))??;
+    let status = response.status();
+    if !status.is_success() {
+        let body = timeout(request_timeout, response.text())
+            .await
+            .map_err(|_| stream_timeout_error(request_timeout))?
+            .unwrap_or_default();
+        return Err(async_openai::error::OpenAIError::ApiError(
+            async_openai::error::ApiErrorResponse {
+                status_code: status,
+                api_error: async_openai::error::ApiError {
+                    message: format!("{status}: {body}"),
+                    r#type: None,
+                    param: None,
+                    code: None,
+                },
+            },
+        ));
+    }
+    Ok(response)
+}
+
 const INITIAL_RETRY_DELAY_MS: u64 = 1000;
 
 #[derive(Clone)]
@@ -181,12 +231,22 @@ impl OpenAiClient {
     }
 
     pub async fn complete(&self, model: &str, payload: Value) -> Result<Value, LlmError> {
-        let client = self.build_client()?;
-        let chat = client.chat();
+        let base = normalize_api_base(&self.config.base_url)
+            .map_err(|error| LlmError::Configuration(error.to_string()))?;
+        let url = format!("{base}/chat/completions");
         timeout(
             self.config.timeout,
-            self.with_retry("openai_complete", model, false, || {
-                chat.create_byot::<_, Value>(payload.clone())
+            self.with_retry("openai_complete", model, false, || async {
+                let response = send_request(
+                    &url,
+                    &self.config.api_key,
+                    &self.config.headers,
+                    &payload,
+                    self.config.timeout,
+                    false,
+                )
+                .await?;
+                parse_complete_body(&response.bytes().await?)
             }),
         )
         .await
@@ -211,37 +271,8 @@ impl OpenAiClient {
             let request_timeout = request_timeout;
             let headers = headers.clone();
             async move {
-                // 建连、等待响应头与一次性响应体的读取均受用户配置的请求
-                // 超时约束。SSE 流本身允许长时间增量生成，建流成功后不再
-                // 受总时限限制。
-                let client = reqwest::Client::builder()
-                    .default_headers(headers)
-                    .build()?;
-                let mut request = client
-                    .post(&url)
-                    .header(reqwest::header::ACCEPT, "text/event-stream")
-                    .json(&payload);
-                if !api_key.trim().is_empty() {
-                    request = request.bearer_auth(&api_key);
-                }
-                let response = tokio::time::timeout(request_timeout, request.send())
-                    .await
-                    .map_err(|_| stream_timeout_error(request_timeout))??;
-                let status = response.status();
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(async_openai::error::OpenAIError::ApiError(
-                        async_openai::error::ApiErrorResponse {
-                            status_code: status,
-                            api_error: async_openai::error::ApiError {
-                                message: format!("{status}: {body}"),
-                                r#type: None,
-                                param: None,
-                                code: None,
-                            },
-                        },
-                    ));
-                }
+                let response =
+                    send_request(&url, &api_key, &headers, &payload, request_timeout, true).await?;
                 match resolve_stream_body(response, request_timeout).await? {
                     StreamBody::Sse(stream) => Ok(OpenAiStreamResponse::Sse(stream)),
                     StreamBody::Complete(value) => {
@@ -345,23 +376,6 @@ impl OpenAiClient {
         .await
     }
 
-    fn build_client(
-        &self,
-    ) -> Result<async_openai::Client<async_openai::config::OpenAIConfig>, LlmError> {
-        let mut config = async_openai::config::OpenAIConfig::new()
-            .with_api_key(self.config.api_key.clone())
-            .with_api_base(
-                normalize_api_base(&self.config.base_url)
-                    .unwrap_or_else(|_| self.config.base_url.clone()),
-            );
-        for (name, value) in &self.config.headers {
-            config = config
-                .with_header(name.clone(), value.as_bytes())
-                .map_err(|_| LlmError::Configuration(format!("请求头 {name} 的值无效")))?;
-        }
-        Ok(async_openai::Client::with_config(config))
-    }
-
     async fn with_retry<F, Fut, T>(
         &self,
         operation: &'static str,
@@ -375,7 +389,7 @@ impl OpenAiClient {
     {
         let mut attempt = 0u32;
         let mut delay_ms = INITIAL_RETRY_DELAY_MS;
-        let max_retries = self.config.max_retries.max(MAX_RETRIES);
+        let max_retries = self.config.max_retries;
         loop {
             let start = std::time::Instant::now();
             tracing::info!(

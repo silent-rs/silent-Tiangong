@@ -543,6 +543,7 @@ fn build_react_request(ctx: &TurnContext) -> ModelRequest {
         context: ctx.session.context(),
         reasoning_effort: ctx.agent_config.reasoning_effort,
         max_output_tokens: None,
+        ..Default::default()
     }
 }
 
@@ -564,7 +565,7 @@ fn start_llm_request(
     let tools = ctx.tools.clone();
     let task = tokio::spawn(async move {
         client
-            .stream_function_calls_with_tool_choice(request, tools, tool_choice, chunk_tx)
+            .stream_async(request.with_tools(tools, tool_choice), chunk_tx)
             .await
     });
 

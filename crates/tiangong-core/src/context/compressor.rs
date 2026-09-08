@@ -142,6 +142,7 @@ impl ContextCompressor {
             context,
             reasoning_effort: crate::model::ReasoningEffort::None,
             max_output_tokens: Some(max_output_tokens),
+            ..Default::default()
         }
     }
 

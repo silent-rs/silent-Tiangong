@@ -8,6 +8,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 - **Thinking Mode** — `thinking`（enabled/disabled）+ `reasoning_effort`（low/high/max）分档控制，`reasoning_content` 思考内容解析
 - **Text Protocol Fallback** — 内置工具调用文本协议兜底（原生 + DSML），SDK 自动从 `content` 文本中识别并解析
 - **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错
+- **Finish Reason** — 普通响应与流式事件均原样保留服务端结束原因，支持完整 JSON 回退和未知值
 - **Responses API** — OpenAI Responses 兼容格式（适配 Codex 场景），非流式 + 流式，支持图片输入（`image_url` / `file_id`）、function / web_search 工具、reasoning effort
 - **Files API** — 图片文件上传（multipart，支持有效期）、列出、查询、删除，`file_id` 可在对话中引用
 - **Model Listing** — list available models
@@ -19,8 +20,10 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1.2"
+tiangong-deepseek = "0.1.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+futures-util = "0.3"
+serde_json = "1"
 ```
 
 ```rust
@@ -41,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
         ..Default::default()
     }).await?;
-    println!("{}", response.choices[0].message.content.unwrap_or_default());
+    println!("{}", response.choices[0].message.content.as_deref().unwrap_or_default());
 
     // Streaming with thinking mode + usage
     let stream = client.chat().create_stream(ChatCompletionRequest {
@@ -71,7 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let hit = usage.prompt_cache_hit_tokens.unwrap_or(0);
                 println!("\n[kv cache 命中 {hit} tokens]");
             }
-            StreamEvent::Done => println!(),
+            StreamEvent::FinishReason(reason) => eprintln!("\n[结束原因] {reason}"),
+            StreamEvent::Done => {
+                println!();
+                break;
+            }
             _ => {}
         }
     }
@@ -83,6 +90,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 > `ChatMessage` fields like `name`, `tool_calls`, `tool_call_id`, and `prefix` default to `None`/`false` via `#[serde(default)]`. You can use `..Default::default()` to omit them.
 >
 > 当前模型为 `deepseek-v4-pro`（满配）与 `deepseek-v4-flash`（轻量），两者均支持思考模式与工具调用。
+
+## Chat 结束原因（0.1.4）
+
+`finish_reason` 是 [DeepSeek Chat Completions 接口](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/) 返回的原始字段。
+
+- 普通响应从 `response.choices[index].finish_reason` 读取。
+- 流式响应通过 `StreamEvent::FinishReason(String)` 提供；中间块的 `null` 不产生此事件。
+- 标准 SSE、漏标内容类型的 SSE、网关返回完整 JSON，以及工具文本缓冲路径都保留该值。
+- `StreamEvent::Done` 表示流结束，不能代替结束原因；未知值同样原样透传。
+
+| 服务端值 | 含义 |
+| --- | --- |
+| `stop` | 自然结束或命中停止字符串 |
+| `length` | 达到输出或上下文长度限制，内容可能截断 |
+| `tool_calls` | 请求调用工具 |
+| `content_filter` | 内容被过滤 |
+| `insufficient_system_resource` | 推理资源不足，生成中断 |
+
+SDK 不替调用方判断结果是否完整、是否接受或重试。升级到 0.1.4 时，若原有代码对 `StreamEvent` 使用穷尽匹配，需要增加 `FinishReason` 分支。相关测试覆盖 48 组响应格式、结束原因和工具缓冲组合。
 
 ## Responses API
 

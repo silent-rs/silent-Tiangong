@@ -423,7 +423,7 @@ pub fn parse_stream_usage(usage: &tiangong_deepseek::types::Usage) -> TokenUsage
     parse_usage(usage)
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+pub(super) fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "stop" => StopReason::EndTurn,
         "tool_calls" => StopReason::ToolUse,

@@ -45,6 +45,7 @@ fn complete_response_events(response: ChatCompletionResponse) -> Vec<StreamEvent
         }
     }
     events.push(StreamEvent::Usage(response.usage));
+    events.push(StreamEvent::FinishReason(choice.finish_reason));
     events.push(StreamEvent::Done);
     events
 }
@@ -402,6 +403,9 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
                     }));
                 }
             }
+        }
+        if let Some(reason) = choice.finish_reason {
+            events.push(Ok(StreamEvent::FinishReason(reason)));
         }
     }
 

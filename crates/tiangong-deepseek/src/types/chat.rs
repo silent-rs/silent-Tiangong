@@ -136,6 +136,7 @@ pub struct ChatCompletionResponse {
 pub struct Choice {
     pub index: u32,
     pub message: ChoiceMessage,
+    /// DeepSeek 原始结束原因；保留未知值，含义由上层解释。
     pub finish_reason: String,
     #[serde(default)]
     pub logprobs: Option<Value>,
@@ -248,6 +249,9 @@ pub enum StreamEvent {
         arguments: String,
     },
     Usage(Usage),
+    /// 原样透传 choices[].finish_reason；中间块的 null 不产生此事件。
+    /// Done 只表示流结束，不能代替服务端提供的结束原因。
+    FinishReason(String),
     Done,
     Error(String),
 }
