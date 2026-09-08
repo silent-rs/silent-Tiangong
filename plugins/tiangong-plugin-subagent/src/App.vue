@@ -38,6 +38,7 @@ const FILTERS: Array<{ key: FilterKind; label: string }> = [
 ];
 
 const snapshot = ref<StateSnapshot | null>(null);
+const loaded = ref(false);
 const filter = ref<FilterKind>('all');
 const sessionContext = ref<{ id: string; workspace: string } | null>(null);
 const connectionError = ref('');
@@ -207,9 +208,13 @@ async function refresh() {
     if (!disposed) {
       snapshot.value = body;
       connectionError.value = '';
+      loaded.value = true;
     }
   } catch (error) {
-    if (!disposed) connectionError.value = String((error as Error).message ?? error);
+    if (!disposed) {
+      connectionError.value = String((error as Error).message ?? error);
+      loaded.value = true;
+    }
   }
 }
 
@@ -487,6 +492,12 @@ onMounted(async () => {
     });
   }
   await refresh();
+  // 新对话的宿主上下文可能晚于页面挂载到达——若首次刷新失败（桥接
+  // 未就绪），等上下文推送后再试一次。
+  if (connectionError.value && props.subscribeHostContext) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!disposed) await refresh();
+  }
   try {
     stopEvents = await subscribeSubagentEvents(() => scheduleRefresh());
   } catch {
@@ -535,7 +546,8 @@ onUnmounted(() => {
     </nav>
 
     <main class="content">
-      <p v-if="!filteredAgents.length" class="empty">
+      <p v-if="!loaded" class="empty">正在连接 Subagent 服务…</p>
+      <p v-else-if="!filteredAgents.length" class="empty">
         暂无 Subagent。点击右上角「新建 Subagent」创建第一个持久 Agent。
       </p>
 
