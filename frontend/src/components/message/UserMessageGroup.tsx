@@ -246,10 +246,6 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   // Subagent 回报：Hook 消息以 [Subagent·成员名] 开头，渲染为卡片
   // 而非普通用户消息气泡。
   const subagentMatch = messageText.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
-  // Subagent 任务投递：专属会话中收到的任务/消息以【Subagent 消息/任务】开头。
-  const subagentTaskMatch = messageText.match(/^【Subagent (消息|任务)】来自(.+?)：\n?([\s\S]*)$/);
-  // Subagent 回报（纯消息投递路径）：接收方收到的成员回报。
-  const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const searchQuery = useSearchStore((s) => s.searchQuery);
@@ -365,52 +361,36 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
         </div>
       ) : (
         <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-          {subagentTaskMatch ? (() => {
-            const [, kind, source, body] = subagentTaskMatch;
-            return (
-              <SubagentTaskCard
-                body={body}
-                bodyOffset={messageText.length - body.length}
-                source={source}
-                kind={kind}
-                time={formatMessageTime(message.created_at)}
-                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
-                renderText={renderUserText}
-              />
-            );
-          })() : subagentReportMessageMatch ? (() => {
-            // 纯消息投递路径的成员回报：成员署名渲染为回报卡片。
-            const [, source, body] = subagentReportMessageMatch;
-            const agentName = source.replace(/^成员「|」$/g, '').trim() || source;
-            return (
-              <SubagentReportCard
-                agentName={agentName}
-                status="回报"
-                content={body}
-                contentOffset={messageText.length - body.length}
-                time={formatMessageTime(message.created_at)}
-                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
-                renderText={renderUserText}
-              />
-            );
-          })() : subagentMatch ? (() => {
+          {subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
-            const bodyOffset = messageText.length - body.length;
             const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
-            const status = statusMatch ? statusMatch[1] : '消息';
-            const contentRaw = statusMatch ? body.slice(statusMatch[0].length) : body;
-            const content = contentRaw.trim();
-            const contentOffset = bodyOffset + (statusMatch ? statusMatch[0].length : 0) + leadingWhitespace(contentRaw);
+            const status = statusMatch ? statusMatch[1] : "消息";
+            const content = statusMatch ? body.slice(statusMatch[0].length) : body;
+            const statusIcon: Record<string, string> = { "任务完成": "✓", "执行失败": "✗", "运行阻塞": "⏳", "等待审批": "?" };
+            const statusColor: Record<string, string> = {
+              "任务完成": "text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+              "执行失败": "text-red-600 dark:text-red-400 bg-red-500/10 border-red-500/20",
+              "运行阻塞": "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
+              "等待审批": "text-blue-600 dark:text-blue-400 bg-blue-500/10 border-blue-500/20",
+              "消息": "text-muted-foreground bg-muted/30 border-border",
+            };
+            const sc = statusColor[status] || statusColor["消息"];
             return (
-              <SubagentReportCard
-                agentName={agentName.trim()}
-                status={status}
-                content={content}
-                contentOffset={contentOffset}
-                time={formatMessageTime(message.created_at)}
-                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
-                renderText={renderUserText}
-              />
+              <div className="w-full max-w-[92%] sm:max-w-[85%]">
+                <div className="rounded-lg border bg-card shadow-sm overflow-hidden">
+                  <div className={`flex items-center gap-2 px-3 py-1.5 border-b text-xs font-medium ${sc}`}>
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold shrink-0">S</span>
+                    <span className="font-semibold">{agentName.trim()}</span>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border">
+                      {statusIcon[status] || "•"} {status}
+                    </span>
+                    <span className="ml-auto text-[10px] text-muted-foreground/60">{formatMessageTime(message.created_at)}</span>
+                  </div>
+                  <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+                    {renderUserText(content.trim())}
+                  </div>
+                </div>
+              </div>
             );
           })() : scheduledTask || webhook ? (
             (() => {
