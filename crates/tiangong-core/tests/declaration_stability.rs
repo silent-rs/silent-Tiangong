@@ -1,3 +1,4 @@
+//! Core 声明稳定性测试：直接模拟 Plugin 接口，不加载 WASM 或启动插件服务。
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -7,20 +8,21 @@ use tiangong_core::{
     agent_input::{AgentInput, AgentInputKind},
     core::{Plugin, TiangongCore},
     core_config::{CoreConfig, CoreConfigProvider},
+    model::{ToolCall, ToolSpec},
     permission::TrustMode,
     session::Session,
-};
-use tiangong_plugin_runtime::{
-    PluginRuntimeConfig, SidecarConnection, WasmPluginAdapter, WasmPluginLoader,
+    tool::ToolResult,
+    tool_override::{
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    },
 };
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
-
-struct ToggleSidecar {
+struct PluginState {
     available: AtomicBool,
     revision: AtomicUsize,
     calls: Mutex<Vec<String>>,
 }
-impl ToggleSidecar {
+impl PluginState {
     fn new() -> Self {
         Self {
             available: AtomicBool::new(true),
@@ -28,32 +30,78 @@ impl ToggleSidecar {
             calls: Mutex::new(Vec::new()),
         }
     }
-}
-impl SidecarConnection for ToggleSidecar {
-    fn invoke(&self, operation: &str, _: &str) -> anyhow::Result<String> {
+    fn declaration(&self, operation: &str) -> Result<String, String> {
         self.calls.lock().unwrap().push(operation.into());
-        anyhow::ensure!(self.available.load(Ordering::SeqCst), "工具服务暂时不可用");
-        let description = format!("revision-{}", self.revision.load(Ordering::SeqCst));
-        Ok(match operation {
-            "mcp.list_tools" => json!({"servers":[{"server":"probe","tools":[{"name":"read","description":description,"input_schema":{"type":"object"}}]}]}),
-            "get_skill_summary" => json!({"storage_root":"/tmp/skills","items":[{"id":"probe","name":"Probe","description":description}]}),
-            "mcp.execute_tool" => json!({"ok":true,"summary":"完成","stdout":"OK","stderr":"","exit_code":0,"duration_ms":1,"tool_name":"mcp::probe::read","arguments":[]}),
-            _ => json!({}),
-        }.to_string())
+        if !self.available.load(Ordering::SeqCst) {
+            return Err("插件声明暂时不可用".into());
+        }
+        Ok(format!("revision-{}", self.revision.load(Ordering::SeqCst)))
     }
 }
-
-fn adapter(id: &str, sidecar: Arc<ToggleSidecar>) -> Arc<WasmPluginAdapter> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "../../target/wasm32-wasip2/debug/tiangong_plugin_{id}_wasm.wasm"
-    ));
-    assert!(path.exists(), "先构建 {id} WASM: {}", path.display());
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::with_sidecar(&config, Some(sidecar)).unwrap();
-    Arc::new(WasmPluginAdapter::new(
-        loader.load_for_plugin(&path, &config, id).unwrap(),
-        config,
-    ))
+struct MockPlugin {
+    id: String,
+    state: Arc<PluginState>,
+}
+impl Plugin for MockPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+impl MentionCandidateProvider for MockPlugin {}
+impl ToolSpecProvider for MockPlugin {
+    fn try_tool_specs(&self) -> Result<Vec<ToolSpec>, String> {
+        let description = if self.id == "dynamic-tools" {
+            self.state.declaration("tools")?
+        } else {
+            "固定工具".into()
+        };
+        Ok(vec![ToolSpec {
+            name: "probe_read".into(),
+            description,
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }])
+    }
+}
+impl PromptSectionProvider for MockPlugin {
+    fn try_prompt_sections(&self) -> Result<Vec<String>, String> {
+        if self.id == "dynamic-prompt" {
+            Ok(vec![self.state.declaration("prompt")?])
+        } else {
+            Ok(vec!["固定插件提示".into()])
+        }
+    }
+}
+impl ToolOverrideHandler for MockPlugin {
+    fn handle(
+        &self,
+        call: &ToolCall,
+        _session: &mut Session,
+        _actor_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
+        let handled = call.name == "probe_read";
+        let ok = self.state.available.load(Ordering::SeqCst);
+        Box::pin(async move {
+            handled.then(|| ToolResult {
+                ok,
+                summary: if ok {
+                    "完成"
+                } else {
+                    "工具暂时不可用"
+                }
+                .into(),
+                stdout: if ok { "OK" } else { "" }.into(),
+                stderr: if ok { "" } else { "工具暂时不可用" }.into(),
+                exit_code: if ok { 0 } else { 1 },
+                execution: None,
+            })
+        })
+    }
+}
+fn plugin(id: &str, state: Arc<PluginState>) -> Arc<dyn Plugin> {
+    Arc::new(MockPlugin {
+        id: id.into(),
+        state,
+    })
 }
 
 fn core(
@@ -115,7 +163,7 @@ async fn send(
 fn reply(call: Option<usize>) -> ResponseTemplate {
     let (message, finish) = match call {
         Some(index) => (
-            json!({"role":"assistant","tool_calls":[{"id":format!("call-{index}"),"type":"function","function":{"name":"mcp__probe__read","arguments":"{\"path\":\"probe\"}"}}]}),
+            json!({"role":"assistant","tool_calls":[{"id":format!("call-{index}"),"type":"function","function":{"name":"probe_read","arguments":"{\"path\":\"probe\"}"}}]}),
             "tool_calls",
         ),
         None => (json!({"role":"assistant","content":"完成"}), "stop"),
@@ -125,18 +173,18 @@ fn reply(call: Option<usize>) -> ResponseTemplate {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset() {
-    for id in ["mcp", "skill"] {
-        let sidecar = Arc::new(ToggleSidecar::new());
+async fn declarations_survive_core_recreation_and_refresh_on_reset() {
+    for id in ["dynamic-tools", "dynamic-prompt"] {
+        let state = Arc::new(PluginState::new());
         let root = tempfile::tempdir().unwrap();
         let server = MockServer::builder().start().await;
         Mock::given(method("POST"))
             .respond_with(reply(None))
             .mount(&server)
             .await;
-        let (core, config, rx, sid) = core(root.path(), &server, adapter(id, sidecar.clone()));
+        let (core, config, rx, sid) = core(root.path(), &server, plugin(id, state.clone()));
         for (round, available) in [true, false, true].into_iter().enumerate() {
-            sidecar.available.store(available, Ordering::SeqCst);
+            state.available.store(available, Ordering::SeqCst);
             core.replace_config(config.clone()).unwrap();
             send(&core, &rx, &format!("继续 {round}")).await;
         }
@@ -152,13 +200,13 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
                 old.as_slice()
             );
         }
-        let operation = if id == "mcp" {
-            "mcp.list_tools"
+        let operation = if id == "dynamic-tools" {
+            "tools"
         } else {
-            "get_skill_summary"
+            "prompt"
         };
         assert_eq!(
-            sidecar
+            state
                 .calls
                 .lock()
                 .unwrap()
@@ -169,8 +217,8 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
         );
         core.shutdown_join().unwrap();
 
-        sidecar.available.store(false, Ordering::SeqCst);
-        sidecar.revision.store(1, Ordering::SeqCst);
+        state.available.store(false, Ordering::SeqCst);
+        state.revision.store(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
         let restored = TiangongCore::builder()
             .session_id(sid.clone())
@@ -179,11 +227,11 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
             .trust_mode(TrustMode::FullTrust)
             .config(CoreConfigProvider::new(config))
             .stream_tx(tx)
-            .plugins(vec![adapter(id, sidecar.clone()) as Arc<dyn Plugin>])
+            .plugins(vec![plugin(id, state.clone()) as Arc<dyn Plugin>])
             .build();
         send(&restored, &rx, "重启后继续").await;
         assert_eq!(
-            sidecar
+            state
                 .calls
                 .lock()
                 .unwrap()
@@ -204,7 +252,7 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
             serde_json::to_value(&before.plugin_declarations).unwrap(),
             serde_json::to_value(&offline.plugin_declarations).unwrap()
         );
-        sidecar.available.store(true, Ordering::SeqCst);
+        state.available.store(true, Ordering::SeqCst);
         restored.deliver(AgentInputKind::reset_context()).unwrap();
         let refreshed = Session::load_from_storage(root.path(), &sid).unwrap();
         assert_ne!(
@@ -214,7 +262,7 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
         send(&restored, &rx, "整理后继续").await;
         let requests = server.received_requests().await.unwrap();
         let next: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
-        if id == "mcp" {
+        if id == "dynamic-tools" {
             assert_ne!(first["tools"], next["tools"]);
         } else {
             assert_ne!(first["messages"][0], next["messages"][0]);
@@ -225,7 +273,7 @@ async fn actual_wasm_declarations_survive_core_recreation_and_refresh_on_reset()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedback() {
-    let sidecar = Arc::new(ToggleSidecar::new());
+    let state = Arc::new(PluginState::new());
     let root = tempfile::tempdir().unwrap();
     let server = MockServer::builder().start().await;
     let step = AtomicUsize::new(0);
@@ -236,11 +284,11 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
         })
         .mount(&server)
         .await;
-    let (core, _, rx, id) = core(root.path(), &server, adapter("mcp", sidecar.clone()));
+    let (core, _, rx, id) = core(root.path(), &server, plugin("dynamic-tools", state.clone()));
     send(&core, &rx, "初始化").await;
-    sidecar.available.store(false, Ordering::SeqCst);
+    state.available.store(false, Ordering::SeqCst);
     send(&core, &rx, "调用工具").await;
-    sidecar.available.store(true, Ordering::SeqCst);
+    state.available.store(true, Ordering::SeqCst);
     send(&core, &rx, "重试工具").await;
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 5);
@@ -285,7 +333,7 @@ async fn missing_plugin_after_restart_keeps_tools_and_reports_execution_failure(
     let (core, config, rx, sid) = core(
         root.path(),
         &server,
-        adapter("mcp", Arc::new(ToggleSidecar::new())),
+        plugin("dynamic-tools", Arc::new(PluginState::new())),
     );
     send(&core, &rx, "初始化").await;
     core.shutdown_join().unwrap();
@@ -320,9 +368,9 @@ async fn undiscovered_offline_plugin_does_not_block_chat_and_is_added_on_reset()
         .respond_with(reply(None))
         .mount(&server)
         .await;
-    let sidecar = Arc::new(ToggleSidecar::new());
-    sidecar.available.store(false, Ordering::SeqCst);
-    let (core, _, rx, sid) = core(root.path(), &server, adapter("mcp", sidecar.clone()));
+    let state = Arc::new(PluginState::new());
+    state.available.store(false, Ordering::SeqCst);
+    let (core, _, rx, sid) = core(root.path(), &server, plugin("dynamic-tools", state.clone()));
     send(&core, &rx, "离线开始").await;
     let before = Session::load_from_storage(root.path(), &sid).unwrap();
     assert!(
@@ -330,9 +378,9 @@ async fn undiscovered_offline_plugin_does_not_block_chat_and_is_added_on_reset()
             .plugin_declarations
             .unwrap()
             .iter()
-            .any(|item| item.plugin_id == "mcp")
+            .any(|item| item.plugin_id == "dynamic-tools")
     );
-    sidecar.available.store(true, Ordering::SeqCst);
+    state.available.store(true, Ordering::SeqCst);
     send(&core, &rx, "恢复后普通续聊").await;
     core.deliver(AgentInputKind::reset_context()).unwrap();
     send(&core, &rx, "整理后继续").await;

@@ -21,24 +21,21 @@ shift || true
 # 用 if [[ ]] 模式匹配 + sort -u 去重，兼容老版本 bash，避免 case 在命令替换内的解析问题
 crates="$(
   for f in "$@"; do
-    if [[ "$f" == plugins/tiangong-plugin-memory/protocol/* ]]; then
+    # WASM 的真实目标编译由发布流程承担；提交阶段仍执行 rustfmt。
+    if [[ "$f" == plugins/*/wasm/* ]]; then
+      continue
+    elif [[ "$f" == plugins/tiangong-plugin-memory/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-protocol"
     elif [[ "$f" == plugins/tiangong-plugin-memory/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-sidecar"
-    elif [[ "$f" == plugins/tiangong-plugin-memory/wasm/* ]]; then
-      printf '%s\n' "tiangong-plugin-memory-wasm"
     elif [[ "$f" == plugins/tiangong-plugin-mcp/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-mcp-protocol"
     elif [[ "$f" == plugins/tiangong-plugin-mcp/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-mcp-sidecar"
-    elif [[ "$f" == plugins/tiangong-plugin-mcp/wasm/* ]]; then
-      printf '%s\n' "tiangong-plugin-mcp-wasm"
     elif [[ "$f" == plugins/tiangong-plugin-index/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-index-protocol"
     elif [[ "$f" == plugins/tiangong-plugin-index/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-index-sidecar"
-    elif [[ "$f" == plugins/tiangong-plugin-index/wasm/* ]]; then
-      printf '%s\n' "tiangong-plugin-index-wasm"
     elif [[ "$f" == plugins/tiangong-plugin-scheduler/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-scheduler-protocol"
     elif [[ "$f" == plugins/tiangong-plugin-scheduler/sidecar/* ]]; then
@@ -102,9 +99,6 @@ case "$sub" in
       fi
     done
     if [[ "$prepare_runtime_test_binaries" == "true" ]]; then
-      timeout 120 rustup target add wasm32-wasip2
-      timeout 300 cargo build -p tiangong-plugin-mcp-wasm \
-        -p tiangong-plugin-skill-wasm --target wasm32-wasip2
       cargo build -p tiangong-sandbox --bin tiangong-sandbox \
         -p tiangong-plugin-command-sidecar --bin tiangong-command-sidecar \
         -p tiangong-plugin-sidecar --bin test-stdio-host

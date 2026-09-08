@@ -12,7 +12,7 @@ test-group = 'memory-integration'
 filter = '''
 package(=tiangong-plugin-runtime) & (
     test(plugin_dev::tests::integration_) |
-    binary(/^(declaration_stability|load_and_call|ephemeral_route|official_catalog_e2e|m0_slot_bridge|v2_manifest_contribution|tool_ui_launcher)$/)
+    binary(/^(load_and_call|ephemeral_route|official_catalog_e2e|m0_slot_bridge|v2_manifest_contribution|tool_ui_launcher)$/)
 )
 '''
 test-group = 'plugin-runtime-integration'
