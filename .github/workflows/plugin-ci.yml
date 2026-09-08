@@ -238,8 +238,9 @@ jobs:
               --arg sidecar "$sidecar" \
               --argjson rust "$has_protocol" \
               --argjson ui "$has_ui" \
+              --argjson ui_build "$package_ui" \
               --argjson ui_test "$ui_test" \
-              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_build:$ui_build,ui_test:$ui_test,native:false,native_package:""}')"
             if [[ "$plugin_selected" == "true" ]]; then
               append_plugin "$item"
             fi
@@ -263,7 +264,7 @@ jobs:
               --arg id "$id" \
               --arg root "$root" \
               --arg package "$package" \
-              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_build:false,ui_test:false,native:true,native_package:$package}')"
             append_plugin "$item"
           done
 
@@ -388,7 +389,7 @@ jobs:
         run: cargo test --locked -p "$PACKAGE"
 
       - name: Setup Node
-        if: matrix.plugin.ui
+        if: matrix.plugin.ui_build
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -396,21 +397,21 @@ jobs:
           cache-dependency-path: ${{ matrix.plugin.root }}/yarn.lock
 
       - name: Enable Yarn
-        if: matrix.plugin.ui
+        if: matrix.plugin.ui_build
         run: |
           corepack enable
           corepack prepare yarn@1.22.22 --activate
 
       - name: Install plugin UI dependencies
-        if: matrix.plugin.ui
+        if: matrix.plugin.ui_build
         run: yarn --cwd "${{ matrix.plugin.root }}" install --frozen-lockfile
 
       - name: Test plugin UI
-        if: matrix.plugin.ui && matrix.plugin.ui_test
+        if: matrix.plugin.ui_build && matrix.plugin.ui_test
         run: yarn --cwd "${{ matrix.plugin.root }}" test
 
       - name: Build plugin UI
-        if: matrix.plugin.ui
+        if: matrix.plugin.ui_build
         run: yarn --cwd "${{ matrix.plugin.root }}" build
 
       - name: Validate plugin UI entries
