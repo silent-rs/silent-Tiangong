@@ -1312,6 +1312,109 @@ async fn inject_user_message_interrupts_tools_and_restarts() {
     assert!(call_closed, "被中断的工具调用应有失败结果（ALR-110）");
 }
 
+/// 记录每次 on_turn_started 时会话用户消息 ID 列表的插件，用于验证
+/// 注入重播后插件快照包含注入的新消息。
+struct SnapshotRecordingPlugin {
+    snapshots: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+impl ToolOverrideHandler for SnapshotRecordingPlugin {}
+impl ToolSpecProvider for SnapshotRecordingPlugin {}
+impl PromptSectionProvider for SnapshotRecordingPlugin {}
+impl MentionCandidateProvider for SnapshotRecordingPlugin {}
+
+impl Plugin for SnapshotRecordingPlugin {
+    fn id(&self) -> &str {
+        "snapshot-recorder"
+    }
+    fn on_turn_started(&self, session: &mut Session, _: usize) {
+        let ids = session
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .map(|m| m.id.clone())
+            .collect();
+        self.snapshots.lock().unwrap().push(ids);
+    }
+}
+
+/// 运行中注入用户消息后重播 turn 开始钩子：依赖会话快照的插件
+/// （如附件分析按 message_id 定位附件）必须看到注入的消息。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inject_user_message_replays_on_turn_started_with_new_message() {
+    use super::super::turn::run_turn;
+
+    let server = MockServer::builder().start().await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert(
+        "paused_probe".to_string(),
+        Arc::new(PausedTool {
+            started: started.clone(),
+            release: release.clone(),
+        }),
+    );
+    // 1) 首轮：工具调用阻塞，制造"工具等待中"。
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_1", "paused_probe", "{}"),
+            usage_chunk(15, 3),
+        ],
+    )
+    .await;
+    // 2) 注入后新意图：直接文本回答。
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("好的。"), usage_chunk(20, 4)],
+    )
+    .await;
+
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let plugin = Arc::new(SnapshotRecordingPlugin {
+        snapshots: snapshots.clone(),
+    });
+    let harness = TestHarness::new_with_plugins(
+        &server,
+        vec![tool_spec("paused_probe")],
+        overrides,
+        vec![plugin],
+    );
+    let TestHarness {
+        mut ctx,
+        cmd_tx,
+        mut cmd_rx,
+        ..
+    } = harness;
+    let inject_tx = cmd_tx.clone();
+    let started_wait = started.clone();
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+            .await
+            .expect("工具应已启动");
+        inject_tx
+            .send(Command::InjectUserMessage {
+                message_id: "injected-with-attachment".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("看这张新截图")],
+            })
+            .unwrap();
+    });
+    run_turn(ctx, &mut cmd_rx).await;
+
+    let snapshots = snapshots.lock().unwrap();
+    assert!(
+        snapshots.len() >= 2,
+        "注入后应重播 on_turn_started（turn 开始 + 注入），实际 {} 次",
+        snapshots.len()
+    );
+    let last = snapshots.last().unwrap();
+    assert!(
+        last.iter().any(|id| id == "injected-with-attachment"),
+        "重播快照应包含注入的消息，实际: {last:?}"
+    );
+}
+
 /// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
 /// 用户消息，原始消息不被覆盖；磁盘重载后一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
