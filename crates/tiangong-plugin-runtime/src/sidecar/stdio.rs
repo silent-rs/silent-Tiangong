@@ -618,11 +618,12 @@ impl StdioSidecarConnection {
             if self.config.sensitive_storage.mcp_config {
                 exempt_mcp_config_write(&mut policy, &self.config.storage_root);
             }
+            // 证书服务授权依赖最终网络权限，必须先赋值，不能读取默认的禁网状态。
+            policy.allow_network = self.config.sandbox_network;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
                 .denied_read_paths
                 .extend(self.config.sandbox_denied_read_paths.clone());
-            policy.allow_network = self.config.sandbox_network;
             if let Some(limits) = &self.config.sandbox_resource_limits {
                 policy.resource_limits = *limits;
             }

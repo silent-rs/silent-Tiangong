@@ -1382,7 +1382,7 @@ async fn inject_user_message_replays_on_turn_started_with_new_message() {
         vec![plugin],
     );
     let TestHarness {
-        mut ctx,
+        ctx,
         cmd_tx,
         mut cmd_rx,
         ..
