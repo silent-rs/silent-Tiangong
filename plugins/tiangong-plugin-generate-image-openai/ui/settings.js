@@ -8,18 +8,23 @@ async function callHost(method, payload = "") {
 
 // ── DOM ──
 
-const sourceGlobal = document.getElementById("source-global");
-const sourceManual = document.getElementById("source-manual");
-const globalSection = document.getElementById("global-section");
-const manualSection = document.getElementById("manual-section");
-const globalModel = document.getElementById("global-model");
-const globalHint = document.getElementById("global-hint");
-const manualBaseUrl = document.getElementById("manual-base-url");
-const manualApiKey = document.getElementById("manual-api-key");
-const manualModel = document.getElementById("manual-model");
-const extraPrompt = document.getElementById("extra-prompt");
-const saveBtn = document.getElementById("save-btn");
-const statusEl = document.getElementById("status");
+// Shadow 容器的页面 DOM 挂在 shadow root（宿主注入 pluginRoot），脚本里的
+// document 是主文档——必须从 pluginRoot 查询，直接打开时回退 document。
+const dom = typeof pluginRoot !== "undefined" && pluginRoot ? pluginRoot : document;
+const byId = (id) => dom.querySelector(`#${id}`);
+
+const sourceGlobal = byId("source-global");
+const sourceManual = byId("source-manual");
+const globalSection = byId("global-section");
+const manualSection = byId("manual-section");
+const globalModel = byId("global-model");
+const globalHint = byId("global-hint");
+const manualBaseUrl = byId("manual-base-url");
+const manualApiKey = byId("manual-api-key");
+const manualModel = byId("manual-model");
+const extraPrompt = byId("extra-prompt");
+const saveBtn = byId("save-btn");
+const statusEl = byId("status");
 
 function toggleSource() {
   const manual = sourceManual.checked;
