@@ -47,7 +47,7 @@ impl tiangong_plugin_sidecar::SidecarService for ImageService {
                 return Response::error(
                     &request_id,
                     ErrorCode::ServiceError,
-                    error.to_string(),
+                    format!("{error:#}"),
                     false,
                 );
             }
