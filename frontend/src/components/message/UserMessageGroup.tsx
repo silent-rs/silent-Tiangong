@@ -18,91 +18,40 @@ import { ContentMedia } from "./ContentMedia";
 import { CollapsibleUserText } from "./CollapsibleUserText";
 
 
-
-/// 计算左侧空白长度：裁剪后的文本须补上被去掉的前缀，才能换算回
-/// 原消息中的位置（搜索高亮依赖原消息坐标）。
-const leadingWhitespace = (s: string) => s.length - s.trimStart().length;
-
-/// 手风琴行：独立展开/收起，标题常显、内容按需展开。
-function AccordionRow({ title, children, contentOffset, renderText }: {
-  title: string; children: string; contentOffset: number;
-  renderText: (text: string, sourceOffset: number) => React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border-b border-border/15 last:border-b-0">
-      <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/[0.08] transition-colors" onClick={() => setOpen(!open)}>
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform shrink-0 ${open ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
-        <span className="font-medium">{title}</span>
-        {!open && <span className="ml-auto text-[10px] text-muted-foreground/40 truncate max-w-[50%]">{children.slice(0, 40).replace(/\n/g, ' ')}…</span>}
-      </button>
-      {open && (
-        <div className="px-4 pb-2 pt-0.5">
-          <div className="rounded-md bg-muted/[0.1] border border-border/15 px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-36 overflow-y-auto">
-            {renderText(children, contentOffset)}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /// Subagent 任务指派卡片：分层展示核心任务与元信息。
 /// 正文结构：任务/消息内容 →【任务工作区】→【长期指令】→【长期记忆】
-/// →【成长约定】→【工作区状态】→（运行标记）。
-function SubagentTaskCard({ body, bodyOffset, source, kind, time, onCopy, renderText }: {
-  body: string; bodyOffset: number; source: string; kind: string; time: string;
-  onCopy: () => void; renderText: (text: string, sourceOffset: number) => React.ReactNode;
+/// →【成长约定】→（运行标记）。核心任务突出展示；工作区/指令/记忆等
+/// 元信息折叠为分组可展开区块；整体默认截断、可展开全文。
+function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
+  body: string; source: string; kind: string; time: string;
+  onCopy: () => void; renderText: (text: string) => React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false);
 
-  // 标记支持新旧两种格式：【任务工作区】(新) / 任务工作区：(旧)
-  const metaDefs: [string, RegExp][] = [
-    ['任务工作区', /\u3010任务工作区\u3011|任务工作区：/],
-    ['长期指令', /\u3010长期指令\u3011/],
-    ['长期记忆', /\u3010长期记忆\u3011/],
-    ['成长约定', /\u3010成长约定\u3011/],
-    ['工作区状态', /\u3010工作区状态\u3011/],
-  ];
-  // 先在全文中定位所有标记的起始位置（互不截断），再统一提取
-  const positions: { start: number; title: string; markerLen: number; raw: string }[] = [];
-  for (const [title, re] of metaDefs) {
-    const m = re.exec(body);
-    if (!m) continue;
-    positions.push({ start: m.index, title, markerLen: m[0].length, raw: '' });
+  const metaMarkers = ['\u3010\u4efb\u52a1\u5de5\u4f5c\u533a\u3011', '\u3010\u957f\u671f\u6307\u4ee4\u3011', '\u3010\u957f\u671f\u8bb0\u5fc6\u3011', '\u3010\u6210\u957f\u7ea6\u5b9a\u3011', '\u3010\u5de5\u4f5c\u533a\u72b6\u6001\u3011'];
+  let coreContent = body;
+  const metaSections: { title: string; content: string }[] = [];
+  for (const marker of metaMarkers) {
+    const idx = coreContent.indexOf(marker);
+    if (idx >= 0) {
+      let end = coreContent.length;
+      for (const next of metaMarkers) {
+        const nextIdx = coreContent.indexOf(next, idx + marker.length);
+        if (nextIdx >= 0 && nextIdx < end) end = nextIdx;
+      }
+      const tagIdx = coreContent.indexOf('\uff08\u8fd0\u884c\u6807\u8bb0', idx);
+      if (tagIdx >= 0 && tagIdx < end) end = tagIdx;
+      const content = coreContent.slice(idx + marker.length, end).trim();
+      if (content) metaSections.push({ title: marker.replace(/[\u3010\u3011]/g, ''), content });
+      coreContent = coreContent.slice(0, idx).trimEnd();
+    }
   }
-  // 加上运行标记位置作为最终截断
-  const runTagIdx = body.indexOf('\uff08运行标记');
-  positions.sort((a, b) => a.start - b.start);
-  // 逐段填充内容：从标记结束到下一个标记或运行标记或末尾。
-  // 只切除标记本身（旧格式含“标题：”前缀），保留其后内容。
-  for (let i = 0; i < positions.length; i++) {
-    const cur = positions[i];
-    const nextStart = i + 1 < positions.length ? positions[i + 1].start
-      : (runTagIdx >= 0 ? runTagIdx : body.length);
-    cur.raw = body.slice(cur.start + cur.markerLen, nextStart);
-  }
-  // 各段记录自身在原消息中的起始偏移，供搜索高亮换算
-  const metaSections = positions.map(p => {
-    const content = p.raw.trim();
-    return {
-      title: p.title,
-      content,
-      offset: bodyOffset + p.start + p.markerLen + leadingWhitespace(p.raw),
-    };
-  }).filter(s => s.content);
-  // 核心内容 = 第一个标记之前的文本
-  const firstMarkerIdx = positions.length > 0 ? positions[0].start : body.length;
-  const coreRaw = body.slice(0, firstMarkerIdx).trimEnd().replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '');
-  const coreContent = coreRaw.trim();
-  const coreOffset = bodyOffset + leadingWhitespace(coreRaw);
+  coreContent = coreContent.replace(/\n*\uff08\u8fd0\u884c\u6807\u8bb0[^\uff09]*\uff09\s*$/, '').trim();
 
-  const MAX_LINES = 5;
-  const lines = coreContent.split('\n');
-  const isLong = lines.length > MAX_LINES;
-  const displayContent = expanded || !isLong ? coreContent : lines.slice(0, MAX_LINES).join('\n') + '…';
-
-  const isTask = kind === '任务';
+  const TRUNCATE_LEN = 300;
+  const isLong = coreContent.length > TRUNCATE_LEN;
+  const displayContent = expanded || !isLong ? coreContent : coreContent.slice(0, TRUNCATE_LEN) + '\u2026';
 
   return (
     <div className="w-full max-w-[92%] sm:max-w-[80%]">
@@ -110,113 +59,50 @@ function SubagentTaskCard({ body, bodyOffset, source, kind, time, onCopy, render
         <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/30 bg-muted/[0.1]">
           <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/10 border border-primary/15 shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-primary">
-              {isTask ? <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> : <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
+              {kind === '\u4efb\u52a1' ? <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> : <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
             </svg>
           </div>
           <div className="min-w-0 flex-1">
-            <span className="text-sm font-semibold text-foreground">{isTask ? '任务指派' : '协作消息'}</span>
-            <span className="ml-2 text-[11px] text-muted-foreground">来自 {source.trim()}</span>
+            <span className="text-sm font-semibold text-foreground">{kind === '\u4efb\u52a1' ? '\u4efb\u52a1\u6307\u6d3e' : '\u534f\u4f5c\u6d88\u606f'}</span>
+            <span className="ml-2 text-[11px] text-muted-foreground">\u6765\u81ea {source.trim()}</span>
           </div>
           <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
-          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
+          <button type="button" aria-label="\u590d\u5236" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
           </button>
         </div>
 
         <div className="px-4 py-3">
           <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-            {renderText(displayContent, coreOffset)}
+            {renderText(displayContent)}
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
+              {expanded ? '\u6536\u8d77' : `\u5c55\u5f00\u5168\u90e8\uff08${coreContent.length} \u5b57\uff09`}
             </button>
           )}
         </div>
 
         {metaSections.length > 0 && (
-          <div className="border-t border-border/30 py-1">
-            {metaSections.map((section) => (
-              <AccordionRow key={section.title} title={section.title} contentOffset={section.offset} renderText={renderText}>
-                {section.content}
-              </AccordionRow>
-            ))}
+          <div className="border-t border-border/30">
+            <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/20 transition-colors" onClick={() => setMetaOpen(!metaOpen)}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform ${metaOpen ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
+              {metaOpen ? '\u6536\u8d77\u9644\u52a0\u4fe1\u606f' : `\u9644\u52a0\u4fe1\u606f\uff08${metaSections.length} \u9879\uff1a${metaSections.map(s => s.title).join('\u3001')}\uff09`}
+            </button>
+            {metaOpen && (
+              <div className="px-4 pb-3 space-y-2">
+                {metaSections.map((section) => (
+                  <div key={section.title} className="rounded-lg bg-muted/[0.12] border border-border/20 overflow-hidden">
+                    <p className="px-3 py-1 text-[10px] font-medium text-muted-foreground border-b border-border/15">{section.title}</p>
+                    <div className="px-3 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-32 overflow-y-auto">
+                      {renderText(section.content)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-
-/// Subagent Hook 回报卡片：状态色竖条+状态图标+成员名+徽章+可折叠内容。
-function SubagentReportCard({ agentName, status, content, contentOffset, time, onCopy, renderText }: {
-  agentName: string; status: string; content: string; contentOffset: number; time: string;
-  onCopy: () => void; renderText: (text: string, sourceOffset: number) => React.ReactNode;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const statusIcon: Record<string, string> = { '任务完成': '✓', '执行失败': '✗', '运行阻塞': '⏳', '等待审批': '?' };
-  const accentColor: Record<string, string> = {
-    '任务完成': 'border-l-emerald-500', '执行失败': 'border-l-red-500',
-    '运行阻塞': 'border-l-amber-500', '等待审批': 'border-l-blue-500', '消息': 'border-l-border',
-  };
-  const iconBg: Record<string, string> = {
-    '任务完成': 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-    '执行失败': 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
-    '运行阻塞': 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-    '等待审批': 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
-    '消息': 'bg-muted text-muted-foreground border-border',
-  };
-  const pillColor: Record<string, string> = {
-    '任务完成': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/15',
-    '执行失败': 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/15',
-    '运行阻塞': 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/15',
-    '等待审批': 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/15',
-    '消息': 'bg-muted/50 text-muted-foreground border-border',
-  };
-  const ac = accentColor[status] || accentColor['消息'];
-  const ib = iconBg[status] || iconBg['消息'];
-  const pc = pillColor[status] || pillColor['消息'];
-  const MAX_LINES = 5;
-  const lines = content.split('\n');
-  const isLong = lines.length > MAX_LINES;
-  const displayContent = expanded || !isLong ? content : lines.slice(0, MAX_LINES).join('\n') + '…';
-  return (
-    <div className="w-full max-w-[92%] sm:max-w-[80%]">
-      <div className={`rounded-xl border border-border/60 border-l-[3px] ${ac} bg-card shadow-sm overflow-hidden`}>
-        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-border/30 bg-muted/[0.15]">
-          <div className={`flex items-center justify-center w-7 h-7 rounded-full border shrink-0 ${ib}`}>
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
-              {status === '任务完成' && <path d="M20 6 9 17l-5-5"/>}
-              {status === '执行失败' && <><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>}
-              {status === '运行阻塞' && <><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>}
-              {status === '等待审批' && <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></>}
-              {status === '消息' && <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
-            </svg>
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-foreground">{agentName}</span>
-              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${pc}`}>
-                {statusIcon[status] || '•'} {status}
-              </span>
-            </div>
-          </div>
-          <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
-          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-          </button>
-        </div>
-        <div className="px-4 py-3">
-          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-            {renderText(displayContent, contentOffset)}
-          </div>
-          {isLong && (
-            <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
-            </button>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -366,27 +252,14 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           {subagentTaskMatch ? (() => {
             const [, kind, source, body] = subagentTaskMatch;
             return (
-              <div className="w-full max-w-[92%] sm:max-w-[85%]">
-                <div className="rounded-lg border bg-card shadow-sm overflow-hidden">
-                  <div className="flex items-center gap-2 px-3 py-1.5 border-b text-xs font-medium text-muted-foreground bg-muted/30 border-border">
-                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold shrink-0">S</span>
-                    <span className="font-semibold">{kind === '任务' ? '任务指派' : '协作消息'}</span>
-                    <span className="text-muted-foreground/60">来自{source.trim()}</span>
-                    <span className="ml-auto text-[10px] text-muted-foreground/60">{formatMessageTime(message.created_at)}</span>
-                    <button
-                      type="button"
-                      aria-label="复制"
-                      className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded text-muted-foreground/50 hover:text-foreground hover:bg-foreground/5 transition-colors"
-                      onClick={() => navigator.clipboard.writeText(messageText).catch(() => {})}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3 h-3"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-                    </button>
-                  </div>
-                  <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-                    {renderUserText(body.trim())}
-                  </div>
-                </div>
-              </div>
+              <SubagentTaskCard
+                body={body}
+                source={source}
+                kind={kind}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
             );
           })() : subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
