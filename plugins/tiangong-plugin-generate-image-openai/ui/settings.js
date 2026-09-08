@@ -1,21 +1,5 @@
 // OpenAI 生图设置页脚本（Shadow 容器注入 bridge 风格）。
-// bridge / hostContext / onHostContextChange 由宿主容器注入执行。
-
-function applyHostContext(context) {
-  if (!context) return;
-  const root = document.documentElement;
-  root.dataset.theme = context.theme === "dark" ? "dark" : "light";
-  Object.entries(context.tokens || {}).forEach(([name, value]) => {
-    if (typeof value === "string" && value) root.style.setProperty(`--host-${name}`, value);
-  });
-  if (typeof context.fontFamily === "string" && context.fontFamily) {
-    root.style.setProperty("--host-font-family", context.fontFamily);
-  }
-}
-applyHostContext(typeof hostContext !== "undefined" ? hostContext : null);
-if (typeof onHostContextChange === "function") {
-  onHostContextChange(applyHostContext);
-}
+// bridge 由宿主容器注入执行；主题经宿主同名 CSS 变量穿透继承，无需脚本处理。
 
 // 配置读写经宿主桥接转发到 WASM 逻辑层（plugin.* → handle_view_message）。
 async function callHost(method, payload = "") {
