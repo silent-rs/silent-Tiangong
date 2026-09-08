@@ -20,8 +20,7 @@ import { CollapsibleUserText } from "./CollapsibleUserText";
 
 /// Subagent 任务指派卡片：分层展示核心任务与元信息。
 /// 正文结构：任务/消息内容 →【任务工作区】→【长期指令】→【长期记忆】
-/// →【成长约定】→（运行标记）。核心任务突出展示；工作区/指令/记忆等
-/// 元信息折叠为分组可展开区块；整体默认截断、可展开全文。
+/// →【成长约定】→【工作区状态】→（运行标记）。
 function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   body: string; source: string; kind: string; time: string;
   onCopy: () => void; renderText: (text: string) => React.ReactNode;
@@ -29,7 +28,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   const [expanded, setExpanded] = useState(false);
   const [metaOpen, setMetaOpen] = useState(false);
 
-  const metaMarkers = ['\u3010\u4efb\u52a1\u5de5\u4f5c\u533a\u3011', '\u3010\u957f\u671f\u6307\u4ee4\u3011', '\u3010\u957f\u671f\u8bb0\u5fc6\u3011', '\u3010\u6210\u957f\u7ea6\u5b9a\u3011', '\u3010\u5de5\u4f5c\u533a\u72b6\u6001\u3011'];
+  const metaMarkers = ['\u3010任务工作区\u3011', '\u3010长期指令\u3011', '\u3010长期记忆\u3011', '\u3010成长约定\u3011', '\u3010工作区状态\u3011'];
   let coreContent = body;
   const metaSections: { title: string; content: string }[] = [];
   for (const marker of metaMarkers) {
@@ -40,18 +39,20 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
         const nextIdx = coreContent.indexOf(next, idx + marker.length);
         if (nextIdx >= 0 && nextIdx < end) end = nextIdx;
       }
-      const tagIdx = coreContent.indexOf('\uff08\u8fd0\u884c\u6807\u8bb0', idx);
+      const tagIdx = coreContent.indexOf('\uff08运行标记', idx);
       if (tagIdx >= 0 && tagIdx < end) end = tagIdx;
       const content = coreContent.slice(idx + marker.length, end).trim();
-      if (content) metaSections.push({ title: marker.replace(/[\u3010\u3011]/g, ''), content });
+      if (content) metaSections.push({ title: marker.slice(1, -1), content });
       coreContent = coreContent.slice(0, idx).trimEnd();
     }
   }
-  coreContent = coreContent.replace(/\n*\uff08\u8fd0\u884c\u6807\u8bb0[^\uff09]*\uff09\s*$/, '').trim();
+  coreContent = coreContent.replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '').trim();
 
   const TRUNCATE_LEN = 300;
   const isLong = coreContent.length > TRUNCATE_LEN;
-  const displayContent = expanded || !isLong ? coreContent : coreContent.slice(0, TRUNCATE_LEN) + '\u2026';
+  const displayContent = expanded || !isLong ? coreContent : coreContent.slice(0, TRUNCATE_LEN) + '…';
+
+  const isTask = kind === '任务';
 
   return (
     <div className="w-full max-w-[92%] sm:max-w-[80%]">
@@ -59,15 +60,15 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
         <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/30 bg-muted/[0.1]">
           <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/10 border border-primary/15 shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-primary">
-              {kind === '\u4efb\u52a1' ? <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> : <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
+              {isTask ? <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> : <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
             </svg>
           </div>
           <div className="min-w-0 flex-1">
-            <span className="text-sm font-semibold text-foreground">{kind === '\u4efb\u52a1' ? '\u4efb\u52a1\u6307\u6d3e' : '\u534f\u4f5c\u6d88\u606f'}</span>
-            <span className="ml-2 text-[11px] text-muted-foreground">\u6765\u81ea {source.trim()}</span>
+            <span className="text-sm font-semibold text-foreground">{isTask ? '任务指派' : '协作消息'}</span>
+            <span className="ml-2 text-[11px] text-muted-foreground">来自 {source.trim()}</span>
           </div>
           <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
-          <button type="button" aria-label="\u590d\u5236" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
+          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
           </button>
         </div>
@@ -78,7 +79,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
-              {expanded ? '\u6536\u8d77' : `\u5c55\u5f00\u5168\u90e8\uff08${coreContent.length} \u5b57\uff09`}
+              {expanded ? '收起' : `展开全部（${coreContent.length} 字）`}
             </button>
           )}
         </div>
@@ -87,7 +88,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
           <div className="border-t border-border/30">
             <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/20 transition-colors" onClick={() => setMetaOpen(!metaOpen)}>
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform ${metaOpen ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
-              {metaOpen ? '\u6536\u8d77\u9644\u52a0\u4fe1\u606f' : `\u9644\u52a0\u4fe1\u606f\uff08${metaSections.length} \u9879\uff1a${metaSections.map(s => s.title).join('\u3001')}\uff09`}
+              {metaOpen ? '收起附加信息' : `附加信息（${metaSections.length} 项：${metaSections.map(s => s.title).join('、')}）`}
             </button>
             {metaOpen && (
               <div className="px-4 pb-3 space-y-2">
