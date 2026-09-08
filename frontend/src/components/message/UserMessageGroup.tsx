@@ -18,6 +18,31 @@ import { ContentMedia } from "./ContentMedia";
 import { CollapsibleUserText } from "./CollapsibleUserText";
 
 
+
+/// 手风琴行：独立展开/收起，标题常显、内容按需展开。
+function AccordionRow({ title, children, renderText }: {
+  title: string; children: string;
+  renderText: (text: string) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-b border-border/15 last:border-b-0">
+      <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/[0.08] transition-colors" onClick={() => setOpen(!open)}>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform shrink-0 ${open ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
+        <span className="font-medium">{title}</span>
+        {!open && <span className="ml-auto text-[10px] text-muted-foreground/40 truncate max-w-[50%]">{children.slice(0, 40).replace(/\n/g, ' ')}…</span>}
+      </button>
+      {open && (
+        <div className="px-4 pb-2 pt-0.5">
+          <div className="rounded-md bg-muted/[0.1] border border-border/15 px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-36 overflow-y-auto">
+            {renderText(children)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /// Subagent 任务指派卡片：分层展示核心任务与元信息。
 /// 正文结构：任务/消息内容 →【任务工作区】→【长期指令】→【长期记忆】
 /// →【成长约定】→【工作区状态】→（运行标记）。
@@ -26,7 +51,6 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
   onCopy: () => void; renderText: (text: string) => React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [metaOpen, setMetaOpen] = useState(false);
 
   // 标记支持新旧两种格式：【任务工作区】(新) / 任务工作区：(旧)
   const metaDefs: [string, RegExp][] = [
@@ -101,23 +125,12 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
         </div>
 
         {metaSections.length > 0 && (
-          <div className="border-t border-border/30">
-            <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/20 transition-colors" onClick={() => setMetaOpen(!metaOpen)}>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform ${metaOpen ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
-              {metaOpen ? '收起附加信息' : `附加信息（${metaSections.length} 项：${metaSections.map(s => s.title).join('、')}）`}
-            </button>
-            {metaOpen && (
-              <div className="px-4 pb-3 space-y-2">
-                {metaSections.map((section) => (
-                  <div key={section.title} className="rounded-lg bg-muted/[0.12] border border-border/20 overflow-hidden">
-                    <p className="px-3 py-1 text-[10px] font-medium text-muted-foreground border-b border-border/15">{section.title}</p>
-                    <div className="px-3 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-32 overflow-y-auto">
-                      {renderText(section.content)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+          <div className="border-t border-border/30 py-1">
+            {metaSections.map((section) => (
+              <AccordionRow key={section.title} title={section.title} renderText={renderText}>
+                {section.content}
+              </AccordionRow>
+            ))}
           </div>
         )}
       </div>
