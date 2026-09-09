@@ -1,8 +1,9 @@
-//! Core 声明稳定性测试：直接模拟 Plugin 接口，不加载 WASM 或启动插件服务。
+//! Core 声明收集测试：直接模拟 Plugin 接口，不加载 WASM 或启动插件服务。
 //!
-//! 契约：同一 App 运行内声明集合（tools/prompt 段）保持稳定——读取失败
-//! 的插件沿用进程缓存中的上次成功声明；App 重启（进程重建）后按插件
-//! 实况重新收集，允许前缀变更。tools 顺序与 prompt 内容由插件自身保证。
+//! 分层契约：声明内容的运行期稳定由 runtime 适配器的冻结快照保证
+//!（本文件的 MockPlugin 以冻结语义模拟适配器行为）；core 不做任何稳定
+//! 化处理，只做固定顺序加载与透传——读取失败的插件本轮缺席、恢复下一
+//! 轮回归，插件缺席/移除即时反映。
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -25,8 +26,8 @@ struct PluginState {
     available: AtomicBool,
     revision: AtomicUsize,
     calls: Mutex<Vec<String>>,
-    /// 模拟真实适配器的声明缓存：读取失败时兜底返回上次成功值。
-    /// 挂在共享状态上，模拟插件实例跨 Core 重建存活。
+    /// 模拟 runtime 适配器的冻结快照：首次成功后固定返回，失败不穿透。
+    /// 挂在共享状态上，模拟适配器实例跨 Core 重建存活。
     cached_declaration: Mutex<Option<String>>,
 }
 impl PluginState {
@@ -38,7 +39,7 @@ impl PluginState {
             cached_declaration: Mutex::new(None),
         }
     }
-    /// 声明读取：失败时兜底上次成功值（插件自身保稳的契约）。
+    /// 声明读取：冻结语义——已有冻结值直接返回，否则真实读取。
     fn declaration(&self, operation: &str) -> Result<String, String> {
         self.calls.lock().unwrap().push(operation.into());
         if !self.available.load(Ordering::SeqCst) {

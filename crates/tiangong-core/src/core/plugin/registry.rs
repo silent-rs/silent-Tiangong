@@ -57,9 +57,10 @@ pub(crate) fn prepare_plugins(
     refresh_from_plugins(sorted)
 }
 
-/// 每轮刷新声明：实时收集全部插件声明。tools 顺序与 prompt 内容的
-/// 稳定（含读取失败的兜底）由插件自身负责；读取失败的插件本轮缺席，
-/// 恢复后下一轮自动回归。插件集合变化（启停/安装/移除）即时反映。
+/// 每轮收集声明：core 只做固定顺序加载与透传，不做任何稳定化处理——
+/// 声明内容的运行期稳定由 runtime 适配器的冻结快照保证（同一次运行内
+/// tools/prompt 不变，换代重新冻结）。读取失败的插件本轮缺席，恢复后
+/// 下一轮自动回归；插件集合变化（启停/移除）即时反映。
 pub(crate) fn refresh_from_plugins(plugins: Vec<Arc<dyn Plugin>>) -> PreparedPlugins {
     let declarations = collect_declarations(&plugins);
     PreparedPlugins::restore(plugins, declarations)

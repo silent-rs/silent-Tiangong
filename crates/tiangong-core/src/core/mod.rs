@@ -316,8 +316,9 @@ impl TiangongCore {
             );
             *prepared = initialized;
         } else {
-            // 每轮实时收集声明：插件集合变化（启停/安装）即时反映；读取
-            // 失败的插件沿用进程缓存的上次成功声明，保持请求前缀稳定。
+            // 每轮收集声明：插件集合变化（启停/缺席恢复）即时反映。声明
+            // 内容的运行期稳定由 runtime 适配器的冻结快照保证，core 不做
+            // 任何稳定化处理，只透传收集结果。
             *prepared = crate::core::plugin::refresh_from_plugins(prepared.plugins.clone());
         }
         ctx.plugins = prepared.plugins.clone();
