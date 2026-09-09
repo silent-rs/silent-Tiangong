@@ -113,7 +113,10 @@ where
         if bytes == 0 {
             tracing::info!(service = %service_name, "stdin 已关闭（宿主退出），stdio sidecar 退出");
             terminate_owned_process_group();
-            break;
+            // EOF 是进程级关闭，不只是结束异步主循环。返回到 Tokio runtime
+            // 会等待无法取消的 spawn_blocking 任务，文件 IO 卡住时可能永不退出。
+            // 进程组不可终止或不归本进程所有时，也必须结束当前 stdio 服务。
+            std::process::exit(0);
         }
         let Ok(frame) = serde_json::from_str::<IpcFrame>(line.trim_end()) else {
             tracing::warn!(service = %service_name, "stdio 收到无法解析的帧");
@@ -227,7 +230,6 @@ where
             }
         }
     }
-    Ok(())
 }
 
 /// Launcher 启动的 stdio sidecar 是独立进程组组长。宿主异常退出时 stdin

@@ -954,13 +954,14 @@ fn run_gui() {
                 }
                 #[cfg(not(windows))]
                 {
+                tiangong_plugin_runtime::registry::begin_sidecar_shutdown();
                 if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
                     let runtime = app_state.bot_runtime.clone();
                     tauri::async_runtime::block_on(async move {
                         runtime.stop_all().await;
                     });
                 }
-                // 逐个停止所有 sidecar（它们经 setsid 独立运行，不会随宿主自动退出）。
+                // 等待后台准备任务结束，再逐个停止所有 sidecar。
                 tiangong_plugin_runtime::registry::shutdown_all_sidecars();
                 }
             }

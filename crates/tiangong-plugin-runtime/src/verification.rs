@@ -336,11 +336,9 @@ fn reverify_installed_sidecars_blocking(storage_root: &Path) {
         if load_valid_capabilities(&installed.directory, &installed.manifest).is_some() {
             continue;
         }
-        #[cfg(windows)]
         let Some(_operation) = crate::registry::background_sidecar_operation() else {
             return;
         };
-        #[cfg(windows)]
         if load_valid_capabilities(&installed.directory, &installed.manifest).is_some() {
             continue;
         }
