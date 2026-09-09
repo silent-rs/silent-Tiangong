@@ -782,7 +782,6 @@ impl StdioSidecarConnection {
                 WindowsJob::new(None).context("创建 sidecar Job Object 失败"),
             )?),
         };
-        #[cfg(windows)]
         if crate::registry::sidecars_shutting_down() {
             return Err(SpawnAttemptError::Preparation(anyhow!(
                 "应用正在退出，取消插件启动"

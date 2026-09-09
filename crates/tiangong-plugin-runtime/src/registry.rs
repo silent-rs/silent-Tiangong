@@ -37,7 +37,6 @@ static SIDECAR_CONNECTIONS: OnceLock<
     Mutex<HashMap<SidecarConnectionKey, Arc<dyn SidecarConnection>>>,
 > = OnceLock::new();
 static LOAD_OPERATION: std::sync::RwLock<()> = std::sync::RwLock::new(());
-#[cfg(windows)]
 static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(windows)]
@@ -98,17 +97,14 @@ pub fn invalidate_persistent_grants(storage_root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
 pub fn sidecars_shutting_down() -> bool {
     SHUTTING_DOWN.load(std::sync::atomic::Ordering::Acquire)
 }
 
-#[cfg(windows)]
 pub fn begin_sidecar_shutdown() {
     SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Release);
 }
 
-#[cfg(windows)]
 pub(crate) fn background_sidecar_operation() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
     let guard = LOAD_OPERATION.write().ok()?;
     (!sidecars_shutting_down()).then_some(guard)
@@ -451,12 +447,10 @@ pub fn on_sandbox_setting_changed() {
 
 /// 宿主退出时逐个停止所有已启动的 sidecar。
 ///
-/// sidecar 经 `setsid()` 脱离进程组独立运行，不会随宿主自动退出。
-/// 宿主必须在退出前调用本函数主动终止它们，否则会残留孤儿进程占用端口与资源。
+/// 先拒绝新的启动并等待正在进行的加载、预热和补验证，再收集连接清理，
+/// 避免后台任务在清理快照之后才注册进程而漏过 stop。
 pub fn shutdown_all_sidecars() {
-    #[cfg(windows)]
     begin_sidecar_shutdown();
-    #[cfg(windows)]
     let _operation = LOAD_OPERATION.write().ok();
     crate::ts_tools::cancel_all_calls();
     let connections = sidecar_connections()
@@ -521,7 +515,6 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
-    #[cfg(windows)]
     if sidecars_shutting_down() {
         return 0;
     }
@@ -531,7 +524,6 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         tracing::warn!("插件加载操作锁已损坏");
         return 0;
     };
-    #[cfg(windows)]
     if sidecars_shutting_down() {
         return 0;
     }
@@ -541,7 +533,6 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         *registered = discovered_invalid;
     }
     for installed in &installed_plugins {
-        #[cfg(windows)]
         if sidecars_shutting_down() {
             return 0;
         }
@@ -2309,11 +2300,9 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
 
 fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) {
     // 准备任务可共享读锁；安装、卸载、补验证和退出仍独占写锁。
-    #[cfg(windows)]
     let Ok(_operation) = LOAD_OPERATION.read() else {
         return;
     };
-    #[cfg(windows)]
     if sidecars_shutting_down() {
         return;
     }
