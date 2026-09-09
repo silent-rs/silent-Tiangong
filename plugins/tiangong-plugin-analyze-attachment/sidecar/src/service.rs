@@ -161,9 +161,12 @@ fn asset_from_path(path: &str) -> Result<StoredAsset> {
         anyhow::bail!("图片路径为空");
     }
     let mime_type = infer_image_mime(path_trimmed);
-    let size = std::fs::metadata(path_trimmed)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let metadata = std::fs::metadata(path_trimmed)
+        .with_context(|| format!("无法读取图片文件：{path_trimmed}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("图片路径不是文件：{path_trimmed}");
+    }
+    let size = metadata.len();
     let original_name = std::path::Path::new(path_trimmed)
         .file_name()
         .and_then(|n| n.to_str())

@@ -1312,6 +1312,100 @@ async fn inject_user_message_interrupts_tools_and_restarts() {
     assert!(call_closed, "被中断的工具调用应有失败结果（ALR-110）");
 }
 
+/// 引导消息仍属于当前轮次：新图片路径进入模型上下文，但不重复触发开始钩子。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injected_image_guidance_keeps_lifecycle_hooks_once() {
+    use super::super::turn::run_turn;
+
+    let server = MockServer::builder().start().await;
+    let started = Arc::new(Notify::new());
+    let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    overrides.insert(
+        "paused_probe".to_string(),
+        Arc::new(PausedTool {
+            started: started.clone(),
+            release: Arc::new(Notify::new()),
+        }),
+    );
+    mount_sse(
+        &server,
+        vec![
+            tool_call_chunk("call_1", "paused_probe", "{}"),
+            usage_chunk(15, 3),
+        ],
+    )
+    .await;
+    mount_sse(
+        &server,
+        vec![text_delta_chunk("好的。"), usage_chunk(20, 4)],
+    )
+    .await;
+    let hook_started = Arc::new(AtomicU32::new(0));
+    let hook_finished = Arc::new(AtomicU32::new(0));
+    let plugin = Arc::new(LifecycleCountingPlugin {
+        started: hook_started.clone(),
+        finished: hook_finished.clone(),
+    });
+    let TestHarness {
+        ctx,
+        cmd_tx,
+        mut cmd_rx,
+        ..
+    } = TestHarness::new_with_plugins(
+        &server,
+        vec![tool_spec("paused_probe")],
+        overrides,
+        vec![plugin],
+    );
+    let inject_tx = cmd_tx.clone();
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("工具应已启动");
+        let path = "/tmp/guidance-image.png";
+        inject_tx
+            .send(Command::InjectUserMessage {
+                message_id: scru128::new().to_string(),
+                content: vec![
+                    tiangong_types::ContentBlock::text("看这张新截图"),
+                    tiangong_types::ContentBlock::AssetReference {
+                        asset: tiangong_types::StoredAsset {
+                            asset_id: scru128::new().to_string(),
+                            local_path: path.into(),
+                            original_name: "guidance-image.png".into(),
+                            mime_type: "image/png".into(),
+                            size: 0,
+                            kind: tiangong_types::MediaKind::Image,
+                        },
+                    },
+                    tiangong_types::ContentBlock::ModelInstruction {
+                        text: format!("请通过 images={} 分析新截图", serde_json::json!([path])),
+                    },
+                ],
+            })
+            .unwrap();
+    });
+    run_turn(ctx, &mut cmd_rx).await;
+    assert_eq!(
+        hook_started.load(Ordering::SeqCst),
+        1,
+        "引导消息不触发 on_turn_started"
+    );
+    wait_for_counter(&hook_finished, 1);
+    assert_eq!(hook_finished.load(Ordering::SeqCst), 1);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| {
+                String::from_utf8_lossy(&request.body).contains("guidance-image.png")
+            }),
+        "新图片路径必须进入引导后的模型上下文"
+    );
+}
+
 /// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
 /// 用户消息，原始消息不被覆盖；磁盘重载后一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

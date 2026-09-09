@@ -30,7 +30,7 @@ pub struct Empty {}
 
 /// 附件分析请求。
 ///
-/// 图片数据由 wasm 从会话消息提取后，以本地路径传给 sidecar；
+/// 图片路径由工具调用参数直接传入，wasm 原样转交给 sidecar；
 /// sidecar 读取图片文件 → 构造多模态请求 → 调模型。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnalyzeRequest {
