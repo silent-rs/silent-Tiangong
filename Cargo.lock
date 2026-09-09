@@ -10971,6 +10971,7 @@ dependencies = [
  "reqwest 0.13.4",
  "scru128",
  "serde",
+ "serde_json",
  "tiangong-types",
  "tracing",
 ]
@@ -11021,7 +11022,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -11029,7 +11030,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",

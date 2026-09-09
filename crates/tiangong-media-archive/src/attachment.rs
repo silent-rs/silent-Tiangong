@@ -386,7 +386,8 @@ fn asset_notice_item(index: usize, asset: &StoredAsset) -> String {
 
 fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={message_id}，并指定 attachment_index={index}。\n- {}",
+        "本条用户消息包含需要附件分析插件处理的图片。需要查看内容时，请调用 analyze_attachment 工具，将本地图片路径原样传入 images={}，并用 instruction 说明分析要求。消息编号仅用于标识来源，不作为图片参数。\n来源：message_id={message_id} attachment_index={index}\n- {}",
+        serde_json::json!([asset.local_path]),
         asset_notice_item(index, asset)
     )
 }
@@ -1050,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_builds_analyzer_reference_with_exact_message_and_index() {
+    fn planner_builds_analyzer_reference_with_explicit_image_paths() {
         let root = TestRoot::new();
         let mut analyze = root
             .store()
@@ -1082,6 +1083,8 @@ mod tests {
                 if text.contains("analyze_attachment")
                     && text.contains("message_id=message-analyze")
                     && text.contains("attachment_index=1")
+                    && text.contains(&format!("images={}", serde_json::json!([analyze.assets()[1].local_path])))
+                    && !text.contains("必须使用 message_id")
                     && text.contains("name=analyze.png")
                     && text.contains("path=")
         ));

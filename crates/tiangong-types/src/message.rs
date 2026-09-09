@@ -538,7 +538,7 @@ fn legacy_resource_instruction(
         ));
     }
     ContentBlock::model_instruction(format!(
-        "本条用户消息包含一个已保存资源。需要读取内容时，请使用当前可用的资源处理能力，并使用 message_id={message_id}、attachment_index={index}。\n- asset_id={} kind={:?} name={} mime_type={} size={} path={}",
+        "本条用户消息包含一个已保存资源。需要读取内容时，请使用当前可用的资源处理能力，直接传入下列本地 path。来源：message_id={message_id}、attachment_index={index}。\n- asset_id={} kind={:?} name={} mime_type={} size={} path={}",
         asset.asset_id,
         asset.kind,
         asset.original_name,
