@@ -478,6 +478,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         };
         let config = self.config.clone();
         let plugin_id = self.id.clone();
+        let tool_name = call.name.clone();
         Box::pin(crate::invocation::dispatch(
             invocation.clone(),
             async move {
@@ -492,9 +493,16 @@ impl ToolOverrideHandler for WasmPluginAdapter {
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => {
-                        return Some(unavailable_tool_result(format!(
-                            "插件 {plugin_id} 工具调用失败：{error}"
-                        )));
+                        let error = format!("{error:#}");
+                        tracing::warn!(%plugin_id, %tool_name, %error, "WASM 插件工具执行失败");
+                        return Some(ToolResult {
+                            ok: false,
+                            summary: format!("插件 {plugin_id} 执行工具 {tool_name} 失败: {error}"),
+                            stdout: String::new(),
+                            stderr: error,
+                            exit_code: 1,
+                            execution: None,
+                        });
                     }
                 };
                 Some(ToolResult {
@@ -615,4 +623,46 @@ fn plugin_config_payload(config: &CoreConfig) -> anyhow::Result<String> {
         );
     }
     Ok(serde_json::to_string(&value)?)
+}
+
+#[cfg(test)]
+mod review_regression_tests {
+    use super::*;
+
+    fn unloaded_adapter() -> WasmPluginAdapter {
+        WasmPluginAdapter {
+            inner: RwLock::new(None),
+            config: PluginRuntimeConfig::default(),
+            id: "review-plugin".into(),
+            feedback_tx: RwLock::new(None),
+            context: Mutex::new(ReloadContext::default()),
+            enabled: AtomicBool::new(true),
+            sidecar: None,
+        }
+    }
+
+    #[test]
+    fn unreadable_declarations_propagate_failure() {
+        let adapter = unloaded_adapter();
+        assert!(adapter.try_tool_specs().is_err());
+        assert!(adapter.try_prompt_sections().is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_and_unloaded_tools_keep_their_failure_reason() {
+        let adapter = unloaded_adapter();
+        let call = ToolCall {
+            id: scru128::new().to_string(),
+            name: "review_tool".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut session = Session::new("review");
+        for (enabled, expected) in [(false, "已停用"), (true, "当前不可用")] {
+            adapter.set_enabled(enabled);
+            let result = adapter.handle(&call, &mut session, "").await.unwrap();
+            assert!(!result.ok);
+            assert!(result.stderr.contains(expected), "{}", result.stderr);
+            assert!(!result.summary.contains("未注册"));
+        }
+    }
 }

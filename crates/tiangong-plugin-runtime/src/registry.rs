@@ -3160,7 +3160,7 @@ fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn stop_connection_for_directory(directory: &Path) -> Result<()> {
+pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
     let connections = sidecar_connections()
         .lock()
         .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?
@@ -3401,6 +3401,17 @@ pub(crate) fn sidecar_connection(
     refresh: bool,
 ) -> Result<Arc<dyn SidecarConnection>> {
     sidecar_connection_inner(storage_root, installed, refresh, false, None)
+}
+
+/// 按 ID 反查插件当前现役 sidecar 连接（WASM 宿主状态刷新过期引用用）。
+///
+/// 与加载路径同键查表：连接被 server 端点变化等停止机制换代后，这里返回
+/// 新连接（spawn 时携带新注入的环境）；未安装或未声明 sidecar 返回 None。
+pub(crate) fn sidecar_connection_for_plugin(plugin_id: &str) -> Option<Arc<dyn SidecarConnection>> {
+    let directory = plugin_install_directory(plugin_id)?;
+    let storage_root = directory.parent()?.parent()?.to_path_buf();
+    let installed = find_installed_plugin(&storage_root, plugin_id).ok()?;
+    sidecar_connection(&storage_root, &installed, false).ok()
 }
 
 /// 带宿主权威会话工作区的连接构造。

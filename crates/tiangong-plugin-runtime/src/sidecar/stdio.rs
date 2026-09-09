@@ -1610,6 +1610,10 @@ fn parse_response_payload(payload: Value) -> Result<Value, String> {
 }
 
 impl SidecarConnection for StdioSidecarConnection {
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
     fn invoke(&self, operation: &str, payload: &str) -> Result<String> {
         self.invoke_with_progress(operation, payload, &mut |_| {})
     }

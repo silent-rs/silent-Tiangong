@@ -147,6 +147,14 @@ impl std::error::Error for SidecarInvokeError {}
 pub trait SidecarConnection: Send + Sync {
     fn invoke(&self, operation: &str, payload: &str) -> Result<String>;
 
+    /// 连接是否已被主动停止（stop 后不再自动重启）。
+    ///
+    /// 长期持有连接引用的调用方（如 WASM 宿主状态）据此发现引用过期，
+    /// 改经注册表取换代后的新连接；默认 false（TCP/一次性连接无此语义）。
+    fn is_stopped(&self) -> bool {
+        false
+    }
+
     fn invoke_with_progress(
         &self,
         operation: &str,
