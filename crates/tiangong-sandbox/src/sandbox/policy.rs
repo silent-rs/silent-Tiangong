@@ -35,8 +35,8 @@ pub struct SandboxPolicy {
     /// 是否放行出网（默认 false；放行走宿主代理体系，见 RFC D16）。
     #[serde(default)]
     pub allow_network: bool,
-    /// 是否允许访问宿主系统凭据服务（macOS Keychain、OpenDirectory 与
-    /// 证书信任服务）。Git/SSH/GitHub CLI 等工具依赖这些系统服务解析
+    /// 是否允许访问宿主系统凭据服务（macOS Keychain、OpenDirectory）。
+    /// 证书验证由 allow_network 独立授权。Git/SSH/GitHub CLI 依赖凭据服务解析
     /// 用户身份与读取凭据；默认 false，仅宿主显式授权的策略开放。
     #[serde(default)]
     pub allow_credential_services: bool,
