@@ -47,7 +47,7 @@ impl tiangong_plugin_sidecar::SidecarService for ImageService {
                 return Response::error(
                     &request_id,
                     ErrorCode::ServiceError,
-                    error.to_string(),
+                    format!("{error:#}"),
                     false,
                 );
             }
@@ -313,7 +313,16 @@ async fn call_responses_api(resolved: &ResolvedModel, payload: Value) -> Result<
         format!("{base}/responses")
     };
 
+    // reqwest 0.13 的默认 Rustls 验证器仍依赖系统凭据服务；沙箱内使用
+    // Mozilla 公共根证书完成证书链和域名校验，无需开放 Keychain 权限。
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("加载 HTTPS 根证书失败")?;
     let client = reqwest::Client::builder()
+        .tls_backend_rustls()
+        .tls_certs_only(roots)
         .timeout(Duration::from_secs(120))
         .build()
         .context("构造 HTTP 客户端失败")?;
