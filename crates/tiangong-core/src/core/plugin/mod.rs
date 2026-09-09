@@ -37,4 +37,4 @@ pub use trait_def::Plugin;
 pub(crate) use injection::injection_tool_spec;
 pub(crate) use notify::{notify_session_ended, notify_turn_finished};
 pub use registry::PreparedPlugins;
-pub(crate) use registry::{collect_declarations, prepare_plugins};
+pub(crate) use registry::{prepare_plugins, refresh_from_plugins};

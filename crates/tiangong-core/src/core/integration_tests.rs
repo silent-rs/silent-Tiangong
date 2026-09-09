@@ -193,11 +193,9 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     }
     impl ToolSpecProvider for OrderedPlugin {
         fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
-            let mut names = self.names;
-            if self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
-                names.reverse();
-            }
-            names
+            // tools 顺序由插件自身保证稳定（core 不代为排序）。
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.names
                 .iter()
                 .map(|name| crate::model::ToolSpec {
                     name: (*name).into(),
@@ -249,7 +247,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 let plugin = Arc::new(OrderedPlugin {
                     id,
                     names,
-                    calls: AtomicUsize::new(generation),
+                    calls: AtomicUsize::new(0),
                     prompt_reads: AtomicUsize::new(0),
                 });
                 instances.push(plugin.clone());
@@ -295,10 +293,10 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 names,
                 [
                     "plugin_injection",
-                    "identity_a",
                     "identity_b",
-                    "y_first",
+                    "identity_a",
                     "z_first",
+                    "y_first",
                     "a_last",
                     "b_last"
                 ]
@@ -319,10 +317,10 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             }
             system_id = Some(current_id);
         }
+        // 每轮 turn 实时收集一次声明（含 tools 与 prompt 段）。
         for plugin in instances {
-            let reads = usize::from(generation == 0);
-            assert_eq!(plugin.calls.load(Ordering::SeqCst), generation + reads);
-            assert_eq!(plugin.prompt_reads.load(Ordering::SeqCst), reads);
+            assert_eq!(plugin.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(plugin.prompt_reads.load(Ordering::SeqCst), 2);
         }
         core.shutdown_join().unwrap();
     }
@@ -398,12 +396,6 @@ async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history()
     assert_eq!(
         serde_json::to_value(&before.system_prompt_message).unwrap(),
         serde_json::to_value(&legacy.system_prompt_message).unwrap()
-    );
-    assert_eq!(before.plugin_declarations.as_deref().unwrap().len(), 1);
-    assert!(
-        before.plugin_declarations.as_ref().unwrap()[0]
-            .plugin_id
-            .is_empty()
     );
     fail_all_persistence_for_session(&sid);
     assert!(core.deliver(AgentInputKind::reset_context()).is_err());

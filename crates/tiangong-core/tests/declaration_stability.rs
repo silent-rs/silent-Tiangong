@@ -1,4 +1,8 @@
 //! Core 声明稳定性测试：直接模拟 Plugin 接口，不加载 WASM 或启动插件服务。
+//!
+//! 契约：同一 App 运行内声明集合（tools/prompt 段）保持稳定——读取失败
+//! 的插件沿用进程缓存中的上次成功声明；App 重启（进程重建）后按插件
+//! 实况重新收集，允许前缀变更。tools 顺序与 prompt 内容由插件自身保证。
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -21,6 +25,9 @@ struct PluginState {
     available: AtomicBool,
     revision: AtomicUsize,
     calls: Mutex<Vec<String>>,
+    /// 模拟真实适配器的声明缓存：读取失败时兜底返回上次成功值。
+    /// 挂在共享状态上，模拟插件实例跨 Core 重建存活。
+    cached_declaration: Mutex<Option<String>>,
 }
 impl PluginState {
     fn new() -> Self {
@@ -28,14 +35,22 @@ impl PluginState {
             available: AtomicBool::new(true),
             revision: AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
+            cached_declaration: Mutex::new(None),
         }
     }
+    /// 声明读取：失败时兜底上次成功值（插件自身保稳的契约）。
     fn declaration(&self, operation: &str) -> Result<String, String> {
         self.calls.lock().unwrap().push(operation.into());
         if !self.available.load(Ordering::SeqCst) {
-            return Err("插件声明暂时不可用".into());
+            let cached = self.cached_declaration.lock().unwrap().clone();
+            return match cached {
+                Some(value) => Ok(value),
+                None => Err("插件声明暂时不可用".into()),
+            };
         }
-        Ok(format!("revision-{}", self.revision.load(Ordering::SeqCst)))
+        let value = format!("revision-{}", self.revision.load(Ordering::SeqCst));
+        *self.cached_declaration.lock().unwrap() = Some(value.clone());
+        Ok(value)
     }
 }
 struct MockPlugin {
@@ -50,7 +65,7 @@ impl Plugin for MockPlugin {
 impl MentionCandidateProvider for MockPlugin {}
 impl ToolSpecProvider for MockPlugin {
     fn try_tool_specs(&self) -> Result<Vec<ToolSpec>, String> {
-        let description = if self.id == "dynamic-tools" {
+        let description = if self.id.starts_with("dynamic-tools") {
             self.state.declaration("tools")?
         } else {
             "固定工具".into()
@@ -64,7 +79,7 @@ impl ToolSpecProvider for MockPlugin {
 }
 impl PromptSectionProvider for MockPlugin {
     fn try_prompt_sections(&self) -> Result<Vec<String>, String> {
-        if self.id == "dynamic-prompt" {
+        if self.id.starts_with("dynamic-prompt") {
             Ok(vec![self.state.declaration("prompt")?])
         } else {
             Ok(vec!["固定插件提示".into()])
@@ -172,9 +187,12 @@ fn reply(call: Option<usize>) -> ResponseTemplate {
         .set_body_json(json!({"id":"reply","choices":[{"message":message,"finish_reason":finish}]}))
 }
 
+/// 同一进程内声明抖动被进程缓存兜住：插件声明时好时坏，请求里的
+/// tools/prompt 集合保持稳定；Core 重建（App 未重启）同样由缓存兜住；
+/// 插件恢复新版本后的下一轮即生效。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn declarations_survive_core_recreation_and_refresh_on_reset() {
-    for id in ["dynamic-tools", "dynamic-prompt"] {
+async fn declaration_jitter_is_absorbed_by_process_cache_across_core_recreation() {
+    for id in ["dynamic-tools-jitter", "dynamic-prompt-jitter"] {
         let state = Arc::new(PluginState::new());
         let root = tempfile::tempdir().unwrap();
         let server = MockServer::builder().start().await;
@@ -200,11 +218,12 @@ async fn declarations_survive_core_recreation_and_refresh_on_reset() {
                 old.as_slice()
             );
         }
-        let operation = if id == "dynamic-tools" {
+        let operation = if id.starts_with("dynamic-tools") {
             "tools"
         } else {
             "prompt"
         };
+        // 每轮实时收集一次（第二、三轮失败但尝试过）。
         assert_eq!(
             state
                 .calls
@@ -213,10 +232,12 @@ async fn declarations_survive_core_recreation_and_refresh_on_reset() {
                 .iter()
                 .filter(|call| call.as_str() == operation)
                 .count(),
-            1
+            3
         );
         core.shutdown_join().unwrap();
 
+        // Core 重建 + 插件不可用 + 版本已变：进程缓存兜住旧声明，
+        // 请求前缀保持不变。
         state.available.store(false, Ordering::SeqCst);
         state.revision.store(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -229,40 +250,23 @@ async fn declarations_survive_core_recreation_and_refresh_on_reset() {
             .stream_tx(tx)
             .plugins(vec![plugin(id, state.clone()) as Arc<dyn Plugin>])
             .build();
-        send(&restored, &rx, "重启后继续").await;
-        assert_eq!(
-            state
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|call| call.as_str() == operation)
-                .count(),
-            1
-        );
+        send(&restored, &rx, "重建后继续").await;
         let requests = server.received_requests().await.unwrap();
         let replay: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
         assert_eq!(first["tools"], replay["tools"]);
         assert_eq!(first["messages"][0], replay["messages"][0]);
 
-        let before = Session::load_from_storage(root.path(), &sid).unwrap();
-        restored.deliver(AgentInputKind::reset_context()).unwrap();
-        let offline = Session::load_from_storage(root.path(), &sid).unwrap();
-        assert_eq!(
-            serde_json::to_value(&before.plugin_declarations).unwrap(),
-            serde_json::to_value(&offline.plugin_declarations).unwrap()
-        );
+        // 插件恢复（新版本）后：tools 类下一轮即时生效；prompt 类要经
+        // 清空上下文重建 system prompt 后生效（system prompt 建立后不随
+        // 段落变化重写，保持消息前缀稳定）。
         state.available.store(true, Ordering::SeqCst);
-        restored.deliver(AgentInputKind::reset_context()).unwrap();
-        let refreshed = Session::load_from_storage(root.path(), &sid).unwrap();
-        assert_ne!(
-            serde_json::to_value(&before.plugin_declarations).unwrap(),
-            serde_json::to_value(&refreshed.plugin_declarations).unwrap()
-        );
-        send(&restored, &rx, "整理后继续").await;
+        if id.starts_with("dynamic-prompt") {
+            restored.deliver(AgentInputKind::reset_context()).unwrap();
+        }
+        send(&restored, &rx, "恢复后继续").await;
         let requests = server.received_requests().await.unwrap();
         let next: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
-        if id == "dynamic-tools" {
+        if id.starts_with("dynamic-tools") {
             assert_ne!(first["tools"], next["tools"]);
         } else {
             assert_ne!(first["messages"][0], next["messages"][0]);
@@ -284,7 +288,11 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
         })
         .mount(&server)
         .await;
-    let (core, _, rx, id) = core(root.path(), &server, plugin("dynamic-tools", state.clone()));
+    let (core, _, rx, id) = core(
+        root.path(),
+        &server,
+        plugin("dynamic-tools-retry", state.clone()),
+    );
     send(&core, &rx, "初始化").await;
     state.available.store(false, Ordering::SeqCst);
     send(&core, &rx, "调用工具").await;
@@ -318,8 +326,11 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
     core.shutdown_join().unwrap();
 }
 
+/// 插件在场与否是合法变化：Core 重建后插件缺席，其工具即时从请求消失
+///（缓存只兜“在场但读取失败”，不代持缺席插件）；模型仍被引导调用时
+/// 以“未注册的工具”报告执行失败。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_plugin_after_restart_keeps_tools_and_reports_execution_failure() {
+async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failure() {
     let root = tempfile::tempdir().unwrap();
     let server = MockServer::builder().start().await;
     let step = AtomicUsize::new(0);
@@ -333,7 +344,7 @@ async fn missing_plugin_after_restart_keeps_tools_and_reports_execution_failure(
     let (core, config, rx, sid) = core(
         root.path(),
         &server,
-        plugin("dynamic-tools", Arc::new(PluginState::new())),
+        plugin("dynamic-tools-vanish", Arc::new(PluginState::new())),
     );
     send(&core, &rx, "初始化").await;
     core.shutdown_join().unwrap();
@@ -351,17 +362,33 @@ async fn missing_plugin_after_restart_keeps_tools_and_reports_execution_failure(
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3);
     let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    for request in &requests[1..] {
-        let next: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(first["tools"], next["tools"]);
-        assert_eq!(first["messages"][0], next["messages"][0]);
-    }
-    assert!(String::from_utf8_lossy(&requests[2].body).contains("未注册的工具"));
+    let next: Value = serde_json::from_slice(&requests[2].body).unwrap();
+    let names_of = |payload: &Value| -> Vec<String> {
+        payload["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(names_of(&first), vec!["plugin_injection", "probe_read"]);
+    assert_eq!(
+        names_of(&next),
+        vec!["plugin_injection"],
+        "插件缺席后其工具应即时消失"
+    );
+    assert!(
+        String::from_utf8_lossy(&requests[2].body)
+            .contains("工具 probe_read 不在本次 tools 定义中"),
+        "插件缺席后模型对其调用的反馈应保留在请求中"
+    );
     restored.shutdown_join().unwrap();
 }
 
+/// 冷启动离线：进程缓存无记录时插件声明缺失（不阻塞对话）；插件恢复
+/// 后的下一轮即进入请求（无需清空上下文）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn undiscovered_offline_plugin_does_not_block_chat_and_is_added_on_reset() {
+async fn offline_plugin_starts_missing_and_recovers_next_turn() {
     let root = tempfile::tempdir().unwrap();
     let server = MockServer::builder().start().await;
     Mock::given(method("POST"))
@@ -370,16 +397,12 @@ async fn undiscovered_offline_plugin_does_not_block_chat_and_is_added_on_reset()
         .await;
     let state = Arc::new(PluginState::new());
     state.available.store(false, Ordering::SeqCst);
-    let (core, _, rx, sid) = core(root.path(), &server, plugin("dynamic-tools", state.clone()));
-    send(&core, &rx, "离线开始").await;
-    let before = Session::load_from_storage(root.path(), &sid).unwrap();
-    assert!(
-        !before
-            .plugin_declarations
-            .unwrap()
-            .iter()
-            .any(|item| item.plugin_id == "dynamic-tools")
+    let (core, _, rx, _sid) = core(
+        root.path(),
+        &server,
+        plugin("dynamic-tools-cold", state.clone()),
     );
+    send(&core, &rx, "离线开始").await;
     state.available.store(true, Ordering::SeqCst);
     send(&core, &rx, "恢复后普通续聊").await;
     core.deliver(AgentInputKind::reset_context()).unwrap();
@@ -390,8 +413,13 @@ async fn undiscovered_offline_plugin_does_not_block_chat_and_is_added_on_reset()
         .map(|request| serde_json::from_slice(&request.body).unwrap())
         .collect();
     assert_eq!(bodies.len(), 3);
-    assert_eq!(bodies[0]["tools"], bodies[1]["tools"]);
-    assert_eq!(bodies[0]["tools"].as_array().unwrap().len(), 1);
-    assert_eq!(bodies[2]["tools"].as_array().unwrap().len(), 2);
+    let tool_count = |payload: &Value| payload["tools"].as_array().unwrap().len();
+    assert_eq!(tool_count(&bodies[0]), 1, "离线开局应只有内置工具");
+    assert_eq!(
+        tool_count(&bodies[1]),
+        2,
+        "插件恢复后的下一轮即应带上其工具"
+    );
+    assert_eq!(tool_count(&bodies[2]), 2);
     core.shutdown_join().unwrap();
 }

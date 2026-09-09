@@ -315,11 +315,10 @@ impl TiangongCore {
                 &mut ctx.session,
             );
             *prepared = initialized;
-        } else if let Some(declarations) = &ctx.session.plugin_declarations {
-            *prepared = crate::core::plugin::PreparedPlugins::restore(
-                prepared.plugins.clone(),
-                declarations,
-            );
+        } else {
+            // 每轮实时收集声明：插件集合变化（启停/安装）即时反映；读取
+            // 失败的插件沿用进程缓存的上次成功声明，保持请求前缀稳定。
+            *prepared = crate::core::plugin::refresh_from_plugins(prepared.plugins.clone());
         }
         ctx.plugins = prepared.plugins.clone();
         ctx.tools = prepared.tools.clone();
@@ -516,26 +515,16 @@ impl TiangongCore {
         session.current_tokens = 0;
         session.active_agent_current_tokens = 0;
         session.agent_current_tokens.clear();
-        session.plugin_declarations = Some(crate::core::plugin::collect_declarations(
-            &ctx.plugins,
-            session.plugin_declarations.as_deref().unwrap_or_default(),
-        ));
-        let prepared = crate::core::plugin::PreparedPlugins::restore(
-            ctx.plugins,
-            session.plugin_declarations.as_deref().unwrap(),
-        );
+        // 声明已由 initialize_plugins 实时刷新（进程内缓存兜底），此处
+        // 只重建 system prompt。
         crate::react::context::rebuild_system_prompt_for_session(
             &mut session,
-            &prepared.prompt_sections,
+            &ctx.prompt_sections,
         );
         session.try_persist_to_disk().map_err(|error| {
             tracing::warn!(%error, session_id = %self.session_id, "清空上下文落盘失败");
             CoreError::WorkerStopped
         })?;
-        *self
-            .plugins
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = prepared;
         crate::react::compression::notify_cleared(&self.stream_tx, &session);
         Ok(())
     }

@@ -41,6 +41,11 @@ pub struct WasmPluginAdapter {
     context: Mutex<ReloadContext>,
     enabled: AtomicBool,
     sidecar: Option<Arc<dyn SidecarConnection>>,
+    /// 声明缓存：WASM 声明读取失败时兜底返回上次成功值——插件自身
+    /// 保稳，sidecar/实例抖动不改写请求前缀。随适配器实例存活，升级
+    /// 换代（replace_inner/release_inner）即清空，不跨版本兜底。
+    cached_tools: Mutex<Option<Vec<ToolSpec>>>,
+    cached_prompt_sections: Mutex<Option<Vec<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -75,6 +80,8 @@ impl WasmPluginAdapter {
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
             sidecar,
+            cached_tools: Mutex::new(None),
+            cached_prompt_sections: Mutex::new(None),
         }
     }
 
@@ -94,6 +101,8 @@ impl WasmPluginAdapter {
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
             sidecar,
+            cached_tools: Mutex::new(None),
+            cached_prompt_sections: Mutex::new(None),
         }
     }
 
@@ -158,6 +167,8 @@ impl WasmPluginAdapter {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = Some(replacement);
+        // 换代即新版本：声明缓存作废，避免旧版本声明兜住新版本实例。
+        self.clear_declaration_cache();
     }
 
     /// 卸载内部 WASM 实例（drop Store），释放其对插件目录的 WASI preopen 句柄。
@@ -171,6 +182,20 @@ impl WasmPluginAdapter {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = None;
+        self.clear_declaration_cache();
+    }
+
+    fn clear_declaration_cache(&self) {
+        let mut tools = self
+            .cached_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *tools = None;
+        let mut sections = self
+            .cached_prompt_sections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *sections = None;
     }
 
     fn current_inner(&self) -> Option<Arc<Mutex<WasmPlugin>>> {
@@ -418,7 +443,8 @@ impl ToolSpecProvider for WasmPluginAdapter {
         if !self.is_enabled() {
             return Ok(Vec::new());
         }
-        self.call_wasm_off_runtime(WasmPlugin::tool_specs)
+        let result: Result<Vec<ToolSpec>, String> = self
+            .call_wasm_off_runtime(WasmPlugin::tool_specs)
             .map_err(|error| error.to_string())
             .and_then(|specs| {
                 specs
@@ -432,7 +458,28 @@ impl ToolSpecProvider for WasmPluginAdapter {
                         })
                     })
                     .collect()
-            })
+            });
+        match result {
+            Ok(specs) => {
+                let mut cached = self
+                    .cached_tools
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *cached = Some(specs.clone());
+                Ok(specs)
+            }
+            Err(error) => {
+                let cached = self
+                    .cached_tools
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(specs) = cached.clone() {
+                    tracing::warn!(%error, plugin_id = %self.id, "读取 wasm 工具规格失败，兜底上次声明");
+                    return Ok(specs);
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -542,8 +589,30 @@ impl PromptSectionProvider for WasmPluginAdapter {
         if !self.is_enabled() {
             return Ok(Vec::new());
         }
-        self.call_wasm_off_runtime(WasmPlugin::prompt_sections)
+        match self
+            .call_wasm_off_runtime(WasmPlugin::prompt_sections)
             .map_err(|error| error.to_string())
+        {
+            Ok(sections) => {
+                let mut cached = self
+                    .cached_prompt_sections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *cached = Some(sections.clone());
+                Ok(sections)
+            }
+            Err(error) => {
+                let cached = self
+                    .cached_prompt_sections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(sections) = cached.clone() {
+                    tracing::warn!(%error, plugin_id = %self.id, "读取 wasm prompt 段失败，兜底上次声明");
+                    return Ok(sections);
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -645,6 +714,8 @@ mod unloaded_adapter_tests {
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(true),
             sidecar: None,
+            cached_tools: Mutex::new(None),
+            cached_prompt_sections: Mutex::new(None),
         }
     }
 
@@ -671,5 +742,43 @@ mod unloaded_adapter_tests {
             assert!(result.stderr.contains(expected), "{}", result.stderr);
             assert!(!result.summary.contains("未注册"));
         }
+    }
+
+    /// 声明缓存兜底语义：WASM 读取失败时返回上次成功声明（插件自身
+    /// 保稳，抖动不改写请求前缀）；换代（升级/卸载）清空缓存，不跨
+    /// 版本兜底。
+    #[test]
+    fn declaration_cache_absorbs_failures_until_reload() {
+        let adapter = unloaded_adapter();
+        // 无缓存时失败原样传播（core 侧该插件本轮缺席）。
+        assert!(adapter.try_tool_specs().is_err());
+        assert!(adapter.try_prompt_sections().is_err());
+
+        // 模拟上次成功收集的声明被缓存：读取失败由缓存兜住。
+        let spec = ToolSpec {
+            name: "cached_tool".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        *adapter
+            .cached_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec![spec.clone()]);
+        *adapter
+            .cached_prompt_sections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec!["缓存提示".into()]);
+        let specs = adapter.try_tool_specs().expect("缓存应兜住读取失败");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "cached_tool");
+        assert_eq!(
+            adapter.try_prompt_sections().expect("缓存应兜住读取失败"),
+            vec!["缓存提示".to_string()]
+        );
+
+        // 升级换代（换内部实例）：缓存作废，失败重新传播。
+        adapter.release_inner();
+        assert!(adapter.try_tool_specs().is_err(), "换代后不得兜旧版本声明");
+        assert!(adapter.try_prompt_sections().is_err());
     }
 }

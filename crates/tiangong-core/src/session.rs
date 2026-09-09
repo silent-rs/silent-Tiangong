@@ -119,9 +119,6 @@ pub struct Session {
     /// `context()` 返回时会将其置于消息列表头部，由 `build_provider_messages()` 提取。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_message: Option<Message>,
-    /// 当前整理周期内固定的插件声明；None 表示尚未迁移的旧会话。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_declarations: Option<Vec<PluginDeclaration>>,
     pub created_at: String,
     pub updated_at: String,
     /// 父会话 ID（Worker 子会话标注所属的父会话）
@@ -284,7 +281,6 @@ impl Session {
             context_summary: None,
             summary_up_to: 0,
             system_prompt_message: None,
-            plugin_declarations: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
@@ -321,7 +317,6 @@ impl Session {
             context_summary: None,
             summary_up_to: 0,
             system_prompt_message: None,
-            plugin_declarations: None,
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
