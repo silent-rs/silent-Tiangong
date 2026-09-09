@@ -314,8 +314,6 @@ async fn call_responses_api(resolved: &ResolvedModel, payload: Value) -> Result<
     };
 
     let client = reqwest::Client::builder()
-        // rustls 的平台证书验证只需 trustd，不要求开放 Keychain 凭据服务。
-        .tls_backend_rustls()
         .timeout(Duration::from_secs(120))
         .build()
         .context("构造 HTTP 客户端失败")?;
