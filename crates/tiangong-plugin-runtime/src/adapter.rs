@@ -41,9 +41,10 @@ pub struct WasmPluginAdapter {
     context: Mutex<ReloadContext>,
     enabled: AtomicBool,
     sidecar: Option<Arc<dyn SidecarConnection>>,
-    /// 声明缓存：WASM 声明读取失败时兜底返回上次成功值——插件自身
-    /// 保稳，sidecar/实例抖动不改写请求前缀。随适配器实例存活，升级
-    /// 换代（replace_inner/release_inner）即清空，不跨版本兜底。
+    /// 声明冻结快照：首次成功读取后，同一次运行内 tools/prompt 固定
+    /// 返回冻结值——插件内部状态波动（探测重写、健康翻转）不得改写
+    /// 请求前缀（KV cache 稳定），也免去每轮 WASM 声明调用。换代
+    ///（replace_inner/release_inner，升级/卸载）清空后重新冻结。
     cached_tools: Mutex<Option<Vec<ToolSpec>>>,
     cached_prompt_sections: Mutex<Option<Vec<String>>>,
 }
@@ -443,43 +444,31 @@ impl ToolSpecProvider for WasmPluginAdapter {
         if !self.is_enabled() {
             return Ok(Vec::new());
         }
-        let result: Result<Vec<ToolSpec>, String> = self
-            .call_wasm_off_runtime(WasmPlugin::tool_specs)
-            .map_err(|error| error.to_string())
-            .and_then(|specs| {
-                specs
-                    .into_iter()
-                    .map(|s| {
-                        Ok(ToolSpec {
-                            name: s.name,
-                            description: s.description,
-                            input_schema: serde_json::from_str(&s.input_schema)
-                                .map_err(|error| error.to_string())?,
-                        })
-                    })
-                    .collect()
-            });
-        match result {
-            Ok(specs) => {
-                let mut cached = self
-                    .cached_tools
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *cached = Some(specs.clone());
-                Ok(specs)
-            }
-            Err(error) => {
-                let cached = self
-                    .cached_tools
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(specs) = cached.clone() {
-                    tracing::warn!(%error, plugin_id = %self.id, "读取 wasm 工具规格失败，兜底上次声明");
-                    return Ok(specs);
-                }
-                Err(error)
-            }
+        // 声明冻结：首次成功读取后，同一次运行内固定返回冻结值——后续
+        // 不再改写（插件内部状态波动如探测重写、健康翻转不得改写请求
+        // 前缀），也免去每轮 WASM 调用。换代/卸载清空后重新冻结。
+        let mut frozen = self
+            .cached_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(specs) = frozen.clone() {
+            return Ok(specs);
         }
+        let specs: Vec<ToolSpec> = self
+            .call_wasm_off_runtime(WasmPlugin::tool_specs)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|s| {
+                Ok(ToolSpec {
+                    name: s.name,
+                    description: s.description,
+                    input_schema: serde_json::from_str(&s.input_schema)
+                        .map_err(|error| error.to_string())?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        *frozen = Some(specs.clone());
+        Ok(specs)
     }
 }
 
@@ -589,30 +578,19 @@ impl PromptSectionProvider for WasmPluginAdapter {
         if !self.is_enabled() {
             return Ok(Vec::new());
         }
-        match self
-            .call_wasm_off_runtime(WasmPlugin::prompt_sections)
-            .map_err(|error| error.to_string())
-        {
-            Ok(sections) => {
-                let mut cached = self
-                    .cached_prompt_sections
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *cached = Some(sections.clone());
-                Ok(sections)
-            }
-            Err(error) => {
-                let cached = self
-                    .cached_prompt_sections
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(sections) = cached.clone() {
-                    tracing::warn!(%error, plugin_id = %self.id, "读取 wasm prompt 段失败，兜底上次声明");
-                    return Ok(sections);
-                }
-                Err(error)
-            }
+        // 声明冻结：与 try_tool_specs 同语义，首次成功读取后运行期固定。
+        let mut frozen = self
+            .cached_prompt_sections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(sections) = frozen.clone() {
+            return Ok(sections);
         }
+        let sections = self
+            .call_wasm_off_runtime(WasmPlugin::prompt_sections)
+            .map_err(|error| error.to_string())?;
+        *frozen = Some(sections.clone());
+        Ok(sections)
     }
 }
 
@@ -744,41 +722,45 @@ mod unloaded_adapter_tests {
         }
     }
 
-    /// 声明缓存兜底语义：WASM 读取失败时返回上次成功声明（插件自身
-    /// 保稳，抖动不改写请求前缀）；换代（升级/卸载）清空缓存，不跨
-    /// 版本兜底。
+    /// 声明冻结语义：首次成功读取后运行期固定返回冻结值（插件内部
+    /// 波动不改写请求前缀）；未冻结时读取失败原样传播（core 侧该插件
+    /// 本轮缺席）；换代（升级/卸载）清空冻结，重新冻结新版本。
     #[test]
-    fn declaration_cache_absorbs_failures_until_reload() {
+    fn declaration_freeze_keeps_specs_stable_within_run() {
         let adapter = unloaded_adapter();
-        // 无缓存时失败原样传播（core 侧该插件本轮缺席）。
+        // 未冻结时失败原样传播。
         assert!(adapter.try_tool_specs().is_err());
         assert!(adapter.try_prompt_sections().is_err());
 
-        // 模拟上次成功收集的声明被缓存：读取失败由缓存兜住。
+        // 模拟首次成功读取后的冻结值：后续读取（无论底层成败）一律
+        // 返回冻结值，不再触达 WASM。
         let spec = ToolSpec {
-            name: "cached_tool".into(),
+            name: "frozen_tool".into(),
             description: String::new(),
             input_schema: serde_json::json!({"type": "object"}),
         };
         *adapter
             .cached_tools
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec![spec.clone()]);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec![spec]);
         *adapter
             .cached_prompt_sections
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec!["缓存提示".into()]);
-        let specs = adapter.try_tool_specs().expect("缓存应兜住读取失败");
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(vec!["冻结提示".into()]);
+        let specs = adapter.try_tool_specs().expect("冻结值应直接返回");
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].name, "cached_tool");
+        assert_eq!(specs[0].name, "frozen_tool");
         assert_eq!(
-            adapter.try_prompt_sections().expect("缓存应兜住读取失败"),
-            vec!["缓存提示".to_string()]
+            adapter.try_prompt_sections().expect("冻结值应直接返回"),
+            vec!["冻结提示".to_string()]
         );
 
-        // 升级换代（换内部实例）：缓存作废，失败重新传播。
+        // 升级换代（换内部实例）：冻结作废，读取失败重新传播。
         adapter.release_inner();
-        assert!(adapter.try_tool_specs().is_err(), "换代后不得兜旧版本声明");
+        assert!(
+            adapter.try_tool_specs().is_err(),
+            "换代后不得沿用旧版本冻结"
+        );
         assert!(adapter.try_prompt_sections().is_err());
     }
 }
