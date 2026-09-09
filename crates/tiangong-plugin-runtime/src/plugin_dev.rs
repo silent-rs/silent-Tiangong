@@ -1732,6 +1732,82 @@ await runSidecar({
         assert_eq!(response["summary"], json!("文本 5 字"));
         assert_eq!(response["stdout"], json!("cba工天"));
     }
+    /// 引用换代：连接被停止（server 端点变化触发的依赖重启等）后，
+    /// 旧引用 is_stopped 且调用恒报「已停止」；经注册表按同键应取到
+    /// 换代后的现役新连接，调用恢复成功——wasm 宿主状态的刷新依据此行为。
+    #[test]
+    #[serial_test::serial]
+    fn sidecar连接停止后引用自动换代() {
+        let Some(_node) = find_node_for_test() else {
+            eprintln!("跳过：PATH 中未找到 node");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        require_native_sandbox!();
+        init_config_with_launcher(root.path());
+        let id = "stale-ref-demo";
+        make_project(root.path(), id);
+        let release = root.path().join(PLUGIN_DEV_DIR).join(id).join("release");
+        std::fs::create_dir_all(release.join("sidecar/vendor/tiangong-sidecar-sdk")).unwrap();
+        std::fs::write(
+            release.join("plugin.json"),
+            r#"{"schema_version":2,"id":"stale-ref-demo","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide","sidecar.invoke"],"capabilities":{"tools":true},"tools":[{"name":"ping","description":"回声","input_schema":{"type":"object"},"timeout_ms":20000}],"sidecar":{"runtime":"node","entry":"sidecar/main.mjs"}}"#,
+        )
+        .unwrap();
+        let sdk =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../plugins/sdk-sidecar/index.mjs");
+        std::fs::copy(
+            &sdk,
+            release.join("sidecar/vendor/tiangong-sidecar-sdk/index.mjs"),
+        )
+        .unwrap();
+        std::fs::write(
+            release.join("sidecar/main.mjs"),
+            r#"
+import { runSidecar } from './vendor/tiangong-sidecar-sdk/index.mjs';
+await runSidecar({
+  pluginId: 'stale-ref-demo',
+  dispatch(operation) {
+    if (operation === 'ping') return { payload: { ok: true } };
+    return { payload: {} };
+  },
+});
+"#,
+        )
+        .unwrap();
+        write_content_manifest(&release);
+        install(root.path(), id, None).expect("插件应可安装");
+
+        // 模拟 wasm 加载路径：经注册表拿连接 A 并完成一次基线调用。
+        let installed = crate::registry::find_installed_plugin(root.path(), id).unwrap();
+        let stale = crate::registry::sidecar_connection(root.path(), &installed, false)
+            .expect("建立初始连接");
+        let baseline = stale.invoke("ping", "{}").expect("基线调用应成功");
+        assert!(baseline.contains("\"ok\":true"), "基线响应: {baseline}");
+        assert!(!stale.is_stopped(), "现役连接不应报告已停止");
+
+        // 模拟 server 端点变化：停连接并清注册表（生产链 stop_connection_for_directory）。
+        crate::registry::stop_connection_for_directory(&installed.directory).unwrap();
+        assert!(stale.is_stopped(), "停止后旧引用应报告已停止");
+        let stale_error = stale
+            .invoke("ping", "{}")
+            .expect_err("停止后的旧引用调用应失败");
+        assert!(
+            stale_error.to_string().contains("已停止"),
+            "旧引用错误应说明已停止: {stale_error}"
+        );
+
+        // 引用换代：按插件 ID 反查应拿到现役新连接（不同实例、可正常调用）。
+        let fresh =
+            crate::registry::sidecar_connection_for_plugin(id).expect("换代连接应可经注册表取到");
+        assert!(
+            !std::sync::Arc::ptr_eq(&stale, &fresh),
+            "换代连接应是新实例"
+        );
+        assert!(!fresh.is_stopped(), "新连接不应报告已停止");
+        let recovered = fresh.invoke("ping", "{}").expect("换代后调用应恢复");
+        assert!(recovered.contains("\"ok\":true"), "恢复响应: {recovered}");
+    }
     /// 自定义图标往返：带 png 图标的插件安装后，read_plugin_icon 返回正确
     /// 字节与 MIME（read 走 loaded_plugins 内存表，install 后可用）。
     #[test]

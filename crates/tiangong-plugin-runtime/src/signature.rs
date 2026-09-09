@@ -128,19 +128,15 @@ impl SignedPluginRelease {
             (None, None) => {}
             _ => bail!("插件签名清单与 plugin.json 的 wasm 声明不一致"),
         }
-        let expected_ui = plugin_manifest
-            .ui_contributions()
-            .into_iter()
-            .map(|contribution| PathBuf::from(contribution.entry))
-            .collect::<BTreeSet<_>>();
         let signed_ui = self
             .ui
             .iter()
             .map(|artifact| artifact.path.clone())
             .collect::<BTreeSet<_>>();
-        if signed_ui.len() != self.ui.len() || signed_ui != expected_ui {
-            bail!("插件签名清单与 plugin.json 的 UI 入口声明不一致");
+        if signed_ui.len() != self.ui.len() {
+            bail!("插件签名清单包含重复的 UI 制品");
         }
+        plugin_manifest.validate_ui_artifacts(&signed_ui)?;
         for artifact in &self.ui {
             artifact.verify(directory, &artifact.path)?;
         }
@@ -438,6 +434,49 @@ mod tests {
             path: PathBuf::from(path),
             sha256: sha256_file(&dir.join(path)).unwrap(),
         }
+    }
+
+    #[test]
+    fn static_ui_resources_are_verified_with_the_page() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let manifest: PluginManifest = serde_json::from_str(
+            r#"{"schema_version":2,"id":"static-ui","version":"1.0.0","permissions":[],"resources":["ui"],"ui":{"contributions":[{"slot":"settings.plugin-page","id":"settings","entry":"ui/settings.html"}]}}"#,
+        ).unwrap();
+        manifest.validate().unwrap();
+        std::fs::create_dir(dir.join("ui")).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        for name in ["ui/settings.html", "ui/settings.css", "ui/settings.js"] {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        let release = SignedPluginRelease {
+            schema_version: SIGNED_RELEASE_SCHEMA_VERSION,
+            id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            publisher: crate::trust::OFFICIAL_PUBLISHER.into(),
+            permissions: vec![],
+            manifest: artifact(dir, "plugin.json"),
+            wasm: None,
+            ui: ["ui/settings.html", "ui/settings.css", "ui/settings.js"]
+                .iter()
+                .map(|name| artifact(dir, name))
+                .collect(),
+            sidecar: None,
+            content_manifest: None,
+        };
+        release.validate(dir, &manifest).unwrap();
+        std::fs::write(dir.join("ui/settings.js"), "tampered").unwrap();
+        assert!(
+            release
+                .validate(dir, &manifest)
+                .unwrap_err()
+                .to_string()
+                .contains("校验失败")
+        );
     }
 
     /// 生成密钥对、按指定发布者构造签名清单并落盘签名；返回测试公钥

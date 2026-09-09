@@ -509,22 +509,13 @@ impl PluginRepository {
             .as_ref()
             .is_some_and(|sidecar| sidecar.runtime != crate::manifest::SidecarRuntime::Native);
         let ui_entries = if interpreter_plugin {
-            // 解释器插件的全部制品（含 UI）在单一归档内，独立条目校验跳过。
+            // 解释器插件的全部制品（含 UI）在单一归档内。
             BTreeSet::<String>::new()
         } else {
-            manifest
-                .ui_contributions()
-                .into_iter()
-                .map(|contribution| contribution.entry)
-                .collect::<BTreeSet<String>>()
+            let paths = release.ui.keys().map(PathBuf::from).collect();
+            manifest.validate_ui_artifacts(&paths)?;
+            release.ui.keys().cloned().collect::<BTreeSet<_>>()
         };
-        let catalog_ui_entries = release.ui.keys().cloned().collect::<BTreeSet<_>>();
-        if !interpreter_plugin && ui_entries != catalog_ui_entries {
-            bail!(
-                "插件 {} 的目录 UI 制品与 plugin.json 声明不一致",
-                release.id
-            );
-        }
 
         // 统计需要下载的制品文件，用于把进度按文件均分到 [0, 100]。
         let platform = current_platform_key();
