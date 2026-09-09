@@ -12,13 +12,10 @@ use serde_json::Value;
 /// 返回的每个元素是一个可以直接交给 `archive_image_reference` 的原始引用：
 /// 形如 `data:image/png;base64,...`。
 pub fn extract_images(payload: &Value) -> Result<Vec<String>> {
-    let output = payload
-        .get("output")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("响应缺少 output 数组"))?;
+    let output = payload.get("output").and_then(Value::as_array);
 
     let mut images = Vec::new();
-    for item in output {
+    for item in output.into_iter().flatten() {
         if item.get("type").and_then(Value::as_str) != Some("image_generation_call") {
             continue;
         }
@@ -35,12 +32,70 @@ pub fn extract_images(payload: &Value) -> Result<Vec<String>> {
     }
 
     if images.is_empty() {
-        return Err(anyhow!(
-            "响应未包含图片（output 数组中没有成功的 image_generation_call）"
-        ));
+        return Err(anyhow!(image_failure_message(payload)));
     }
 
     Ok(images)
+}
+
+/// 只展示上游的错误及面向用户的回复，不把推理内容或完整响应放入错误。
+fn image_failure_message(payload: &Value) -> String {
+    let mut details = Vec::new();
+    if let Some(message) = payload.pointer("/error/message").and_then(Value::as_str) {
+        details.push(message);
+    }
+    for item in payload
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match item.get("type").and_then(Value::as_str) {
+            Some("image_generation_call") => {
+                if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
+                    details.push(message);
+                }
+            }
+            Some("message") => {
+                for content in item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let field = match content.get("type").and_then(Value::as_str) {
+                        Some("refusal") => "refusal",
+                        Some("output_text") => "text",
+                        _ => continue,
+                    };
+                    if let Some(text) = content.get(field).and_then(Value::as_str) {
+                        details.push(text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let explanation = details
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !explanation.is_empty() {
+        let mut excerpt: String = explanation.chars().take(2000).collect();
+        if explanation.chars().count() > 2000 {
+            excerpt.push('…');
+        }
+        return format!("上游服务未生成图片，返回说明：{excerpt}");
+    }
+    if let Some(reason) = payload
+        .pointer("/incomplete_details/reason")
+        .and_then(Value::as_str)
+    {
+        return format!("上游生图响应未完成：{reason}");
+    }
+    "上游服务未返回图片，也未提供失败原因，请检查所选模型及服务是否支持生图".to_string()
 }
 
 #[cfg(test)]
