@@ -3414,6 +3414,25 @@ pub(crate) fn sidecar_connection_for_plugin(plugin_id: &str) -> Option<Arc<dyn S
     sidecar_connection(&storage_root, &installed, false).ok()
 }
 
+/// 检测长期持有的连接引用是否已被停止换代（server 端点变化等触发的
+/// 依赖插件重启）：已停止且注册表能查到现役连接时返回换代后的新连接，
+/// 否则原样返回（查不到时调用方保留旧引用、按原错误上报）。
+///
+/// 静态注入连接的两类持有方共用：WASM 宿主状态（调用转发）与适配器
+/// （会话取消）——取消若仍打旧引用，换代后的调用将无法取消。
+pub(crate) fn refresh_stale_sidecar(
+    sidecar: Option<&Arc<dyn SidecarConnection>>,
+    plugin_id: &str,
+) -> Option<Arc<dyn SidecarConnection>> {
+    if sidecar.is_some_and(|conn| conn.is_stopped())
+        && let Some(connection) = sidecar_connection_for_plugin(plugin_id)
+    {
+        tracing::info!(plugin_id, "sidecar 连接已换代，过期引用刷新");
+        return Some(connection);
+    }
+    sidecar.cloned()
+}
+
 /// 带宿主权威会话工作区的连接构造。
 pub(crate) fn sidecar_connection_with_workspace(
     storage_root: &Path,

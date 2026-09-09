@@ -313,7 +313,9 @@ impl Plugin for WasmPluginAdapter {
         &'a self,
         session: &mut Session,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        if let Some(sidecar) = &self.sidecar
+        // 引用可能已被换代（wasm 调用侧触发刷新）：取消要打到现役连接。
+        if let Some(sidecar) =
+            crate::registry::refresh_stale_sidecar(self.sidecar.as_ref(), &self.id)
             && let Err(error) = sidecar.cancel_session(&session.id)
         {
             tracing::warn!(plugin_id = %self.id, session_id = %session.id, %error, "取消 sidecar 调用失败");
@@ -467,8 +469,13 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         );
         if let Some(sidecar) = &self.sidecar {
             let sidecar = sidecar.clone();
+            let plugin_id = self.id.clone();
             let session_id = session.id.clone();
             invocation.on_cancel(move || {
+                // 引用可能已被换代（wasm 调用侧触发刷新）：取消经注册表
+                // 取现役连接，取不到时退回原引用。
+                let sidecar = crate::registry::refresh_stale_sidecar(Some(&sidecar), &plugin_id)
+                    .unwrap_or(sidecar);
                 let _ = sidecar.cancel_session(&session_id);
             });
         }
@@ -495,14 +502,11 @@ impl ToolOverrideHandler for WasmPluginAdapter {
                     Err(error) => {
                         let error = format!("{error:#}");
                         tracing::warn!(%plugin_id, %tool_name, %error, "WASM 插件工具执行失败");
-                        return Some(ToolResult {
-                            ok: false,
-                            summary: format!("插件 {plugin_id} 执行工具 {tool_name} 失败: {error}"),
-                            stdout: String::new(),
-                            stderr: error,
-                            exit_code: 1,
-                            execution: None,
-                        });
+                        let mut result = unavailable_tool_result(format!(
+                            "插件 {plugin_id} 执行工具 {tool_name} 失败: {error}"
+                        ));
+                        result.stderr = error;
+                        return Some(result);
                     }
                 };
                 Some(ToolResult {
@@ -625,15 +629,18 @@ fn plugin_config_payload(config: &CoreConfig) -> anyhow::Result<String> {
     Ok(serde_json::to_string(&value)?)
 }
 
+/// 未加载（或声明读取失败）状态下适配器行为的回归保护。
+/// 此前一次重构曾把这两类失败误退成"工具未注册"级别的降级（#501），
+/// 这里锁定失败必须原样传播、原因必须准确。
 #[cfg(test)]
-mod review_regression_tests {
+mod unloaded_adapter_tests {
     use super::*;
 
     fn unloaded_adapter() -> WasmPluginAdapter {
         WasmPluginAdapter {
             inner: RwLock::new(None),
             config: PluginRuntimeConfig::default(),
-            id: "review-plugin".into(),
+            id: "unloaded-plugin".into(),
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(true),
@@ -653,10 +660,10 @@ mod review_regression_tests {
         let adapter = unloaded_adapter();
         let call = ToolCall {
             id: scru128::new().to_string(),
-            name: "review_tool".into(),
+            name: "sample_tool".into(),
             arguments: serde_json::json!({}),
         };
-        let mut session = Session::new("review");
+        let mut session = Session::new("unit");
         for (enabled, expected) in [(false, "已停用"), (true, "当前不可用")] {
             adapter.set_enabled(enabled);
             let result = adapter.handle(&call, &mut session, "").await.unwrap();

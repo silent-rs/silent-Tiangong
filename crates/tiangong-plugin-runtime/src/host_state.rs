@@ -137,14 +137,9 @@ impl SidecarHost for HostState {
     fn invoke(&mut self, operation: String, payload: String) -> Result<String, SidecarError> {
         // 加载时注入的连接被停止（server 端点变化等触发依赖插件重启）后，
         // 静态引用永不恢复：检测到已停止就经注册表取换代后的现役连接
-        //（新进程携带新注入的环境），查不到时保留旧引用按原错误上报。
-        if self.sidecar.as_ref().is_some_and(|conn| conn.is_stopped())
-            && let Some(connection) =
-                crate::registry::sidecar_connection_for_plugin(&self.plugin_id)
-        {
-            tracing::info!(plugin_id = %self.plugin_id, "sidecar 连接已换代，wasm 引用刷新");
-            self.sidecar = Some(connection);
-        }
+        //（新进程携带新注入的环境）。
+        self.sidecar =
+            crate::registry::refresh_stale_sidecar(self.sidecar.as_ref(), &self.plugin_id);
         let Some(conn) = self.sidecar.clone() else {
             return Err(SidecarError::NotConfigured);
         };
