@@ -310,19 +310,31 @@ impl McpService {
     }
 
     fn apply_config(&self, next: McpConfig, affected_server: Option<&str>) -> Result<()> {
-        // 启动时配置加载失败（文件损坏/不可读）且文件仍在磁盘上：内存里是
-        // 兜底默认配置，一旦写回会把磁盘上的真实配置整体抹掉，必须拒绝。
+        // 启动时配置加载失败（文件损坏/不可读）：内存里是兜底默认配置，一旦
+        // 写回会把磁盘上的真实配置整体抹掉，必须拒绝。只有明确确认文件已
+        // 不在磁盘上（NotFound，用户删除后重建）才放行；状态无法确认时同样
+        // 保守拒绝——`exists()` 在权限不足时也会返回 false，不能作放行依据。
         if let Some(error) = self
             .config_load_error
             .read()
             .ok()
             .and_then(|guard| guard.clone())
-            && self.mcp_config_path.exists()
         {
-            return Err(anyhow!(
-                "MCP 配置文件加载失败，拒绝写回以防覆盖现有配置：{}（{error}）",
-                self.mcp_config_path.display()
-            ));
+            match std::fs::metadata(&self.mcp_config_path) {
+                Ok(_) => {
+                    return Err(anyhow!(
+                        "MCP 配置文件加载失败，拒绝写回以防覆盖现有配置：{}（{error}）",
+                        self.mcp_config_path.display()
+                    ));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(anyhow!(
+                        "MCP 配置文件状态无法确认，拒绝写回以防覆盖现有配置：{}（{error}；{err}）",
+                        self.mcp_config_path.display()
+                    ));
+                }
+            }
         }
         write_mcp_config_to_path(&self.mcp_config_path, &next)?;
         if let Ok(mut guard) = self.mcp_config.write() {
@@ -479,11 +491,16 @@ impl McpService {
     }
 
     fn merge_with_disk(&self) -> Result<()> {
-        if !self.mcp_config_path.exists() {
-            return Ok(());
-        }
-        let disk_content = std::fs::read_to_string(&self.mcp_config_path)
-            .with_context(|| format!("读取 mcp 配置失败：{}", self.mcp_config_path.display()))?;
+        let disk_content = match std::fs::read_to_string(&self.mcp_config_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(anyhow!(
+                    "读取 mcp 配置失败：{}（{err}）",
+                    self.mcp_config_path.display()
+                ));
+            }
+        };
         let disk_mcp: McpConfig = serde_json::from_str(&disk_content)
             .with_context(|| format!("解析 mcp 配置失败：{}", self.mcp_config_path.display()))?;
         let mut next = self.config_snapshot();
@@ -524,29 +541,32 @@ impl McpService {
 
 /// 从指定路径加载 MCP 配置；返回（配置, 加载失败原因）。
 ///
-/// 文件不存在是首装常态，返回默认配置且无错误；文件存在但读取/解析失败时
-/// 同样返回默认配置供只读展示，但记录错误原因——`apply_config` 依赖它拒绝
-/// 写回，避免默认空配置覆盖磁盘上的真实配置。
+/// 只有明确的 NotFound 才是首装常态（返回默认配置且无错误）；读取或解析
+/// 失败（含权限不足等一切非 NotFound 错误）时同样返回默认配置供只读展示，
+/// 但记录错误原因——`apply_config` 依赖它拒绝写回，避免默认空配置覆盖
+/// 磁盘上的真实配置。不能用 `exists()` 预判：无权限 stat 的路径同样返回
+/// false，会被误判成首装。
 fn load_mcp_config_from_path(path: &std::path::Path) -> (McpConfig, Option<String>) {
-    if !path.exists() {
-        return (McpConfig::default(), None);
-    }
-    match std::fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str::<McpConfig>(&content) {
-            Ok(config) => (config, None),
-            Err(err) => {
-                let reason = format!("解析失败：{err}");
-                tracing::warn!(
-                    "MCP 配置解析失败，回退为默认配置（写回已禁止）：path={} error={err}",
-                    path.display()
-                );
-                (McpConfig::default(), Some(reason))
-            }
-        },
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (McpConfig::default(), None);
+        }
         Err(err) => {
             let reason = format!("读取失败：{err}");
             tracing::warn!(
                 "MCP 配置读取失败，回退为默认配置（写回已禁止）：path={} error={err}",
+                path.display()
+            );
+            return (McpConfig::default(), Some(reason));
+        }
+    };
+    match serde_json::from_str::<McpConfig>(&content) {
+        Ok(config) => (config, None),
+        Err(err) => {
+            let reason = format!("解析失败：{err}");
+            tracing::warn!(
+                "MCP 配置解析失败，回退为默认配置（写回已禁止）：path={} error={err}",
                 path.display()
             );
             (McpConfig::default(), Some(reason))
@@ -697,6 +717,37 @@ mod tests {
             std::fs::read_to_string(&config_path).unwrap(),
             "{ 损坏的配置"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn register_rejected_when_config_file_inaccessible() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("mcp.json");
+        let existing = serde_json::to_string_pretty(&McpConfig::default()).unwrap();
+        std::fs::write(&config_path, &existing).unwrap();
+
+        // 目录去掉执行权限后 stat 会失败，exists() 会把"无法访问"误报成
+        // "不存在"；加载必须按读取失败记录并保持写回保护，而不是当作首装。
+        let original = std::fs::metadata(dir.path()).unwrap().permissions();
+        let mut restricted = original.clone();
+        restricted.set_mode(0o600);
+        std::fs::set_permissions(dir.path(), restricted).unwrap();
+        let service = McpService::with_paths(config_path.clone(), dir.path().join("cache.json"));
+        // 先恢复权限再断言，保证 tempdir 清理不受断言失败影响。
+        std::fs::set_permissions(dir.path(), original).unwrap();
+
+        let service = service.unwrap();
+        let error = service
+            .register_server(register_request("new-server"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("拒绝写回"),
+            "目录不可访问时注册应拒绝写回，实际：{error}"
+        );
+        // 原文件仍在且未被默认空配置覆盖。
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), existing);
     }
 
     #[test]
