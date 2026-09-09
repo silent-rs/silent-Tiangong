@@ -124,7 +124,7 @@ fn fixture(root: &Path, binary: &Path) -> Result<PathBuf> {
         "entrypoints":["desktop"],
         "permissions":["sidecar.invoke","tool.provide"],"capabilities":{"tools":true},
         "tools":[{"name":"echo","description":"echo","input_schema":{"type":"object"}}],
-        "sidecar":{"binary":"sidecar","lifecycle":"resident","startup_timeout_ms":2000}});
+        "sidecar":{"binary":"sidecar","lifecycle":"resident","startup_timeout_ms":10000}});
     std::fs::write(dir.join("plugin.json"), serde_json::to_vec(&manifest)?)?;
     let artifact = |name: &str| -> Result<serde_json::Value> {
         let digest = Sha256::digest(std::fs::read(dir.join(name))?);
@@ -399,6 +399,66 @@ def blocked_io(sandbox, own_group):
     success(name)
 
 
+def signal_boundary():
+    directory = work / 'signal-boundary'
+    directory.mkdir()
+    log = directory / 'signals.log'
+    unrelated = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
+    children.append(unrelated)
+    other_pid_file = directory / 'other-sandbox.pid'
+    other_log = (directory / 'other-sandbox.log').open('w')
+    other = subprocess.Popen([str(debug / 'tiangong-sandbox'), 'run', '--workspace', str(directory),
+                              '--', '/bin/sh', '-c', 'printf "%s" "$$" > "$1"; exec /bin/sleep 30',
+                              'other-sandbox', str(other_pid_file)],
+                             stdout=other_log, stderr=other_log, start_new_session=True)
+    children.append(other)
+    other_group = None
+    shell = r'''
+sleep 30 & own=$!
+/bin/sh -c 'sleep 30 & printf "%s\n" "$!" > "$1"; wait' nested "$2" & nested=$!
+printf 'own=%s\nnested=%s\n' "$own" "$nested"
+while [ ! -s "$2" ]; do sleep 0.01; done
+grandchild=$(cat "$2")
+printf 'grandchild=%s\n' "$grandchild"
+kill -TERM "$grandchild"; grandchild_status=$?
+kill -TERM "$own"; own_status=$?
+kill -TERM "$1"; unrelated_status=$?
+kill -TERM "$3"; other_sandbox_status=$?
+printf 'result=%s,%s,%s,%s\n' "$own_status" "$grandchild_status" "$unrelated_status" "$other_sandbox_status"
+if [ "$own_status" = 0 ]; then wait "$own"; fi
+if [ "$grandchild_status" = 0 ]; then wait "$nested"; fi
+exit 0
+'''
+    try:
+        wait_until(lambda: other_pid_file.is_file() and other_pid_file.stat().st_size > 0,
+                   5, '另一沙箱未就绪')
+        other_pid = int(other_pid_file.read_text())
+        other_group = os.getpgid(other_pid)
+        groups.add(other_group)
+        with log.open('w') as output:
+            bounded([str(debug / 'tiangong-sandbox'), 'run', '--workspace', str(directory),
+                     '--', '/bin/sh', '-c', shell, 'signal-boundary', str(unrelated.pid),
+                     str(directory / 'grandchild.pid'), str(other_pid)], 10, stdout=output, stderr=output)
+        result = re.search(r'^result=(\d+),(\d+),(\d+),(\d+)$', log.read_text(), re.MULTILINE)
+        assert result, f'未取得信号边界结果：{log.read_text()}'
+        assert result.groups() == ('0', '0', '1', '1'), f'信号权限范围错误：{log.read_text()}'
+        assert unrelated.poll() is None, '沙箱不应能够终止无关进程'
+        assert alive(other_pid), '相同策略的另一沙箱不应受到影响'
+    finally:
+        if unrelated.poll() is None:
+            unrelated.kill()
+        unrelated.wait(timeout=5)
+        cleanup([other], {other_group} if other_group is not None else set())
+        other_log.close()
+        content = log.read_text() if log.exists() else ''
+        for pid in re.findall(r'^(?:own|nested|grandchild)=(\d+)$', content, re.MULTILINE):
+            try:
+                groups.add(os.getpgid(int(pid)))
+            except ProcessLookupError:
+                pass
+    success('signal-boundary：子进程/孙进程可回收，普通无关进程/相同策略的另一沙箱均被拒')
+
+
 def cleanup(processes, process_groups):
     for process in processes:
         if process.poll() is None:
@@ -430,6 +490,7 @@ def case(operation):
 try:
     check_environment()
     build()
+    case(signal_boundary)
     for sandbox in (False, True):
         for own_group in (False, True):
             case(lambda: blocked_io(sandbox, own_group))

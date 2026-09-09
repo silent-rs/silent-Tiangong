@@ -145,6 +145,10 @@ fn compile_profile_explicit_categories(
     }
     append_system_service_rules(&mut sbpl, policy);
     sbpl.push_str("(allow process-exec*)\n(allow process-fork)\n");
+    // 宿主退出时 sidecar 必须能终止自己创建的整棵进程树；target children
+    // 只含直接子进程。按继承的沙箱实例授权，覆盖孙进程但不包括宿主或
+    // 独立启动的其他沙箱（即使使用相同策略）。
+    sbpl.push_str("(allow signal (target same-sandbox))\n");
     // Rust/C 运行时启动需读 sysctl（页大小——guard page 计算），zsh 5.9
     // 同样读 hw.* sysctl（Tahoe 上多方踩坑）；不显式放行直接崩。
     sbpl.push_str("(allow sysctl-read)\n");
