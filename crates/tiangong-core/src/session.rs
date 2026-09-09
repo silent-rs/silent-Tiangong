@@ -132,14 +132,6 @@ pub struct Session {
     storage_root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginDeclaration {
-    /// 空 ID 表示 Core 自带的反馈工具，不绑定外部插件。
-    pub plugin_id: String,
-    pub tools: Vec<crate::model::ToolSpec>,
-    pub prompt_sections: Vec<String>,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionTaskStatus {

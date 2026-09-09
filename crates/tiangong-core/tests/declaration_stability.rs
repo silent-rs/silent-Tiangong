@@ -65,25 +65,33 @@ impl Plugin for MockPlugin {
 }
 impl MentionCandidateProvider for MockPlugin {}
 impl ToolSpecProvider for MockPlugin {
-    fn try_tool_specs(&self) -> Result<Vec<ToolSpec>, String> {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
         let description = if self.id.starts_with("dynamic-tools") {
-            self.state.declaration("tools")?
+            // 冻结模拟：失败且无冻结值时返回空（core 不感知失败）。
+            match self.state.declaration("tools") {
+                Ok(value) => value,
+                Err(_) => return Vec::new(),
+            }
         } else {
             "固定工具".into()
         };
-        Ok(vec![ToolSpec {
+        vec![ToolSpec {
             name: "probe_read".into(),
             description,
             input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
-        }])
+        }]
     }
 }
 impl PromptSectionProvider for MockPlugin {
-    fn try_prompt_sections(&self) -> Result<Vec<String>, String> {
+    fn prompt_sections(&self) -> Vec<String> {
         if self.id.starts_with("dynamic-prompt") {
-            Ok(vec![self.state.declaration("prompt")?])
+            // 冻结模拟：失败且无冻结值时返回空。
+            match self.state.declaration("prompt") {
+                Ok(value) => vec![value],
+                Err(_) => Vec::new(),
+            }
         } else {
-            Ok(vec!["固定插件提示".into()])
+            vec!["固定插件提示".into()]
         }
     }
 }
@@ -257,13 +265,10 @@ async fn declaration_jitter_is_absorbed_by_process_cache_across_core_recreation(
         assert_eq!(first["tools"], replay["tools"]);
         assert_eq!(first["messages"][0], replay["messages"][0]);
 
-        // 插件恢复（新版本）后：tools 类下一轮即时生效；prompt 类要经
-        // 清空上下文重建 system prompt 后生效（system prompt 建立后不随
-        // 段落变化重写，保持消息前缀稳定）。
+        // 插件恢复（新版本）后的下一轮：tools 与 prompt 类都即时生效
+        //（每轮 turn 启动时就地重拼 system prompt，内容由插件冻结快照
+        // 保证稳定，变化即真实变化）。
         state.available.store(true, Ordering::SeqCst);
-        if id.starts_with("dynamic-prompt") {
-            restored.deliver(AgentInputKind::reset_context()).unwrap();
-        }
         send(&restored, &rx, "恢复后继续").await;
         let requests = server.received_requests().await.unwrap();
         let next: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();

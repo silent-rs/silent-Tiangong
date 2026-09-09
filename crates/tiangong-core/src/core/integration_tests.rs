@@ -365,8 +365,10 @@ async fn plain_question_completes_with_done_event() {
     core.shutdown_join().expect("关闭失败");
 }
 
+/// 旧版会话（手工 system prompt）：下一轮 turn 启动时重拼为新格式，
+/// 旧摘要并入摘要段不丢失；清理失败整体回滚保历史，解除后清理成功。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history() {
+async fn legacy_prompt_is_reassembled_next_turn_and_failed_reset_keeps_history() {
     let (env, sid) = TestEnv::new("legacy-declarations");
     let server = MockServer::builder().start().await;
     mount_prompt_router(
@@ -393,9 +395,20 @@ async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history()
     );
     wait_idle(&sid).await;
     let before = env.load_session(&sid);
-    assert_eq!(
-        serde_json::to_value(&before.system_prompt_message).unwrap(),
-        serde_json::to_value(&legacy.system_prompt_message).unwrap()
+    // 下一轮 turn 启动时重拼：旧手工提示被新格式替换，旧摘要保留进摘要段。
+    let prompt_text = before
+        .system_prompt_message
+        .as_ref()
+        .unwrap()
+        .text_content()
+        .to_string();
+    assert!(
+        !prompt_text.contains("旧系统提示"),
+        "旧手工提示应被重拼替换: {prompt_text}"
+    );
+    assert!(
+        prompt_text.contains("旧摘要"),
+        "旧摘要应并入摘要段: {prompt_text}"
     );
     fail_all_persistence_for_session(&sid);
     assert!(core.deliver(AgentInputKind::reset_context()).is_err());
@@ -403,19 +416,12 @@ async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history()
         serde_json::to_value(env.load_session(&sid)).unwrap(),
         serde_json::to_value(&before).unwrap()
     );
-    // 解除故障后再次清理，必须同时移除旧摘要并重建系统提示。
+    // 解除故障后再次清理，必须移除旧摘要；system prompt 由下一轮重拼。
     clear_persistent_persistence_failure(&sid);
     core.deliver(AgentInputKind::reset_context()).unwrap();
     let reset = env.load_session(&sid);
     assert!(reset.context_summary.is_none());
     assert_eq!(reset.summary_up_to, reset.messages.len());
-    assert!(
-        !reset
-            .system_prompt_message
-            .unwrap()
-            .text_content()
-            .contains("旧系统提示")
-    );
     core.shutdown_join().unwrap();
 }
 

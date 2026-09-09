@@ -455,9 +455,8 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
-    // 摘要段变化需要重建 system prompt；插件声明由每轮实时收集维护
-    //（进程内缓存兜底），压缩不再重建声明。
-    rebuild_system_prompt_for_session(&mut candidate, &ctx.prompt_sections);
+    // 摘要段变化需要重建 system prompt（内容一致时保留原消息）。
+    rebuild_system_prompt_for_session(&mut candidate, &ctx.plugins);
     candidate
         .try_persist_to_disk()
         .map_err(anyhow::Error::msg)?;
@@ -706,8 +705,8 @@ mod tests {
         assert_eq!(restored.summary_up_to, ctx.session.summary_up_to);
         for question in ["继续", "再核对一次"] {
             restored.append_message(MessageRole::User, question);
-            // 声明不再随会话保存：同一组插件段落重建应得到相同 prompt。
-            rebuild_system_prompt_for_session(&mut restored, &ctx.prompt_sections);
+            // 同一组插件段落重建应得到相同 prompt。
+            rebuild_system_prompt_for_session(&mut restored, &ctx.plugins);
             assert_eq!(
                 serde_json::to_vec(&restored.system_prompt_message).unwrap(),
                 saved_prompt
@@ -731,7 +730,6 @@ mod tests {
     #[test]
     fn compression_keeps_current_declarations_and_survives_persist_failure() {
         use crate::core::plugin::Plugin;
-        use crate::core::plugin::refresh_from_plugins;
         use crate::tool_override::{
             MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
         };
@@ -771,14 +769,9 @@ mod tests {
             session.append_message(MessageRole::User, "当前问题");
             let (mut ctx, root) = test_context(session);
             ctx.plugins = vec![std::sync::Arc::new(ChangingPlugin { fail: unreadable })];
-            // 模拟 turn 开始的实时收集：读取失败的插件本轮缺席
-            //（兜底由插件自身负责）。
-            let prepared = refresh_from_plugins(ctx.plugins.clone());
-            ctx.tools = prepared.tools;
-            ctx.prompt_sections = prepared.prompt_sections;
+            // 模拟 turn 启动时的 system prompt 重拼（就地收集插件段落）。
+            rebuild_system_prompt_for_session(&mut ctx.session, &ctx.plugins);
             let turn_tools = serde_json::to_value(&ctx.tools).unwrap();
-            let turn_prompts = ctx.prompt_sections.clone();
-            rebuild_system_prompt_for_session(&mut ctx.session, &ctx.prompt_sections);
             ctx.session.try_persist_to_disk().unwrap();
             let old_session = serde_json::to_value(&ctx.session).unwrap();
             let old_tools = serde_json::to_value(&ctx.tools).unwrap();
@@ -796,8 +789,7 @@ mod tests {
             } else {
                 result.unwrap();
                 assert_eq!(restored.context_summary.as_deref(), Some("新的摘要"));
-                // 压缩不重建声明：tools/prompt 保持 turn 开始收集的值。
-                assert_eq!(ctx.prompt_sections, turn_prompts);
+                // 压缩不改动 tools：保持 turn 开始的值。
                 assert_eq!(serde_json::to_value(&ctx.tools).unwrap(), turn_tools);
                 assert_eq!(
                     serde_json::to_value(restored.system_prompt_message).unwrap(),

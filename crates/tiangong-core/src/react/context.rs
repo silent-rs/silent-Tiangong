@@ -47,12 +47,19 @@ pub(super) fn record_call_usage(
     crate::react::message::emit_session_message_upsert(ctx, message_id);
 }
 
-/// 从 Core 已固定的提示段落与会话摘要重建 system prompt，不调用插件。
+/// 就地收集插件提示段落并重建 system prompt（内容一致时保留原消息）。
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
 /// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
-pub(crate) fn rebuild_system_prompt_for_session(session: &mut Session, plugin_sections: &[String]) {
-    let config = SystemPromptConfig::from_plugin_sections(plugin_sections.to_vec());
+pub(crate) fn rebuild_system_prompt_for_session(
+    session: &mut Session,
+    plugins: &[std::sync::Arc<dyn crate::core::Plugin>],
+) {
+    let prompt_sections = plugins
+        .iter()
+        .flat_map(|plugin| plugin.prompt_sections())
+        .collect();
+    let config = SystemPromptConfig::from_plugin_sections(prompt_sections);
     session.rebuild_system_prompt(&config);
 }
 
