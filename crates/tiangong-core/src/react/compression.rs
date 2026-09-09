@@ -155,7 +155,8 @@ impl ContextCompression {
     }
 
     /// 手动压缩的等待语义：只接受引导消息（用户消息，取消压缩并立即
-    /// 起新轮）与取消类（Cancel/Shutdown/通道关闭）；其余信号（插件
+    /// 起新轮）与取消类（Cancel/Shutdown/通道关闭）；标题修改保存到当前
+    /// 会话而不中断压缩；其余信号（插件
     /// 可用性广播、工具注入等）不接受——忽略并继续等待压缩收敛。
     pub(crate) async fn run_manual(
         mut self,
@@ -172,6 +173,26 @@ impl ContextCompression {
                             | Command::InjectUserMessage { .. })) => {
                             self.cancel(ctx).await;
                             return Some(CompressionInterrupt::Command(command));
+                        }
+                        Some(Command::SetTitle { title, only_if_default }) => {
+                            if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
+                                let mut candidate = ctx.session.clone();
+                                candidate.title = title.clone();
+                                candidate.updated_at = tiangong_types::now_text();
+                                match candidate.try_persist_to_disk() {
+                                    Ok(()) => {
+                                        ctx.session = candidate;
+                                        let _ = ctx.stream_tx.send(StreamEvent::TitleChanged { title });
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            session_id = %ctx.session.id,
+                                            %error,
+                                            "手动压缩期间保存标题失败，保留原标题"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Some(_) => continue,
                         None => {
@@ -799,15 +820,15 @@ mod tests {
         }
     }
 
-    /// 手动压缩只接受引导消息与取消类命令：插件可用性广播、工具注入
-    /// 等其余信号不接受——忽略并继续等待压缩收敛；取消类立即终止。
+    /// 手动压缩保存标题但不中断任务；忽略工具注入，取消类立即终止。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_compression_ignores_non_steering_commands_and_finishes() {
         let mut session = Session::new("manual-cmd");
         for text in ["旧问题", "新问题"] {
             session.append_message(MessageRole::User, text);
         }
-        let (mut ctx, _root) = test_context(session);
+        let (mut ctx, root) = test_context(session);
+        let session_id = ctx.session.id.clone();
         let organizer = ContextOrganizer::new(ctx.context_limit);
         let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
         let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
@@ -832,6 +853,70 @@ mod tests {
             .expect("等待 run_manual 超时")
             .unwrap();
         assert!(interrupt.is_none(), "非引导/取消命令不得中断手动压缩");
+        let restored = Session::load_from_storage(root.path(), &session_id).unwrap();
+        assert_eq!(restored.title, "压缩中改标题");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_only_reports_persisted_title_changes() {
+        for fail_save in [false, true] {
+            for cancel in [false, true] {
+                let mut session = Session::new("原标题");
+                for text in ["旧问题", "新问题"] {
+                    session.append_message(MessageRole::User, text);
+                }
+                let (mut ctx, root) = test_context(session);
+                ctx.session.try_persist_to_disk().unwrap();
+                let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+                ctx.stream_tx = stream_tx;
+                let organizer = ContextOrganizer::new(ctx.context_limit);
+                let compression =
+                    ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+                let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+                cmd_tx
+                    .send(Command::SetTitle {
+                        title: "新标题".into(),
+                        only_if_default: false,
+                    })
+                    .unwrap();
+                if fail_save {
+                    crate::core::test_support::fail_next_persistence_for_session(&ctx.session.id);
+                }
+                if cancel {
+                    cmd_tx.send(Command::Cancel).unwrap();
+                }
+                let interrupt = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    compression.run_manual(&mut ctx, &mut cmd_rx),
+                )
+                .await
+                .expect("手动压缩应及时结束");
+                if cancel {
+                    assert!(matches!(
+                        interrupt,
+                        Some(CompressionInterrupt::Command(Command::Cancel))
+                    ));
+                } else {
+                    assert!(interrupt.is_none());
+                }
+                let expected = if fail_save { "原标题" } else { "新标题" };
+                assert_eq!(ctx.session.title, expected);
+                let restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+                assert_eq!(restored.title, expected);
+                let titles: Vec<_> = stream_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        StreamEvent::TitleChanged { title } => Some(title),
+                        _ => None,
+                    })
+                    .collect();
+                if fail_save {
+                    assert!(titles.is_empty(), "保存失败不得报告标题修改成功");
+                } else {
+                    assert_eq!(titles, vec!["新标题"]);
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

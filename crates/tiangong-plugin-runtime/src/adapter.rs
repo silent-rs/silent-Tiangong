@@ -44,7 +44,7 @@ pub struct WasmPluginAdapter {
     /// 声明冻结快照：首次成功读取后，同一次运行内 tools/prompt 固定
     /// 返回冻结值——插件内部状态波动（探测重写、健康翻转）不得改写
     /// 请求前缀（KV cache 稳定），也免去每轮 WASM 声明调用。换代
-    ///（replace_inner/release_inner，升级/卸载）清空后重新冻结。
+    ///（replace_inner/release_inner，升级/卸载）或配置变化后重新冻结。
     cached_tools: Mutex<Option<Vec<ToolSpec>>>,
     cached_prompt_sections: Mutex<Option<Vec<String>>>,
 }
@@ -168,6 +168,7 @@ impl WasmPluginAdapter {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = Some(replacement);
+        drop(current);
         // 换代即新版本：声明缓存作废，避免旧版本声明兜住新版本实例。
         self.clear_declaration_cache();
     }
@@ -183,6 +184,8 @@ impl WasmPluginAdapter {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = None;
+        // 声明读取会先锁缓存再读取 inner，不能持有 inner 写锁清缓存。
+        drop(current);
         self.clear_declaration_cache();
     }
 
@@ -235,16 +238,25 @@ impl Plugin for WasmPluginAdapter {
                 return;
             }
         };
-        if let Ok(mut context) = self.context.lock() {
+        let changed = {
+            let mut context = self
+                .context
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let changed = context.config_json.as_ref() != Some(&config_json);
             context.config_json = Some(config_json.clone());
-        }
-        if !self.is_enabled() {
-            return;
-        }
-        if let Err(e) =
-            self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
+            changed
+        };
+        if self.is_enabled()
+            && let Err(e) =
+                self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
         {
             tracing::warn!("通知 wasm 插件配置变更失败: {e}");
+        }
+        // 在配置通知结束后清理，避免并发读取把旧声明留到下一轮。
+        // 失败也可能已部分更新插件状态，不能继续沿用旧配置的声明。
+        if changed {
+            self.clear_declaration_cache();
         }
     }
 
@@ -446,7 +458,7 @@ impl ToolSpecProvider for WasmPluginAdapter {
         }
         // 声明冻结：首次成功读取后，同一次运行内固定返回冻结值——后续
         // 不再改写（插件内部状态波动如探测重写、健康翻转不得改写请求
-        // 前缀），也免去每轮 WASM 调用。换代/卸载清空后重新冻结。
+        // 前缀），也免去每轮 WASM 调用。换代/卸载或配置变化后重新冻结。
         let mut frozen = self
             .cached_tools
             .lock()
@@ -755,7 +767,22 @@ mod unloaded_adapter_tests {
             vec!["冻结提示".to_string()]
         );
 
+        let mut config = CoreConfig::default();
+        adapter.context.lock().unwrap().config_json = Some(plugin_config_payload(&config).unwrap());
+        adapter.on_config_updated(&config);
+        assert_eq!(adapter.try_tool_specs().unwrap()[0].name, "frozen_tool");
+        assert_eq!(adapter.try_prompt_sections().unwrap(), vec!["冻结提示"]);
+
+        config.llm.chat.model = "changed-model".into();
+        adapter.on_config_updated(&config);
+        assert!(adapter.cached_tools.lock().unwrap().is_none());
+        assert!(adapter.cached_prompt_sections.lock().unwrap().is_none());
+        assert!(adapter.try_tool_specs().is_err());
+        assert!(adapter.try_prompt_sections().is_err());
+
         // 升级换代（换内部实例）：冻结作废，读取失败重新传播。
+        *adapter.cached_tools.lock().unwrap() = Some(specs);
+        *adapter.cached_prompt_sections.lock().unwrap() = Some(vec!["冻结提示".into()]);
         adapter.release_inner();
         assert!(
             adapter.try_tool_specs().is_err(),
