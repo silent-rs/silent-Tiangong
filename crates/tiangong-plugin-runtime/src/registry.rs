@@ -10,6 +10,7 @@ use semver::Version;
 use serde::Serialize;
 use sha2::Digest;
 use tiangong_core::core::Plugin;
+use tiangong_core::tool_override::ToolSpecProvider;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
@@ -174,29 +175,66 @@ fn stop_installed_sidecar(storage_root: &Path, plugin_id: &str) -> Result<()> {
     let installed = find_installed_plugin(storage_root, plugin_id)?;
     stop_loaded_sidecar(plugin_id)?;
     stop_connection_for_directory(&installed.directory)?;
+    mark_sidecar_stopped_for_recovery(plugin_id);
     tracing::info!(plugin_id, "已停止 sidecar，下次调用将以新配置重启");
     Ok(())
 }
 
-/// 列出声明 `require_server` 且已启用的插件（id, name）：宿主在关闭
-/// Server 时据此提示用户受影响的插件。声明只描述依赖，不触发重启
-/// 或状态广播。
-pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
-    let Ok(plugins) = loaded_plugins().lock() else {
-        return Vec::new();
+/// 因端点变化被停止、等待恢复反馈的插件集合。
+///
+/// 注册状态（tools/prompt）不随 sidecar 停止波动；连接以新配置重新建立
+/// 成功时经 [`announce_sidecar_recovery`] 向 agent 注入一次恢复反馈。
+/// 正常冷启动（懒加载）不打标记，不会产生打扰性注入。
+static PENDING_RECOVERY: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+
+fn pending_recovery() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    PENDING_RECOVERY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 标记插件 sidecar 因端点变化停止，恢复后需要反馈（见 [`announce_sidecar_recovery`]）。
+fn mark_sidecar_stopped_for_recovery(plugin_id: &str) {
+    if let Ok(mut set) = pending_recovery().lock() {
+        set.insert(plugin_id.to_string());
+    }
+}
+
+/// sidecar 连接重新建立成功时调用：被标记的插件经既有反馈管道
+/// （`plugin_availability` 注入）向 agent 通告工具恢复可用，然后清除标记。
+///
+/// 在 [`crate::sidecar::stdio`] 的就绪握手成功点调用；无标记（正常冷启动、
+/// 崩溃静默换代）时无任何动作。
+pub fn announce_sidecar_recovery(plugin_id: &str) {
+    let marked = pending_recovery()
+        .lock()
+        .map(|mut set| set.remove(plugin_id))
+        .unwrap_or(false);
+    if !marked {
+        return;
+    }
+    let tools: Vec<String> = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return;
+        };
+        let Some(loaded) = plugins.get(plugin_id) else {
+            return;
+        };
+        loaded
+            .instances
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .flat_map(|adapter| adapter.try_tool_specs().unwrap_or_default())
+            .map(|spec| spec.name)
+            .collect()
     };
-    plugins
-        .iter()
-        .filter(|(_, loaded)| loaded.enabled && loaded.manifest.require_server)
-        .map(|(id, loaded)| {
-            let name = loaded
-                .descriptor
-                .as_ref()
-                .map(|value| value.name.clone())
-                .unwrap_or_else(|| id.clone());
-            (id.clone(), name)
-        })
-        .collect()
+    if tools.is_empty() {
+        tracing::debug!(plugin_id, "恢复反馈跳过：插件当前无已注册工具");
+        return;
+    }
+    tracing::info!(plugin_id, ?tools, "sidecar 恢复可用，向 agent 反馈");
+    if let Ok(payload) = serde_json::to_string(&crate::protocol::ToolsRecovered { tools }) {
+        dispatch_tools_recovered(plugin_id, &payload);
+    }
 }
 
 /// 依赖 server 回调的插件 ID 列表。
@@ -1507,6 +1545,26 @@ mod tests {
         assert_eq!(invalid.len(), 1);
         assert_eq!(invalid[0].id, "wrong-directory");
         assert!(invalid[0].reason.contains("目录名"));
+    }
+
+    /// 恢复反馈标记语义：无标记的 announce 无动作；标记后 announce 一次
+    /// 消费即清除，不重复注入（连接层多次就绪只反馈一次）。
+    #[test]
+    fn announce_sidecar_recovery_consumes_marker_exactly_once() {
+        // 无标记：无动作也不 panic（插件未加载也安全）。
+        announce_sidecar_recovery("recovery-probe-unloaded");
+
+        mark_sidecar_stopped_for_recovery("recovery-probe-unloaded");
+        // 插件未加载实例：标记被消费但无注入路径，同样不 panic。
+        announce_sidecar_recovery("recovery-probe-unloaded");
+        // 已消费：再次就绪不再反馈。
+        announce_sidecar_recovery("recovery-probe-unloaded");
+        assert!(
+            !pending_recovery()
+                .lock()
+                .unwrap()
+                .contains("recovery-probe-unloaded")
+        );
     }
 
     /// 错误分类保护：sidecar 运行检查重新成功只清除 runtime_error，
