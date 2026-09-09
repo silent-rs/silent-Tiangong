@@ -154,6 +154,41 @@ impl ContextCompression {
         }
     }
 
+    /// 手动压缩的等待语义：只接受引导消息（用户消息，取消压缩并立即
+    /// 起新轮）与取消类（Cancel/Shutdown/通道关闭）；其余信号（插件
+    /// 可用性广播、工具注入等）不接受——忽略并继续等待压缩收敛。
+    pub(crate) async fn run_manual(
+        mut self,
+        ctx: &mut TurnContext,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    ) -> Option<CompressionInterrupt> {
+        loop {
+            tokio::select! {
+                biased;
+                command = cmd_rx.recv() => {
+                    match command {
+                        Some(command @ (Command::Cancel
+                            | Command::Shutdown
+                            | Command::InjectUserMessage { .. })) => {
+                            self.cancel(ctx).await;
+                            return Some(CompressionInterrupt::Command(command));
+                        }
+                        Some(_) => continue,
+                        None => {
+                            self.cancel(ctx).await;
+                            return Some(CompressionInterrupt::Closed);
+                        }
+                    }
+                }
+                task_result = &mut self.task => {
+                    let result = resolve_task_result(task_result);
+                    self.complete(ctx, result, None);
+                    return None;
+                }
+            }
+        }
+    }
+
     /// 提交压缩结果：应用摘要、按种类累计用量并通知（ALR-307）。
     ///
     /// `result` 来自 `run` 的完成返回。Auto/Forced 的用量计入 `turn_usage`
@@ -231,6 +266,9 @@ fn complete_with_turn_usage(
 }
 
 /// 在独立 turn task 中执行手动压缩。
+///
+/// 只接受引导消息与取消类命令：引导消息取消压缩并立即起新轮；其余
+/// 信号在压缩状态下不接受（忽略），压缩照常收敛。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -248,16 +286,8 @@ pub(crate) async fn run_manual_context_compression(
         notify_result(&ctx, ContextCompressAction::Noop);
         return None;
     }
-    let mut compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
-    match compression.run(&mut ctx, cmd_rx).await {
-        Ok(result) => {
-            compression.complete(&mut ctx, result, None);
-            None
-        }
-        // 中断类命令已取消压缩，未应用任何结果；命令原样上抛，
-        // 由调用方（手动压缩任务）决定接续动作（用户消息起新轮等）。
-        Err(interrupt) => Some(interrupt),
-    }
+    let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
+    compression.run_manual(&mut ctx, cmd_rx).await
 }
 
 pub(crate) fn notify_cleared(stream_tx: &std::sync::mpsc::Sender<StreamEvent>, session: &Session) {
@@ -775,6 +805,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 手动压缩只接受引导消息与取消类命令：插件可用性广播、工具注入
+    /// 等其余信号不接受——忽略并继续等待压缩收敛；取消类立即终止。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_ignores_non_steering_commands_and_finishes() {
+        let mut session = Session::new("manual-cmd");
+        for text in ["旧问题", "新问题"] {
+            session.append_message(MessageRole::User, text);
+        }
+        let (mut ctx, _root) = test_context(session);
+        let organizer = ContextOrganizer::new(ctx.context_limit);
+        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+        // 压缩请求指向不可达端点，约 1 秒超时后任务收敛（失败也视为一次
+        // 完整收敛闭合）；期间到达的广播一律不接受。
+        cmd_tx
+            .send(Command::InjectTool {
+                tool_name: "plugin_availability".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        cmd_tx
+            .send(Command::SetTitle {
+                title: "压缩中改标题".into(),
+                only_if_default: false,
+            })
+            .unwrap();
+        let handle =
+            tokio::spawn(async move { compression.run_manual(&mut ctx, &mut cmd_rx).await });
+        let interrupt = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("等待 run_manual 超时")
+            .unwrap();
+        assert!(interrupt.is_none(), "非引导/取消命令不得中断手动压缩");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_stops_immediately_on_cancel() {
+        let mut session = Session::new("manual-cancel");
+        for text in ["旧问题", "新问题"] {
+            session.append_message(MessageRole::User, text);
+        }
+        let (mut ctx, _root) = test_context(session);
+        let organizer = ContextOrganizer::new(ctx.context_limit);
+        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+        cmd_tx.send(Command::Cancel).unwrap();
+        let interrupt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            compression.run_manual(&mut ctx, &mut cmd_rx),
+        )
+        .await
+        .expect("取消应立即返回");
+        assert!(matches!(
+            interrupt,
+            Some(CompressionInterrupt::Command(Command::Cancel))
+        ));
     }
 
     #[tokio::test]

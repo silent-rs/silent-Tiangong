@@ -64,6 +64,11 @@ pub fn shared_runtime() -> &'static Runtime {
 ///
 /// turn task 正常结束时，wrapper 会按任务代际立即清理；panic 的任务保留在表中，
 /// 供关闭路径等待并上报。
+///
+/// 反馈通道天然随任务生死：turn 结束通道关闭，插件侧投递失败即丢弃，
+/// 因此插件的主动反馈只在任务运行期生效；非 Agent 任务（手动压缩）
+/// 在 [`run_manual`](crate::react::compression::ContextCompression::run_manual)
+/// 中只接受引导消息与取消类命令，其余信号不接受。
 pub fn spawn_turn<F, Fut>(
     context: TurnContext,
     future_factory: F,

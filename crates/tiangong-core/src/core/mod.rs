@@ -444,8 +444,9 @@ impl TiangongCore {
 
     /// 空闲期手动上下文压缩：spawn 独立压缩任务占用本会话的任务槽。
     ///
-    /// 压缩期间收到用户消息会取消压缩并直接起轮（压缩可随时重新发起）；
-    /// 其他中断类命令按各自语义处理。运行中调用返回 `Busy`。
+    /// 压缩状态下只接受引导消息与取消类命令：用户消息取消压缩并直接
+    /// 起轮（压缩可随时重新发起）；其余信号（插件可用性广播等）不接受，
+    /// 不打断压缩。运行中调用返回 `Busy`。
     fn compress_context(&self) -> Result<(), CoreError> {
         if self.is_busy() {
             return Err(CoreError::Busy);
@@ -458,42 +459,19 @@ impl TiangongCore {
             // 手动压缩时可能缺失）。
             core.initialize_plugins(&mut ctx)?;
             Ok(async move {
-                if let Some(crate::react::compression::CompressionInterrupt::Command(command)) =
-                    crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
-                        .await
+                if let Some(crate::react::compression::CompressionInterrupt::Command(
+                    Command::InjectUserMessage {
+                        message_id,
+                        content,
+                    },
+                )) = crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
+                    .await
                 {
-                    // 压缩已被该命令取消且未应用任何结果。腾出任务槽后再按命令
-                    // 类型接续：用户消息起新轮，标题就地落盘，其余记录后丢弃。
+                    // 压缩已被引导消息终止且未应用任何结果。腾出任务槽后
+                    // 起新轮；取消类终止无需接续。
                     crate::shared_runtime::release_agent(&session_id);
-                    match command {
-                        Command::InjectUserMessage {
-                            message_id,
-                            content,
-                        } => {
-                            if let Err(error) = core.start_user_turn(message_id, content) {
-                                tracing::warn!(%error, session_id = %session_id, "压缩中断后起新轮失败");
-                            }
-                        }
-                        Command::SetTitle {
-                            title,
-                            only_if_default,
-                        } => {
-                            let _ = core.set_title(title, only_if_default);
-                        }
-                        Command::SetReasoningEffort(effort) => {
-                            core.set_reasoning_effort(effort);
-                        }
-                        Command::SetTrustMode(mode) => {
-                            core.set_trust_mode(mode);
-                        }
-                        Command::Cancel | Command::Shutdown => {}
-                        command => {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                message_type = command.kind_name(),
-                                "手动压缩被中断，命令已丢弃"
-                            );
-                        }
+                    if let Err(error) = core.start_user_turn(message_id, content) {
+                        tracing::warn!(%error, session_id = %session_id, "压缩中断后起新轮失败");
                     }
                 }
             })
