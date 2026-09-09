@@ -38,21 +38,3 @@ pub enum Command {
     /// 关闭。
     Shutdown,
 }
-
-impl Command {
-    pub(crate) fn kind_name(&self) -> &'static str {
-        match self {
-            Self::Cancel => "Cancel",
-            Self::SetTrustMode(_) => "SetTrustMode",
-            Self::SetReasoningEffort(_) => "SetReasoningEffort",
-            Self::SetTitle { .. } => "SetTitle",
-            Self::InjectTool { .. } => "InjectTool",
-            Self::InjectUserMessage { .. } => "InjectUserMessage",
-            Self::EmitStreamEvent(_) => "EmitStreamEvent",
-            Self::ReportUsage { .. } => "ReportUsage",
-            Self::CompressContext => "CompressContext",
-            Self::ResetContext => "ResetContext",
-            Self::Shutdown => "Shutdown",
-        }
-    }
-}

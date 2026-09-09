@@ -4,24 +4,27 @@ use std::sync::Arc;
 use crate::core_config::CoreConfig;
 use crate::model::ToolSpec;
 use crate::permission::TrustMode;
-use crate::session::{PluginDeclaration, Session};
+use crate::session::Session;
 use crate::tool_override::ToolOverrideHandler;
 
 use super::{Plugin, injection_tool_spec};
 
-#[derive(Clone, Default)]
-pub struct PreparedPlugins {
+pub(crate) struct PreparedPlugins {
     pub plugins: Vec<Arc<dyn Plugin>>,
     pub tools: Vec<ToolSpec>,
     pub tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
-    pub prompt_sections: Vec<String>,
 }
 
+/// 每轮 turn 构建上下文时调用：排序注入生命周期钩子并收集工具声明。
+///
+/// core 不做任何声明稳定化处理——运行期稳定由 runtime 适配器的冻结
+/// 快照保证；工具顺序即插件输出顺序，core 不代为排序。声明读取失败
+/// 由适配器降级为空列表，core 不感知。
 pub(crate) fn prepare_plugins(
     plugins: &[Arc<dyn Plugin>],
     config: &CoreConfig,
     trust_mode: TrustMode,
-    session: &mut Session,
+    session: &Session,
 ) -> PreparedPlugins {
     // 提示与工具共用固定顺序，避免加载顺序变化改写请求前缀。
     let mut sorted: Vec<Arc<dyn Plugin>> = plugins.to_vec();
@@ -51,91 +54,92 @@ pub(crate) fn prepare_plugins(
         plugin.set_workspace(workspace);
         plugin.set_trust_mode(trust_mode);
     }
-    for plugin in plugins {
-        plugin.on_session_ready(session);
-    }
-    if session.plugin_declarations.is_none() {
-        session.plugin_declarations = Some(collect_declarations(plugins, &[]));
-    }
-    PreparedPlugins::restore(sorted, session.plugin_declarations.as_deref().unwrap())
-}
 
-pub(crate) fn collect_declarations(
-    plugins: &[Arc<dyn Plugin>],
-    previous: &[PluginDeclaration],
-) -> Vec<PluginDeclaration> {
-    // Core 自带的反馈工具也保存完整定义，避免升级后恢复时悄悄改写 tools。
-    let mut declarations = vec![PluginDeclaration {
-        plugin_id: String::new(),
-        tools: vec![injection_tool_spec()],
-        prompt_sections: Vec::new(),
-    }];
+    let mut tools = vec![injection_tool_spec()];
+    let mut tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+    let mut seen_tool_names = HashSet::new();
     for plugin in plugins {
-        let result = plugin.try_tool_specs().and_then(|tools| {
-            plugin
-                .try_prompt_sections()
-                .map(|prompt_sections| PluginDeclaration {
-                    plugin_id: plugin.id().to_string(),
-                    tools,
-                    prompt_sections,
-                })
-        });
-        let mut declaration = match result {
-            Ok(declaration) => declaration,
-            Err(error) => {
-                let Some(previous) = previous.iter().find(|item| item.plugin_id == plugin.id())
-                else {
-                    tracing::warn!(plugin_id = plugin.id(), %error, "声明读取失败且没有历史定义，暂不加入该插件声明");
-                    continue;
-                };
-                tracing::warn!(plugin_id = plugin.id(), %error, "声明读取失败，保留会话原声明");
-                previous.clone()
-            }
-        };
-        declaration
-            .tools
-            .sort_by(|left, right| left.name.cmp(&right.name));
-        declarations.push(declaration);
-    }
-    declarations
-}
-
-impl PreparedPlugins {
-    pub(crate) fn restore(
-        plugins: Vec<Arc<dyn Plugin>>,
-        declarations: &[PluginDeclaration],
-    ) -> Self {
-        let mut tools = Vec::new();
-        let mut tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
-        let mut seen_tool_names = HashSet::new();
-        let mut prompt_sections = Vec::new();
-        for declaration in declarations {
-            prompt_sections.extend(declaration.prompt_sections.clone());
-            let plugin = plugins
-                .iter()
-                .find(|plugin| plugin.id() == declaration.plugin_id);
-            let plugin_tools = declaration.tools.clone();
-            for spec in plugin_tools {
-                if seen_tool_names.insert(spec.name.clone()) {
-                    if let Some(plugin) = plugin {
-                        tool_overrides.insert(spec.name.clone(), plugin.clone());
-                    }
-                    tools.push(spec);
-                } else {
-                    tracing::debug!(
-                        tool = %spec.name,
-                        plugin = %declaration.plugin_id,
-                        "跳过与其他插件重名的工具规格（保留先注册者）"
-                    );
-                }
+        let plugin_tools = plugin.tool_specs();
+        for spec in plugin_tools {
+            if seen_tool_names.insert(spec.name.clone()) {
+                tool_overrides.insert(spec.name.clone(), plugin.clone());
+                tools.push(spec);
+            } else {
+                tracing::debug!(
+                    tool = %spec.name,
+                    plugin = %plugin.id(),
+                    "跳过与其他插件重名的工具规格（保留先注册者）"
+                );
             }
         }
+    }
+    PreparedPlugins {
+        plugins: sorted,
+        tools,
+        tool_overrides,
+    }
+}
 
-        PreparedPlugins {
-            plugins,
-            tools,
-            tool_overrides,
-            prompt_sections,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool_override::{
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler,
+    };
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
         }
+    }
+
+    struct OrderedPlugin {
+        id: String,
+        names: &'static [&'static str],
+    }
+    impl Plugin for OrderedPlugin {
+        fn id(&self) -> &str {
+            &self.id
+        }
+    }
+    impl crate::tool_override::ToolSpecProvider for OrderedPlugin {
+        fn tool_specs(&self) -> Vec<ToolSpec> {
+            self.names.iter().map(|name| tool(name)).collect()
+        }
+    }
+    impl PromptSectionProvider for OrderedPlugin {}
+    impl ToolOverrideHandler for OrderedPlugin {}
+    impl MentionCandidateProvider for OrderedPlugin {}
+
+    /// 顺序语义锁定：tools 顺序 = 内置注入工具 + 插件 id 字典序（prompt
+    /// 置顶）+ 插件自身输出序（core 不排序）；重名工具保留先注册者。
+    #[test]
+    fn prepare_keeps_plugin_order_and_dedupes() {
+        let marker = format!("order-{}", line!());
+        let plugins: Vec<Arc<dyn Plugin>> = vec![
+            Arc::new(OrderedPlugin {
+                id: format!("{marker}-zeta"),
+                names: &["z_b_first", "a_second"],
+            }),
+            Arc::new(OrderedPlugin {
+                id: format!("{marker}-alpha"),
+                names: &["alpha_tool", "z_b_first"],
+            }),
+        ];
+        let session = Session::new("顺序");
+        let prepared = prepare_plugins(
+            &plugins,
+            &CoreConfig::default(),
+            TrustMode::default(),
+            &session,
+        );
+        let names: Vec<&str> = prepared.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["plugin_injection", "alpha_tool", "z_b_first", "a_second"],
+            "tools 顺序应为：内置注入工具 + 插件 id 序 + 插件输出序，重名保留先注册者"
+        );
     }
 }

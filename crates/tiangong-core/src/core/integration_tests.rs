@@ -193,11 +193,9 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     }
     impl ToolSpecProvider for OrderedPlugin {
         fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
-            let mut names = self.names;
-            if self.calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
-                names.reverse();
-            }
-            names
+            // tools 顺序由插件自身保证稳定（core 不代为排序）。
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.names
                 .iter()
                 .map(|name| crate::model::ToolSpec {
                     name: (*name).into(),
@@ -249,7 +247,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 let plugin = Arc::new(OrderedPlugin {
                     id,
                     names,
-                    calls: AtomicUsize::new(generation),
+                    calls: AtomicUsize::new(0),
                     prompt_reads: AtomicUsize::new(0),
                 });
                 instances.push(plugin.clone());
@@ -295,10 +293,10 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 names,
                 [
                     "plugin_injection",
-                    "identity_a",
                     "identity_b",
-                    "y_first",
+                    "identity_a",
                     "z_first",
+                    "y_first",
                     "a_last",
                     "b_last"
                 ]
@@ -319,10 +317,10 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             }
             system_id = Some(current_id);
         }
+        // 每轮 turn 实时收集一次声明（含 tools 与 prompt 段）。
         for plugin in instances {
-            let reads = usize::from(generation == 0);
-            assert_eq!(plugin.calls.load(Ordering::SeqCst), generation + reads);
-            assert_eq!(plugin.prompt_reads.load(Ordering::SeqCst), reads);
+            assert_eq!(plugin.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(plugin.prompt_reads.load(Ordering::SeqCst), 2);
         }
         core.shutdown_join().unwrap();
     }
@@ -367,8 +365,10 @@ async fn plain_question_completes_with_done_event() {
     core.shutdown_join().expect("关闭失败");
 }
 
+/// 旧版会话（手工 system prompt）：下一轮 turn 启动时重拼为新格式，
+/// 旧摘要并入摘要段不丢失；清理失败整体回滚保历史，解除后清理成功。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history() {
+async fn legacy_prompt_is_reassembled_next_turn_and_failed_reset_keeps_history() {
     let (env, sid) = TestEnv::new("legacy-declarations");
     let server = MockServer::builder().start().await;
     mount_prompt_router(
@@ -395,15 +395,20 @@ async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history()
     );
     wait_idle(&sid).await;
     let before = env.load_session(&sid);
-    assert_eq!(
-        serde_json::to_value(&before.system_prompt_message).unwrap(),
-        serde_json::to_value(&legacy.system_prompt_message).unwrap()
-    );
-    assert_eq!(before.plugin_declarations.as_deref().unwrap().len(), 1);
+    // 下一轮 turn 启动时重拼：旧手工提示被新格式替换，旧摘要保留进摘要段。
+    let prompt_text = before
+        .system_prompt_message
+        .as_ref()
+        .unwrap()
+        .text_content()
+        .to_string();
     assert!(
-        before.plugin_declarations.as_ref().unwrap()[0]
-            .plugin_id
-            .is_empty()
+        !prompt_text.contains("旧系统提示"),
+        "旧手工提示应被重拼替换: {prompt_text}"
+    );
+    assert!(
+        prompt_text.contains("旧摘要"),
+        "旧摘要应并入摘要段: {prompt_text}"
     );
     fail_all_persistence_for_session(&sid);
     assert!(core.deliver(AgentInputKind::reset_context()).is_err());
@@ -411,19 +416,12 @@ async fn legacy_prompt_is_preserved_until_reset_and_failed_reset_keeps_history()
         serde_json::to_value(env.load_session(&sid)).unwrap(),
         serde_json::to_value(&before).unwrap()
     );
-    // 解除故障后再次清理，必须同时移除旧摘要并重建系统提示。
+    // 解除故障后再次清理，必须移除旧摘要；system prompt 由下一轮重拼。
     clear_persistent_persistence_failure(&sid);
     core.deliver(AgentInputKind::reset_context()).unwrap();
     let reset = env.load_session(&sid);
     assert!(reset.context_summary.is_none());
     assert_eq!(reset.summary_up_to, reset.messages.len());
-    assert!(
-        !reset
-            .system_prompt_message
-            .unwrap()
-            .text_content()
-            .contains("旧系统提示")
-    );
     core.shutdown_join().unwrap();
 }
 

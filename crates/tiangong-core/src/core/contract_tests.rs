@@ -65,7 +65,8 @@ async fn accepted_and_saved_message_survives_shutdown() {
     routes["shutdown-active"].assert_hits(1);
 }
 
-/// 手动压缩期间的用户消息取消压缩并立即起轮（压缩可随时重新发起）。
+/// 手动压缩期间的用户消息取消压缩并立即起轮（压缩可随时重新发起）；
+/// 其余信号（插件可用性广播等）在压缩状态下不接受、不打断压缩。
 /// 压缩请求走非流式 completion，接续消息走 prompt 路由错误响应。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_during_manual_compression_cancels_and_starts_turn() {

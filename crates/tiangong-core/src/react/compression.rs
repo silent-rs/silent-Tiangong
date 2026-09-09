@@ -154,6 +154,62 @@ impl ContextCompression {
         }
     }
 
+    /// 手动压缩的等待语义：只接受引导消息（用户消息，取消压缩并立即
+    /// 起新轮）与取消类（Cancel/Shutdown/通道关闭）；标题修改保存到当前
+    /// 会话而不中断压缩；其余信号（插件
+    /// 可用性广播、工具注入等）不接受——忽略并继续等待压缩收敛。
+    pub(crate) async fn run_manual(
+        mut self,
+        ctx: &mut TurnContext,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    ) -> Option<CompressionInterrupt> {
+        loop {
+            tokio::select! {
+                biased;
+                command = cmd_rx.recv() => {
+                    match command {
+                        Some(command @ (Command::Cancel
+                            | Command::Shutdown
+                            | Command::InjectUserMessage { .. })) => {
+                            self.cancel(ctx).await;
+                            return Some(CompressionInterrupt::Command(command));
+                        }
+                        Some(Command::SetTitle { title, only_if_default }) => {
+                            if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
+                                let mut candidate = ctx.session.clone();
+                                candidate.title = title.clone();
+                                candidate.updated_at = tiangong_types::now_text();
+                                match candidate.try_persist_to_disk() {
+                                    Ok(()) => {
+                                        ctx.session = candidate;
+                                        let _ = ctx.stream_tx.send(StreamEvent::TitleChanged { title });
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            session_id = %ctx.session.id,
+                                            %error,
+                                            "手动压缩期间保存标题失败，保留原标题"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Some(_) => continue,
+                        None => {
+                            self.cancel(ctx).await;
+                            return Some(CompressionInterrupt::Closed);
+                        }
+                    }
+                }
+                task_result = &mut self.task => {
+                    let result = resolve_task_result(task_result);
+                    self.complete(ctx, result, None);
+                    return None;
+                }
+            }
+        }
+    }
+
     /// 提交压缩结果：应用摘要、按种类累计用量并通知（ALR-307）。
     ///
     /// `result` 来自 `run` 的完成返回。Auto/Forced 的用量计入 `turn_usage`
@@ -231,6 +287,9 @@ fn complete_with_turn_usage(
 }
 
 /// 在独立 turn task 中执行手动压缩。
+///
+/// 只接受引导消息与取消类命令：引导消息取消压缩并立即起新轮；其余
+/// 信号在压缩状态下不接受（忽略），压缩照常收敛。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -248,16 +307,8 @@ pub(crate) async fn run_manual_context_compression(
         notify_result(&ctx, ContextCompressAction::Noop);
         return None;
     }
-    let mut compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
-    match compression.run(&mut ctx, cmd_rx).await {
-        Ok(result) => {
-            compression.complete(&mut ctx, result, None);
-            None
-        }
-        // 中断类命令已取消压缩，未应用任何结果；命令原样上抛，
-        // 由调用方（手动压缩任务）决定接续动作（用户消息起新轮等）。
-        Err(interrupt) => Some(interrupt),
-    }
+    let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
+    compression.run_manual(&mut ctx, cmd_rx).await
 }
 
 pub(crate) fn notify_cleared(stream_tx: &std::sync::mpsc::Sender<StreamEvent>, session: &Session) {
@@ -425,22 +476,12 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
-    candidate.plugin_declarations = Some(crate::core::plugin::collect_declarations(
-        &ctx.plugins,
-        candidate.plugin_declarations.as_deref().unwrap_or_default(),
-    ));
-    let prepared = crate::core::plugin::PreparedPlugins::restore(
-        ctx.plugins.clone(),
-        candidate.plugin_declarations.as_deref().unwrap(),
-    );
-    rebuild_system_prompt_for_session(&mut candidate, &prepared.prompt_sections);
+    // 摘要段变化需要重建 system prompt（内容一致时保留原消息）。
+    rebuild_system_prompt_for_session(&mut candidate, &ctx.plugins);
     candidate
         .try_persist_to_disk()
         .map_err(anyhow::Error::msg)?;
     ctx.session = candidate;
-    ctx.tools = prepared.tools;
-    ctx.tool_overrides = prepared.tool_overrides;
-    ctx.prompt_sections = prepared.prompt_sections;
     Ok(current_tokens)
 }
 
@@ -685,11 +726,8 @@ mod tests {
         assert_eq!(restored.summary_up_to, ctx.session.summary_up_to);
         for question in ["继续", "再核对一次"] {
             restored.append_message(MessageRole::User, question);
-            let prepared = crate::core::plugin::PreparedPlugins::restore(
-                Vec::new(),
-                restored.plugin_declarations.as_deref().unwrap(),
-            );
-            rebuild_system_prompt_for_session(&mut restored, &prepared.prompt_sections);
+            // 同一组插件段落重建应得到相同 prompt。
+            rebuild_system_prompt_for_session(&mut restored, &ctx.plugins);
             assert_eq!(
                 serde_json::to_vec(&restored.system_prompt_message).unwrap(),
                 saved_prompt
@@ -708,10 +746,11 @@ mod tests {
         );
     }
 
+    /// 压缩不改动插件声明：tools/prompt 由每轮实时收集维护（进程缓存
+    /// 兜底），压缩只推进摘要边界与重建 system prompt；落盘失败整体回滚。
     #[test]
-    fn compression_refreshes_declarations_atomically_and_keeps_unreadable_ones() {
-        use crate::core::plugin::{Plugin, PreparedPlugins};
-        use crate::session::PluginDeclaration;
+    fn compression_keeps_current_declarations_and_survives_persist_failure() {
+        use crate::core::plugin::Plugin;
         use crate::tool_override::{
             MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
         };
@@ -745,28 +784,15 @@ mod tests {
         }
 
         for (unreadable, fail_save) in [(false, false), (true, false), (false, true)] {
-            let mut session = Session::new("整理声明");
+            let mut session = Session::new("压缩不改声明");
             session.append_message(MessageRole::User, "历史问题");
             session.append_message(MessageRole::Assistant, "历史回答");
             session.append_message(MessageRole::User, "当前问题");
-            session.plugin_declarations = Some(vec![PluginDeclaration {
-                plugin_id: "changing".into(),
-                tools: vec![crate::model::ToolSpec {
-                    name: "old_tool".into(),
-                    description: "old".into(),
-                    input_schema: serde_json::json!({"type":"object"}),
-                }],
-                prompt_sections: vec!["old prompt".into()],
-            }]);
             let (mut ctx, root) = test_context(session);
             ctx.plugins = vec![std::sync::Arc::new(ChangingPlugin { fail: unreadable })];
-            let prepared = PreparedPlugins::restore(
-                ctx.plugins.clone(),
-                ctx.session.plugin_declarations.as_deref().unwrap(),
-            );
-            ctx.tools = prepared.tools;
-            ctx.prompt_sections = prepared.prompt_sections;
-            rebuild_system_prompt_for_session(&mut ctx.session, &ctx.prompt_sections);
+            // 模拟 turn 启动时的 system prompt 重拼（就地收集插件段落）。
+            rebuild_system_prompt_for_session(&mut ctx.session, &ctx.plugins);
+            let turn_tools = serde_json::to_value(&ctx.tools).unwrap();
             ctx.session.try_persist_to_disk().unwrap();
             let old_session = serde_json::to_value(&ctx.session).unwrap();
             let old_tools = serde_json::to_value(&ctx.tools).unwrap();
@@ -784,29 +810,136 @@ mod tests {
             } else {
                 result.unwrap();
                 assert_eq!(restored.context_summary.as_deref(), Some("新的摘要"));
-                let prepared = PreparedPlugins::restore(
-                    Vec::new(),
-                    restored.plugin_declarations.as_deref().unwrap(),
-                );
-                assert_eq!(
-                    serde_json::to_value(prepared.tools).unwrap(),
-                    serde_json::to_value(&ctx.tools).unwrap()
-                );
-                assert_eq!(prepared.prompt_sections, ctx.prompt_sections);
-                assert_eq!(
-                    ctx.prompt_sections,
-                    vec![if unreadable {
-                        "old prompt"
-                    } else {
-                        "new prompt"
-                    }]
-                );
+                // 压缩不改动 tools：保持 turn 开始的值。
+                assert_eq!(serde_json::to_value(&ctx.tools).unwrap(), turn_tools);
                 assert_eq!(
                     serde_json::to_value(restored.system_prompt_message).unwrap(),
                     serde_json::to_value(&ctx.session.system_prompt_message).unwrap()
                 );
             }
         }
+    }
+
+    /// 手动压缩保存标题但不中断任务；忽略工具注入，取消类立即终止。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_ignores_non_steering_commands_and_finishes() {
+        let mut session = Session::new("manual-cmd");
+        for text in ["旧问题", "新问题"] {
+            session.append_message(MessageRole::User, text);
+        }
+        let (mut ctx, root) = test_context(session);
+        let session_id = ctx.session.id.clone();
+        let organizer = ContextOrganizer::new(ctx.context_limit);
+        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+        // 压缩请求指向不可达端点，约 1 秒超时后任务收敛（失败也视为一次
+        // 完整收敛闭合）；期间到达的广播一律不接受。
+        cmd_tx
+            .send(Command::InjectTool {
+                tool_name: "plugin_availability".into(),
+                payload: serde_json::json!({}),
+            })
+            .unwrap();
+        cmd_tx
+            .send(Command::SetTitle {
+                title: "压缩中改标题".into(),
+                only_if_default: false,
+            })
+            .unwrap();
+        let handle =
+            tokio::spawn(async move { compression.run_manual(&mut ctx, &mut cmd_rx).await });
+        let interrupt = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("等待 run_manual 超时")
+            .unwrap();
+        assert!(interrupt.is_none(), "非引导/取消命令不得中断手动压缩");
+        let restored = Session::load_from_storage(root.path(), &session_id).unwrap();
+        assert_eq!(restored.title, "压缩中改标题");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_only_reports_persisted_title_changes() {
+        for fail_save in [false, true] {
+            for cancel in [false, true] {
+                let mut session = Session::new("原标题");
+                for text in ["旧问题", "新问题"] {
+                    session.append_message(MessageRole::User, text);
+                }
+                let (mut ctx, root) = test_context(session);
+                ctx.session.try_persist_to_disk().unwrap();
+                let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+                ctx.stream_tx = stream_tx;
+                let organizer = ContextOrganizer::new(ctx.context_limit);
+                let compression =
+                    ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+                let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+                cmd_tx
+                    .send(Command::SetTitle {
+                        title: "新标题".into(),
+                        only_if_default: false,
+                    })
+                    .unwrap();
+                if fail_save {
+                    crate::core::test_support::fail_next_persistence_for_session(&ctx.session.id);
+                }
+                if cancel {
+                    cmd_tx.send(Command::Cancel).unwrap();
+                }
+                let interrupt = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    compression.run_manual(&mut ctx, &mut cmd_rx),
+                )
+                .await
+                .expect("手动压缩应及时结束");
+                if cancel {
+                    assert!(matches!(
+                        interrupt,
+                        Some(CompressionInterrupt::Command(Command::Cancel))
+                    ));
+                } else {
+                    assert!(interrupt.is_none());
+                }
+                let expected = if fail_save { "原标题" } else { "新标题" };
+                assert_eq!(ctx.session.title, expected);
+                let restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
+                assert_eq!(restored.title, expected);
+                let titles: Vec<_> = stream_rx
+                    .try_iter()
+                    .filter_map(|event| match event {
+                        StreamEvent::TitleChanged { title } => Some(title),
+                        _ => None,
+                    })
+                    .collect();
+                if fail_save {
+                    assert!(titles.is_empty(), "保存失败不得报告标题修改成功");
+                } else {
+                    assert_eq!(titles, vec!["新标题"]);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_compression_stops_immediately_on_cancel() {
+        let mut session = Session::new("manual-cancel");
+        for text in ["旧问题", "新问题"] {
+            session.append_message(MessageRole::User, text);
+        }
+        let (mut ctx, _root) = test_context(session);
+        let organizer = ContextOrganizer::new(ctx.context_limit);
+        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
+        cmd_tx.send(Command::Cancel).unwrap();
+        let interrupt = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            compression.run_manual(&mut ctx, &mut cmd_rx),
+        )
+        .await
+        .expect("取消应立即返回");
+        assert!(matches!(
+            interrupt,
+            Some(CompressionInterrupt::Command(Command::Cancel))
+        ));
     }
 
     #[tokio::test]
