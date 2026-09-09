@@ -683,6 +683,31 @@ impl PluginManifest {
     ///
     /// 沙箱级别逐级取值：贡献级 `sandbox` → `ui.sandbox` → `shadow`；
     /// 打开模式缺省 `singleton`。v1 清单返回空（设置页贡献由 WASM 运行时声明）。
+    /// UI 制品必须包含全部页面入口；附属文件仅允许位于已声明的资源目录。
+    pub(crate) fn validate_ui_artifacts(&self, paths: &BTreeSet<PathBuf>) -> Result<()> {
+        let entries = self
+            .ui_contributions()
+            .into_iter()
+            .map(|contribution| PathBuf::from(contribution.entry))
+            .collect::<BTreeSet<_>>();
+        if !entries.is_subset(paths) {
+            bail!("插件 {} 的 UI 制品缺少声明的页面入口", self.id);
+        }
+        for path in paths {
+            validate_relative_path(path, "UI 制品")?;
+            if !entries.contains(path)
+                && !self.resources.as_ref().is_some_and(|roots| {
+                    roots
+                        .iter()
+                        .any(|root| path != Path::new(root) && path.starts_with(root))
+                })
+            {
+                bail!("插件 {} 的 UI 制品未声明: {}", self.id, path.display());
+            }
+        }
+        Ok(())
+    }
+
     pub fn ui_contributions(&self) -> Vec<UiContribution> {
         let Some(ui) = &self.ui else {
             return Vec::new();
@@ -850,6 +875,36 @@ mod tests {
         let manifest: PluginManifest = serde_json::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    #[test]
+    fn ui_artifacts_require_entries_and_declared_resource_roots() {
+        let mut manifest = parse(&v2_json()).unwrap();
+        manifest.resources = Some(vec!["ui".into()]);
+        let entries = BTreeSet::from([PathBuf::from("index.html"), PathBuf::from("settings.html")]);
+        manifest.validate_ui_artifacts(&entries).unwrap();
+        let mut resources = entries.clone();
+        resources.extend([
+            PathBuf::from("ui/settings.css"),
+            PathBuf::from("ui/settings.js"),
+        ]);
+        manifest.validate_ui_artifacts(&resources).unwrap();
+        for bad in [
+            "ui/../plugin.json",
+            "plugin.json",
+            "ui-other/script.js",
+            "/tmp/script.js",
+        ] {
+            let mut invalid = resources.clone();
+            invalid.insert(PathBuf::from(bad));
+            assert!(manifest.validate_ui_artifacts(&invalid).is_err(), "{bad}");
+        }
+        resources.remove(Path::new("settings.html"));
+        assert!(manifest.validate_ui_artifacts(&resources).is_err());
+        manifest.resources = None;
+        let mut undeclared = entries;
+        undeclared.insert(PathBuf::from("ui/settings.js"));
+        assert!(manifest.validate_ui_artifacts(&undeclared).is_err());
     }
 
     #[test]

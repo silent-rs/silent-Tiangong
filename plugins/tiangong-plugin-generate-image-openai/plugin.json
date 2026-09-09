@@ -42,5 +42,8 @@
         "icon": "image"
       }
     ]
-  }
+  },
+  "resources": [
+    "ui"
+  ]
 }

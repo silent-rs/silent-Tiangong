@@ -27,6 +27,7 @@ jobs:
       plugin_root: ${{ steps.plugin.outputs.plugin_root }}
       has_wasm: ${{ steps.plugin.outputs.has_wasm }}
       has_ui: ${{ steps.plugin.outputs.has_ui }}
+      ui_build: ${{ steps.plugin.outputs.ui_build }}
       release_kind: ${{ steps.plugin.outputs.release_kind }}
     steps:
       - name: Checkout
@@ -48,7 +49,7 @@ jobs:
           fi
           echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
           # 从 plugin.json 解析插件形态：纯 UI 插件（如 interaction/browser）
-          # 无 wasm；带 UI 贡献的插件需要预构建单文件页面；解释器 sidecar
+          # 无 wasm；UI 区分前端工程与静态页面，完整资源在平台间共享；解释器 sidecar
           # 插件（node/python）为平台无关发布（单一 any 归档，独立构建任务）。
           python3 - "$plugin_id" >> "$GITHUB_OUTPUT" <<'PY'
           import json, os, sys
@@ -71,6 +72,7 @@ jobs:
                   print(f"plugin_root={root}")
                   print(f"has_wasm={has_wasm}")
                   print(f"has_ui={has_ui}")
+                  print("ui_build=" + ("true" if has_ui == "true" and os.path.isfile(f"{root}/package.json") else "false"))
                   print(f"release_kind={release_kind}")
                   break
           else:
@@ -112,10 +114,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Node
+        if: needs.resolve-plugin.outputs.ui_build == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Build deterministic shared UI
+        if: needs.resolve-plugin.outputs.ui_build == 'true'
         env:
           PLUGIN_ROOT: ${{ needs.resolve-plugin.outputs.plugin_root }}
         run: |
@@ -125,6 +129,21 @@ jobs:
           yarn --cwd "$PLUGIN_ROOT" build
           mkdir -p target/shared-ui/dist
           cp "$PLUGIN_ROOT/dist/index.html" target/shared-ui/dist/index.html
+      - name: Stage static UI resources
+        if: needs.resolve-plugin.outputs.ui_build != 'true'
+        env:
+          PLUGIN_ROOT: ${{ needs.resolve-plugin.outputs.plugin_root }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ["PLUGIN_ROOT"])
+          manifest = json.loads((root / "plugin.json").read_text())
+          for contribution in manifest["ui"]["contributions"]:
+              entry = pathlib.Path(contribution["entry"])
+              if not (root / entry).is_file():
+                  raise SystemExit(f"Missing static UI entry: {entry}")
+              shutil.copytree(root / entry.parent, pathlib.Path("target/shared-ui") / entry.parent, dirs_exist_ok=True)
+          PY
       - name: Upload shared UI
         uses: actions/upload-artifact@v4
         with:
@@ -237,7 +256,7 @@ jobs:
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
           TIANGONG_PLUGIN_PREBUILT_WASM: ${{ needs.resolve-plugin.outputs.has_wasm == 'true' && format('{0}/target/shared-wasm/{1}.wasm', github.workspace, needs.resolve-plugin.outputs.plugin_id) || '' }}
-          TIANGONG_PLUGIN_PREBUILT_UI: ${{ needs.resolve-plugin.outputs.has_ui == 'true' && format('{0}/target/shared-ui/dist/index.html', github.workspace) || '' }}
+          TIANGONG_PLUGIN_PREBUILT_UI: ${{ needs.resolve-plugin.outputs.has_ui == 'true' && format('{0}/target/shared-ui', github.workspace) || '' }}
         run: |
           if [[ "$(uname -s)" == MINGW* ]]; then
             # Git Bash 每个 step 会重排 PATH，使 MSYS2 自带 perl 优先于 Strawberry；

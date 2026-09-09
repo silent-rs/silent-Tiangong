@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::sidecar::SidecarConnection;
-use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core_config::CoreConfig;
@@ -102,10 +101,6 @@ impl WasmPluginAdapter {
         self.enabled.store(enabled, Ordering::Release);
     }
 
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
-    }
-
     pub(crate) fn notify_tools_recovered(&self, names: &[String]) {
         if !self.is_enabled() {
             return;
@@ -119,6 +114,10 @@ impl WasmPluginAdapter {
                 serde_json::json!({"plugin_id":self.id,"available":true,"tools":names}),
             );
         }
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
     }
 
     pub(crate) fn runtime_config(&self) -> PluginRuntimeConfig {
@@ -407,23 +406,31 @@ impl WasmPluginAdapter {
 // ToolSpecProvider：返回插件声明的工具规格。
 impl ToolSpecProvider for WasmPluginAdapter {
     fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.try_tool_specs().unwrap_or_else(|error| {
+            tracing::error!(%error, "读取 wasm 插件工具规格失败");
+            Vec::new()
+        })
+    }
+
+    fn try_tool_specs(&self) -> Result<Vec<ToolSpec>, String> {
         if !self.is_enabled() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        match self.call_wasm_off_runtime(WasmPlugin::tool_specs) {
-            Ok(specs) => specs
-                .into_iter()
-                .map(|s| ToolSpec {
-                    name: s.name,
-                    description: s.description,
-                    input_schema: serde_json::from_str(&s.input_schema).unwrap_or(Value::Null),
-                })
-                .collect(),
-            Err(e) => {
-                tracing::error!("读取 wasm 插件工具规格失败: {e}");
-                Vec::new()
-            }
-        }
+        self.call_wasm_off_runtime(WasmPlugin::tool_specs)
+            .map_err(|error| error.to_string())
+            .and_then(|specs| {
+                specs
+                    .into_iter()
+                    .map(|s| {
+                        Ok(ToolSpec {
+                            name: s.name,
+                            description: s.description,
+                            input_schema: serde_json::from_str(&s.input_schema)
+                                .map_err(|error| error.to_string())?,
+                        })
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -436,7 +443,8 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         if !self.is_enabled() {
-            return Box::pin(async { None });
+            let message = format!("插件 {} 已停用，工具不可用", self.id);
+            return Box::pin(async move { Some(unavailable_tool_result(message)) });
         }
         let arguments = serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
         let wit_call = crate::loader::ToolCall {
@@ -455,7 +463,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             &session.id,
             session.cwd.trim(),
             actor_id,
-            feedback,
+            feedback.clone(),
         );
         if let Some(sidecar) = &self.sidecar {
             let sidecar = sidecar.clone();
@@ -465,7 +473,8 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             });
         }
         let Some(inner) = self.current_inner() else {
-            return Box::pin(async { None });
+            let message = format!("插件 {} 当前不可用", self.id);
+            return Box::pin(async move { Some(unavailable_tool_result(message)) });
         };
         let config = self.config.clone();
         let plugin_id = self.id.clone();
@@ -478,12 +487,10 @@ impl ToolOverrideHandler for WasmPluginAdapter {
                         plugin.handle_tool_with_runtime_invocation(wit_call, &config, invocation)
                     })
                 })
-                .await;
-                // 已接管的调用失败仍是插件执行结果，不能退回 None 冒充未注册。
-                let result = match result
-                    .map_err(anyhow::Error::from)
-                    .and_then(|result| result)
-                {
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
+                let result = match result {
                     Ok(result) => result,
                     Err(error) => {
                         let error = format!("{error:#}");
@@ -518,19 +525,21 @@ impl ToolOverrideHandler for WasmPluginAdapter {
     }
 }
 
-// PromptSectionProvider：调 WASM 的 prompt-sections 导出，拉取三级记忆注入。
+// PromptSectionProvider：供首次会话初始化及压缩、清理后的声明整理使用。
 impl PromptSectionProvider for WasmPluginAdapter {
     fn prompt_sections(&self) -> Vec<String> {
+        self.try_prompt_sections().unwrap_or_else(|error| {
+            tracing::warn!(%error, "wasm prompt_sections 失败");
+            Vec::new()
+        })
+    }
+
+    fn try_prompt_sections(&self) -> Result<Vec<String>, String> {
         if !self.is_enabled() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        match self.call_wasm_off_runtime(WasmPlugin::prompt_sections) {
-            Ok(sections) => sections,
-            Err(e) => {
-                tracing::warn!("wasm prompt_sections 失败: {e}");
-                Vec::new()
-            }
-        }
+        self.call_wasm_off_runtime(WasmPlugin::prompt_sections)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -575,6 +584,17 @@ where
     })
 }
 
+fn unavailable_tool_result(message: String) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: message.clone(),
+        stdout: String::new(),
+        stderr: message,
+        exit_code: 1,
+        execution: None,
+    }
+}
+
 /// 序列化 CoreConfig 为插件配置载荷，并附加主 Chat 模型的能力声明。
 ///
 /// CoreConfig 只含端点信息（base_url/model 等），不含能力路由；插件需要
@@ -603,4 +623,46 @@ fn plugin_config_payload(config: &CoreConfig) -> anyhow::Result<String> {
         );
     }
     Ok(serde_json::to_string(&value)?)
+}
+
+#[cfg(test)]
+mod review_regression_tests {
+    use super::*;
+
+    fn unloaded_adapter() -> WasmPluginAdapter {
+        WasmPluginAdapter {
+            inner: RwLock::new(None),
+            config: PluginRuntimeConfig::default(),
+            id: "review-plugin".into(),
+            feedback_tx: RwLock::new(None),
+            context: Mutex::new(ReloadContext::default()),
+            enabled: AtomicBool::new(true),
+            sidecar: None,
+        }
+    }
+
+    #[test]
+    fn unreadable_declarations_propagate_failure() {
+        let adapter = unloaded_adapter();
+        assert!(adapter.try_tool_specs().is_err());
+        assert!(adapter.try_prompt_sections().is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_and_unloaded_tools_keep_their_failure_reason() {
+        let adapter = unloaded_adapter();
+        let call = ToolCall {
+            id: scru128::new().to_string(),
+            name: "review_tool".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut session = Session::new("review");
+        for (enabled, expected) in [(false, "已停用"), (true, "当前不可用")] {
+            adapter.set_enabled(enabled);
+            let result = adapter.handle(&call, &mut session, "").await.unwrap();
+            assert!(!result.ok);
+            assert!(result.stderr.contains(expected), "{}", result.stderr);
+            assert!(!result.summary.contains("未注册"));
+        }
+    }
 }
