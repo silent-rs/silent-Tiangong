@@ -618,11 +618,11 @@ impl StdioSidecarConnection {
             if self.config.sensitive_storage.mcp_config {
                 exempt_mcp_config_write(&mut policy, &self.config.storage_root);
             }
+            policy.allow_network = self.config.sandbox_network;
             exempt_authorized_user_credentials(&mut policy, self.config.user_credential_reads);
             policy
                 .denied_read_paths
                 .extend(self.config.sandbox_denied_read_paths.clone());
-            policy.allow_network = self.config.sandbox_network;
             if let Some(limits) = &self.config.sandbox_resource_limits {
                 policy.resource_limits = *limits;
             }
@@ -1610,6 +1610,10 @@ fn parse_response_payload(payload: Value) -> Result<Value, String> {
 }
 
 impl SidecarConnection for StdioSidecarConnection {
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
     fn invoke(&self, operation: &str, payload: &str) -> Result<String> {
         self.invoke_with_progress(operation, payload, &mut |_| {})
     }
@@ -2165,9 +2169,7 @@ fn exempt_authorized_user_credentials(
     policy: &mut tiangong_sandbox::SandboxPolicy,
     access: crate::host_policy::UserCredentialReadAccess,
 ) {
-    // 文件凭据（~/.ssh 等）经 denied_read 豁免；系统凭据服务（Keychain、
-    // OpenDirectory、trustd）经 allow_credential_services 放行——沙箱内
-    // ssh 解析 uid、gh 读钥匙串都依赖后者，缺任一都会功能回退。
+    // 网络证书验证由 Launcher 根据 allow_network 独立开放，不授予凭据访问。
     policy.allow_credential_services = access.ssh || access.github_cli;
     let Some(home) = crate::interpreter_env::user_home_dir() else {
         return;
@@ -2294,6 +2296,21 @@ mod sensitive_access_tests {
 
     #[test]
     fn git_workflow_credentials_are_readable_but_remain_write_protected() {
+        for network in [false, true] {
+            for ssh in [false, true] {
+                for github_cli in [false, true] {
+                    let mut policy = tiangong_sandbox::SandboxPolicy::workspace_write("/tmp/ws");
+                    policy.allow_network = network;
+                    exempt_authorized_user_credentials(
+                        &mut policy,
+                        crate::host_policy::UserCredentialReadAccess { ssh, github_cli },
+                    );
+                    assert_eq!(policy.allow_credential_services, ssh || github_cli);
+                    assert_eq!(policy.allow_network, network);
+                }
+            }
+        }
+
         let Some(home) = crate::interpreter_env::user_home_dir() else {
             return;
         };

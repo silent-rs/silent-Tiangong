@@ -679,10 +679,6 @@ impl PluginManifest {
         Ok(())
     }
 
-    /// 归一化后的 UI 贡献列表（schema v2）。
-    ///
-    /// 沙箱级别逐级取值：贡献级 `sandbox` → `ui.sandbox` → `shadow`；
-    /// 打开模式缺省 `singleton`。v1 清单返回空（设置页贡献由 WASM 运行时声明）。
     /// UI 制品必须包含全部页面入口；附属文件仅允许位于已声明的资源目录。
     pub(crate) fn validate_ui_artifacts(&self, paths: &BTreeSet<PathBuf>) -> Result<()> {
         let entries = self
@@ -708,6 +704,10 @@ impl PluginManifest {
         Ok(())
     }
 
+    /// 归一化后的 UI 贡献列表（schema v2）。
+    ///
+    /// 沙箱级别逐级取值：贡献级 `sandbox` → `ui.sandbox` → `shadow`；
+    /// 打开模式缺省 `singleton`。v1 清单返回空（设置页贡献由 WASM 运行时声明）。
     pub fn ui_contributions(&self) -> Vec<UiContribution> {
         let Some(ui) = &self.ui else {
             return Vec::new();
