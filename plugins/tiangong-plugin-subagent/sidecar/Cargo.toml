@@ -27,5 +27,9 @@ toml = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 tempfile = "3"
 
+fs2 = "0.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+serial_test = "4"

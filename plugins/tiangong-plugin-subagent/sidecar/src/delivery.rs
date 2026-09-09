@@ -121,10 +121,14 @@ impl DeliveryWorker {
 }
 
 /// 向指定会话投递一条用户可见消息（respond-async；Hook 队列与会话后端共用）。
+///
+/// `workspace`：消息期望的工作区——服务端创建会话时作为 cwd、已有会话
+/// 不一致时由宿主统一更新；None 表示不指定（Hook/控制通知等）。
 pub async fn deliver_message(
     client: &reqwest::Client,
     conversation_id: &str,
     message: &str,
+    workspace: Option<&str>,
 ) -> Result<()> {
     let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
     if url.is_empty() {
@@ -133,14 +137,18 @@ pub async fn deliver_message(
         );
     }
     let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
+    let mut payload = serde_json::json!({
+        "connector": "server-api",
+        "channel_id": conversation_id,
+        "message": message,
+    });
+    if let Some(workspace) = workspace.map(str::trim).filter(|value| !value.is_empty()) {
+        payload["workspace"] = serde_json::Value::String(workspace.to_string());
+    }
     let mut request = client
         .post(&endpoint)
         .header("Prefer", "respond-async")
-        .json(&serde_json::json!({
-            "connector": "server-api",
-            "channel_id": conversation_id,
-            "message": message,
-        }));
+        .json(&payload);
     if let Ok(token) = std::env::var(SERVER_TOKEN_ENV)
         && !token.is_empty()
     {

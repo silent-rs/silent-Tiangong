@@ -1634,10 +1634,15 @@ impl SubagentService {
         if let Some(run_tag) = run_tag {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
         }
-        // 工作区对齐：专属会话的 cwd 若与本次激活工作区不一致（服务端
-        // 按默认创建），先更新会话文件再投递——成员在正确的项目目录工作。
-        crate::sessions::ensure_session_workspace(source_session, &activation.workspace);
-        crate::delivery::deliver_message(&self.http, source_session, &body).await?;
+        // 工作区随消息传递：服务端创建/更新专属会话 cwd 时统一落位（P1-3/4），
+        // sidecar 不再直改会话文件——首条消息（会话未创建）也能正确对齐。
+        crate::delivery::deliver_message(
+            &self.http,
+            source_session,
+            &body,
+            Some(&activation.workspace),
+        )
+        .await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
 
@@ -1799,7 +1804,7 @@ impl SubagentService {
             "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
             config.name, config.id, action
         );
-        crate::delivery::deliver_message(&self.http, source_session, &body).await
+        crate::delivery::deliver_message(&self.http, source_session, &body, None).await
     }
 
     /// 关联会话本轮完成（WASM on_turn_finished 转发）：
@@ -2559,7 +2564,27 @@ impl SubagentService {
         let (session_id, workspace) = Self::require_context()?;
         let target = self.resolve_state_target(request.agent_id.as_str(), &session_id)?;
         let state = crate::workspace_state::load(&self.agents, &target, &workspace)?;
-        Ok(json!({ "ok": true, "state": state }))
+        // WASM 工具桥接只透传 summary/stdout 文本字段；状态内容必须装入
+        // stdout，否则成员读到"成功但空结果"。state 字段保留供结构化消费。
+        let field = |name: &str| {
+            state
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("（未填写）")
+        };
+        let stdout = format!(
+            "## 长期计划\n{}\n\n## 工作背景\n{}\n\n## 当前任务\n{}",
+            field("plan"),
+            field("context"),
+            field("task"),
+        );
+        Ok(json!({
+            "ok": true,
+            "summary": format!("已读取 {} 的工作区状态", target),
+            "stdout": stdout,
+            "state": state,
+        }))
     }
 
     /// 成员写工作状态（plan/context）：写入方为该成员自己的会话

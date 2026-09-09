@@ -15,8 +15,12 @@ const STATE_INJECTION_MAX_CHARS: usize = 1500;
 
 /// 解析（或首次登记）workspace 稳定身份：agents/<id>/workspaces/index.json
 /// 维护「本机路径 → workspace-id」映射；路径只是位置，id 才是身份。
+///
+/// 登记全程（查询、创建、写回）持文件锁：宿主 sidecar 与外部 MCP 进程
+/// 可能同时访问同一 agents 目录，单次原子写不能保护读-改-写整体。
 fn workspace_id(agents: &AgentStore, agent_id: &str, workspace_path: &str) -> Result<String> {
     let dir = workspaces_dir(agents, agent_id)?;
+    let _guard = IndexLock::acquire(&dir)?;
     // 路径归一：符号链接与挂载别名统一到 canonical 形态再登记比较，
     // 避免同一工作区因 /tmp 与 /private/tmp 等差异分裂出多个身份。
     let workspace_path = std::fs::canonicalize(workspace_path)
@@ -80,6 +84,34 @@ fn workspaces_dir(agents: &AgentStore, agent_id: &str) -> Result<PathBuf> {
     let dir = agents.root().join(agent_id).join("workspaces");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// 工作区索引的跨进程排他锁（目录下 `.index.lock` 文件，flock 独占）。
+///
+/// 保护 workspace 身份登记的读-改-写整体：宿主 sidecar 与外部 MCP 进程
+/// 可能同时登记同一工作区，无锁时并发读到旧索引会各自分配新身份并
+/// 相互覆盖。RAII：Drop 解锁，锁文件本身不删除。
+struct IndexLock {
+    _file: std::fs::File,
+}
+
+impl IndexLock {
+    fn acquire(dir: &std::path::Path) -> Result<Self> {
+        use fs2::FileExt;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".index.lock"))?;
+        file.lock_exclusive()?;
+        Ok(Self { _file: file })
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
 }
 
 /// 公共入口统一校验：成员不存在时不创建任何目录，直接报错。
@@ -210,4 +242,72 @@ pub fn injection_summary(agents: &AgentStore, agent_id: &str, workspace_path: &s
         body.push_str(&format!("\n背景：\n{}", truncate(context)));
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 独立存储根下构造带一个成员的 AgentStore（serial：TIANGONG_STORAGE_ROOT
+    /// 是进程级环境变量，测试间须串行防互染）。
+    fn store_with_agent(tag: &str) -> (AgentStore, tempfile::TempDir, String) {
+        let root = tempfile::tempdir().unwrap();
+        // serial 测试内单线程设置（edition 2024 set_var 为 unsafe）。
+        unsafe { std::env::set_var("TIANGONG_STORAGE_ROOT", root.path()) };
+        let store = AgentStore::open().unwrap();
+        let config = store
+            .create(
+                &format!("测试成员-{tag}"),
+                "并发登记测试",
+                tiangong_plugin_subagent_protocol::config::BackendKind::TiangongSession,
+                None,
+                Some("sess-test"),
+                tiangong_plugin_subagent_protocol::config::WorkspacePolicy::ReadOnly,
+                None,
+            )
+            .unwrap();
+        (store, root, config.id)
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 并发登记同一工作区只有一个稳定身份() {
+        let (store, _root, agent_id) = store_with_agent("concurrent");
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().to_string_lossy().into_owned();
+
+        // 8 线程同时首次登记同一工作区：文件锁保证读-改-写整体串行，
+        // 全部拿到同一 id（此前无锁时会分裂出多个身份并相互覆盖索引）。
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let agent = agent_id.clone();
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                // 每线程独立 open（同一存储根），模拟宿主与外部 MCP 双进程并发登记。
+                let store = AgentStore::open().unwrap();
+                workspace_id(&store, &agent, &path).unwrap()
+            }));
+        }
+        let ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let first = &ids[0];
+        assert!(ids.iter().all(|id| id == first), "身份分裂: {ids:?}");
+
+        // 索引只登记一条。
+        let index =
+            std::fs::read_to_string(store.root().join(&agent_id).join("workspaces/index.json"))
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&index).unwrap();
+        assert_eq!(parsed["workspaces"].as_array().unwrap().len(), 1);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 同一工作区重复登记返回同一身份() {
+        let (store, _root, agent_id) = store_with_agent("stable");
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().to_string_lossy().into_owned();
+        let first = workspace_id(&store, &agent_id, &path).unwrap();
+        let second = workspace_id(&store, &agent_id, &path).unwrap();
+        assert_eq!(first, second);
+    }
 }
