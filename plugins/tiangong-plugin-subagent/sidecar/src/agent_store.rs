@@ -109,10 +109,8 @@ impl AgentStore {
         if backend == BackendKind::Cli && command.map(str::trim).unwrap_or("").is_empty() {
             bail!("CLI 后端必须提供启动命令");
         }
+        // 天工会话后端不要求预绑定会话：成员×工作区专属会话按映射延迟创建。
         let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
-        if backend == BackendKind::TiangongSession && session_id.is_none() {
-            bail!("天工会话后端必须关联一个已有会话");
-        }
         let agent_id = format!("agent-{}", new_id());
         let dir = self.agent_dir(&agent_id)?;
         std::fs::create_dir_all(&dir)

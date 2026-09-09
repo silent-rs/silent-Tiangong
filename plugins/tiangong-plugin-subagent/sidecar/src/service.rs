@@ -804,35 +804,10 @@ impl SubagentService {
         {
             bail!("CLI 后端缺少启动命令");
         }
-        if config.backend == BackendKind::TiangongSession {
-            let session_id = config.session_id.as_deref().unwrap_or("");
-            if session_id.is_empty() {
-                bail!("天工会话后端缺少关联会话（可在管理页编辑补充）");
-            }
-            if !crate::sessions::session_exists(session_id) {
-                bail!("关联会话不存在或已被删除: {session_id}");
-            }
-        }
-        // 原生 Subagent 后端：专属会话由系统在首次运行时创建，无需用户提供；
-        // 若已绑定（历史运行回写），校验其仍然存在，被删则清空待重建。
-        if config.backend == BackendKind::AgentTeam
-            && let Some(session_id) = config.session_id.as_deref()
-            && !session_id.trim().is_empty()
-            && !crate::sessions::session_exists(session_id)
-        {
-            let _ = self.agents.update(
-                &config.id,
-                crate::agent_store::AgentChanges {
-                    session_id: Some(""),
-                    ..Default::default()
-                },
-            );
-            tracing::warn!(
-                agent_id = %config.id,
-                session_id,
-                "原生后端专属会话已不存在，将在下次运行时重建"
-            );
-        }
+        // 天工会话后端不再要求预绑定全局会话：成员×工作区专属会话在首次
+        // 投递时按映射创建（见 workspace_state::session_for_workspace）。
+        // 原生后端的会话存续由成员×工作区映射负责（丢失重建），
+        // 老全局绑定仅作迁移源保留。
         Ok(())
     }
 
@@ -1187,11 +1162,13 @@ impl SubagentService {
 
     /// 发起会话是否为某成员的后端会话（专属/关联）——集群协作识别。
     fn collaboration_origin(&self, session_id: &str) -> Option<AgentConfig> {
+        // 会话归属经成员×工作区映射反查（老全局绑定在映射内兜底）。
+        let session_owner = crate::workspace_state::agent_for_session(&self.agents, &session_id);
         self.agents.list().into_iter().find(|config| {
             matches!(
                 config.backend,
                 BackendKind::TiangongSession | BackendKind::AgentTeam
-            ) && config.session_id.as_deref() == Some(session_id)
+            ) && session_owner.as_deref() == Some(config.id.as_str())
         })
     }
 
@@ -1324,13 +1301,11 @@ impl SubagentService {
                     injected_into_run: true,
                 });
             }
-            let source_session = config
-                .session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("成员缺少后端会话，无法注入补充消息"))?
-                .to_string();
+            // 运行记录自带实际投递的后端会话（成员×工作区映射会话）。
+            let source_session = run.session_id.trim().to_string();
+            if source_session.is_empty() {
+                anyhow::bail!("运行缺少后端会话，无法注入补充消息");
+            }
             // 轻量载体仅供投递正文提示（workspace 来自该成员最近激活），
             // 不落盘——复用工作进行中，不新增占用记录。
             let workspace = crate::sessions::session_workspace(session_id)
@@ -1360,6 +1335,7 @@ impl SubagentService {
                 Some(&supplement_content),
                 origin.as_ref(),
                 Some(&run_tag),
+                None,
             )
             .await?;
             append_event(
@@ -1507,19 +1483,17 @@ impl SubagentService {
         };
         match config.backend {
             BackendKind::TiangongSession | BackendKind::AgentTeam => {
-                // 原生后端：首次运行时新建专属会话 ID，投递成功后回写绑定，
-                // 后续任务延续同一会话的上下文；会话后端则要求已绑定。
-                let source_session = match config.session_id.as_deref() {
-                    Some(session_id) if !session_id.trim().is_empty() => {
-                        session_id.trim().to_string()
-                    }
-                    _ => {
-                        if config.backend == BackendKind::TiangongSession {
-                            anyhow::bail!("天工会话后端缺少关联会话");
-                        }
-                        crate::paths::new_id()
-                    }
-                };
+                // 成员×工作区固定长期会话：(agent, workspace) → session 映射。
+                // 首次生成会话号并随消息携带 workspace 由宿主创建（cwd 即
+                // 工作区）；复用映射会话不再携带（会话创建后工作区不修改，
+                // 上下文过长走 Core 压缩）。老成员的全局绑定一次性迁移。
+                let (source_session, session_is_new) =
+                    crate::workspace_state::session_for_workspace(
+                        &self.agents,
+                        &config.id,
+                        &activation.workspace,
+                        config.session_id.as_deref(),
+                    )?;
                 // 运行标记：投递正文携带 run 短码，turn 完成回报按标记精确
                 // 归因（同一成员并发多运行时不串任务）。
                 let run_tag: String = run.run_id.chars().rev().take(8).collect();
@@ -1533,21 +1507,13 @@ impl SubagentService {
                         message,
                         origin,
                         Some(&run_tag),
-                    )
-                    .await?;
-                // 原生后端首次投递成功：回写专属会话绑定（失败不回写，下次重建）。
-                if config.backend == BackendKind::AgentTeam
-                    && config.session_id.as_deref().unwrap_or("").trim().is_empty()
-                    && let Err(error) = self.agents.update(
-                        &config.id,
-                        crate::agent_store::AgentChanges {
-                            session_id: Some(&source_session),
-                            ..Default::default()
+                        if session_is_new {
+                            Some(activation.workspace.as_str())
+                        } else {
+                            None
                         },
                     )
-                {
-                    tracing::warn!(agent_id = %config.id, %error, "回写原生后端专属会话绑定失败");
-                }
+                    .await?;
                 run.summary = Some(outcome);
                 self.store.save_run(&run)?;
                 if let Some(task) = task {
@@ -1587,6 +1553,7 @@ impl SubagentService {
         message: Option<&str>,
         origin: Option<&CollabOrigin<'_>>,
         run_tag: Option<&str>,
+        session_workspace: Option<&str>,
     ) -> Result<String> {
         let instructions = self.agents.instructions(&config.id).unwrap_or_default();
         let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
@@ -1634,15 +1601,10 @@ impl SubagentService {
         if let Some(run_tag) = run_tag {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
         }
-        // 工作区随消息传递：服务端创建/更新专属会话 cwd 时统一落位（P1-3/4），
-        // sidecar 不再直改会话文件——首条消息（会话未创建）也能正确对齐。
-        crate::delivery::deliver_message(
-            &self.http,
-            source_session,
-            &body,
-            Some(&activation.workspace),
-        )
-        .await?;
+        // 工作区仅随新会话的首条消息传递（宿主创建时落为 cwd）；复用已有
+        // 会话不携带——会话创建后工作区固定，不随消息修改。
+        crate::delivery::deliver_message(&self.http, source_session, &body, session_workspace)
+            .await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
 
@@ -1810,6 +1772,7 @@ impl SubagentService {
     /// 关联会话本轮完成（WASM on_turn_finished 转发）：
     /// 本轮用户消息带 Subagent 标记时，把完成归因到该源会话上最新的活跃运行。
     async fn handle_session_turn_finished(
+        // 占位注释（实际插入在拿到 request 之后，见下）
         &self,
         request: &SessionTurnFinishedRequest,
     ) -> Result<String> {
@@ -1817,6 +1780,8 @@ impl SubagentService {
         if !request.user_text.contains("【Subagent") {
             return Ok("本轮非 Subagent 投递触发，忽略".to_string());
         }
+        let request_session_owner =
+            crate::workspace_state::agent_for_session(&self.agents, &request.session_id);
         // 找到以该会话为源的后端 Agent（关联会话后端与原生后端的专属会话）。
         let agents: Vec<AgentConfig> = self
             .agents
@@ -1826,7 +1791,7 @@ impl SubagentService {
                 matches!(
                     config.backend,
                     BackendKind::TiangongSession | BackendKind::AgentTeam
-                ) && config.session_id.as_deref() == Some(request.session_id.as_str())
+                ) && request_session_owner.as_deref() == Some(config.id.as_str())
             })
             .collect();
         if agents.is_empty() {
@@ -1881,7 +1846,7 @@ impl SubagentService {
                         && run.status == RunStatus::Completed
                         && agents.iter().any(|config| {
                             config.id == run.agent_id
-                                && config.session_id.as_deref() == Some(request.session_id.as_str())
+                                && request_session_owner.as_deref() == Some(config.id.as_str())
                         })
                 })
             {
@@ -2606,9 +2571,9 @@ impl SubagentService {
         };
         // 写入仅限成员自己（主会话/他成员不代写业务状态）。
         if !agent_id.is_empty() {
-            let is_self = self.agents.list().into_iter().any(|config| {
-                config.id == target && config.session_id.as_deref() == Some(session_id.as_str())
-            });
+            let session_owner =
+                crate::workspace_state::agent_for_session(&self.agents, &session_id);
+            let is_self = session_owner.is_some_and(|owner| owner == target);
             if !is_self {
                 bail!("工作区状态由成员自己维护：只有成员自己的执行会话可写入 plan/context");
             }
@@ -2639,10 +2604,12 @@ impl SubagentService {
                 .unwrap_or_else(|| agent_id.to_string())
         };
         // 发起方标定：发起会话是某成员的后端会话 → 该成员；否则主会话。
+        // 归属按成员×工作区映射逐会话反查（老全局绑定兜底）。
         let origin_label = |session_id: &str| {
+            let owner = crate::workspace_state::agent_for_session(&self.agents, &session_id);
             agents
                 .iter()
-                .find(|config| config.session_id.as_deref() == Some(session_id))
+                .find(|config| owner.as_deref() == Some(config.id.as_str()))
                 .map(|config| format!("成员「{}」", config.name))
                 .unwrap_or_else(|| "主会话".to_string())
         };
@@ -2725,6 +2692,7 @@ impl SubagentService {
     /// 未回报时的兜底路径。
     async fn tool_report_result(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let (session_id, _) = Self::require_context()?;
+        let session_owner = crate::workspace_state::agent_for_session(&self.agents, &session_id);
         let request: ReportAgentResultRequest = parse_request(payload)?;
         let result = request.result.trim();
         if result.is_empty() {
@@ -2746,7 +2714,7 @@ impl SubagentService {
                 matches!(
                     config.backend,
                     BackendKind::TiangongSession | BackendKind::AgentTeam
-                ) && config.session_id.as_deref() == Some(session_id.as_str())
+                ) && session_owner.as_deref() == Some(config.id.as_str())
             })
             .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话，无法回报"))?;
         // 关联明确的工作：优先按回报携带的运行标记精确匹配（成员管理多

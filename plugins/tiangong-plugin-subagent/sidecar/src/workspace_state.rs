@@ -18,9 +18,18 @@ const STATE_INJECTION_MAX_CHARS: usize = 1500;
 ///
 /// 登记全程（查询、创建、写回）持文件锁：宿主 sidecar 与外部 MCP 进程
 /// 可能同时访问同一 agents 目录，单次原子写不能保护读-改-写整体。
-fn workspace_id(agents: &AgentStore, agent_id: &str, workspace_path: &str) -> Result<String> {
+pub(crate) fn workspace_id(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+) -> Result<String> {
     let dir = workspaces_dir(agents, agent_id)?;
     let _guard = IndexLock::acquire(&dir)?;
+    workspace_id_locked(&dir, workspace_path)
+}
+
+/// 已持 [`IndexLock`] 的工作区身份解析（勿在锁外调用）。
+fn workspace_id_locked(dir: &std::path::Path, workspace_path: &str) -> Result<String> {
     // 路径归一：符号链接与挂载别名统一到 canonical 形态再登记比较，
     // 避免同一工作区因 /tmp 与 /private/tmp 等差异分裂出多个身份。
     let workspace_path = std::fs::canonicalize(workspace_path)
@@ -244,6 +253,87 @@ pub fn injection_summary(agents: &AgentStore, agent_id: &str, workspace_path: &s
     body
 }
 
+// ── 成员 × 工作区 的专属会话映射 ──
+//
+// 最终架构约定：每个成员在每个 workspace 使用一个固定工作区的长期会话
+// ((agent_id, workspace_id) → session_id)。会话创建后 workspace 不再修改：
+// 首次投递随消息携带 workspace 由宿主创建（cwd 即工作区），后续复用会话
+// 不携带；上下文过长走 Core 压缩，不因此换会话。
+
+/// 解析（或首次登记）成员在该工作区的专属会话。返回 `(session_id, is_new)`。
+///
+/// 全程持文件锁（查询、登记、写回）：宿主 sidecar 与外部 MCP 进程并发
+/// 首次访问同一成员和工作区时只产生一个有效映射。老成员配置中的全局
+/// `session_id` 首次迁移为当前工作区的映射（保持连续性，此后不再使用）；
+/// 映射会话已不存在（被删/损坏）时生成新号重建。
+pub(crate) fn session_for_workspace(
+    agents: &AgentStore,
+    agent_id: &str,
+    workspace_path: &str,
+    legacy_session: Option<&str>,
+) -> Result<(String, bool)> {
+    let dir = workspaces_dir(agents, agent_id)?;
+    let _guard = IndexLock::acquire(&dir)?;
+    let ws_id = workspace_id_locked(&dir, workspace_path)?;
+    let meta_path = dir.join(&ws_id).join("workspace.json");
+    let mut meta: serde_json::Value = std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({ "workspace_id": ws_id, "paths": [workspace_path] }));
+
+    let mapped = meta
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // 映射即真相：登记即复用，不查会话文件——会话由宿主在首条消息到达时
+    // 创建（异步窗口），文件缺失是预期状态而非映射失效；被删会话的重置
+    // 走显式入口，不靠这里猜测。
+    if let Some(session_id) = mapped {
+        return Ok((session_id.to_string(), false));
+    }
+
+    // 本工作区从未登记映射：老全局会话一次性迁移（会话须实际存在），
+    // 否则生成新会话号。
+    let never_mapped = mapped.is_none();
+    let (session_id, is_new) = match legacy_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(legacy) if never_mapped && crate::sessions::session_exists(legacy) => {
+            (legacy.to_string(), false)
+        }
+        _ => (paths::new_id(), true),
+    };
+    meta["session_id"] = serde_json::Value::String(session_id.clone());
+    paths::atomic_write(&meta_path, serde_json::to_string(&meta)?.as_bytes())?;
+    Ok((session_id, is_new))
+}
+
+/// 反查会话归属的成员 ID：扫描全部成员的全部工作区映射，老全局绑定
+/// （未迁移数据）兜底。低频路径（Hook 回报归因等），线性扫描可接受。
+pub(crate) fn agent_for_session(agents: &AgentStore, session_id: &str) -> Option<String> {
+    for config in agents.list() {
+        if config.session_id.as_deref() == Some(session_id) {
+            return Some(config.id);
+        }
+        let ws_dir = agents.root().join(&config.id).join("workspaces");
+        let Ok(entries) = std::fs::read_dir(&ws_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let meta = entry.path().join("workspace.json");
+            if let Ok(raw) = std::fs::read_to_string(&meta)
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
+                && value.get("session_id").and_then(serde_json::Value::as_str) == Some(session_id)
+            {
+                return Some(config.id);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +388,105 @@ mod tests {
                 .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&index).unwrap();
         assert_eq!(parsed["workspaces"].as_array().unwrap().len(), 1);
+    }
+
+    /// 在测试存储根下落一个会话文件（模拟宿主已创建该会话）。
+    fn create_session_file(session_id: &str) {
+        let dir = crate::paths::storage_root().unwrap().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{session_id}.json")),
+            br#"{"id":"x","messages":[]}"#,
+        )
+        .unwrap();
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_首次生成_复用_跨工作区独立() {
+        let (store, _root, agent_id) = store_with_agent("mapping");
+        let w1 = tempfile::tempdir().unwrap();
+        let w2 = tempfile::tempdir().unwrap();
+        let p1 = w1.path().to_string_lossy().into_owned();
+        let p2 = w2.path().to_string_lossy().into_owned();
+
+        // 首次：生成新会话号。
+        let (s1, is_new) = session_for_workspace(&store, &agent_id, &p1, None).unwrap();
+        assert!(is_new, "首次应生成新会话");
+        create_session_file(&s1);
+
+        // 复用：同工作区返回同会话。
+        let (s1b, is_new) = session_for_workspace(&store, &agent_id, &p1, None).unwrap();
+        assert_eq!(s1, s1b);
+        assert!(!is_new);
+
+        // 跨工作区：独立会话。
+        let (s2, is_new) = session_for_workspace(&store, &agent_id, &p2, None).unwrap();
+        assert!(is_new);
+        assert_ne!(s1, s2);
+
+        // 反查归属。
+        assert_eq!(agent_for_session(&store, &s1), Some(agent_id.clone()));
+        assert_eq!(agent_for_session(&store, &s2), Some(agent_id.clone()));
+        assert_eq!(agent_for_session(&store, "no-such"), None);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_老全局绑定一次性迁移() {
+        let (store, _root, agent_id) = store_with_agent("legacy");
+        let w = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        create_session_file("legacy-sess-1");
+
+        // 老配置全局会话存在且本工作区从未映射 → 迁移沿用（保持连续性）。
+        let (s, is_new) =
+            session_for_workspace(&store, &agent_id, &p, Some("legacy-sess-1")).unwrap();
+        assert_eq!(s, "legacy-sess-1");
+        assert!(!is_new);
+
+        // 已映射后不再迁移：即使再传 legacy 也按映射走。
+        let (s2, _) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert_eq!(s2, "legacy-sess-1");
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_登记即固定不随会话文件漂移() {
+        let (store, _root, agent_id) = store_with_agent("rebuild");
+        let w = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        let (s1, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert!(is_new);
+        // 会话文件尚未由宿主创建（首条消息未达）：映射保持稳定——
+        // 否则异步创建窗口内的连续投递会不断重建、分裂会话。
+        let (s2, is_new) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
+        assert_eq!(s1, s2);
+        assert!(!is_new);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_并发首次访问只产生一个会话() {
+        let (store, _root, agent_id) = store_with_agent("mapping-concurrent");
+        let w = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let agent = agent_id.clone();
+            let path = p.clone();
+            handles.push(std::thread::spawn(move || {
+                let store = AgentStore::open().unwrap();
+                session_for_workspace(&store, &agent, &path, None).unwrap()
+            }));
+        }
+        let results: Vec<(String, bool)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let sessions: std::collections::HashSet<&String> = results.iter().map(|(s, _)| s).collect();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "并发首次只应有一个映射会话: {sessions:?}"
+        );
     }
 
     #[serial_test::serial]
