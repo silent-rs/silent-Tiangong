@@ -1,30 +1,69 @@
-// OpenAI 生图设置页脚本（Shadow 容器注入 bridge 风格）。
-// bridge 由宿主容器注入执行；主题经宿主同名 CSS 变量穿透继承，无需脚本处理。
+// OpenAI 生图设置页脚本（与 prompt/memory 同构的 postMessage 桥接框架）。
 
-// 配置读写经宿主桥接转发到 WASM 逻辑层（plugin.* → handle_view_message）。
+const HOST_TIMEOUT_MS = 60000;
+let hostChannel = null;
+let hostReadyResolve = null;
+const hostReady = new Promise((resolve) => { hostReadyResolve = resolve; });
+let requestSequence = 0;
+
+function applyHostContext(context) {
+  if (hostChannel && context.channel !== hostChannel) return;
+  hostChannel = context.channel;
+  const root = document.documentElement;
+  root.dataset.theme = context.theme === "dark" ? "dark" : "light";
+  Object.entries(context.tokens || {}).forEach(([name, value]) => {
+    if (typeof value === "string" && value) root.style.setProperty(`--host-${name}`, value);
+  });
+  if (typeof context.fontFamily === "string" && context.fontFamily) {
+    root.style.setProperty("--host-font-family", context.fontFamily);
+  }
+  hostReadyResolve?.();
+  hostReadyResolve = null;
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent || !event.data) return;
+  if (event.data.type === "tiangong_host_context" && typeof event.data.channel === "string") {
+    applyHostContext(event.data);
+  }
+});
+window.parent.postMessage({ type: "plugin_host_ready" }, "*");
+
 async function callHost(method, payload = "") {
-  return bridge.call(`plugin.${method}`, payload);
+  if (!hostChannel) await hostReady;
+  return new Promise((resolve, reject) => {
+    const id = `img-${Date.now()}-${++requestSequence}`;
+    const channel = hostChannel;
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener("message", handler);
+      reject(new Error("插件请求超时"));
+    }, HOST_TIMEOUT_MS);
+    const handler = (event) => {
+      if (event.source !== window.parent || !event.data || event.data.id !== id || event.data.channel !== channel) return;
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handler);
+      if (event.data.error) reject(new Error(String(event.data.error)));
+      else resolve(event.data.result ?? "");
+    };
+    window.addEventListener("message", handler);
+    window.parent.postMessage({ type: "plugin_call", channel, id, method, payload }, "*");
+  });
 }
 
 // ── DOM ──
 
-// Shadow 容器的页面 DOM 挂在 shadow root（宿主注入 pluginRoot），脚本里的
-// document 是主文档——必须从 pluginRoot 查询，直接打开时回退 document。
-const dom = typeof pluginRoot !== "undefined" && pluginRoot ? pluginRoot : document;
-const byId = (id) => dom.querySelector(`#${id}`);
-
-const sourceGlobal = byId("source-global");
-const sourceManual = byId("source-manual");
-const globalSection = byId("global-section");
-const manualSection = byId("manual-section");
-const globalModel = byId("global-model");
-const globalHint = byId("global-hint");
-const manualBaseUrl = byId("manual-base-url");
-const manualApiKey = byId("manual-api-key");
-const manualModel = byId("manual-model");
-const extraPrompt = byId("extra-prompt");
-const saveBtn = byId("save-btn");
-const statusEl = byId("status");
+const sourceGlobal = document.getElementById("source-global");
+const sourceManual = document.getElementById("source-manual");
+const globalSection = document.getElementById("global-section");
+const manualSection = document.getElementById("manual-section");
+const globalModel = document.getElementById("global-model");
+const globalHint = document.getElementById("global-hint");
+const manualBaseUrl = document.getElementById("manual-base-url");
+const manualApiKey = document.getElementById("manual-api-key");
+const manualModel = document.getElementById("manual-model");
+const extraPrompt = document.getElementById("extra-prompt");
+const saveBtn = document.getElementById("save-btn");
+const statusEl = document.getElementById("status");
 
 function toggleSource() {
   const manual = sourceManual.checked;

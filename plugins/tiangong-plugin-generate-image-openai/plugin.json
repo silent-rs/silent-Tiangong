@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "id": "generate-image-openai",
   "version": "0.2.6",
   "wasm": {
@@ -14,8 +14,7 @@
   },
   "permissions": [
     "model-config.read",
-    "sidecar.invoke",
-    "bridge.call"
+    "sidecar.invoke"
   ],
   "entrypoints": [
     "desktop",
@@ -27,23 +26,5 @@
       "kind": "chat",
       "required": false
     }
-  ],
-  "mention": {
-    "hint": "根据文字描述生成图片（OpenAI）"
-  },
-  "ui": {
-    "contributions": [
-      {
-        "slot": "settings.plugin-page",
-        "id": "generate-image-openai",
-        "title": "OpenAI 生图",
-        "description": "通过 Responses API 生成图片的配置",
-        "entry": "ui/settings.html",
-        "icon": "image"
-      }
-    ]
-  },
-  "resources": [
-    "ui"
   ]
 }

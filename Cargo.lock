@@ -11281,6 +11281,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webpki-root-certs",
 ]
 
 [[package]]

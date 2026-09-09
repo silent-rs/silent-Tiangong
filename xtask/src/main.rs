@@ -381,17 +381,7 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
         "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
             &["dist/index.html"]
         }
-        // 无前端构建的静态 UI：源文件直接随包分发
-        "generate-image-openai" => &["ui/settings.html"],
         _ => &[],
-    }
-}
-
-/// 随页面发布并参与签名的完整资源；入口声明仍由 plugin_ui_entries 校验。
-fn plugin_ui_files(config: &PluginConfig) -> &'static [&'static str] {
-    match config.id {
-        "generate-image-openai" => &["ui/settings.html", "ui/settings.css", "ui/settings.js"],
-        _ => plugin_ui_entries(config),
     }
 }
 
@@ -727,30 +717,29 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
 }
 
 fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig) -> io::Result<()> {
-    let files = plugin_ui_files(config);
-    if files.is_empty() {
+    let entries = plugin_ui_entries(config);
+    if entries.is_empty() {
         return Ok(());
     }
 
-    // 发布流程传入保留相对目录结构的完整资源目录；兼容既有单文件输入。
+    // CI 对无 UI 插件会传空串占位，空值视为未设置。
     let prebuilt = non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
-    let plugin_root = workspace_root.join(config.plugin_root);
-    if prebuilt.is_none() && plugin_root.join("package.json").is_file() {
+    if prebuilt.is_none() {
+        let plugin_root = workspace_root.join(config.plugin_root);
         eprintln!("[xtask] 安装并构建 {} UI...", config.name);
         run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
         run_yarn(&plugin_root, &["build"])?;
-    }
-    if prebuilt.as_ref().is_some_and(|path| !path.is_dir()) && files.len() != 1 {
+    } else if entries.len() != 1 {
         return Err(invalid_input(
-            "多文件 UI 必须通过 TIANGONG_PLUGIN_PREBUILT_UI 传入完整资源目录",
+            "TIANGONG_PLUGIN_PREBUILT_UI 仅支持单入口 UI 插件",
         ));
     }
-    for entry in files {
-        let source = match &prebuilt {
-            Some(root) if root.is_dir() => root.join(entry),
-            Some(file) => file.clone(),
-            None => plugin_root.join(entry),
-        };
+
+    for entry in entries {
+        let source = prebuilt
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| workspace_root.join(config.plugin_root).join(entry));
         require_file(&source)?;
         let destination = staging.join(entry);
         if let Some(parent) = destination.parent() {
@@ -822,7 +811,7 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
             "sha256": sha256(&plugin.join(&sidecar_name))?,
         });
     }
-    let ui = plugin_ui_files(config)
+    let ui = plugin_ui_entries(config)
         .iter()
         .map(|entry| {
             Ok(serde_json::json!({
@@ -1272,7 +1261,7 @@ fn generate_oss_distribution(
         std::fs::copy(plugin.join(wasm_artifact), release_root.join(wasm_artifact))?;
     }
     let mut ui_artifacts = serde_json::Map::new();
-    for entry in plugin_ui_files(config) {
+    for entry in plugin_ui_entries(config) {
         let destination = release_root.join(entry);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
@@ -1394,7 +1383,7 @@ fn generate_oss_distribution(
             std::env::consts::EXE_SUFFIX,
         ));
     }
-    for entry in plugin_ui_files(config) {
+    for entry in plugin_ui_entries(config) {
         checksums.push_str(&format!(
             "{}  {}\n",
             sha256(&release_root.join(entry))?,

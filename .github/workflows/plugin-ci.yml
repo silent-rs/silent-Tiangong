@@ -156,34 +156,10 @@ jobs:
             [[ -f "$protocol_manifest" ]] && has_protocol=true
             [[ -f "$wasm_manifest" ]] && has_wasm=true
             [[ -f "$sidecar_manifest" ]] && has_sidecar=true
-            # UI 有两种形态：v1 工程（package.json 构建）或 v2 声明式（manifest.ui
-            # 声明 contributions[].entry，静态文件随插件目录分发，无构建工程）。
-            manifest_has_ui="$(jq -r '.ui != null' "$manifest")"
-            package_ui=false
-            [[ -f "$package_json" ]] && package_ui=true
-            v2_ui_ok=false
-            if [[ "$manifest_has_ui" == "true" && "$package_ui" == "false" ]]; then
-              v2_ui_ok=true
-              while IFS= read -r entry; do
-                [[ -n "$entry" ]] || continue
-                if [[ ! -f "$root/$entry" ]]; then
-                  echo "Plugin $id v2 UI entry missing: $entry" >&2
-                  exit 1
-                fi
-              done < <(jq -r '[.ui.contributions[]?.entry] | .[]' "$manifest")
-            fi
-            if [[ "$package_ui" == "true" || "$v2_ui_ok" == "true" ]]; then
-              has_ui=true
-            fi
-            # v1 UI 工程必须在 manifest 声明 ui；声明了 ui 却既无工程也无完整
-            # entry 文件（v2 校验已在上文报错）的组合同样视为不匹配。
-            if [[ "$package_ui" == "true" && "$manifest_has_ui" != "true" ]]; then
-              echo "Plugin $id has package.json but no ui declaration in manifest" >&2
-              exit 1
-            fi
+            [[ -f "$package_json" ]] && has_ui=true
 
             uses_sdk=false
-            if [[ "$package_ui" == "true" ]] && jq -e '
+            if [[ "$has_ui" == "true" ]] && jq -e '
               ((.dependencies // {}) + (.devDependencies // {}))
               | has("@tiangong/plugin-sdk")
             ' "$package_json" >/dev/null; then
@@ -207,6 +183,11 @@ jobs:
               echo "Plugin $id must provide protocol and WASM together" >&2
               exit 1
             fi
+            manifest_has_ui="$(jq -r '.ui != null' "$manifest")"
+            if [[ "$manifest_has_ui" != "$has_ui" ]]; then
+              echo "Plugin $id UI manifest and package.json do not match" >&2
+              exit 1
+            fi
             if [[ "$has_protocol" != "true" && "$has_ui" != "true" ]]; then
               echo "Plugin $id has no checkable WASM or UI" >&2
               exit 1
@@ -223,7 +204,7 @@ jobs:
             if [[ "$has_sidecar" == "true" ]]; then
               sidecar="$(package_name "$sidecar_manifest")"
             fi
-            if [[ "$package_ui" == "true" ]]; then
+            if [[ "$has_ui" == "true" ]]; then
               if jq -e '.scripts.test // empty' "$package_json" >/dev/null; then
                 ui_test=true
               fi
@@ -238,9 +219,8 @@ jobs:
               --arg sidecar "$sidecar" \
               --argjson rust "$has_protocol" \
               --argjson ui "$has_ui" \
-              --argjson ui_build "$package_ui" \
               --argjson ui_test "$ui_test" \
-              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_build:$ui_build,ui_test:$ui_test,native:false,native_package:""}')"
+              '{id:$id,root:$root,manifest:$manifest,protocol:$protocol,wasm:$wasm,sidecar:$sidecar,rust:$rust,ui:$ui,ui_test:$ui_test,native:false,native_package:""}')"
             if [[ "$plugin_selected" == "true" ]]; then
               append_plugin "$item"
             fi
@@ -264,7 +244,7 @@ jobs:
               --arg id "$id" \
               --arg root "$root" \
               --arg package "$package" \
-              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_build:false,ui_test:false,native:true,native_package:$package}')"
+              '{id:$id,root:$root,manifest:"",protocol:"",wasm:"",sidecar:"",rust:false,ui:false,ui_test:false,native:true,native_package:$package}')"
             append_plugin "$item"
           done
 
@@ -389,7 +369,7 @@ jobs:
         run: cargo test --locked -p "$PACKAGE"
 
       - name: Setup Node
-        if: matrix.plugin.ui_build
+        if: matrix.plugin.ui
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -397,21 +377,21 @@ jobs:
           cache-dependency-path: ${{ matrix.plugin.root }}/yarn.lock
 
       - name: Enable Yarn
-        if: matrix.plugin.ui_build
+        if: matrix.plugin.ui
         run: |
           corepack enable
           corepack prepare yarn@1.22.22 --activate
 
       - name: Install plugin UI dependencies
-        if: matrix.plugin.ui_build
+        if: matrix.plugin.ui
         run: yarn --cwd "${{ matrix.plugin.root }}" install --frozen-lockfile
 
       - name: Test plugin UI
-        if: matrix.plugin.ui_build && matrix.plugin.ui_test
+        if: matrix.plugin.ui && matrix.plugin.ui_test
         run: yarn --cwd "${{ matrix.plugin.root }}" test
 
       - name: Build plugin UI
-        if: matrix.plugin.ui_build
+        if: matrix.plugin.ui
         run: yarn --cwd "${{ matrix.plugin.root }}" build
 
       - name: Validate plugin UI entries
