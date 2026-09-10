@@ -54,6 +54,15 @@ impl ServerCoreManager {
         }
     }
 
+    /// 取消指定会话当前执行中的轮次：向活跃 turn 投递 Cancel 信号，Core
+    /// 立即终止并以「已取消」错误唤醒全部等待方（快速停止，不排队）。
+    /// 返回 false 表示会话没有可取消的活跃执行。
+    pub async fn cancel_session_turn(&self, session_id: &str) -> Result<bool> {
+        let session_id = normalize_session_id(session_id)?;
+        let state = self.state.lock().await;
+        Ok(state.core_manager.cancel_core(&session_id))
+    }
+
     /// 从 App State 刷新全局模板，并按 session 为每个 Core 替换独立配置快照。
     pub async fn sync_config_from_state(&self) {
         let _config_guard = self.config_update_lock.lock().await;

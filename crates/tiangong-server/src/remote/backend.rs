@@ -37,6 +37,10 @@ pub trait ServerCoreBackend: Send + Sync {
 
     async fn delete_session(&self, session_id: &str) -> Result<bool>;
 
+    /// 取消会话当前执行中的轮次（快速停止：等待方立即收到取消错误）。
+    /// 返回 false 表示没有可取消的活跃执行。
+    async fn cancel_session_turn(&self, session_id: &str) -> Result<bool>;
+
     async fn sync_config_from_state(&self) -> Result<()>;
 }
 
@@ -72,6 +76,10 @@ impl ServerCoreBackend for ServerCoreManager {
 
     async fn delete_session(&self, session_id: &str) -> Result<bool> {
         ServerCoreManager::delete_session(self, session_id).await
+    }
+
+    async fn cancel_session_turn(&self, session_id: &str) -> Result<bool> {
+        ServerCoreManager::cancel_session_turn(self, session_id).await
     }
 
     async fn sync_config_from_state(&self) -> Result<()> {
