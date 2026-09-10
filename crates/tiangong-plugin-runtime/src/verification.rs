@@ -369,12 +369,13 @@ pub(crate) fn reverify_installed_sidecars_blocking(
                 }
             }
             Err(error) => {
+                let reason = format!("{error:#}");
                 tracing::warn!(
                     plugin_id = %installed.manifest.id,
-                    %error,
+                    error = %reason,
                     "旧插件 sidecar 补验证失败：有 UI 插件回退 UI Handler，无 UI 插件调用将返回不可用"
                 );
-                crate::registry::set_runtime_error(&installed.manifest.id, error.to_string());
+                crate::registry::set_runtime_error(&installed.manifest.id, reason);
             }
         }
     }

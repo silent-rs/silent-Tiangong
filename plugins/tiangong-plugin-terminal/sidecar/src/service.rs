@@ -430,7 +430,10 @@ impl TerminalService {
         *sequence
     }
 
-    fn spawn_session(&self, request: SpawnRequest) -> Result<SpawnResponse> {
+    fn spawn_session(&self, mut request: SpawnRequest) -> Result<SpawnResponse> {
+        if let Some(cwd) = &mut request.cwd {
+            *cwd = shell_compatible_cwd(cwd).to_string();
+        }
         let _spawn_guard = self.spawn_lock.lock().expect("终端创建锁损坏");
         let requested_session_id = request
             .session_id
@@ -1454,11 +1457,24 @@ fn command_from_request(request: &ExecRequest) -> Result<String> {
     else {
         return Ok(command);
     };
+    let cwd = shell_compatible_cwd(cwd);
     if cfg!(windows) {
         Ok(format!("cd /d {} && {}", shell_quote(cwd), command))
     } else {
         Ok(format!("cd {} && {}", shell_quote(cwd), command))
     }
+}
+
+/// Windows 的本地扩展路径可用于文件 API，但 cmd 不支持将其作为工作目录。
+/// 仅去掉本地盘符路径的前缀，不把真实 UNC 网络路径伪装成本地路径。
+fn shell_compatible_cwd(cwd: &str) -> &str {
+    if cfg!(windows)
+        && let Some(local) = cwd.strip_prefix(r"\\?\")
+        && local.as_bytes().get(1) == Some(&b':')
+    {
+        return local;
+    }
+    cwd
 }
 
 /// 按引号感知规则拆分命令字符串为（程序名, 参数列表）。
@@ -1988,7 +2004,7 @@ impl TerminalService {
             format!("命令已在{selection}结束，退出码 {exit_code}{cwd_note}")
         };
         ToolOutcome {
-            ok: true,
+            ok: !executed.timed_out && (executed.interactive_mode || exit_code == 0),
             summary,
             stdout: Some(executed.stdout),
             stderr: Some(executed.stderr),
@@ -2640,7 +2656,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_windows_首次执行并复用同一终端() {
         let cwd = tempfile::tempdir().expect("创建 Windows 测试目录失败");
-        let workspace = cwd.path().to_string_lossy().to_string();
+        let workspace = cwd
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         std::fs::write(cwd.path().join("terminal-ready-windows.txt"), "ok")
             .expect("写 Windows 测试文件失败");
         let service = TerminalService::new();
@@ -2701,6 +2722,18 @@ mod tests {
                 .contains("复用空闲终端"),
             "第二次执行未复用终端: {second}"
         );
+
+        let failed = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd":"cmd.exe","args":["/c","exit","7"],"timeout":5}),
+                    Some(("windows-session", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(failed["exit_code"], 7);
+        assert_eq!(failed["ok"], false, "非零退出状态不能报告工具成功");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         let display = service
