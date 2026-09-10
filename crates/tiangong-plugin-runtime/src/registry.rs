@@ -10,7 +10,6 @@ use semver::Version;
 use serde::Serialize;
 use sha2::Digest;
 use tiangong_core::core::Plugin;
-use tiangong_core::tool_override::ToolSpecProvider;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;

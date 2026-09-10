@@ -180,6 +180,20 @@ fn show_desktop_notification(
         .map_err(|err| err.to_string())
 }
 
+/// 宿主内部事件（托盘菜单等无窗口路径）的桌面通知：
+/// 权限未授予时静默跳过，不主动弹出权限请求。
+pub fn show_host_notification(app: &AppHandle, title: &str, body: &str) {
+    let granted = app
+        .notification()
+        .permission_state()
+        .map(|state| matches!(state, PermissionState::Granted))
+        .unwrap_or(false);
+    if !granted {
+        return;
+    }
+    let _ = show_desktop_notification(app, title.to_string(), body.to_string(), "tiangong-server");
+}
+
 fn parse_model_capability(
     capability: &str,
 ) -> Result<tiangong_llm::models_config::ModelCapability, String> {
@@ -3749,7 +3763,7 @@ pub async fn stop_server_with_intent(state: &TiangongApp) -> Result<String, Stri
     config.enabled = false;
     save_server_config_to_state(state, config).await?;
 
-    Ok("Server 已停止".to_string())
+    Ok(stop_server_summary("Server 已停止"))
 }
 
 async fn save_server_config_to_state(
