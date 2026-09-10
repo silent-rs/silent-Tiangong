@@ -4,10 +4,12 @@
 //! Phase B：扩展为 SQLite + Tantivy 双层协调。
 //! Phase C：扩展为 SQLite + Tantivy + Vector 三层协调（recall 通过 RecallEngine）。
 
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures_util::FutureExt;
 use tiangong_llm::{
     EmbeddingEndpointConfig, EmbeddingProvider, RerankEndpointConfig, RerankProvider,
     embedding_provider_from_config, rerank_provider_from_config,
@@ -167,7 +169,16 @@ impl MemoryStore {
             MemoryVectorMode::EmbeddedLanceDb => {
                 let base = memory_base_dir();
                 let needs_migration = migration::needs_vector_migration(&self.db, &base);
-                match LanceDbIndex::open(&base, embedding.dimension).await {
+                let opened = AssertUnwindSafe(LanceDbIndex::open(&base, embedding.dimension))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|panic| {
+                        Err(anyhow::anyhow!(
+                            "LanceDB 初始化发生异常: {}",
+                            panic_message(panic)
+                        ))
+                    });
+                match opened {
                     Ok(index) => {
                         if needs_migration {
                             migration::migrate_vectors(&self.db, &index, embedding.dimension).await;
@@ -308,21 +319,83 @@ impl MemoryStore {
         limit: usize,
     ) -> Vec<RecallHit> {
         // BM25 由 MemoryStore 统一执行，保证只有一个 IndexWriter
-        let bm25_hits = self
-            .tantivy
-            .as_ref()
-            .and_then(|tantivy| tantivy.search(&anchors.query, limit * 2).ok())
-            .unwrap_or_default();
+        let (bm25_hits, lexical_backend) = match self.tantivy.as_ref() {
+            Some(tantivy) => (
+                tantivy
+                    .search(&anchors.query, limit * 2)
+                    .unwrap_or_default(),
+                "bm25",
+            ),
+            None => (
+                self.sqlite_keyword_recall(anchors, limit * 2),
+                "sqlite_keyword",
+            ),
+        };
         tracing::debug!(
             query = %anchors.query,
             strategy = ?anchors.strategy,
             bm25_hit_count = bm25_hits.len(),
-            backend = "bm25",
+            backend = lexical_backend,
             "Memory BM25 召回完成"
         );
         self.recall_engine
             .recall(bm25_hits, &anchors.query, limit, anchors.strategy.as_ref())
             .await
+    }
+
+    fn sqlite_keyword_recall(&self, anchors: &RecallAnchors, limit: usize) -> Vec<RecallHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut terms = Vec::new();
+        let mut normalized = std::collections::HashSet::new();
+        for term in std::iter::once(anchors.query.as_str())
+            .chain(anchors.keywords.iter().map(String::as_str))
+        {
+            let term = term.trim();
+            if !term.is_empty() && normalized.insert(term.to_lowercase()) {
+                terms.push(term);
+            }
+        }
+
+        let mut hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let candidate_limit = limit.min(500);
+        for term in terms {
+            let nodes = match self.db.list_memory_nodes(
+                None,
+                Some(term),
+                Some(&MemoryStatus::Active),
+                None,
+                0,
+                candidate_limit,
+            ) {
+                Ok(nodes) => nodes,
+                Err(error) => {
+                    tracing::warn!(query = %term, %error, "Memory SQLite 关键词召回失败");
+                    continue;
+                }
+            };
+            for node in nodes {
+                if !seen.insert(node.id.clone()) {
+                    continue;
+                }
+                let score = sqlite_keyword_score(&node, term);
+                hits.push(RecallHit {
+                    node_id: node.id,
+                    title: node.title,
+                    summary: node.summary,
+                    score,
+                    kind: node.kind,
+                    importance: f64::from(node.importance),
+                    depth1_loaded: false,
+                });
+                if hits.len() >= candidate_limit {
+                    return hits;
+                }
+            }
+        }
+        hits
     }
 
     /// 加载已召回节点的完整内容，用于二跳展开。
@@ -802,6 +875,36 @@ impl MemoryStore {
     }
 }
 
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "未知异常".to_string()
+    }
+}
+
+fn sqlite_keyword_score(node: &MemoryNode, term: &str) -> f64 {
+    let term = term.to_lowercase();
+    let title = node.title.to_lowercase();
+    let summary = node.summary.to_lowercase();
+    let keyword_match = node
+        .keywords
+        .iter()
+        .any(|keyword| keyword.to_lowercase().contains(&term));
+    let base: f64 = if title.contains(&term) {
+        0.9
+    } else if keyword_match {
+        0.8
+    } else if summary.contains(&term) {
+        0.7
+    } else {
+        0.6
+    };
+    (base + f64::from(node.importance) * 0.05).min(1.0)
+}
+
 fn normalize_keywords(keywords: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::new();
     for keyword in keywords {
@@ -928,4 +1031,43 @@ fn memory_base_dir() -> PathBuf {
 
 fn default_vector_mode() -> MemoryVectorMode {
     MemoryVectorMode::EmbeddedLanceDb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::test_helpers::open_in_memory;
+    use crate::types::{Episode, EpisodeOutcome};
+
+    #[test]
+    fn sqlite_keyword_recall_is_available_without_native_indexes() {
+        let db = open_in_memory().unwrap();
+        let episode = Episode::new(
+            "fallback-session".to_string(),
+            "Windows 沙箱修复".to_string(),
+            "Memory 原生索引不可用时仍可召回".to_string(),
+            EpisodeOutcome::Success,
+            vec!["Windows".to_string(), "Memory".to_string()],
+            Vec::new(),
+            0.8,
+        );
+        let expected_id = episode.id.clone();
+        db.insert_episode(&episode, Some("fallback-workspace"))
+            .unwrap();
+        let store = MemoryStore {
+            db,
+            tantivy: None,
+            recall_engine: RecallEngine::bm25_only(),
+        };
+        let anchors = RecallAnchors {
+            keywords: vec!["Windows".to_string()],
+            query: "Windows".to_string(),
+            strategy: None,
+        };
+
+        let hits = store.sqlite_keyword_recall(&anchors, 5);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_id, expected_id);
+    }
 }

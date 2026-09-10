@@ -41,7 +41,8 @@ impl LanceDbIndex {
             tracing::warn!("Memory LanceDB __manifest 自愈失败，继续尝试打开: {err}");
         }
 
-        let db = connect(lancedb_path.to_str().unwrap_or("."))
+        let connection_uri = lancedb_connection_uri(&lancedb_path)?;
+        let db = connect(&connection_uri)
             .execute()
             .await
             .with_context(|| "连接 LanceDB 失败")?;
@@ -72,6 +73,18 @@ impl LanceDbIndex {
             schema,
         })
     }
+}
+
+#[cfg(windows)]
+fn lancedb_connection_uri(path: &Path) -> Result<String> {
+    url::Url::from_directory_path(path)
+        .map(String::from)
+        .map_err(|_| anyhow::anyhow!("LanceDB 目录无法转换为 file URI: {}", path.display()))
+}
+
+#[cfg(not(windows))]
+fn lancedb_connection_uri(path: &Path) -> Result<String> {
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[async_trait(?Send)]
@@ -362,5 +375,14 @@ mod tests {
         heal_legacy_manifest(tmp.path()).unwrap();
         assert!(!clean.exists());
         assert!(!tmp.path().join("__manifest").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lancedb_path_uses_file_uri() {
+        let uri = lancedb_connection_uri(Path::new(r"C:\Users\Test User\.tiangong\memory\lancedb"))
+            .unwrap();
+        assert!(uri.starts_with("file:///C:/"), "unexpected URI: {uri}");
+        assert!(uri.contains("Test%20User"), "unexpected URI: {uri}");
     }
 }

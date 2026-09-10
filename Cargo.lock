@@ -11000,6 +11000,7 @@ dependencies = [
  "tiangong-types",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -11199,7 +11200,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-protocol"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -11207,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-sidecar"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11437,7 +11438,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -11445,7 +11446,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.7"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",

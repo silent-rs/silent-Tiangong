@@ -22,7 +22,6 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     ViewResponse,
 };
 use serde::Deserialize;
-use tiangong_plugin_memory_protocol::control::Reconfigure;
 use tiangong_plugin_memory_protocol::recall::{
     Recall, RecallContext, RecallContextRequest, RecallQuery, RecallRequest,
 };
@@ -307,8 +306,8 @@ impl Guest for Component {
     }
 
     fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
-        // Core 配置事件只作为重新读取 Memory 配置的触发器。
-        let _ = sidecar_client::invoke::<Reconfigure>(&Empty {});
+        // Core 的聊天配置不属于 Memory 配置。后台在启动时读取自己的配置，
+        // 设置页保存时 SetConfig 已直接完成重载；新会话和每轮发送无需唤醒它。
         Ok(())
     }
 
