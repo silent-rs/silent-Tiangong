@@ -83,7 +83,11 @@ fn save(path: &Path, record: &Record) -> Result<()> {
 }
 
 fn capability(set: &mut CapabilitySet, generation: &str) -> Result<PSID> {
-    let name = wide(&format!("TiangongSandbox.Files.{generation}"));
+    add_named_capability(set, &format!("TiangongSandbox.Files.{generation}"))
+}
+
+pub(super) fn add_named_capability(set: &mut CapabilitySet, name: &str) -> Result<PSID> {
+    let name = wide(name);
     let mut groups: *mut PSID = std::ptr::null_mut();
     let mut group_count = 0;
     let mut sids: *mut PSID = std::ptr::null_mut();

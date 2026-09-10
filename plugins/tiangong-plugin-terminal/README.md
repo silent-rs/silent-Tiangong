@@ -52,3 +52,9 @@ sidecar 插件必须带官方签名才能启动原生 sidecar（`tauri signer` �
   workspace，缺失即拒绝执行
 - 调用闭合：Handler 不设统一时限，由会话取消或宿主退出闭合；
   `run_command` / `run_shell` 仅在调用参数显式提供 `timeout` 时中断命令
+
+### Windows 默认终端
+
+Windows 默认使用系统 PowerShell；已设置 `SHELL` 时沿用其选择。就绪探针、参数引用及执行结果按实际 Shell 处理。PowerShell 使用无个人配置的交互会话，避免启动脚本及 PSReadLine 干扰命令边界；不修改系统执行策略。CMD 命令可通过 `run_command` 调用 `cmd.exe` 并传入 `/d`、`/c` 和脚本参数，显式创建的 CMD 终端也可连续执行。
+
+CMD 在 Windows 沙箱内需要读取磁盘根的基本信息；对应的最小权限准备见沙箱 README，不等同于开放磁盘文件访问。

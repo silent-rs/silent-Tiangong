@@ -69,6 +69,12 @@ pub trait Plugin:
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
     fn set_trust_mode(&self, _trust: TrustMode) {}
 
+    /// 一次应用本轮运行上下文；默认兼容原有插件的两个通知入口。
+    fn set_execution_context(&self, workspace: Option<&Path>, trust: TrustMode) {
+        self.set_workspace(workspace);
+        self.set_trust_mode(trust);
+    }
+
     /// 注入状态反馈通道（复用 worker 的命令通道）。
     ///
     /// core 在 TurnContext 构建后、turn task 启动前调用一次。需要向 session 主动

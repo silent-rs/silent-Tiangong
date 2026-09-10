@@ -9,23 +9,27 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('@xterm/xterm', () => {
-  const TerminalMock = vi.fn().mockImplementation(() => ({
-    loadAddon: vi.fn(),
-    open: vi.fn(),
-    reset: vi.fn(),
-    focus: vi.fn(),
-    write: vi.fn(),
-    dispose: vi.fn(),
-    onData: vi.fn(),
-    buffer: { active: { baseY: 0 } },
-    rows: 24,
-    cols: 80,
-    scrollToBottom: vi.fn(),
-    refresh: vi.fn(),
-  }));
+  const TerminalMock = vi.fn().mockImplementation(function () {
+    return {
+      loadAddon: vi.fn(),
+      open: vi.fn(),
+      reset: vi.fn(),
+      focus: vi.fn(),
+      write: vi.fn(),
+      dispose: vi.fn(),
+      onData: vi.fn(),
+      buffer: { active: { baseY: 0 } },
+      rows: 24,
+      cols: 80,
+      scrollToBottom: vi.fn(),
+      refresh: vi.fn(),
+    };
+  });
   return { Terminal: TerminalMock };
 });
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })) }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn().mockImplementation(function () {
+    return { fit: vi.fn() };
+  }) }));
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 
 // SDK 桩：各用例注入 bridge 与 shadow runtime 后动态加载 main.ts。

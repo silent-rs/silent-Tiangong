@@ -8,18 +8,22 @@ import { describe, expect, it, vi } from 'vitest';
 
 // xterm 在 jsdom 下需要 canvas mock
 vi.mock('@xterm/xterm', () => {
-  const TerminalMock = vi.fn().mockImplementation(() => ({
-    loadAddon: vi.fn(),
-    open: vi.fn(),
-    reset: vi.fn(),
-    focus: vi.fn(),
-    write: vi.fn(),
-    dispose: vi.fn(),
-    onData: vi.fn(),
-  }));
+  const TerminalMock = vi.fn().mockImplementation(function () {
+    return {
+      loadAddon: vi.fn(),
+      open: vi.fn(),
+      reset: vi.fn(),
+      focus: vi.fn(),
+      write: vi.fn(),
+      dispose: vi.fn(),
+      onData: vi.fn(),
+    };
+  });
   return { Terminal: TerminalMock };
 });
-vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })) }));
+vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn().mockImplementation(function () {
+    return { fit: vi.fn() };
+  }) }));
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}));
 
 import { createTerminalView } from './src/terminal-view';

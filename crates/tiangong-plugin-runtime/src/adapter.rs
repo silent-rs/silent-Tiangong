@@ -39,6 +39,8 @@ pub struct WasmPluginAdapter {
     /// 反馈通道（每 turn 注入），供 handle 发送流事件。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
+    /// 串行化配置与运行上下文通知，避免旧通知晚完成覆盖新状态。
+    context_updates: Mutex<()>,
     enabled: AtomicBool,
     sidecar: Option<Arc<dyn SidecarConnection>>,
     /// 声明冻结快照：首次成功读取后，同一次运行内 tools/prompt 固定
@@ -56,6 +58,8 @@ struct ReloadContext {
     session_json: Option<String>,
     trust_mode: Option<TrustMode>,
     exec_env: std::collections::BTreeMap<String, String>,
+    config_applied: bool,
+    workspace_applied: bool,
 }
 
 impl WasmPluginAdapter {
@@ -79,6 +83,7 @@ impl WasmPluginAdapter {
             config,
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
+            context_updates: Mutex::new(()),
             enabled: AtomicBool::new(enabled),
             sidecar,
             cached_tools: Mutex::new(None),
@@ -100,6 +105,7 @@ impl WasmPluginAdapter {
             config,
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
+            context_updates: Mutex::new(()),
             enabled: AtomicBool::new(enabled),
             sidecar,
             cached_tools: Mutex::new(None),
@@ -163,12 +169,17 @@ impl WasmPluginAdapter {
     }
 
     pub(crate) fn replace_inner(&self, replacement: Arc<Mutex<WasmPlugin>>) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let mut current = self
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = Some(replacement);
         drop(current);
+        self.reset_applied_context();
         // 换代即新版本：声明缓存作废，避免旧版本声明兜住新版本实例。
         self.clear_declaration_cache();
     }
@@ -179,6 +190,10 @@ impl WasmPluginAdapter {
     /// 安装目录就无法 rename/delete，升级与卸载会失败。在改写目录前调用本方法释放句柄，
     /// 后续 reload 会重建实例。
     pub(crate) fn release_inner(&self) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let mut current = self
             .inner
             .write()
@@ -186,6 +201,7 @@ impl WasmPluginAdapter {
         *current = None;
         // 声明读取会先锁缓存再读取 inner，不能持有 inner 写锁清缓存。
         drop(current);
+        self.reset_applied_context();
         self.clear_declaration_cache();
     }
 
@@ -207,6 +223,38 @@ impl WasmPluginAdapter {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn reset_applied_context(&self) {
+        let mut context = self.context.lock().unwrap_or_else(|p| p.into_inner());
+        context.config_applied = false;
+        context.workspace_applied = false;
+    }
+
+    /// 调用方持有 context_updates。只有成功应用后才跳过重复通知。
+    fn apply_workspace_context(&self) {
+        let (workspace, full_trust) = {
+            let context = self.context.lock().unwrap_or_else(|p| p.into_inner());
+            if context.workspace_applied || !self.is_enabled() {
+                return;
+            }
+            (
+                context.workspace.clone(),
+                context.trust_mode == Some(TrustMode::FullTrust),
+            )
+        };
+        match self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(workspace, full_trust))
+        {
+            Ok(()) => {
+                self.context
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .workspace_applied = true
+            }
+            Err(error) => {
+                tracing::warn!(plugin_id = %self.id, %error, "更新 wasm 工作目录与信任模式失败")
+            }
+        }
     }
 }
 
@@ -231,6 +279,10 @@ impl Plugin for WasmPluginAdapter {
     /// CoreConfig 变更：序列化为 JSON 转发到 WASM 组件的 on-config-updated。
     /// 序列化失败（不应发生）或 WASM 调用失败时仅记录 warning，不阻断 core 流程。
     fn on_config_updated(&self, config: &CoreConfig) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let config_json = match plugin_config_payload(config) {
             Ok(json) => json,
             Err(e) => {
@@ -244,14 +296,25 @@ impl Plugin for WasmPluginAdapter {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let changed = context.config_json.as_ref() != Some(&config_json);
+            if !changed && context.config_applied {
+                return;
+            }
             context.config_json = Some(config_json.clone());
+            context.config_applied = false;
             changed
         };
-        if self.is_enabled()
-            && let Err(e) =
-                self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
-        {
-            tracing::warn!("通知 wasm 插件配置变更失败: {e}");
+        if self.is_enabled() {
+            match self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json)) {
+                Ok(()) => {
+                    self.context
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .config_applied = true
+                }
+                Err(error) => {
+                    tracing::warn!(plugin_id = %self.id, %error, "通知 wasm 插件配置变更失败")
+                }
+            }
         }
         // 在配置通知结束后清理，避免并发读取把旧声明留到下一轮。
         // 失败也可能已部分更新插件状态，不能继续沿用旧配置的声明。
@@ -304,37 +367,51 @@ impl Plugin for WasmPluginAdapter {
     ///
     /// 同时携带当前信任模式（full_trust），供插件放宽/收紧工作区外路径校验。
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let ws = workspace.map(|p| p.to_string_lossy().to_string());
         if let Ok(mut context) = self.context.lock() {
+            if context.workspace != ws {
+                context.workspace_applied = false;
+            }
             context.workspace = ws.clone();
         }
-        if !self.is_enabled() {
-            return;
-        }
-        let full_trust = self.is_full_trust();
-        if let Err(e) =
-            self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws, full_trust))
-        {
-            tracing::warn!("wasm set_workspace 失败: {e}");
-        }
+        self.apply_workspace_context();
     }
 
     fn set_trust_mode(&self, trust: TrustMode) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if let Ok(mut context) = self.context.lock() {
+            if context.trust_mode != Some(trust) {
+                context.workspace_applied = false;
+            }
             context.trust_mode = Some(trust);
         }
         // 信任模式可能在 set_workspace 之后变更：重新调一次 set_workspace，
         // 把最新 trust 推送给 WASM（workspace 保持 context 中缓存的值不变）。
-        if !self.is_enabled() {
-            return;
-        }
-        let ws = self.context.lock().ok().and_then(|c| c.workspace.clone());
-        let full_trust = matches!(trust, TrustMode::FullTrust);
-        if let Err(e) =
-            self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws, full_trust))
+        self.apply_workspace_context();
+    }
+
+    fn set_execution_context(&self, workspace: Option<&std::path::Path>, trust: TrustMode) {
+        let _update = self
+            .context_updates
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let ws = workspace.map(|p| p.to_string_lossy().to_string());
         {
-            tracing::warn!("wasm set_trust_mode 推送失败: {e}");
+            let mut context = self.context.lock().unwrap_or_else(|p| p.into_inner());
+            if context.workspace != ws || context.trust_mode != Some(trust) {
+                context.workspace_applied = false;
+            }
+            context.workspace = ws;
+            context.trust_mode = Some(trust);
         }
+        self.apply_workspace_context();
     }
 
     fn set_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
@@ -702,6 +779,7 @@ mod unloaded_adapter_tests {
             id: "unloaded-plugin".into(),
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
+            context_updates: Mutex::new(()),
             enabled: AtomicBool::new(true),
             sidecar: None,
             cached_tools: Mutex::new(None),
@@ -769,16 +847,39 @@ mod unloaded_adapter_tests {
 
         let mut config = CoreConfig::default();
         adapter.context.lock().unwrap().config_json = Some(plugin_config_payload(&config).unwrap());
+        adapter.context.lock().unwrap().config_applied = true;
         adapter.on_config_updated(&config);
+        assert!(
+            adapter.context.lock().unwrap().config_applied,
+            "相同配置不应再次调用已不可用的实例"
+        );
         assert_eq!(adapter.try_tool_specs().unwrap()[0].name, "frozen_tool");
         assert_eq!(adapter.try_prompt_sections().unwrap(), vec!["冻结提示"]);
 
         config.llm.chat.model = "changed-model".into();
         adapter.on_config_updated(&config);
+        assert!(
+            !adapter.context.lock().unwrap().config_applied,
+            "失败的配置通知不能缓存为成功"
+        );
         assert!(adapter.cached_tools.lock().unwrap().is_none());
         assert!(adapter.cached_prompt_sections.lock().unwrap().is_none());
         assert!(adapter.try_tool_specs().is_err());
         assert!(adapter.try_prompt_sections().is_err());
+
+        let workspace = std::path::Path::new("/test-workspace");
+        {
+            let mut context = adapter.context.lock().unwrap();
+            context.workspace = Some(workspace.to_string_lossy().to_string());
+            context.trust_mode = Some(TrustMode::FullTrust);
+            context.workspace_applied = true;
+        }
+        adapter.set_execution_context(Some(workspace), TrustMode::FullTrust);
+        adapter.set_workspace(Some(workspace));
+        adapter.set_trust_mode(TrustMode::FullTrust);
+        assert!(adapter.context.lock().unwrap().workspace_applied);
+        adapter.set_execution_context(None, TrustMode::Supervised);
+        assert!(!adapter.context.lock().unwrap().workspace_applied);
 
         // 升级换代（换内部实例）：冻结作废，读取失败重新传播。
         *adapter.cached_tools.lock().unwrap() = Some(specs);

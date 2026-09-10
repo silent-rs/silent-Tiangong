@@ -227,6 +227,8 @@ pub(crate) fn save_verification(
             .with_context(|| format!("写入验证记录临时文件失败: {}", temp_path.display()))?;
         file.sync_all()
             .with_context(|| format!("落盘验证记录临时文件失败: {}", temp_path.display()))?;
+        // Windows ReplaceFileW 需要重新打开替换文件；先释放写入句柄。
+        drop(file);
         replace_verification_file(&temp_path, &path).with_context(|| {
             format!(
                 "替换验证记录失败: {} -> {}",
@@ -317,7 +319,7 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
     let spawned = std::thread::Builder::new()
         .name("reverify-sidecars".to_string())
         .spawn(move || {
-            reverify_installed_sidecars_blocking(&storage_root);
+            reverify_installed_sidecars_blocking(&storage_root, true);
             REVERIFY_RUNNING.store(false, Ordering::Release);
         });
     if let Err(error) = spawned {
@@ -327,7 +329,10 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
 }
 
 /// 同步补验证（后台线程体；测试直接调用）。
-fn reverify_installed_sidecars_blocking(storage_root: &Path) {
+pub(crate) fn reverify_installed_sidecars_blocking(
+    storage_root: &Path,
+    prewarm_after_verification: bool,
+) {
     let (installed_plugins, _) = crate::registry::discover_installed_plugins(storage_root);
     for installed in installed_plugins {
         if installed.manifest.sidecar.is_none() || !installed.enabled {
@@ -354,17 +359,23 @@ fn reverify_installed_sidecars_blocking(storage_root: &Path) {
                     );
                     // 独立验证进程已经退出，此时再启动常驻进程，不会争用
                     // 数据库或索引目录。
-                    crate::registry::prewarm_plugin_sidecar(storage_root, &installed.manifest.id);
+                    if prewarm_after_verification {
+                        crate::registry::prewarm_plugin_sidecar(
+                            storage_root,
+                            &installed.manifest.id,
+                        );
+                    }
                     tracing::info!(plugin_id = %installed.manifest.id, "旧插件 sidecar 补验证完成");
                 }
             }
             Err(error) => {
+                let reason = format!("{error:#}");
                 tracing::warn!(
                     plugin_id = %installed.manifest.id,
-                    %error,
+                    error = %reason,
                     "旧插件 sidecar 补验证失败：有 UI 插件回退 UI Handler，无 UI 插件调用将返回不可用"
                 );
-                crate::registry::set_runtime_error(&installed.manifest.id, error.to_string());
+                crate::registry::set_runtime_error(&installed.manifest.id, reason);
             }
         }
     }
@@ -433,6 +444,8 @@ mod tests {
             capabilities: vec!["tool:demo".into()],
             verified_at: "2026-09-03 12:00:00".into(),
         };
+        save_verification(&plugin, &record).unwrap();
+        // 补验证必须能覆盖已有记录（Windows 不能持写入句柄替换文件）。
         save_verification(&plugin, &record).unwrap();
         let stored_path = verification_path(&plugin).unwrap();
         assert_eq!(

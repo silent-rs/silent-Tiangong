@@ -102,6 +102,31 @@ fn main() {
         return;
     }
     #[cfg(windows)]
+    if matches!(
+        args.first().map(String::as_str),
+        Some("prepare-volume-metadata" | "revoke-volume-metadata")
+    ) {
+        let result = if args.len() == 2 {
+            if args[0] == "prepare-volume-metadata" {
+                tiangong_sandbox::sandbox::windows::prepare_volume_metadata(Path::new(&args[1]))
+            } else {
+                tiangong_sandbox::sandbox::windows::revoke_volume_metadata(Path::new(&args[1]))
+            }
+        } else {
+            Err(anyhow::anyhow!(
+                "用法: prepare-volume-metadata <工作区绝对路径>"
+            ))
+        };
+        match result {
+            Ok(root) => println!("磁盘基本信息访问已更新: {}", root.display()),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(EXIT_SANDBOX_UNAVAILABLE);
+            }
+        }
+        return;
+    }
+    #[cfg(windows)]
     if args.first().map(String::as_str) == Some("complete-update") {
         if let Err(error) = run_windows_update_completer(&args) {
             eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
