@@ -24,7 +24,8 @@ use crate::protocol::{
 };
 use crate::sidecar::{
     EXEC_ENV_JSON_ENV, PLUGIN_DATA_DIR_ENV, PLUGIN_ENDPOINT_ENV, PLUGIN_ID_ENV, PLUGIN_VERSION_ENV,
-    ResponseWait, STORAGE_ROOT_ENV, SidecarConfig, SidecarConnection, SidecarInvokeError,
+    ResponseWait, SERVER_TOKEN_ENV, SERVER_URL_ENV, STORAGE_ROOT_ENV, SidecarConfig,
+    SidecarConnection, SidecarInvokeError,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
@@ -736,6 +737,14 @@ impl StdioSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(PROCESS_GROUP_ENV, "1");
+        // 注入本机 server 连接信息（scheduler/subagent 等需回调 host 的 sidecar 使用；
+        // 与 TCP 版 spawn 保持一致，endpoint 变化时由重启机制换代）。
+        if let Some(url) = self.config.server_url.as_deref() {
+            command.env(SERVER_URL_ENV, url);
+        }
+        if let Some(token) = self.config.server_token.as_deref() {
+            command.env(SERVER_TOKEN_ENV, token);
+        }
         // 运行期解释器环境的权威来源是缓存：不修改宿主全局环境，仅对
         // 新建子进程注入覆盖（TIANGONG_*_PATH + 前置解释器目录的 PATH），
         // 恢复后的新路径由此传导给 sidecar 及其派生的命令通道进程。

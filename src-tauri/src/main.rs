@@ -1117,10 +1117,17 @@ fn handle_tray_menu_event(app: tauri::AppHandle, menu_id: &str, ui: TrayServerUi
             tauri::async_runtime::spawn(async move {
                 let _ = ui.status_item.set_text("Server 状态：停止中");
                 let state = app_clone.state::<tiangong_app::TiangongApp>();
-                if let Err(error) =
-                    tiangong_app::commands::stop_server_with_intent(state.inner()).await
-                {
-                    warn!(%error, "菜单栏停止 Server 失败");
+                match tiangong_app::commands::stop_server_with_intent(state.inner()).await {
+                    // 停止结果经桌面通知反馈，依赖 Server 的插件提示不因
+                    // 菜单栏入口而丢失。
+                    Ok(message) => {
+                        tiangong_app::commands::show_host_notification(
+                            &app_clone,
+                            "天工 Server",
+                            &message,
+                        );
+                    }
+                    Err(error) => warn!(%error, "菜单栏停止 Server 失败"),
                 }
                 if let Some(tray) = tray.as_ref() {
                     refresh_tray_server_status(&app_clone, tray, &ui);

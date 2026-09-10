@@ -178,10 +178,32 @@ fn stop_installed_sidecar(storage_root: &Path, plugin_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 列出声明 `require_server` 且已启用的插件（id, name）：宿主在关闭
+/// Server 时据此提示用户受影响的插件。声明只描述依赖，不触发重启
+/// 或状态广播。
+pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return Vec::new();
+    };
+    plugins
+        .iter()
+        .filter(|(_, loaded)| loaded.enabled && loaded.manifest.require_server)
+        .map(|(id, loaded)| {
+            let name = loaded
+                .descriptor
+                .as_ref()
+                .map(|value| value.name.clone())
+                .unwrap_or_else(|| id.clone());
+            (id.clone(), name)
+        })
+        .collect()
+}
+
 /// 依赖 server 回调的插件 ID 列表。
 ///
 /// 这些 sidecar 会在运行时经 HTTP 回调本机 server，server 连接信息变化时必须重启。
 const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler"];
+
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";
 
@@ -1096,6 +1118,7 @@ mod tests {
     fn refresh_verified_sidecar_clears_only_runtime_error() {
         let manifest = PluginManifest {
             schema_version: 2,
+            require_server: false,
             id: "load-error-demo".into(),
             version: "0.1.0".into(),
             wasm: None,
