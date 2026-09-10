@@ -227,12 +227,9 @@ impl TiangongApp {
             let result = tauri::async_runtime::spawn_blocking(move || {
                 let _ = tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
                 tracing::info!("启动沙箱检查结束，开始后台加载插件");
-                tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root);
-                if tiangong_plugin_runtime::registry::sidecars_shutting_down() {
-                    Err("应用正在退出，插件加载已取消".to_string())
-                } else {
-                    Ok(())
-                }
+                tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root)
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:#}"))
             })
             .await
             .map_err(|error| format!("插件预加载失败：{error}"))

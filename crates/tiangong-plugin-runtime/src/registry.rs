@@ -537,35 +537,55 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
-    preload_installed_plugins_inner(storage_root, false)
+    preload_installed_plugins_inner(storage_root, false).unwrap_or_else(|error| {
+        tracing::warn!(error = %format!("{error:#}"), "插件预加载失败");
+        0
+    })
 }
 
 /// 桌面启动准备：全部验证与常驻进程准备完成后才返回，不把任务留给首次发送。
-pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> usize {
+pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> Result<usize> {
     preload_installed_plugins_inner(storage_root, true)
 }
 
-fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) -> usize {
+fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) -> Result<usize> {
     if sidecars_shutting_down() {
-        return 0;
+        bail!("应用正在退出，插件准备已取消");
     }
     migrate_legacy_plugin_ids(storage_root);
 
-    let Ok(_operation) = LOAD_OPERATION.write() else {
-        tracing::warn!("插件加载操作锁已损坏");
-        return 0;
-    };
+    let _operation = LOAD_OPERATION
+        .write()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    if wait_for_ready {
+        match std::fs::read_dir(storage_root.join("plugins")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("读取已安装插件目录失败"),
+        }
+    }
     if sidecars_shutting_down() {
-        return 0;
+        bail!("应用正在退出，插件准备已取消");
     }
 
     let (installed_plugins, discovered_invalid) = discover_installed_plugins(storage_root);
-    if let Ok(mut registered) = invalid_plugins().lock() {
-        *registered = discovered_invalid;
-    }
+    let mut failures = discovered_invalid
+        .iter()
+        .filter(|entry| {
+            let directory = storage_root.join("plugins").join(&entry.id);
+            !directory.join(DISABLED_MARKER).is_file()
+                && PluginManifest::load(&directory.join(MANIFEST_FILE))
+                    .map(|manifest| manifest.available_at("desktop"))
+                    .unwrap_or(true)
+        })
+        .map(|entry| format!("{}: {}", entry.id, entry.reason))
+        .collect::<Vec<_>>();
+    *invalid_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("无效插件登记锁已损坏"))? = discovered_invalid;
     for installed in &installed_plugins {
         if sidecars_shutting_down() {
-            return 0;
+            bail!("应用正在退出，插件准备已取消");
         }
         // 幂等跳过仅当登记属于本次扫描到的同一安装目录：同 id 但目录
         // 不同（如测试以不同 storage root 反复预加载）必须以最后一次
@@ -574,9 +594,12 @@ fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) ->
         let unchanged = loaded_plugins()
             .lock()
             .map(|plugins| {
-                plugins
-                    .get(&installed.manifest.id)
-                    .is_some_and(|loaded| loaded.directory == installed.directory)
+                plugins.get(&installed.manifest.id).is_some_and(|loaded| {
+                    loaded.directory == installed.directory
+                        && loaded.manifest.version == installed.manifest.version
+                        && loaded.enabled == installed.enabled
+                        && loaded.load_error.is_none()
+                })
             })
             .unwrap_or(false);
         if unchanged {
@@ -592,20 +615,51 @@ fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) ->
             installed.clone(),
             !wait_for_ready && !cfg!(windows),
         );
-        if let Ok(mut plugins) = loaded_plugins().lock() {
-            plugins.insert(installed.manifest.id.clone(), loaded);
-        }
+        loaded_plugins()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("插件登记锁已损坏"))?
+            .insert(installed.manifest.id.clone(), loaded);
     }
     drop(_operation);
     if wait_for_ready {
-        crate::verification::reverify_installed_sidecars_blocking(storage_root, false);
-        for installed in &installed_plugins {
-            if sidecars_shutting_down() {
-                break;
-            }
-            prewarm_plugin_sidecar_blocking(storage_root, &installed.manifest.id);
+        if let Err(error) = crate::verification::reverify_installed_sidecars_blocking(
+            storage_root,
+            false,
+            Some("desktop"),
+        ) {
+            failures.push(format!("{error:#}"));
         }
-        return installed_plugins.len();
+        for installed in installed_plugins
+            .iter()
+            .filter(|installed| installed.enabled && installed.manifest.available_at("desktop"))
+        {
+            if sidecars_shutting_down() {
+                bail!("应用正在退出，插件准备已取消");
+            }
+            if let Err(error) =
+                prewarm_plugin_sidecar_blocking(storage_root, &installed.manifest.id)
+            {
+                failures.push(format!("{}: {error:#}", installed.manifest.id));
+            }
+            let plugins = loaded_plugins()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("插件登记锁已损坏"))?;
+            if let Some(error) = plugins
+                .get(&installed.manifest.id)
+                .and_then(|loaded| loaded.load_error.as_ref())
+            {
+                failures.push(format!("{}: {error}", installed.manifest.id));
+            }
+        }
+        if sidecars_shutting_down() {
+            bail!("应用正在退出，插件准备已取消");
+        }
+        if !failures.is_empty() {
+            failures.sort();
+            failures.dedup();
+            bail!("插件启动准备失败：\n{}", failures.join("\n"));
+        }
+        return Ok(installed_plugins.len());
     }
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。
@@ -613,7 +667,7 @@ fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) ->
     #[cfg(windows)]
     prewarm_resident_sidecars(storage_root);
 
-    installed_plugins.len()
+    Ok(installed_plugins.len())
 }
 
 /// 若 `plugin_id` 是已登记的无效插件目录则删除它并返回 true。
@@ -1095,6 +1149,128 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tiangong_core::MentionCandidate;
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_preparation_retries_failed_load_and_skips_disabled_plugins() {
+        let root = tempfile::tempdir().unwrap();
+        let config_directory = root.path().join("config");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        tiangong_config::registry::init_from_dir(&config_directory);
+        let id = format!("startup-load-{}", scru128::new());
+        let directory = root.path().join("plugins").join(&id);
+        std::fs::create_dir_all(directory.join("app")).unwrap();
+        std::fs::write(directory.join("app/index.html"), "ready").unwrap();
+        let mut manifest = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
+            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]},
+            "wasm":{"binary":"broken.wasm"}});
+        std::fs::write(directory.join("broken.wasm"), "invalid wasm").unwrap();
+        std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        assert!(format!("{error:#}").contains(&id), "{error:#}");
+        std::fs::write(directory.join(DISABLED_MARKER), "").unwrap();
+        prepare_desktop_startup_plugins(root.path()).expect("已禁用的失败插件不阻止启动");
+        std::fs::remove_file(directory.join(DISABLED_MARKER)).unwrap();
+        manifest["entrypoints"] = serde_json::json!(["cli"]);
+        std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+        prepare_desktop_startup_plugins(root.path()).expect("非 desktop 插件不阻止启动");
+        manifest.as_object_mut().unwrap().remove("wasm");
+        manifest["entrypoints"] = serde_json::json!(["desktop"]);
+        std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+        assert_eq!(prepare_desktop_startup_plugins(root.path()).unwrap(), 1);
+        assert!(
+            loaded_plugins()
+                .lock()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .load_error
+                .is_none()
+        );
+        loaded_plugins().lock().unwrap().remove(&id);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_preparation_reports_verification_and_resident_failures_then_recovers() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct RecoverableSidecar {
+            failing: AtomicBool,
+            starts: AtomicUsize,
+        }
+        impl SidecarConnection for RecoverableSidecar {
+            fn invoke(&self, _: &str, _: &str) -> Result<String> {
+                Ok("{}".into())
+            }
+            fn ensure_running(&self) -> Result<()> {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                if self.failing.load(Ordering::SeqCst) {
+                    bail!("resident temporarily unavailable");
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config_directory = root.path().join("config");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        tiangong_config::registry::init_from_dir(&config_directory);
+        let id = format!("startup-resident-{}", scru128::new());
+        let directory = root.path().join("plugins").join(&id);
+        std::fs::create_dir_all(directory.join("app")).unwrap();
+        std::fs::write(directory.join("app/index.html"), "ready").unwrap();
+        let binary = format!("test-sidecar{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(directory.join(&binary), "not an executable").unwrap();
+        let manifest = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
+            "permissions":["sidecar.invoke"],"entrypoints":["desktop"],
+            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]},
+            "sidecar":{"binary":binary,"lifecycle":"resident","startup_timeout_ms":500}});
+        std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
+        let artifact = |path: &str| serde_json::json!({"path":path,"sha256":hex::encode(sha2::Sha256::digest(std::fs::read(directory.join(path)).unwrap()))});
+        let release = serde_json::json!({"schema_version":1,"id":id,"version":"0.1.0","publisher":"local",
+            "permissions":["sidecar.invoke"],"manifest":artifact(MANIFEST_FILE),
+            "ui":[artifact("app/index.html")],"sidecar":artifact(&binary)});
+        std::fs::write(directory.join("release.json"), release.to_string()).unwrap();
+        crate::trust::sign_with_user_key(root.path(), &directory.join("release.json")).unwrap();
+        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("插件验证失败"), "{error:#}");
+        assert!(format!("{error:#}").contains(&id), "{error:#}");
+        // 在同一入口中分别验证“验证记录可用但启动失败”和“失败后恢复”。
+        let connection = Arc::new(RecoverableSidecar {
+            failing: AtomicBool::new(true),
+            starts: AtomicUsize::new(0),
+        });
+        for (key, cached) in sidecar_connections().lock().unwrap().iter_mut() {
+            if key.directory == directory {
+                *cached = connection.clone();
+            }
+        }
+        loaded_plugins()
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .sidecar = Some(connection.clone());
+        let record = crate::verification::SidecarVerification {
+            plugin_id: id.clone(),
+            plugin_version: "0.1.0".into(),
+            artifact_digest: crate::verification::artifact_digest(&directory).unwrap(),
+            protocol_version: crate::protocol::PROTOCOL_VERSION.into(),
+            capabilities: Vec::new(),
+            verified_at: chrono::Local::now().naive_local().to_string(),
+        };
+        crate::verification::save_verification(&directory, &record).unwrap();
+        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("resident temporarily unavailable"),
+            "{error:#}"
+        );
+        connection.failing.store(false, Ordering::SeqCst);
+        assert_eq!(prepare_desktop_startup_plugins(root.path()).unwrap(), 1);
+        assert_eq!(connection.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(loaded_runtime_error(&id), None);
+        remove_sidecar_connection(&directory);
+        loaded_plugins().lock().unwrap().remove(&id);
+    }
 
     fn candidate(kind: &str, value: &str) -> MentionCandidate {
         MentionCandidate {
@@ -2318,7 +2494,7 @@ pub fn prewarm_resident_sidecars(storage_root: &Path) {
                     if sidecars_shutting_down() {
                         break;
                     }
-                    prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id);
+                    let _ = prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id);
                 }
                 tracing::info!(
                     elapsed_ms = started.elapsed().as_millis() as u64,
@@ -2338,37 +2514,35 @@ pub fn prewarm_plugin_sidecar(storage_root: &Path, plugin_id: &str) {
     let plugin_id = plugin_id.to_string();
     let spawned = std::thread::Builder::new()
         .name(format!("prewarm-sidecar-{plugin_id}"))
-        .spawn(move || prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id));
+        .spawn(move || {
+            let _ = prewarm_plugin_sidecar_blocking(&storage_root, &plugin_id);
+        });
     if let Err(error) = spawned {
         tracing::debug!(%error, "创建 sidecar 预热线程失败");
     }
 }
 
-fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) {
-    // 准备任务可共享读锁；安装、卸载、补验证和退出仍独占写锁。
-    let Ok(_operation) = LOAD_OPERATION.read() else {
-        return;
-    };
+fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Result<()> {
+    let _operation = LOAD_OPERATION
+        .read()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     if sidecars_shutting_down() {
-        return;
+        bail!("应用正在退出，插件准备已取消");
     }
-    let Ok(installed) = find_installed_plugin(storage_root, plugin_id) else {
-        return;
-    };
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
     if !installed.enabled || !installed.manifest.should_preload_sidecar() {
-        return;
+        return Ok(());
     }
-    #[cfg(windows)]
     if crate::verification::load_valid_capabilities(&installed.directory, &installed.manifest)
         .is_none()
     {
-        return;
+        bail!("插件尚未通过完整验证，无法准备常驻进程");
     }
-    match sidecar_connection(storage_root, &installed, false)
-        .and_then(|connection| connection.ensure_running())
-    {
+    let result = resolve_sidecar(storage_root, &installed, false)
+        .and_then(|connection| connection.context("常驻插件缺少后台连接"))
+        .and_then(|connection| connection.ensure_running());
+    match &result {
         Ok(()) => {
-            #[cfg(windows)]
             if let Ok(mut plugins) = loaded_plugins().lock()
                 && let Some(loaded) = plugins.get_mut(plugin_id)
             {
@@ -2377,11 +2551,11 @@ fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) {
             tracing::info!(plugin_id, "插件 sidecar 预热完成");
         }
         Err(error) => {
-            #[cfg(windows)]
             set_runtime_error(plugin_id, format!("{error:#}"));
-            tracing::debug!(plugin_id, %error, "插件 sidecar 预热失败（使用时重试）")
+            tracing::debug!(plugin_id, error = %format!("{error:#}"), "插件 sidecar 预热失败");
         }
     }
+    result
 }
 
 /// 启用或停用插件，并立即同步所有存活 Core 实例。

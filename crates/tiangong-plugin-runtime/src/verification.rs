@@ -319,7 +319,7 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
     let spawned = std::thread::Builder::new()
         .name("reverify-sidecars".to_string())
         .spawn(move || {
-            reverify_installed_sidecars_blocking(&storage_root, true);
+            let _ = reverify_installed_sidecars_blocking(&storage_root, true, None);
             REVERIFY_RUNNING.store(false, Ordering::Release);
         });
     if let Err(error) = spawned {
@@ -332,53 +332,57 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
 pub(crate) fn reverify_installed_sidecars_blocking(
     storage_root: &Path,
     prewarm_after_verification: bool,
-) {
+    entrypoint: Option<&str>,
+) -> Result<()> {
     let (installed_plugins, _) = crate::registry::discover_installed_plugins(storage_root);
+    let mut failures = Vec::new();
     for installed in installed_plugins {
-        if installed.manifest.sidecar.is_none() || !installed.enabled {
+        if installed.manifest.sidecar.is_none()
+            || !installed.enabled
+            || entrypoint.is_some_and(|entry| !installed.manifest.available_at(entry))
+        {
             continue;
         }
-        if load_valid_capabilities(&installed.directory, &installed.manifest).is_some() {
+        if let Some(capabilities) =
+            load_valid_capabilities(&installed.directory, &installed.manifest)
+        {
+            crate::registry::refresh_verified_sidecar(&installed.manifest.id, capabilities);
             continue;
         }
         let Some(_operation) = crate::registry::background_sidecar_operation() else {
-            return;
+            bail!("插件补验证已取消：应用正在退出或加载锁不可用");
         };
-        if load_valid_capabilities(&installed.directory, &installed.manifest).is_some() {
+        if let Some(capabilities) =
+            load_valid_capabilities(&installed.directory, &installed.manifest)
+        {
+            crate::registry::refresh_verified_sidecar(&installed.manifest.id, capabilities);
             continue;
         }
-        match verify_installed_sidecar(storage_root, &installed) {
-            Ok(record) => {
-                if let Err(error) = save_verification(&installed.directory, &record) {
-                    tracing::warn!(plugin_id = %installed.manifest.id, %error, "保存 sidecar 验证记录失败");
-                } else {
-                    // 已构建的 Core 实例立即按新能力路由。
-                    crate::registry::refresh_verified_sidecar(
-                        &installed.manifest.id,
-                        record.capabilities,
-                    );
-                    // 独立验证进程已经退出，此时再启动常驻进程，不会争用
-                    // 数据库或索引目录。
-                    if prewarm_after_verification {
-                        crate::registry::prewarm_plugin_sidecar(
-                            storage_root,
-                            &installed.manifest.id,
-                        );
-                    }
-                    tracing::info!(plugin_id = %installed.manifest.id, "旧插件 sidecar 补验证完成");
-                }
+        let result = verify_installed_sidecar(storage_root, &installed).and_then(|record| {
+            save_verification(&installed.directory, &record)
+                .context("保存 sidecar 验证记录失败")?;
+            crate::registry::refresh_verified_sidecar(&installed.manifest.id, record.capabilities);
+            if prewarm_after_verification {
+                crate::registry::prewarm_plugin_sidecar(storage_root, &installed.manifest.id);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                tracing::info!(plugin_id = %installed.manifest.id, "旧插件 sidecar 补验证完成")
             }
             Err(error) => {
                 let reason = format!("{error:#}");
-                tracing::warn!(
-                    plugin_id = %installed.manifest.id,
-                    error = %reason,
-                    "旧插件 sidecar 补验证失败：有 UI 插件回退 UI Handler，无 UI 插件调用将返回不可用"
-                );
-                crate::registry::set_runtime_error(&installed.manifest.id, reason);
+                tracing::warn!(plugin_id = %installed.manifest.id, error = %reason, "旧插件 sidecar 补验证失败");
+                crate::registry::set_runtime_error(&installed.manifest.id, reason.clone());
+                failures.push(format!("{}: {reason}", installed.manifest.id));
             }
         }
     }
+    if !failures.is_empty() {
+        bail!("插件验证失败：\n{}", failures.join("\n"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

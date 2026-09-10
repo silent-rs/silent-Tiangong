@@ -1679,12 +1679,10 @@ pub async fn prepare_startup_resources(
     match result {
         Ok(version) => {
             tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+            // 安装期间的旧准备可能因 Launcher 缺失失败；先等它结束，再重试失败结果。
+            let _ = state.wait_plugin_preload().await;
+            state.retry_failed_plugin_preload();
             state.wait_plugin_preload().await?;
-            tauri::async_runtime::spawn_blocking(move || {
-                tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root);
-            })
-            .await
-            .map_err(|error| format!("插件启动准备失败：{error}"))?;
             let _ = app.emit(
                 "startup-prepare-step",
                 serde_json::json!({ "step": "done", "version": version }),
