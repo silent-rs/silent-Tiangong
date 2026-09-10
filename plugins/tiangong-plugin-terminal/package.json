@@ -24,5 +24,8 @@
     "vite-plugin-singlefile": "^2.1.0",
     "vitest": "^4.1.11",
     "vue-tsc": "^2.2.0"
+  },
+  "resolutions": {
+    "vite": "6.4.3"
   }
 }
