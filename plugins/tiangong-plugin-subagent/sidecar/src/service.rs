@@ -1853,13 +1853,13 @@ impl SubagentService {
             .find(|run| run.run_id.ends_with(&tag))
             .cloned()
         else {
-            // 修订链：补充消息排在原轮次之后（服务端串行），原运行可能已
-            // 随上一轮终结——本轮（正文标注补充、标记同源）作为结果修订：
-            // 更新原运行结论并重投发起方，修正不丢失。
+            // 补充轮次对应的原运行已终结：只把本轮执行事实（系统抓取的
+            // 最终文本）追加为事件，供观测与诊断——不自动改写原运行结论、
+            // 不同步任务结论、不代发修订回报；修订成果由成员经
+            // report_agent_result 主动反馈（与普通收尾同一约定）。
             if request.user_text.contains("（补充消息）")
-                && let Some(mut finished) = self.store.list_runs().into_iter().find(|run| {
-                    // 修订归属校验：只匹配本会话所属成员的工作——跨成员
-                    // 完善须先建立协作关系，不能仅凭标记后缀接受修改。
+                && let Some(finished) = self.store.list_runs().into_iter().find(|run| {
+                    // 归属校验：只匹配本会话所属成员的工作。
                     run.run_id.ends_with(&tag)
                         && run.status == RunStatus::Completed
                         && agents.iter().any(|config| {
@@ -1873,36 +1873,14 @@ impl SubagentService {
                     return Ok("补充轮无回复文本，忽略".to_string());
                 }
                 let timestamp = now_string();
-                finished.summary = Some(format!("[含补充修订] {text}"));
-                finished.updated_at = timestamp.clone();
-                self.store.save_run(&finished)?;
-                // 当前有效成果同步到任务结论（运行与任务引用一致结论）。
-                if let Some(task_id) = finished.task_id.clone()
-                    && let Ok(mut task) = self.store.load_task(&task_id)
-                    && task.status == TaskStatus::Completed
-                {
-                    task.result_summary = Some(format!("[含补充修订] {text}"));
-                    task.updated_at = timestamp.clone();
-                    let _ = self.store.save_task(&task);
-                }
                 append_event(
                     &self.store,
                     &finished,
-                    "revised",
+                    "supplement_turn",
                     &json!({ "text": text }),
                     &timestamp,
                 );
-                let agents_ref = Some(&self.agents);
-                enqueue_hook(
-                    &self.store,
-                    agents_ref,
-                    &finished,
-                    HookEventType::Message,
-                    json!({ "text": format!("结果修订（补充后）：{text}") }),
-                    &timestamp,
-                );
-                notify_run_status(&finished);
-                return Ok("补充后的修订结果已更新到运行并重投发起方".to_string());
+                return Ok("补充轮次已记录执行事件（业务修订由成员主动回报）".to_string());
             }
             return Ok(format!(
                 "运行标记 r-{tag} 无匹配的活跃运行（迟到或重复回报），忽略"
