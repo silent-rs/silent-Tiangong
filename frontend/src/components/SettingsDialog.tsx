@@ -801,17 +801,23 @@ function ProviderModelsView({
     return () => { cancelled = true; };
   }, [modelDraft.model, modelDraft.capabilities, modelDraft.context_window]);
 
-  // 模型名命中默认视觉前缀时自动补勾多模态能力，用户可手动取消
+  // 模型名变为命中默认视觉前缀时自动补勾多模态。
+  // 仅在模型名实际变化时触发：编辑已有模型（首次加载）保留原有选择，
+  // 用户手动取消勾选后也不会被重复补回。
+  const prevModelNameRef = useRef<string | null>(null);
   useEffect(() => {
     const model = modelDraft.model.trim();
+    const prev = prevModelNameRef.current;
+    prevModelNameRef.current = model;
+    if (prev === null || prev === model) return;
     if (!model || modelDraft.capabilities.includes('multimodal')) return;
     if (!VISION_DEFAULT_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix))) return;
-    setModelDraft((prev) =>
-      prev.capabilities.includes('multimodal')
-        ? prev
-        : { ...prev, capabilities: [...prev.capabilities, 'multimodal'] },
+    setModelDraft((prevDraft) =>
+      prevDraft.capabilities.includes('multimodal')
+        ? prevDraft
+        : { ...prevDraft, capabilities: [...prevDraft.capabilities, 'multimodal'] },
     );
-  }, [modelDraft.model, modelDraft.capabilities]);
+  }, [modelDraft.model]);
 
   const toggleCapability = (cap: string) => {
     if (modelDraft.capabilities.includes(cap)) {
