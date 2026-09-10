@@ -33,7 +33,7 @@ use tiangong_plugin_subagent_protocol::{NOTIFICATION_CHANNEL, PLUGIN_ID, PLUGIN_
 use crate::agent_store::AgentStore;
 use crate::delivery::DeliveryWorker;
 use crate::paths::{new_id, now_string};
-use crate::runner::{BeginFrame, CliEvent, ExitInfo, RunHooks, RunnerHub};
+use crate::runner::{BeginFrame, CliEvent, ExitInfo, McpGuide, RunHooks, RunnerHub};
 use crate::runtime_store::RuntimeStore;
 
 /// 工具响应统一形状（对齐宿主 ToolOutcome 映射）。
@@ -1649,6 +1649,19 @@ impl SubagentService {
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
 
+    /// CLI 成员的 MCP 接入引导：sidecar 二进制外部直起即 stdio MCP server
+    ///（标准 JSON-RPC），透传绝对路径与协作说明——注册与否、注册到用户级
+    /// 还是项目级由 CLI 工具与其用户决定，总线不代写任何外部配置文件。
+    fn mcp_guide(workspace: &str) -> Option<McpGuide> {
+        let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        Some(McpGuide {
+            server: "tiangong-subagent",
+            command,
+            workspace: workspace.to_string(),
+            hint: "天工协作接入（可选）：将 command 字段指向的可执行文件注册为本工具的 MCP server（stdio JSON-RPC，工作目录建议使用 workspace 字段），即可调用 list_agents / send_agent_message / load_workspace_state / list_pending_work 与天工成员协作（查看同伴、传递消息、汇报进展）。已注册过时忽略本段。",
+        })
+    }
+
     /// CLI 后端：启动子进程（持 ops 锁调用）。
     #[allow(clippy::too_many_arguments)]
     async fn spawn_cli_run(
@@ -1683,6 +1696,9 @@ impl SubagentService {
             input: message.or_else(|| task.map(|task| task.goal.as_str())),
             // 附件本地路径随启动帧透传（无附件省略字段，老协议实现兼容）。
             attachments: (!attachments.is_empty()).then_some(attachments),
+            // MCP 接入引导：sidecar 自身即 stdio MCP server（外部直起形态），
+            // 透传路径与说明由 CLI 工具自行注册——不代写任何外部配置文件。
+            mcp: Self::mcp_guide(&activation.workspace),
         };
         let hooks = RUN_HOOKS
             .get()

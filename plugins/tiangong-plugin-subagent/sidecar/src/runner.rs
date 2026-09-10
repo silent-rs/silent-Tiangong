@@ -88,6 +88,23 @@ pub struct BeginFrame<'a> {
     /// 随消息携带的附件（本地路径原样透传，成员自行读取；无附件省略字段）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<&'a [AttachmentPayload]>,
+    /// 天工协作 MCP 接入引导（仅 CLI 后端携带；CLI 工具自行决定注册方式）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpGuide>,
+}
+
+/// 引导 CLI 成员接入天工协作的 MCP 端点信息（begin 帧透传，不代为注册：
+/// 用户级/项目级注册由 CLI 工具与其用户决定，沙箱内也不可写外部配置）。
+#[derive(Debug, Clone, Serialize)]
+pub struct McpGuide {
+    /// MCP server 名（注册时使用）。
+    pub server: &'static str,
+    /// sidecar 可执行文件绝对路径（直接作为 stdio MCP server 命令启动）。
+    pub command: String,
+    /// 建议 MCP server 的工作目录（成员协作域按此路由）。
+    pub workspace: String,
+    /// 给 CLI agent 的注册与用途说明。
+    pub hint: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -466,6 +483,7 @@ mod tests {
             message: Some("看图"),
             input: Some("看图"),
             attachments,
+            mcp: None,
         }
     }
 
@@ -475,6 +493,7 @@ mod tests {
     fn 启动帧附件序列化形状() {
         let without = serde_json::to_value(begin_frame(None)).unwrap();
         assert!(without.get("attachments").is_none(), "无附件必须省略字段");
+        assert!(without.get("mcp").is_none(), "无 MCP 引导必须省略字段");
 
         let with = serde_json::to_value(begin_frame(Some(&sample_attachments()))).unwrap();
         let attachments = with["attachments"].as_array().unwrap();
@@ -493,7 +512,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let hub = RunnerHub::new();
         let attachments = sample_attachments();
+        let guide = McpGuide {
+            server: "tiangong-subagent",
+            command: "/opt/部署路径/tiangong-subagent-sidecar".to_string(),
+            workspace: temp.path().to_string_lossy().into_owned(),
+            hint: "注册为本工具的 MCP server 后可与天工协作。",
+        };
         let begin = begin_frame(Some(&attachments));
+        let begin = BeginFrame {
+            mcp: Some(guide),
+            ..begin
+        };
         let pid = hub
             .spawn(
                 "run-test",
@@ -536,6 +565,16 @@ mod tests {
         assert_eq!(begin["type"], "begin");
         assert_eq!(begin["attachments"][0]["path"], "/tmp/屏幕截图 2026.png");
         assert_eq!(begin["attachments"][0]["name"], "截图.png");
+        // MCP 接入引导随帧到达：注册名、命令路径与工作目录。
+        assert_eq!(begin["mcp"]["server"], "tiangong-subagent");
+        assert_eq!(
+            begin["mcp"]["command"],
+            "/opt/部署路径/tiangong-subagent-sidecar"
+        );
+        assert_eq!(
+            begin["mcp"]["workspace"].as_str().unwrap(),
+            temp.path().to_string_lossy()
+        );
 
         let supplement = &lines[1];
         assert_eq!(supplement["type"], "user_message");
