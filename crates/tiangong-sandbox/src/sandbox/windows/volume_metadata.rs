@@ -146,6 +146,14 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(&sibling, "private").unwrap();
         std::fs::write(workspace.join("visible.txt"), "visible").unwrap();
+        // CI 的系统目录未必向 AppContainer 开放执行；此测试只验证卷属性权限。
+        // 将真实 CMD 放入明确授权的测试工作区，避免 PATH 或系统目录 ACL 干扰。
+        let system_root = std::env::var_os("SystemRoot").expect("Windows 缺少 SystemRoot");
+        std::fs::copy(
+            PathBuf::from(system_root).join("System32/cmd.exe"),
+            workspace.join("cmd.exe"),
+        )
+        .expect("复制测试 CMD 失败");
         let letter = ('P'..='Z')
             .rev()
             .find(|letter| !Path::new(&format!("{letter}:\\")).exists())
@@ -231,7 +239,7 @@ mod tests {
             "echo success>created.txt & type created.txt & del created.txt".into(),
             "exit 7".into(),
         ] {
-            let output = std::process::Command::new("cmd.exe")
+            let output = std::process::Command::new(cwd.join("cmd.exe"))
                 .args(["/d", "/c", &command])
                 .output()
                 .unwrap();
