@@ -195,3 +195,21 @@ Windows 需安装 Node 22，并将独立 `node.exe` 的绝对路径设置为 `SA
 | 进程数限制 | Windows Job 自检；当前 Linux Launcher 未施加该限制，保留独立待办，不用目标自己 setrlimit 代替 Launcher 验证 |
 
 此测试组不表示 issue #485 的所有能力已完成，也不改变 Launcher 生产代码。平台 CI 未运行时不得宣称三平台真实隔离通过。
+
+### Windows CMD 的磁盘基本信息权限
+
+Launcher 0.1.7 为 CMD 查询盘符信息提供独立能力。工作区已获读写权限时，CMD 仍可能因无法读取盘符根属性而失败。具有盘符根权限的管理员可一次性执行：
+
+```text
+tiangong-sandbox prepare-volume-metadata D:\workspace
+```
+
+仅为专用能力增加盘符根的读取属性和同步权限，不继承到子项，不开放根目录枚举或文件内容读写；使用目录句柄更新，不向整个磁盘传播权限。重复执行幂等，普通启动及退出不会修改这项授权。只支持本地盘符（含映射到本地目录的盘符）。不自动提权或修改根权限。
+
+需要撤销时，由同样具备权限的管理员执行：
+
+```text
+tiangong-sandbox revoke-volume-metadata D:\workspace
+```
+
+原有文件授权、禁读目录、临时身份和退出清理仍生效。PowerShell 列目录本身不依赖这项准备。

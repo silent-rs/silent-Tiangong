@@ -72,7 +72,9 @@ use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCE
 use super::{SandboxAvailability, SandboxMode, SandboxPolicy, SandboxResourceLimits};
 
 mod persistent;
+mod volume_metadata;
 pub use persistent::revoke as revoke_persistent_grants;
+pub use volume_metadata::{prepare_volume_metadata, revoke_volume_metadata};
 
 const SE_GROUP_ENABLED: u32 = 4;
 const SE_GROUP_LOGON_ID: u32 = 0xc000_0000;
@@ -129,6 +131,7 @@ pub fn launch_with_grant_cache(
     validate_launch_request(&request)?;
     trace_self_check(&request, "创建网络能力集合");
     let mut capabilities = CapabilitySet::new(request.policy.allow_network)?;
+    volume_metadata::add_capability(&mut capabilities)?;
     if cache.is_some() {
         trace_self_check(&request, "检查持久目录授权");
     }
