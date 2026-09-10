@@ -2,6 +2,7 @@
   "_comment": "模型 context_window 映射表（token 数）。首次安装时释放到 ~/.tiangong/context_windows.json，用户可自行修改。匹配规则：精确匹配 > 最长键匹配（无 * 的键按前缀匹配，含 * 的键按通配符匹配，如 glm-4.5*、*-flash、gpt-*-mini） > 默认 200000",
   "_default": 200000,
 
+  "gpt-6*": 1050000,
   "gpt-5.6*": 1050000,
   "gpt-5.5*": 1050000,
   "gpt-5.4": 272000,
@@ -13,10 +14,12 @@
   "o3*": 200000,
   "o4*": 200000,
 
+  "claude-opus-5": 1000000,
   "claude-opus-4-8": 1000000,
   "claude-opus-4-7": 1000000,
   "claude-sonnet-5*": 1000000,
   "claude-fable-5*": 1000000,
+  "claude-mythos-5*": 1000000,
   "claude*": 200000,
 
   "gemini-3.1*": 1000000,
