@@ -643,6 +643,9 @@ function ProviderBalanceSection({ providerName }: { providerName: string }) {
 // 供应商与模型 — 分栏视图
 // ---------------------------------------------------------------------------
 
+// 原生支持图片理解、配置时默认自动勾选多模态能力的模型名前缀（用户可手动取消勾选）
+const VISION_DEFAULT_MODEL_PREFIXES = ['deepseek-flash', 'glm-5.3-flash'];
+
 function ProviderModelsView({
   config,
   onChange,
@@ -797,6 +800,24 @@ function ProviderModelsView({
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [modelDraft.model, modelDraft.capabilities, modelDraft.context_window]);
+
+  // 模型名变为命中默认视觉前缀时自动补勾多模态。
+  // 仅在模型名实际变化时触发：编辑已有模型（首次加载）保留原有选择，
+  // 用户手动取消勾选后也不会被重复补回。
+  const prevModelNameRef = useRef<string | null>(null);
+  useEffect(() => {
+    const model = modelDraft.model.trim();
+    const prev = prevModelNameRef.current;
+    prevModelNameRef.current = model;
+    if (prev === null || prev === model) return;
+    if (!model || modelDraft.capabilities.includes('multimodal')) return;
+    if (!VISION_DEFAULT_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix))) return;
+    setModelDraft((prevDraft) =>
+      prevDraft.capabilities.includes('multimodal')
+        ? prevDraft
+        : { ...prevDraft, capabilities: [...prevDraft.capabilities, 'multimodal'] },
+    );
+  }, [modelDraft.model]);
 
   const toggleCapability = (cap: string) => {
     if (modelDraft.capabilities.includes(cap)) {

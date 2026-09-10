@@ -224,17 +224,14 @@ pub fn default_context_windows_json() -> &'static str {
     include_str!("resources/context_windows.json")
 }
 
-/// 首次安装：用户目录下不存在 context_windows.json 时释放内嵌默认内容。
+/// 启动时用内嵌默认表直接覆盖 `dir/context_windows.json`，
+/// 让默认映射随程序版本更新自动同步；该文件按约定不承载用户自定义。
 pub fn ensure_context_windows(dir: &Path) {
     let path = dir.join("context_windows.json");
-    if path.exists() {
-        return;
-    }
-    let default_content = default_context_windows_json();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(err) = std::fs::write(&path, default_content) {
+    if let Err(err) = std::fs::write(&path, default_context_windows_json()) {
         tracing::warn!("写入 context_windows.json 失败：{err}");
     }
 }
@@ -259,7 +256,8 @@ pub fn resolve_context_limit_with_override(
 /// 根据模型名称从映射表解析 context_window。
 ///
 /// 读取 `dir/context_windows.json`（不存在则用内嵌默认表），
-/// 精确匹配 > 最长前缀匹配 > `DEFAULT_CONTEXT_LIMIT`。
+/// 精确匹配 > 最长键匹配（无 `*` 的键按前缀匹配，含 `*` 的键按通配符匹配）
+/// > `DEFAULT_CONTEXT_LIMIT`。
 pub fn resolve_context_limit_at(dir: &Path, model_name: &str) -> usize {
     const DEFAULT_MAP: &str = include_str!("resources/context_windows.json");
 
@@ -285,14 +283,19 @@ pub fn resolve_context_limit_at(dir: &Path, model_name: &str) -> usize {
         return n as usize;
     }
 
-    // 前缀匹配：用最长的匹配前缀
+    // 最长键匹配：无 `*` 的键按前缀匹配，含 `*` 的键按通配符匹配
     let mut best_match: Option<usize> = None;
     let mut best_len = 0;
     for (key, val) in &map {
         if key.starts_with('_') {
             continue;
         }
-        if model_name.starts_with(key)
+        let hit = if key.contains('*') {
+            wildcard_match(key, model_name)
+        } else {
+            model_name.starts_with(key)
+        };
+        if hit
             && key.len() > best_len
             && let Some(n) = val.as_u64()
         {
@@ -301,6 +304,29 @@ pub fn resolve_context_limit_at(dir: &Path, model_name: &str) -> usize {
         }
     }
     best_match.unwrap_or(DEFAULT_CONTEXT_LIMIT)
+}
+
+/// 通配符匹配：`*` 匹配任意（含空）字符串，其余字符字面相等。
+/// 如 `glm-4.5*` 匹配 glm-4.5 及其变体，`*-flash` 匹配任意 flash 后缀，
+/// `gpt-*-mini` 匹配中间任意。
+fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let Some((first, rest)) = parts.split_first() else {
+        return false;
+    };
+    let Some(mut s) = name.strip_prefix(first) else {
+        return false;
+    };
+    let Some((last, mid)) = rest.split_last() else {
+        return true;
+    };
+    for part in mid {
+        match s.find(part) {
+            Some(i) => s = &s[i + part.len()..],
+            None => return false,
+        }
+    }
+    s.ends_with(last)
 }
 
 #[cfg(test)]
@@ -413,5 +439,68 @@ mod tests {
             resolve_context_limit_at(dir.path(), "totally-unknown-model"),
             DEFAULT_CONTEXT_LIMIT
         );
+    }
+
+    /// 通配符键（含 `*`）按 glob 匹配：尾部、后缀、中间通配各自生效，
+    /// 与其他键同时命中时取最长键；不命中任何键回退默认值。
+    #[test]
+    fn resolve_context_limit_wildcard_match() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("context_windows.json"),
+            r#"{
+              "_default": 200000,
+              "glm-4.5*": 128000,
+              "glm-4*": 300000,
+              "*-flash": 400000,
+              "gpt-*-mini": 500000,
+              "glm-4.5": 600000
+            }"#,
+        )
+        .unwrap();
+
+        // 同时命中 glm-4.5*（最长）与 glm-4*、*-flash
+        assert_eq!(
+            resolve_context_limit_at(dir.path(), "glm-4.5-flash"),
+            128000
+        );
+        // 尾部通配可匹配空串，精确键优先于通配符键
+        assert_eq!(resolve_context_limit_at(dir.path(), "glm-4.5"), 600000);
+        assert_eq!(resolve_context_limit_at(dir.path(), "glm-4.5-air"), 128000);
+        // 仅命中更短的 glm-4*
+        assert_eq!(resolve_context_limit_at(dir.path(), "glm-4.6"), 300000);
+        // 后缀通配
+        assert_eq!(
+            resolve_context_limit_at(dir.path(), "deepseek-v4-flash"),
+            400000
+        );
+        // 中间通配
+        assert_eq!(resolve_context_limit_at(dir.path(), "gpt-4.1-mini"), 500000);
+        // 不命中任何键
+        assert_eq!(
+            resolve_context_limit_at(dir.path(), "gpt-4.1"),
+            DEFAULT_CONTEXT_LIMIT
+        );
+    }
+
+    /// ensure 时无条件用内嵌默认表覆盖用户目录文件：旧内容被还原为新表，
+    /// 手改过的键同样在下次 ensure 时被还原。
+    #[test]
+    fn context_windows_overwritten_on_ensure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("context_windows.json");
+
+        // 任意旧内容覆盖为新默认表
+        std::fs::write(&file, r#"{ "gpt-4o": 1, "_default": 200000 }"#).unwrap();
+        ensure_context_windows(dir.path());
+        assert_eq!(resolve_context_limit_at(dir.path(), "gpt-4o"), 128000);
+
+        // 手改后在下次 ensure 被还原
+        let content = std::fs::read_to_string(&file).unwrap();
+        let customized = content.replace("\"gpt-5.6*\": 1050000", "\"gpt-5.6*\": 999999");
+        assert_ne!(customized, content, "替换目标键应存在于默认表");
+        std::fs::write(&file, customized).unwrap();
+        ensure_context_windows(dir.path());
+        assert_eq!(resolve_context_limit_at(dir.path(), "gpt-5.6-sol"), 1050000);
     }
 }
