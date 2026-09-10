@@ -184,7 +184,33 @@ jobs:
 
       - name: Install protoc on Windows
         if: runner.os == 'Windows'
-        run: choco install protoc -y
+        timeout-minutes: 5
+        run: |
+          # Chocolatey can report success after a feed error; verify the executable.
+          for attempt in 1 2 3; do
+            if ! choco install protoc -y --no-progress; then
+              echo "::warning::protoc installation failed (attempt ${attempt}/3)"
+            fi
+            protoc_path="$(command -v protoc || true)"
+            if [[ -z "$protoc_path" ]]; then
+              # A newly installed package may not be on this shell's PATH yet.
+              choco_root="$(cygpath -u "${ChocolateyInstall:-C:\ProgramData\chocolatey}")"
+              if [[ -f "$choco_root/bin/protoc.exe" ]]; then
+                protoc_path="$choco_root/bin/protoc.exe"
+              fi
+            fi
+            if [[ -n "$protoc_path" ]] && "$protoc_path" --version; then
+              # Give native build scripts an absolute Windows path, independent of PATH.
+              printf 'PROTOC=%s\n' "$(cygpath -aw "$protoc_path")" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::warning::protoc is unavailable after attempt ${attempt}/3"
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep 10
+            fi
+          done
+          echo "::error::protoc installation could not be verified after 3 attempts"
+          exit 1
 
       # memory sidecar 通过 bundled-sqlcipher-vendored-openssl 由 openssl-sys 从源码
       # 静态编译 SQLCipher 与 OpenSSL 并链接进 sidecar.exe，产物自包含，运行时不再
