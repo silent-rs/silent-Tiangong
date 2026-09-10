@@ -198,23 +198,46 @@ mod tests {
         })
         .unwrap();
         assert_eq!(code, 0);
+        // 直接由 Launcher 启动真实 CMD。卷权限检查不依赖沙箱内再次 CreateProcess。
+        let cmd = workspace.join("cmd.exe");
+        let run_cmd = |script: String| {
+            launch(WindowsLaunchRequest {
+                program: &cmd,
+                program_root: &workspace,
+                args: &["/d".into(), "/c".into(), script],
+                policy: &policy,
+                host_pid: None,
+                stop_event_name: None,
+                timeout: Some(Duration::from_secs(20)),
+            })
+            .unwrap()
+        };
+        let script = format!(
+            "cd /d {} && dir /b >listed.txt && echo success>created.txt && type created.txt >readback.txt && del created.txt && exit /b 7",
+            alias_root.join("workspace").display(),
+        );
+        assert_eq!(run_cmd(script), 7, "CMD 应完成文件操作并保留指定退出码");
+        assert!(
+            std::fs::read_to_string(workspace.join("listed.txt"))
+                .unwrap()
+                .contains("visible.txt")
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("readback.txt"))
+                .unwrap()
+                .trim(),
+            "success"
+        );
+        assert!(!workspace.join("created.txt").exists());
         set_root_attributes(root.path(), sid, REVOKE_ACCESS).unwrap();
-        let denied = launch(WindowsLaunchRequest {
-            program: &program,
-            program_root: program.parent().unwrap(),
-            args: &[
-                "--exact".into(),
-                "sandbox::windows::volume_metadata::tests::volume_probe_child".into(),
-                "--ignored".into(),
-                "--nocapture".into(),
-            ],
-            policy: &policy,
-            host_pid: None,
-            stop_event_name: None,
-            timeout: Some(Duration::from_secs(20)),
-        })
-        .unwrap();
-        assert_ne!(denied, 0, "撤销根属性后 CMD 不应继续获得卷信息");
+        assert_eq!(
+            run_cmd(format!(
+                "cd /d {} && dir /b",
+                alias_root.join("workspace").display()
+            )),
+            1,
+            "撤销根属性后 CMD 不应继续获得卷信息",
+        );
     }
 
     #[test]
@@ -233,26 +256,16 @@ mod tests {
             std::fs::write(alias_root.join("outside-new.txt"), "escape").is_err(),
             "不应允许写相邻文件"
         );
-        let cwd = alias_root.join("workspace");
-        for command in [
-            format!("cd /d {} && dir /b", cwd.display()),
-            "echo success>created.txt & type created.txt & del created.txt".into(),
-            "exit 7".into(),
-        ] {
-            let output = std::process::Command::new(cwd.join("cmd.exe"))
-                .args(["/d", "/c", &command])
-                .output()
-                .unwrap();
-            let expected = if command == "exit 7" { 7 } else { 0 };
-            assert_eq!(
-                output.status.code(),
-                Some(expected),
-                "command={command} output={output:?}"
-            );
-            if command.contains("dir /b") {
-                assert!(String::from_utf8_lossy(&output.stdout).contains("visible.txt"));
-            }
-        }
-        assert!(!Path::new("created.txt").exists());
+        assert!(
+            std::fs::read_dir(".")
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == "visible.txt")
+        );
+        std::fs::write("probe-write.txt", "workspace write").unwrap();
+        assert_eq!(
+            std::fs::read_to_string("probe-write.txt").unwrap(),
+            "workspace write"
+        );
+        std::fs::remove_file("probe-write.txt").unwrap();
     }
 }
