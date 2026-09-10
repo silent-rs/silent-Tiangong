@@ -300,7 +300,12 @@ pub(crate) fn session_for_workspace(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(legacy) if never_mapped && crate::sessions::session_exists(legacy) => {
+        Some(legacy)
+            if never_mapped
+                && crate::sessions::session_exists(legacy)
+                && !legacy_session_mapped(&dir, legacy)
+                && legacy_session_cwd_matches(legacy, workspace_path) =>
+        {
             (legacy.to_string(), false)
         }
         _ => (paths::new_id(), true),
@@ -308,6 +313,49 @@ pub(crate) fn session_for_workspace(
     meta["session_id"] = serde_json::Value::String(session_id.clone());
     paths::atomic_write(&meta_path, serde_json::to_string(&meta)?.as_bytes())?;
     Ok((session_id, is_new))
+}
+
+/// 旧会话是否已被本成员任一工作区映射占用（防同一旧会话迁移到多个
+/// workspace——不同工作区必须使用不同会话）。
+fn legacy_session_mapped(dir: &std::path::Path, legacy: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let meta = entry.path().join("workspace.json");
+        std::fs::read_to_string(&meta)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| {
+                value
+                    .get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .is_some_and(|session| session == legacy)
+    })
+}
+
+/// 旧会话的工作目录是否与给定工作区一致（canonicalize 后比较）——
+/// 只有会话本就工作在该项目下才沿用，避免把别的项目的会话错配过来。
+fn legacy_session_cwd_matches(session_id: &str, workspace_path: &str) -> bool {
+    let Some(cwd) = crate::sessions::load_session_json(session_id)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+    else {
+        return false;
+    };
+    let canonical = |path: &str| {
+        std::fs::canonicalize(path)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string())
+    };
+    !cwd.trim().is_empty() && canonical(&cwd) == canonical(workspace_path)
 }
 
 /// 反查会话归属的成员 ID：扫描全部成员的全部工作区映射，老全局绑定
@@ -391,14 +439,21 @@ mod tests {
     }
 
     /// 在测试存储根下落一个会话文件（模拟宿主已创建该会话）。
-    fn create_session_file(session_id: &str) {
+    fn create_session_file_with_cwd(session_id: &str, cwd: Option<&std::path::Path>) {
         let dir = crate::paths::storage_root().unwrap().join("sessions");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(format!("{session_id}.json")),
-            br#"{"id":"x","messages":[]}"#,
-        )
-        .unwrap();
+        let body = match cwd {
+            Some(cwd) => format!(
+                r#"{{"id":"x","cwd":{},"messages":[]}}"#,
+                serde_json::to_string(&cwd.to_string_lossy().into_owned()).unwrap()
+            ),
+            None => r#"{"id":"x","messages":[]}"#.to_string(),
+        };
+        std::fs::write(dir.join(format!("{session_id}.json")), body).unwrap();
+    }
+
+    fn create_session_file(session_id: &str) {
+        create_session_file_with_cwd(session_id, None);
     }
 
     #[serial_test::serial]
@@ -433,21 +488,47 @@ mod tests {
 
     #[serial_test::serial]
     #[test]
-    fn 会话映射_老全局绑定一次性迁移() {
+    fn 会话映射_老绑定仅迁入工作目录匹配的工作区() {
         let (store, _root, agent_id) = store_with_agent("legacy");
-        let w = tempfile::tempdir().unwrap();
-        let p = w.path().to_string_lossy().into_owned();
-        create_session_file("legacy-sess-1");
+        let w1 = tempfile::tempdir().unwrap();
+        let w2 = tempfile::tempdir().unwrap();
+        let p1 = w1.path().to_string_lossy().into_owned();
+        let p2 = w2.path().to_string_lossy().into_owned();
+        // 老会话实际工作在 W1。
+        create_session_file_with_cwd("legacy-sess-1", Some(w1.path()));
 
-        // 老配置全局会话存在且本工作区从未映射 → 迁移沿用（保持连续性）。
-        let (s, is_new) =
-            session_for_workspace(&store, &agent_id, &p, Some("legacy-sess-1")).unwrap();
-        assert_eq!(s, "legacy-sess-1");
+        // W1：目录匹配且未被占用 → 迁移沿用（保持连续性）。
+        let (s1, is_new) =
+            session_for_workspace(&store, &agent_id, &p1, Some("legacy-sess-1")).unwrap();
+        assert_eq!(s1, "legacy-sess-1");
         assert!(!is_new);
 
+        // W2：老会话已被 W1 映射占用且其工作目录也不是 W2 →
+        // 不迁移，创建独立新会话（不同工作区不同会话）。
+        let (s2, is_new) =
+            session_for_workspace(&store, &agent_id, &p2, Some("legacy-sess-1")).unwrap();
+        assert!(is_new);
+        assert_ne!(s1, s2);
+
         // 已映射后不再迁移：即使再传 legacy 也按映射走。
-        let (s2, _) = session_for_workspace(&store, &agent_id, &p, None).unwrap();
-        assert_eq!(s2, "legacy-sess-1");
+        let (s1b, _) = session_for_workspace(&store, &agent_id, &p1, None).unwrap();
+        assert_eq!(s1b, "legacy-sess-1");
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn 会话映射_老绑定工作目录不匹配时不迁移() {
+        let (store, _root, agent_id) = store_with_agent("legacy-cwd");
+        let w = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = w.path().to_string_lossy().into_owned();
+        // 老会话工作在其他目录：不得错配到本工作区。
+        create_session_file_with_cwd("legacy-sess-2", Some(other.path()));
+
+        let (s, is_new) =
+            session_for_workspace(&store, &agent_id, &p, Some("legacy-sess-2")).unwrap();
+        assert!(is_new, "目录不匹配的老会话不应被迁移");
+        assert_ne!(s, "legacy-sess-2");
     }
 
     #[serial_test::serial]

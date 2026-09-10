@@ -1301,11 +1301,16 @@ impl SubagentService {
                     injected_into_run: true,
                 });
             }
-            // 运行记录自带实际投递的后端会话（成员×工作区映射会话）。
-            let source_session = run.session_id.trim().to_string();
-            if source_session.is_empty() {
-                anyhow::bail!("运行缺少后端会话，无法注入补充消息");
-            }
+            // 补充消息沿实际执行会话（成员×工作区映射会话）路由；
+            // 老运行数据无该字段时回退旧全局绑定（旧模型语义即全局会话）。
+            let source_session = run
+                .executor_session
+                .as_deref()
+                .or(config.session_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("运行缺少执行会话，无法注入补充消息"))?
+                .to_string();
             // 轻量载体仅供投递正文提示（workspace 来自该成员最近激活），
             // 不落盘——复用工作进行中，不新增占用记录。
             let workspace = crate::sessions::session_workspace(session_id)
@@ -1471,6 +1476,7 @@ impl SubagentService {
             agent_id: config.id.clone(),
             activation_id: activation.activation_id.clone(),
             session_id: activation.session_id.clone(),
+            executor_session: None,
             kind,
             status: RunStatus::Working,
             pid: None,
@@ -1514,6 +1520,7 @@ impl SubagentService {
                         },
                     )
                     .await?;
+                run.executor_session = Some(source_session.clone());
                 run.summary = Some(outcome);
                 self.store.save_run(&run)?;
                 if let Some(task) = task {
@@ -1756,12 +1763,14 @@ impl SubagentService {
     /// 会话后端运行控制通知（中断/取消尽力语义）。
     async fn notify_source_session(&self, run: &RunRecord, action: &str) -> Result<()> {
         let config = self.agents.load(&run.agent_id)?;
-        let source_session = config
-            .session_id
+        // 控制通知沿实际执行会话路由；老运行数据回退旧全局绑定。
+        let source_session = run
+            .executor_session
             .as_deref()
+            .or(config.session_id.as_deref())
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("成员未绑定源会话，无法投递{action}通知"))?;
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("运行缺少执行会话，无法投递{action}通知"))?;
         let body = format!(
             "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
             config.name, config.id, action

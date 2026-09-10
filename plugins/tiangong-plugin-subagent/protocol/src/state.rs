@@ -172,6 +172,11 @@ pub struct RunRecord {
     pub pid: Option<u32>,
     /// 本次运行使用的 Workspace。
     pub workspace: String,
+    /// 实际执行会话（成员×工作区映射的专属会话），会话型后端投递后回填。
+    /// session_id 保持发起会话语义（回报回投与发起方判定的既有依据），
+    /// 两者不得混用——补充消息与控制通知必须沿执行会话路由。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_session: Option<String>,
     /// 集群协作发起方会话：成员互发消息时记录，完成/失败回报投回该会话；
     /// 缺省（主会话发起）回投激活会话。
     #[serde(default, skip_serializing_if = "Option::is_none")]
