@@ -332,20 +332,20 @@ pub struct ListPendingWorkRequest {
     pub agent_id: Option<String>,
 }
 
-/// 成员主动回报：向当前工作的发起方投递结果（带状态与任务归属），
-/// 并终结对应的运行记录。
+/// 成员主动回报：向明确接收方投递消息（纯消息投递，不附带任务选择
+/// 或运行终结——工作是否完成由成员与主 Agent 各自判断，执行实例的
+/// 终结由执行系统按真实事件记录）。
 #[derive(Debug, Deserialize)]
 pub struct ReportAgentResultRequest {
     /// 回报结果正文。
     pub result: String,
-    /// 回报状态：completed（默认）/ failed / blocked。
-    #[serde(default)]
-    pub status: Option<String>,
+    /// 接收方会话 ID（任务消息中的【回复地址】）。
+    pub to_session: String,
     /// 可选备注（产物位置、后续建议等）。
     #[serde(default)]
     pub note: Option<String>,
-    /// 运行标记（正在处理消息尾部的 r-短码）：成员管理多项工作时
-    /// 精确关联回报对象；缺省按最新活跃运行。
+    /// 可选运行标记（消息尾部的 r-短码）：仅用于诊断追踪，不用于
+    /// 选择或终结运行。
     #[serde(default)]
     pub run_marker: Option<String>,
 }

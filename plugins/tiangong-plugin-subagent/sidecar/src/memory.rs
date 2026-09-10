@@ -6,7 +6,6 @@
 //! - 从关联会话整理：提取每轮「用户消息 + 最终回复（截断）」生成 session-notes.md。
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 
 use tiangong_plugin_subagent_protocol::ops::MemoryFileEntry;
 
@@ -170,36 +169,6 @@ pub fn archive_run_result(agents: &AgentStore, agent_id: &str, goal: &str, resul
     if let Err(error) = crate::paths::atomic_write(&path, body.as_bytes()) {
         tracing::warn!(%error, "归档任务结论失败");
     }
-}
-
-/// 从关联会话整理记忆：每轮「用户消息 + 最终回复（截断）」→ session-notes.md。
-pub fn compile_from_session(
-    agents: &AgentStore,
-    agent_id: &str,
-    session: &Value,
-    session_id: &str,
-) -> Result<String> {
-    let title = session
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("（无标题）");
-    let turns = crate::sessions::extract_turns(session);
-    if turns.is_empty() {
-        bail!("关联会话（{title}）没有可整理的完整对话轮次");
-    }
-    let mut body = format!(
-        "# 来自会话「{title}」的整理（{session_id}）\n\n由管理页「从会话整理记忆」生成：每轮保留用户请求与最终回复（截断至 {SESSION_TURN_MAX_CHARS} 字）。\n",
-    );
-    for (index, turn) in turns.iter().enumerate() {
-        body.push_str(&format!(
-            "\n## 轮次 {}\n\n**用户：** {}\n\n**回复：** {}\n",
-            index + 1,
-            truncate_chars(turn.user_text.trim(), SESSION_TURN_MAX_CHARS),
-            truncate_chars(turn.assistant_text.trim(), SESSION_TURN_MAX_CHARS),
-        ));
-    }
-    write(agents, agent_id, "session-notes.md", &body)?;
-    Ok("session-notes.md".to_string())
 }
 
 /// 经验文件（成长沉淀目标）：注入时优先并给予最大份额。

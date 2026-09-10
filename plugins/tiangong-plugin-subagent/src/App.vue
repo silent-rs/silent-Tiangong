@@ -377,6 +377,7 @@ function toggleExpand(agentId: string) {
 const memoryFiles = ref<Record<string, MemoryFileEntry[]>>({});
 const memoryDrafts = ref<Record<string, { name: string; content: string; original: string }>>({});
 const memoryError = ref('');
+const memoryNotice = ref('');
 
 interface WorkspaceState {
   workspace_id: string;
@@ -454,12 +455,14 @@ async function deleteMemory(agentId: string, name: string) {
 
 async function compileMemory(agent: AgentSummary) {
   void withBusy(agent.config.id, async () => {
-    const body = await sidecarCall<{ compiled: string }>('ui_compile_memory', {
+    await sidecarCall<{ sent: boolean }>('ui_compile_memory', {
       agent_id: agent.config.id,
     });
     memoryError.value = '';
-    await loadMemory(agent.config.id);
-    await openMemory(agent.config.id, body.compiled);
+    memoryNotice.value = '';
+    // 整理请求已发送：由成员整理保存并经回报消息反馈结果，
+    // 这里不再直接生成记忆文件。
+    memoryNotice.value = `整理请求已发送给「${agent.config.name}」，结果将由成员回报。`;
   });
 }
 
@@ -737,6 +740,7 @@ onUnmounted(() => {
               </div>
             </div>
             <p v-if="memoryError" class="session-hint">{{ memoryError }}</p>
+            <p v-else-if="memoryNotice" class="session-hint">{{ memoryNotice }}</p>
             <p v-if="!(memoryFiles[agent.config.id] ?? []).length" class="empty small">
               暂无记忆文件（任务完成后自动归档结论；会话后端可「从会话整理」）
             </p>

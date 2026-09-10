@@ -1588,8 +1588,13 @@ impl SubagentService {
             }
         }
         body.push_str(&format!(
-            "\n【任务工作区】{}\n本次任务的所有文件操作（读/写/搜索/执行命令）都必须在此目录下进行——这是发起会话的工作区，你的会话默认目录可能与它不同，请始终使用基于此目录的绝对路径。完成后你的最终回复会作为结果返回发起会话；如需其他成员协助，可用 send_agent_message 向其发送协作消息。",
+            "\n【任务工作区】{}\n本次任务的所有文件操作（读/写/搜索/执行命令）都必须在此目录下进行——这是发起会话的工作区，你的会话默认目录可能与它不同，请始终使用基于此目录的绝对路径。如需其他成员协助，可用 send_agent_message 向其发送协作消息。",
             activation.workspace
+        ));
+        // 回复地址：成员回报必须明确接收方（纯消息投递，不再由总线按
+        // 运行记录推断发起方）。
+        body.push_str(&format!(
+            "\n\n【回复地址】会话 {source_session}\n完成、阻塞或失败时，用 report_agent_result 向该地址回报结果（to_session 填此地址）；同一工作区有多项工作时在 task.md 中区分各自进展。"
         ));
         if !instructions.trim().is_empty() {
             body.push_str(&format!("\n\n【长期指令】\n{}", instructions.trim()));
@@ -1604,7 +1609,7 @@ impl SubagentService {
             &activation.workspace,
         );
         body.push_str(&state_section);
-        body.push_str("\n\n【成长约定】完成本次工作后：把可复用经验（成功做法、踩坑、用户偏好等，一行一条、结论式）用 append_agent_memory 追加到 lessons.md；确实学到稳定的新规则时，用 append_agent_instructions 并入你的长期指令（追加式，勿重复已有内容）。");
+        body.push_str("\n\n【成长约定】用 update_workspace_state 在 task.md 维护每项工作的发起者（其回复地址）、目标、进展、依赖与待反馈事项——同一工作区的多个发起方靠它区分，总线不替你猜测消息归属。完成本次工作后：把可复用经验（成功做法、踩坑、用户偏好等，一行一条、结论式）用 append_agent_memory 追加到 lessons.md；确实学到稳定的新规则时，用 append_agent_instructions 并入你的长期指令（追加式，勿重复已有内容）。");
         if let Some(run_tag) = run_tag {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
         }
@@ -2707,15 +2712,12 @@ impl SubagentService {
         if result.is_empty() {
             bail!("回报结果不能为空");
         }
-        let status = match request.status.as_deref().map(str::trim) {
-            None | Some("") | Some("completed") => RunStatus::Completed,
-            Some("failed") => RunStatus::Failed,
-            Some("blocked") => RunStatus::Blocked,
-            Some(other) => bail!("未知的回报状态「{other}」（completed / failed / blocked）"),
-        };
-        let _guard = self.ops.lock().await;
-        // 发起会话即成员后端会话：归属成员 = 以该会话为源的那个成员。
-        let target = self
+        let to_session = request.to_session.trim();
+        if to_session.is_empty() {
+            bail!("回报必须指定接收方（to_session，任务消息中的【回复地址】）");
+        }
+        // 消息来自成员：以该会话为后端会话的成员署名。
+        let config = self
             .agents
             .list()
             .into_iter()
@@ -2726,251 +2728,49 @@ impl SubagentService {
                 ) && session_owner.as_deref() == Some(config.id.as_str())
             })
             .ok_or_else(|| anyhow::anyhow!("当前会话不是任何 Subagent 的后端会话，无法回报"))?;
-        // 关联明确的工作：优先按回报携带的运行标记精确匹配（成员管理多
-        // 项工作时不由系统猜测）；未携带才回退最新活跃运行（单工作场景）。
-        let alive: Vec<RunRecord> = self
-            .store
-            .list_runs()
-            .into_iter()
-            .filter(|run| run.agent_id == target.id && run.status.is_alive() && run.pid.is_none())
-            .collect();
+        // 纯消息投递：回报只负责传达——不选择任务、不终结运行、不释放
+        // 执行资源（终结由执行系统按真实事件记录，工作含义由成员与主
+        // Agent 各自判断）。
+        let mut body = format!(
+            "【Subagent 回报】来自成员「{}」（{}）：\n{}",
+            config.name, config.id, result
+        );
+        if let Some(note) = request
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            body.push_str(&format!("\n（{note}）"));
+        }
         let marker = request
             .run_marker
             .as_deref()
             .map(str::trim)
             .map(|s| s.trim_start_matches("r-"))
             .filter(|s| !s.is_empty());
-        let mut run = match marker {
-            Some(marker) => alive
-                .iter()
-                .find(|run| run.run_id.ends_with(marker))
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "运行标记 r-{marker} 没有匹配的等待中工作；请核对正在处理的消息尾部标记"
-                    )
-                })?,
-            None => {
-                // 无标记缺省仅在恰好一项等待工作时合法；多项时拒绝歧义，
-                // 由成员明确指明——总线不猜测回报归属。
-                if alive.len() > 1 {
-                    bail!(
-                        "当前有 {} 项等待中的工作，回报必须携带 run_marker（正在处理消息尾部的 r-短码）指明对象",
-                        alive.len()
-                    );
-                }
-                alive.into_iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("当前没有等待回报的运行（可能已回报或被终结）")
-                })?
-            }
-        };
-        // 取消/停用裁定优先：停止请求中的工作收到成果时保留备查，
-        // 但不恢复为正常完成——是否继续由主 Agent 重新安排。
-        if run.status == RunStatus::Stopping {
-            let timestamp = now_string();
-            run.status = RunStatus::Cancelled;
-            run.summary = Some(format!("[停止请求中收到的成果备查] {result}"));
-            run.finished_at = Some(timestamp.clone());
-            run.updated_at = timestamp.clone();
-            self.store.save_run(&run)?;
-            sync_task_status(&self.store, &run);
-            self.release_collab_activation_if_idle(&run);
-            append_event(
-                &self.store,
-                &run,
-                "cancelled",
-                &json!({ "text": "停止确认；成员后续送达的成果已备查" }),
-                &timestamp,
-            );
-            let agents_ref = Some(&self.agents);
-            enqueue_hook(
-                &self.store,
-                agents_ref,
-                &run,
-                HookEventType::Message,
-                json!({ "text": format!("已请求停止的工作收到成员成果（备查，不改变取消裁定）：{result}") }),
-                &timestamp,
-            );
-            notify_run_status(&run);
-            return Ok(tool_ok(
-                "该工作已请求停止：成果已备查并转达发起方，取消裁定保持不变".to_string(),
-            ));
+        if let Some(marker) = marker {
+            body.push_str(&format!("\n（运行标记 r-{marker}）"));
         }
-        let timestamp = now_string();
-        if let Some(note) = request
-            .note
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        crate::delivery::deliver_message(&self.http, to_session, &body, None).await?;
+        // 诊断追踪：标记匹配到等待中的运行时追加一条投递事件（不动状态）。
+        if let Some(marker) = marker
+            && let Some(run) = self
+                .store
+                .list_runs()
+                .into_iter()
+                .find(|run| run.run_id.ends_with(marker) && run.status.is_alive())
         {
-            run.summary = Some(format!("{result}\n（{note}）"));
-        } else {
-            run.summary = Some(result.to_string());
-        }
-        run.status = status;
-        run.finished_at = status.is_terminal().then(|| timestamp.clone());
-        run.updated_at = timestamp.clone();
-        self.store.save_run(&run)?;
-        sync_task_status(&self.store, &run);
-        self.release_collab_activation_if_idle(&run);
-        let (event_type, payload) = match status {
-            RunStatus::Completed => ("completed", json!({ "text": result })),
-            RunStatus::Failed => ("failed", json!({ "text": result })),
-            _ => ("blocked", json!({ "text": result })),
-        };
-        append_event(&self.store, &run, event_type, &payload, &timestamp);
-        if status == RunStatus::Completed {
-            let agents_ref = Some(&self.agents);
-            archive_completion(&self.store, agents_ref, &run, result);
-        }
-        let agents_ref = Some(&self.agents);
-        enqueue_hook(
-            &self.store,
-            agents_ref,
-            &run,
-            match status {
-                RunStatus::Completed => HookEventType::Completed,
-                RunStatus::Failed => HookEventType::Failed,
-                _ => HookEventType::Blocked,
-            },
-            payload,
-            &timestamp,
-        );
-        notify_run_status(&run);
-        Ok(tool_ok(format!(
-            "已回报给发起方（{}，run {}）",
-            run.status.label(),
-            run.run_id
-        )))
-    }
-
-    /// 外部凭据回报（MCP 接入层）：运行标记即关联凭据（标记只在投递
-    /// 正文给出——收到任务的一方才知道）；验证运行存在且未终结后按
-    /// 内部回报同一语义收尾（取消裁定备查规则一致），投递按发起关系路由。
-    #[allow(dead_code, reason = "MCP 外部回报已收窄；保留供后续外部消息通道复用")]
-    pub async fn report_by_marker(
-        &self,
-        marker: &str,
-        result: &str,
-        status: &str,
-        note: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let result = result.trim();
-        if result.is_empty() {
-            bail!("回报结果不能为空");
-        }
-        let status = match status.trim() {
-            "" | "completed" => RunStatus::Completed,
-            "failed" => RunStatus::Failed,
-            "blocked" => RunStatus::Blocked,
-            other => bail!("未知的回报状态「{other}」（completed / failed / blocked）"),
-        };
-        let marker = marker.trim().trim_start_matches("r-");
-        if marker.is_empty() {
-            bail!("外部回报必须携带运行标记（任务消息尾部的 r-短码）");
-        }
-        let _guard = self.ops.lock().await;
-        let mut run = self
-            .store
-            .list_runs()
-            .into_iter()
-            .find(|run| run.run_id.ends_with(marker) && run.status.is_alive())
-            .ok_or_else(|| {
-                anyhow::anyhow!("运行标记 r-{marker} 无匹配的等待中工作（迟到、重复或已终结）")
-            })?;
-        self.finalize_report(&mut run, result, status, note).await
-    }
-
-    /// 回报收尾核心（内部成员会话与外部凭据入口共用）：终态化（含停止
-    /// 备查语义）、事件、Hook 投递发起方、归档与协作释放。
-    #[allow(dead_code, reason = "同 report_by_marker")]
-    async fn finalize_report(
-        &self,
-        run: &mut RunRecord,
-        result: &str,
-        status: RunStatus,
-        note: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        // 取消/停用裁定优先：停止请求中的工作收到成果时保留备查，
-        // 不恢复为正常完成——是否继续由主 Agent 重新安排。
-        if run.status == RunStatus::Stopping {
-            let timestamp = now_string();
-            run.status = RunStatus::Cancelled;
-            run.summary = Some(format!("[停止请求中收到的成果备查] {result}"));
-            run.finished_at = Some(timestamp.clone());
-            run.updated_at = timestamp.clone();
-            self.store.save_run(run)?;
-            sync_task_status(&self.store, run);
-            self.release_collab_activation_if_idle(run);
+            let text: String = result.chars().take(200).collect();
             append_event(
                 &self.store,
-                run,
-                "cancelled",
-                &json!({ "text": "停止确认；后续送达的成果已备查" }),
-                &timestamp,
+                &run,
+                "report_delivered",
+                &json!({ "text": text, "to_session": to_session }),
+                &now_string(),
             );
-            let agents_ref = Some(&self.agents);
-            enqueue_hook(
-                &self.store,
-                agents_ref,
-                run,
-                HookEventType::Message,
-                json!({ "text": format!("已请求停止的工作收到成果（备查，不改变取消裁定）：{result}") }),
-                &timestamp,
-            );
-            notify_run_status(run);
-            return Ok(tool_ok(
-                "该工作已请求停止：成果已备查并转达发起方，取消裁定保持不变".to_string(),
-            ));
         }
-        let timestamp = now_string();
-        if let Some(note) = note.map(str::trim).filter(|s| !s.is_empty()) {
-            run.summary = Some(format!("{result}\n（{note}）"));
-        } else {
-            run.summary = Some(result.to_string());
-        }
-        run.status = status;
-        run.finished_at = status.is_terminal().then(|| timestamp.clone());
-        run.updated_at = timestamp.clone();
-        self.store.save_run(run)?;
-        sync_task_status(&self.store, run);
-        self.release_collab_activation_if_idle(run);
-        let (event_type, payload) = match status {
-            RunStatus::Completed => ("completed", json!({ "text": result })),
-            RunStatus::Failed => ("failed", json!({ "text": result })),
-            _ => ("blocked", json!({ "text": result })),
-        };
-        append_event(&self.store, run, event_type, &payload, &timestamp);
-        if status == RunStatus::Completed {
-            let agents_ref = Some(&self.agents);
-            archive_completion(&self.store, agents_ref, run, result);
-        }
-        let agents_ref = Some(&self.agents);
-        enqueue_hook(
-            &self.store,
-            agents_ref,
-            run,
-            match status {
-                RunStatus::Completed => HookEventType::Completed,
-                RunStatus::Failed => HookEventType::Failed,
-                _ => HookEventType::Blocked,
-            },
-            payload,
-            &timestamp,
-        );
-        notify_run_status(run);
-        Ok(tool_ok(format!(
-            "已回报给发起方（{}，run …{}）",
-            run.status.label(),
-            run.run_id
-                .chars()
-                .rev()
-                .take(6)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>()
-        )))
+        Ok(tool_ok(format!("回报已投递到会话 {to_session}")))
     }
 
     /// 指令受控成长：向成员长期指令追加稳定规则（不覆盖既有内容）。
@@ -3162,7 +2962,9 @@ impl SubagentService {
         Ok(json!({ "deleted": request.name }))
     }
 
-    /// 从关联会话整理记忆（天工会话后端）：每轮「用户请求 + 最终回复（截断）」。
+    /// 整理记忆 = 向成员发送整理请求（成员按自身规则整理保存并经通用
+    /// 消息机制反馈）。目标会话按发起方（管理页所在会话）工作区的映射
+    /// 路由；不再由 sidecar 抓取会话历史代替成员整理。
     async fn ui_compile_memory(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let request: AgentMemoryRequest = parse_request(payload)?;
         let config = self.agents.load(&request.agent_id)?;
@@ -3170,25 +2972,16 @@ impl SubagentService {
             config.backend,
             BackendKind::TiangongSession | BackendKind::AgentTeam
         ) {
-            bail!(
-                "「从会话整理记忆」仅适用于有天工运行时会话的后端（其他后端的记忆来源是任务归档与手动记录）"
-            );
+            bail!("整理请求仅适用于天工会话后端的成员（其他后端的记忆来源是任务归档与手动记录）");
         }
-        let session_id = config
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("尚未建立运行时会话（原生后端在首次运行后可整理）"))?;
-        let session = crate::sessions::load_session_json(session_id)?;
-        let name = crate::memory::compile_from_session(
-            &self.agents,
-            &request.agent_id,
-            &session,
-            session_id,
-        )?;
-        notify(json!({ "kind": "memory_updated", "agent_id": request.agent_id }));
-        Ok(json!({ "compiled": name }))
+        let (session_id, workspace) = Self::require_context()?;
+        let content = format!(
+            "请整理当前工作区的重要结论：用 update_workspace_state 更新当前工作（task.md）、背景约定（context.md）与计划（plan.md），把可复用经验用 append_agent_memory 追加到 lessons.md，完成后用 report_agent_result 向我反馈整理结果（to_session 填会话 {session_id}）。"
+        );
+        self.send_message_core(&request.agent_id, &session_id, &workspace, &content)
+            .await?;
+        notify(json!({ "kind": "memory_request_sent", "agent_id": request.agent_id }));
+        Ok(json!({ "sent": true }))
     }
 
     async fn ui_agent_delete(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {

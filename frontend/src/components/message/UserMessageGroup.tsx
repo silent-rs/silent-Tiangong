@@ -238,6 +238,8 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   const subagentMatch = messageText.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
   // Subagent 任务投递：专属会话中收到的任务/消息以【Subagent 消息/任务】开头。
   const subagentTaskMatch = messageText.match(/^【Subagent (消息|任务)】来自(.+?)：\n?([\s\S]*)$/);
+  // Subagent 回报（纯消息投递路径）：接收方收到的成员回报。
+  const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const searchQuery = useSearchStore((s) => s.searchQuery);
@@ -365,6 +367,20 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                 renderText={renderUserText}
               />
             );
+          })() : subagentReportMessageMatch ? (() => {
+            // 纯消息投递路径的成员回报：成员署名渲染为回报卡片。
+            const [, source, body] = subagentReportMessageMatch;
+            const agentName = source.replace(/^成员「|」$/g, '').trim() || source;
+            return (
+              <SubagentReportCard
+                agentName={agentName}
+                status="回报"
+                content={body}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
+            );
           })() : subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
             const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
@@ -435,7 +451,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           )}
         </div>
       )}
-      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && (
+      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && (
         <div className="flex justify-end">
           <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
         </div>
