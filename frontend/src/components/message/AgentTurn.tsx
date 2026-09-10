@@ -110,6 +110,7 @@ function AgentTurnView({
     | { type: "retry_system"; msg: MessageItem }
     | { type: "context_management"; msg: MessageItem }
     | { type: "agent_event"; category: string; content: string; agentRoles: string[] }
+    | { type: "subagent_report"; agentName: string; status: string; content: string; time: string; msgId: string }
     | { type: "other_system"; msg: MessageItem };
 
   const fragments: Fragment[] = [];
@@ -124,7 +125,20 @@ function AgentTurnView({
 
   for (const msg of messages) {
     if (msg.role === "notice" && msg.usage) continue;
-    if (msg.role === "user") {
+    if (msg.role === "user" && textContent(msg).startsWith("[Subagent·")) {
+      flushTools();
+      const raw = textContent(msg);
+      const match = raw.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
+      if (match) {
+        const [, name, body] = match;
+        const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
+        const status = statusMatch ? statusMatch[1] : "消息";
+        const content = statusMatch ? body.slice(statusMatch[0].length) : body;
+        fragments.push({ type: "subagent_report", agentName: name.trim(), status, content: content.trim(), time: msg.created_at, msgId: msg.id });
+      } else {
+        fragments.push({ type: "user", msg });
+      }
+    } else if (msg.role === "user") {
       flushTools();
       fragments.push({ type: "user", msg });
     } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索] 策略:")) {
@@ -351,6 +365,31 @@ function AgentTurnView({
             <div key={frag.msg.id} className="inline-flex max-w-full items-center gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground" title={formatMessageTime(frag.msg.created_at)}>
               <FileText className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">{text}</span>
+            </div>
+          );
+        }
+        if (frag.type === "subagent_report") {
+          const statusIcon: Record<string, string> = { "任务完成": "✓", "执行失败": "✗", "运行阻塞": "⏳", "等待审批": "?" };
+          const statusColor: Record<string, string> = {
+            "任务完成": "text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+            "执行失败": "text-red-600 dark:text-red-400 bg-red-500/10 border-red-500/20",
+            "运行阻塞": "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
+            "等待审批": "text-blue-600 dark:text-blue-400 bg-blue-500/10 border-blue-500/20",
+            "消息": "text-muted-foreground bg-muted/30 border-border",
+          };
+          const sc = statusColor[frag.status] || statusColor["消息"];
+          return (
+            <div key={`sr-${frag.msgId}`} className="my-1.5 rounded-lg border bg-card shadow-sm overflow-hidden" title={formatMessageTime(frag.time)}>
+              <div className={`flex items-center gap-2 px-3 py-1.5 border-b text-xs font-medium ${sc}`}>
+                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold">S</span>
+                <span className="font-semibold">{frag.agentName}</span>
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border">
+                  {statusIcon[frag.status] || "•"} {frag.status}
+                </span>
+              </div>
+              <div className="px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+                {frag.content}
+              </div>
             </div>
           );
         }
