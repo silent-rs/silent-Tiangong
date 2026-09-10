@@ -19,10 +19,14 @@ import { CollapsibleUserText } from "./CollapsibleUserText";
 
 
 
+/// 计算左侧空白长度：裁剪后的文本须补上被去掉的前缀，才能换算回
+/// 原消息中的位置（搜索高亮依赖原消息坐标）。
+const leadingWhitespace = (s: string) => s.length - s.trimStart().length;
+
 /// 手风琴行：独立展开/收起，标题常显、内容按需展开。
-function AccordionRow({ title, children, renderText }: {
-  title: string; children: string;
-  renderText: (text: string) => React.ReactNode;
+function AccordionRow({ title, children, contentOffset, renderText }: {
+  title: string; children: string; contentOffset: number;
+  renderText: (text: string, sourceOffset: number) => React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -35,7 +39,7 @@ function AccordionRow({ title, children, renderText }: {
       {open && (
         <div className="px-4 pb-2 pt-0.5">
           <div className="rounded-md bg-muted/[0.1] border border-border/15 px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-36 overflow-y-auto">
-            {renderText(children)}
+            {renderText(children, contentOffset)}
           </div>
         </div>
       )}
@@ -46,9 +50,9 @@ function AccordionRow({ title, children, renderText }: {
 /// Subagent 任务指派卡片：分层展示核心任务与元信息。
 /// 正文结构：任务/消息内容 →【任务工作区】→【长期指令】→【长期记忆】
 /// →【成长约定】→【工作区状态】→（运行标记）。
-function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
-  body: string; source: string; kind: string; time: string;
-  onCopy: () => void; renderText: (text: string) => React.ReactNode;
+function SubagentTaskCard({ body, bodyOffset, source, kind, time, onCopy, renderText }: {
+  body: string; bodyOffset: number; source: string; kind: string; time: string;
+  onCopy: () => void; renderText: (text: string, sourceOffset: number) => React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -61,31 +65,37 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
     ['工作区状态', /\u3010工作区状态\u3011/],
   ];
   // 先在全文中定位所有标记的起始位置（互不截断），再统一提取
-  const positions: { start: number; title: string; content: string }[] = [];
+  const positions: { start: number; title: string; markerLen: number; raw: string }[] = [];
   for (const [title, re] of metaDefs) {
     const m = re.exec(body);
     if (!m) continue;
-    positions.push({ start: m.index, title, content: '' });
+    positions.push({ start: m.index, title, markerLen: m[0].length, raw: '' });
   }
   // 加上运行标记位置作为最终截断
   const runTagIdx = body.indexOf('\uff08运行标记');
   positions.sort((a, b) => a.start - b.start);
-  // 逐段填充内容：从标记结束到下一个标记或运行标记或末尾
+  // 逐段填充内容：从标记结束到下一个标记或运行标记或末尾。
+  // 只切除标记本身（旧格式含“标题：”前缀），保留其后内容。
   for (let i = 0; i < positions.length; i++) {
     const cur = positions[i];
     const nextStart = i + 1 < positions.length ? positions[i + 1].start
       : (runTagIdx >= 0 ? runTagIdx : body.length);
-    cur.content = body.slice(cur.start, nextStart).trim();
+    cur.raw = body.slice(cur.start + cur.markerLen, nextStart);
   }
-  // 提取内容去掉标记行本身
-  const metaSections = positions.map(p => ({
-    title: p.title,
-    content: p.content.replace(/^\u3010?[^\u3011\n]*\u3011?\n?/, '').trim(),
-  })).filter(s => s.content);
+  // 各段记录自身在原消息中的起始偏移，供搜索高亮换算
+  const metaSections = positions.map(p => {
+    const content = p.raw.trim();
+    return {
+      title: p.title,
+      content,
+      offset: bodyOffset + p.start + p.markerLen + leadingWhitespace(p.raw),
+    };
+  }).filter(s => s.content);
   // 核心内容 = 第一个标记之前的文本
   const firstMarkerIdx = positions.length > 0 ? positions[0].start : body.length;
-  let coreContent = body.slice(0, firstMarkerIdx).trimEnd();
-  coreContent = coreContent.replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '').trim();
+  const coreRaw = body.slice(0, firstMarkerIdx).trimEnd().replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '');
+  const coreContent = coreRaw.trim();
+  const coreOffset = bodyOffset + leadingWhitespace(coreRaw);
 
   const MAX_LINES = 5;
   const lines = coreContent.split('\n');
@@ -115,7 +125,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
 
         <div className="px-4 py-3">
           <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-            {renderText(displayContent)}
+            {renderText(displayContent, coreOffset)}
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
@@ -127,7 +137,7 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
         {metaSections.length > 0 && (
           <div className="border-t border-border/30 py-1">
             {metaSections.map((section) => (
-              <AccordionRow key={section.title} title={section.title} renderText={renderText}>
+              <AccordionRow key={section.title} title={section.title} contentOffset={section.offset} renderText={renderText}>
                 {section.content}
               </AccordionRow>
             ))}
@@ -140,9 +150,9 @@ function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
 
 
 /// Subagent Hook 回报卡片：状态色竖条+状态图标+成员名+徽章+可折叠内容。
-function SubagentReportCard({ agentName, status, content, time, onCopy, renderText }: {
-  agentName: string; status: string; content: string; time: string;
-  onCopy: () => void; renderText: (text: string) => React.ReactNode;
+function SubagentReportCard({ agentName, status, content, contentOffset, time, onCopy, renderText }: {
+  agentName: string; status: string; content: string; contentOffset: number; time: string;
+  onCopy: () => void; renderText: (text: string, sourceOffset: number) => React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const statusIcon: Record<string, string> = { '任务完成': '✓', '执行失败': '✗', '运行阻塞': '⏳', '等待审批': '?' };
@@ -199,7 +209,7 @@ function SubagentReportCard({ agentName, status, content, time, onCopy, renderTe
         </div>
         <div className="px-4 py-3">
           <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
-            {renderText(displayContent)}
+            {renderText(displayContent, contentOffset)}
           </div>
           {isLong && (
             <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
@@ -360,6 +370,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
             return (
               <SubagentTaskCard
                 body={body}
+                bodyOffset={messageText.length - body.length}
                 source={source}
                 kind={kind}
                 time={formatMessageTime(message.created_at)}
@@ -376,6 +387,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                 agentName={agentName}
                 status="回报"
                 content={body}
+                contentOffset={messageText.length - body.length}
                 time={formatMessageTime(message.created_at)}
                 onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
                 renderText={renderUserText}
@@ -383,14 +395,18 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
             );
           })() : subagentMatch ? (() => {
             const [, agentName, body] = subagentMatch;
+            const bodyOffset = messageText.length - body.length;
             const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
             const status = statusMatch ? statusMatch[1] : '消息';
-            const content = statusMatch ? body.slice(statusMatch[0].length) : body;
+            const contentRaw = statusMatch ? body.slice(statusMatch[0].length) : body;
+            const content = contentRaw.trim();
+            const contentOffset = bodyOffset + (statusMatch ? statusMatch[0].length : 0) + leadingWhitespace(contentRaw);
             return (
               <SubagentReportCard
                 agentName={agentName.trim()}
                 status={status}
-                content={content.trim()}
+                content={content}
+                contentOffset={contentOffset}
                 time={formatMessageTime(message.created_at)}
                 onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
                 renderText={renderUserText}
