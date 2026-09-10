@@ -1,5 +1,5 @@
 {
-  "_comment": "模型 context_window 映射表（token 数）。首次安装时释放到 ~/.tiangong/context_windows.json，用户可自行修改。匹配规则：精确匹配 > 最长键匹配（无 * 的键按前缀匹配，含 * 的键按通配符匹配，如 glm-4.5*、*-flash、gpt-*-mini） > 默认 200000",
+  "_comment": "模型 context_window 映射表（token 数）。程序启动时用内置默认表直接覆盖 ~/.tiangong/context_windows.json，随版本更新保持最新，不承载用户自定义。匹配规则：精确匹配 > 最长键匹配（无 * 的键按前缀匹配，含 * 的键按通配符匹配，如 glm-4.5*、*-flash、gpt-*-mini） > 默认 200000",
   "_default": 200000,
 
   "gpt-6*": 1050000,

@@ -224,17 +224,14 @@ pub fn default_context_windows_json() -> &'static str {
     include_str!("resources/context_windows.json")
 }
 
-/// 首次安装：用户目录下不存在 context_windows.json 时释放内嵌默认内容。
+/// 启动时用内嵌默认表直接覆盖 `dir/context_windows.json`，
+/// 让默认映射随程序版本更新自动同步；该文件按约定不承载用户自定义。
 pub fn ensure_context_windows(dir: &Path) {
     let path = dir.join("context_windows.json");
-    if path.exists() {
-        return;
-    }
-    let default_content = default_context_windows_json();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(err) = std::fs::write(&path, default_content) {
+    if let Err(err) = std::fs::write(&path, default_context_windows_json()) {
         tracing::warn!("写入 context_windows.json 失败：{err}");
     }
 }
@@ -484,5 +481,26 @@ mod tests {
             resolve_context_limit_at(dir.path(), "gpt-4.1"),
             DEFAULT_CONTEXT_LIMIT
         );
+    }
+
+    /// ensure 时无条件用内嵌默认表覆盖用户目录文件：旧内容被还原为新表，
+    /// 手改过的键同样在下次 ensure 时被还原。
+    #[test]
+    fn context_windows_overwritten_on_ensure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("context_windows.json");
+
+        // 任意旧内容覆盖为新默认表
+        std::fs::write(&file, r#"{ "gpt-4o": 1, "_default": 200000 }"#).unwrap();
+        ensure_context_windows(dir.path());
+        assert_eq!(resolve_context_limit_at(dir.path(), "gpt-4o"), 128000);
+
+        // 手改后在下次 ensure 被还原
+        let content = std::fs::read_to_string(&file).unwrap();
+        let customized = content.replace("\"gpt-5.6*\": 1050000", "\"gpt-5.6*\": 999999");
+        assert_ne!(customized, content, "替换目标键应存在于默认表");
+        std::fs::write(&file, customized).unwrap();
+        ensure_context_windows(dir.path());
+        assert_eq!(resolve_context_limit_at(dir.path(), "gpt-5.6-sol"), 1050000);
     }
 }
