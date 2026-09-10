@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useSearchStore } from "@/store/useSearchStore";
 import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
@@ -15,6 +16,201 @@ import { VoiceBubble } from "./VoiceBubble";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { CollapsibleUserText } from "./CollapsibleUserText";
+
+
+
+/// 手风琴行：独立展开/收起，标题常显、内容按需展开。
+function AccordionRow({ title, children, renderText }: {
+  title: string; children: string;
+  renderText: (text: string) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-b border-border/15 last:border-b-0">
+      <button type="button" className="flex items-center gap-1.5 w-full px-4 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/[0.08] transition-colors" onClick={() => setOpen(!open)}>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`w-3 h-3 transition-transform shrink-0 ${open ? 'rotate-90' : ''}`}><path d="m9 18 6-6-6-6"/></svg>
+        <span className="font-medium">{title}</span>
+        {!open && <span className="ml-auto text-[10px] text-muted-foreground/40 truncate max-w-[50%]">{children.slice(0, 40).replace(/\n/g, ' ')}…</span>}
+      </button>
+      {open && (
+        <div className="px-4 pb-2 pt-0.5">
+          <div className="rounded-md bg-muted/[0.1] border border-border/15 px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground max-h-36 overflow-y-auto">
+            {renderText(children)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// Subagent 任务指派卡片：分层展示核心任务与元信息。
+/// 正文结构：任务/消息内容 →【任务工作区】→【长期指令】→【长期记忆】
+/// →【成长约定】→【工作区状态】→（运行标记）。
+function SubagentTaskCard({ body, source, kind, time, onCopy, renderText }: {
+  body: string; source: string; kind: string; time: string;
+  onCopy: () => void; renderText: (text: string) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  // 标记支持新旧两种格式：【任务工作区】(新) / 任务工作区：(旧)
+  const metaDefs: [string, RegExp][] = [
+    ['任务工作区', /\u3010任务工作区\u3011|任务工作区：/],
+    ['长期指令', /\u3010长期指令\u3011/],
+    ['长期记忆', /\u3010长期记忆\u3011/],
+    ['成长约定', /\u3010成长约定\u3011/],
+    ['工作区状态', /\u3010工作区状态\u3011/],
+  ];
+  // 先在全文中定位所有标记的起始位置（互不截断），再统一提取
+  const positions: { start: number; title: string; content: string }[] = [];
+  for (const [title, re] of metaDefs) {
+    const m = re.exec(body);
+    if (!m) continue;
+    positions.push({ start: m.index, title, content: '' });
+  }
+  // 加上运行标记位置作为最终截断
+  const runTagIdx = body.indexOf('\uff08运行标记');
+  positions.sort((a, b) => a.start - b.start);
+  // 逐段填充内容：从标记结束到下一个标记或运行标记或末尾
+  for (let i = 0; i < positions.length; i++) {
+    const cur = positions[i];
+    const nextStart = i + 1 < positions.length ? positions[i + 1].start
+      : (runTagIdx >= 0 ? runTagIdx : body.length);
+    cur.content = body.slice(cur.start, nextStart).trim();
+  }
+  // 提取内容去掉标记行本身
+  const metaSections = positions.map(p => ({
+    title: p.title,
+    content: p.content.replace(/^\u3010?[^\u3011\n]*\u3011?\n?/, '').trim(),
+  })).filter(s => s.content);
+  // 核心内容 = 第一个标记之前的文本
+  const firstMarkerIdx = positions.length > 0 ? positions[0].start : body.length;
+  let coreContent = body.slice(0, firstMarkerIdx).trimEnd();
+  coreContent = coreContent.replace(/\n*\uff08运行标记[^\uff09]*\uff09\s*$/, '').trim();
+
+  const MAX_LINES = 5;
+  const lines = coreContent.split('\n');
+  const isLong = lines.length > MAX_LINES;
+  const displayContent = expanded || !isLong ? coreContent : lines.slice(0, MAX_LINES).join('\n') + '…';
+
+  const isTask = kind === '任务';
+
+  return (
+    <div className="w-full max-w-[92%] sm:max-w-[80%]">
+      <div className="rounded-xl border border-border/60 bg-card shadow-sm overflow-hidden">
+        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border/30 bg-muted/[0.1]">
+          <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary/10 border border-primary/15 shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5 text-primary">
+              {isTask ? <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></> : <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
+            </svg>
+          </div>
+          <div className="min-w-0 flex-1">
+            <span className="text-sm font-semibold text-foreground">{isTask ? '任务指派' : '协作消息'}</span>
+            <span className="ml-2 text-[11px] text-muted-foreground">来自 {source.trim()}</span>
+          </div>
+          <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
+          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          </button>
+        </div>
+
+        <div className="px-4 py-3">
+          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+            {renderText(displayContent)}
+          </div>
+          {isLong && (
+            <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
+              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
+            </button>
+          )}
+        </div>
+
+        {metaSections.length > 0 && (
+          <div className="border-t border-border/30 py-1">
+            {metaSections.map((section) => (
+              <AccordionRow key={section.title} title={section.title} renderText={renderText}>
+                {section.content}
+              </AccordionRow>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+/// Subagent Hook 回报卡片：状态色竖条+状态图标+成员名+徽章+可折叠内容。
+function SubagentReportCard({ agentName, status, content, time, onCopy, renderText }: {
+  agentName: string; status: string; content: string; time: string;
+  onCopy: () => void; renderText: (text: string) => React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const statusIcon: Record<string, string> = { '任务完成': '✓', '执行失败': '✗', '运行阻塞': '⏳', '等待审批': '?' };
+  const accentColor: Record<string, string> = {
+    '任务完成': 'border-l-emerald-500', '执行失败': 'border-l-red-500',
+    '运行阻塞': 'border-l-amber-500', '等待审批': 'border-l-blue-500', '消息': 'border-l-border',
+  };
+  const iconBg: Record<string, string> = {
+    '任务完成': 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+    '执行失败': 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+    '运行阻塞': 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+    '等待审批': 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+    '消息': 'bg-muted text-muted-foreground border-border',
+  };
+  const pillColor: Record<string, string> = {
+    '任务完成': 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/15',
+    '执行失败': 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/15',
+    '运行阻塞': 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/15',
+    '等待审批': 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/15',
+    '消息': 'bg-muted/50 text-muted-foreground border-border',
+  };
+  const ac = accentColor[status] || accentColor['消息'];
+  const ib = iconBg[status] || iconBg['消息'];
+  const pc = pillColor[status] || pillColor['消息'];
+  const MAX_LINES = 5;
+  const lines = content.split('\n');
+  const isLong = lines.length > MAX_LINES;
+  const displayContent = expanded || !isLong ? content : lines.slice(0, MAX_LINES).join('\n') + '…';
+  return (
+    <div className="w-full max-w-[92%] sm:max-w-[80%]">
+      <div className={`rounded-xl border border-border/60 border-l-[3px] ${ac} bg-card shadow-sm overflow-hidden`}>
+        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-border/30 bg-muted/[0.15]">
+          <div className={`flex items-center justify-center w-7 h-7 rounded-full border shrink-0 ${ib}`}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5">
+              {status === '任务完成' && <path d="M20 6 9 17l-5-5"/>}
+              {status === '执行失败' && <><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>}
+              {status === '运行阻塞' && <><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>}
+              {status === '等待审批' && <><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></>}
+              {status === '消息' && <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>}
+            </svg>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">{agentName}</span>
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium border ${pc}`}>
+                {statusIcon[status] || '•'} {status}
+              </span>
+            </div>
+          </div>
+          <span className="text-[10px] text-muted-foreground/50 shrink-0">{time}</span>
+          <button type="button" aria-label="复制" className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground/40 hover:text-foreground hover:bg-foreground/5 transition-colors shrink-0" onClick={onCopy}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          </button>
+        </div>
+        <div className="px-4 py-3">
+          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words text-card-foreground">
+            {renderText(displayContent)}
+          </div>
+          {isLong && (
+            <button type="button" className="mt-2 text-xs text-primary hover:text-primary/70 transition-colors" onClick={() => setExpanded(!expanded)}>
+              {expanded ? '收起' : `展开全部（共 ${lines.length} 行）`}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
@@ -37,6 +233,13 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   const messageText = textContent(message);
   const scheduledTask = parseScheduledTaskMessage(messageText);
   const webhook = parseWebhookMessage(messageText);
+  // Subagent 回报：Hook 消息以 [Subagent·成员名] 开头，渲染为卡片
+  // 而非普通用户消息气泡。
+  const subagentMatch = messageText.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
+  // Subagent 任务投递：专属会话中收到的任务/消息以【Subagent 消息/任务】开头。
+  const subagentTaskMatch = messageText.match(/^【Subagent (消息|任务)】来自(.+?)：\n?([\s\S]*)$/);
+  // Subagent 回报（纯消息投递路径）：接收方收到的成员回报。
+  const subagentReportMessageMatch = messageText.match(/^【Subagent 回报】来自(.+?)：\n?([\s\S]*)$/);
   const voiceInfo = voiceMessages[message.id];
   const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const searchQuery = useSearchStore((s) => s.searchQuery);
@@ -152,7 +355,48 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
         </div>
       ) : (
         <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-          {scheduledTask || webhook ? (
+          {subagentTaskMatch ? (() => {
+            const [, kind, source, body] = subagentTaskMatch;
+            return (
+              <SubagentTaskCard
+                body={body}
+                source={source}
+                kind={kind}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
+            );
+          })() : subagentReportMessageMatch ? (() => {
+            // 纯消息投递路径的成员回报：成员署名渲染为回报卡片。
+            const [, source, body] = subagentReportMessageMatch;
+            const agentName = source.replace(/^成员「|」$/g, '').trim() || source;
+            return (
+              <SubagentReportCard
+                agentName={agentName}
+                status="回报"
+                content={body}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
+            );
+          })() : subagentMatch ? (() => {
+            const [, agentName, body] = subagentMatch;
+            const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
+            const status = statusMatch ? statusMatch[1] : '消息';
+            const content = statusMatch ? body.slice(statusMatch[0].length) : body;
+            return (
+              <SubagentReportCard
+                agentName={agentName.trim()}
+                status={status}
+                content={content.trim()}
+                time={formatMessageTime(message.created_at)}
+                onCopy={() => navigator.clipboard.writeText(messageText).catch(() => {})}
+                renderText={renderUserText}
+              />
+            );
+          })() : scheduledTask || webhook ? (
             (() => {
               const data = scheduledTask ?? webhook!;
               return (
@@ -207,7 +451,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           )}
         </div>
       )}
-      {messageText && !isEditing && (
+      {messageText && !isEditing && !subagentMatch && !subagentTaskMatch && !subagentReportMessageMatch && (
         <div className="flex justify-end">
           <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
         </div>
