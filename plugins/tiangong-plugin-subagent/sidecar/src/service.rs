@@ -1242,6 +1242,7 @@ impl SubagentService {
         session_id: &str,
         workspace: &str,
         content: &str,
+        attachments: &[AttachmentPayload],
     ) -> Result<SendOutcome> {
         if content.trim().is_empty() {
             bail!("消息内容不能为空");
@@ -1341,6 +1342,7 @@ impl SubagentService {
                 origin.as_ref(),
                 Some(&run_tag),
                 None,
+                attachments,
             )
             .await?;
             append_event(
@@ -1370,6 +1372,7 @@ impl SubagentService {
                 None,
                 Some(content),
                 origin.as_ref(),
+                attachments,
             )
             .await?;
         Ok(SendOutcome {
@@ -1386,6 +1389,7 @@ impl SubagentService {
         workspace: &str,
         goal: &str,
         completion_criteria: Option<&str>,
+        attachments: &[AttachmentPayload],
     ) -> Result<SubmitOutcome> {
         if goal.trim().is_empty() {
             bail!("任务目标不能为空");
@@ -1428,6 +1432,7 @@ impl SubagentService {
                 Some(&task),
                 None,
                 origin.as_ref(),
+                attachments,
             )
             .await?;
         Ok(SubmitOutcome {
@@ -1438,6 +1443,7 @@ impl SubagentService {
 
     /// 启动运行（持 ops 锁调用）：CLI 后端启动子进程，会话后端投递关联会话。
     /// 启动失败时回滚协作登记（无活跃运行即释放），不留残留占用。
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_run(
         &self,
         config: &AgentConfig,
@@ -1446,10 +1452,11 @@ impl SubagentService {
         task: Option<&TaskRecord>,
         message: Option<&str>,
         origin: Option<&CollabOrigin<'_>>,
+        attachments: &[AttachmentPayload],
     ) -> Result<RunRecord> {
         let collab_activation = activation.activation_id.clone();
         let result = self
-            .spawn_run_inner(config, activation, kind, task, message, origin)
+            .spawn_run_inner(config, activation, kind, task, message, origin, attachments)
             .await;
         if result.is_err() {
             release_collab_activation(&self.store, &collab_activation);
@@ -1457,6 +1464,7 @@ impl SubagentService {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_run_inner(
         &self,
         config: &AgentConfig,
@@ -1465,6 +1473,7 @@ impl SubagentService {
         task: Option<&TaskRecord>,
         message: Option<&str>,
         origin: Option<&CollabOrigin<'_>>,
+        attachments: &[AttachmentPayload],
     ) -> Result<RunRecord> {
         if self.shutting_down.load(Ordering::Acquire) {
             bail!("Subagent 总线正在关闭，不再接受新任务");
@@ -1518,6 +1527,7 @@ impl SubagentService {
                         } else {
                             None
                         },
+                        attachments,
                     )
                     .await?;
                 run.executor_session = Some(source_session.clone());
@@ -1561,6 +1571,7 @@ impl SubagentService {
         origin: Option<&CollabOrigin<'_>>,
         run_tag: Option<&str>,
         session_workspace: Option<&str>,
+        attachments: &[AttachmentPayload],
     ) -> Result<String> {
         let instructions = self.agents.instructions(&config.id).unwrap_or_default();
         let memory = crate::memory::injection_snapshot(&self.agents, &config.id);
@@ -1618,9 +1629,22 @@ impl SubagentService {
             body.push_str(&format!("\n\n（运行标记 r-{run_tag}）"));
         }
         // 工作区仅随新会话的首条消息传递（宿主创建时落为 cwd）；复用已有
-        // 会话不携带——会话创建后工作区固定，不随消息修改。
-        crate::delivery::deliver_message(&self.http, source_session, &body, session_workspace)
-            .await?;
+        // 会话不携带——会话创建后工作区固定，不随消息修改。附件随消息
+        // 携带（本地路径经 Server 归档进成员会话），正文标注数量供成员感知。
+        if !attachments.is_empty() {
+            body.push_str(&format!(
+                "\n\n【随消息附件】本条消息附带 {} 个附件（已随消息送达，按内容中的资源引用处理）。",
+                attachments.len()
+            ));
+        }
+        crate::delivery::deliver_message(
+            &self.http,
+            source_session,
+            &body,
+            session_workspace,
+            attachments,
+        )
+        .await?;
         Ok(format!("已投递到关联会话 {source_session}，等待其完成回复"))
     }
 
@@ -1784,7 +1808,7 @@ impl SubagentService {
             "【Subagent 控制】会话「{}」（{}）对刚才提交的请求发起{}：无需继续处理，若已在处理请尽快收尾并说明未完成的部分。",
             config.name, config.id, action
         );
-        crate::delivery::deliver_message(&self.http, source_session, &body, None).await
+        crate::delivery::deliver_message(&self.http, source_session, &body, None, &[]).await
     }
 
     /// 关联会话本轮完成（WASM on_turn_finished 转发）：
@@ -2271,7 +2295,13 @@ impl SubagentService {
         let (session_id, workspace) = Self::require_context()?;
         let request: SendMessageRequest = parse_request(payload)?;
         let outcome = self
-            .send_message_core(&request.agent_id, &session_id, &workspace, &request.content)
+            .send_message_core(
+                &request.agent_id,
+                &session_id,
+                &workspace,
+                &request.content,
+                &request.attachments,
+            )
             .await?;
         Ok(tool_ok(if outcome.injected_into_run {
             format!("消息已注入运行中实例（run {}）", outcome.run_id)
@@ -2293,6 +2323,7 @@ impl SubagentService {
                 &workspace,
                 &request.goal,
                 request.completion_criteria.as_deref(),
+                &request.attachments,
             )
             .await?;
         Ok(tool_ok(format!(
@@ -2719,7 +2750,7 @@ impl SubagentService {
         if let Some(marker) = marker {
             body.push_str(&format!("\n（运行标记 r-{marker}）"));
         }
-        crate::delivery::deliver_message(&self.http, to_session, &body, None).await?;
+        crate::delivery::deliver_message(&self.http, to_session, &body, None, &[]).await?;
         // 诊断追踪：标记匹配到等待中的运行时追加一条投递事件（不动状态）。
         if let Some(marker) = marker
             && let Some(run) = self
@@ -2958,7 +2989,7 @@ impl SubagentService {
         let content = format!(
             "请整理当前工作区的重要结论：用 update_workspace_state 更新当前工作（task.md）、背景约定（context.md）与计划（plan.md），把可复用经验用 append_agent_memory 追加到 lessons.md，完成后用 report_agent_result 向我反馈整理结果（to_session 填会话 {session_id}）。"
         );
-        self.send_message_core(&request.agent_id, session_id, workspace, &content)
+        self.send_message_core(&request.agent_id, session_id, workspace, &content, &[])
             .await?;
         notify(json!({ "kind": "memory_request_sent", "agent_id": request.agent_id }));
         Ok(json!({ "sent": true }))
@@ -3000,6 +3031,7 @@ impl SubagentService {
                 &request.session_id,
                 &request.workspace,
                 &request.content,
+                &[],
             )
             .await?;
         Ok(serde_json::to_value(outcome)?)
@@ -3014,6 +3046,7 @@ impl SubagentService {
                 &request.workspace,
                 &request.goal,
                 request.completion_criteria.as_deref(),
+                &[],
             )
             .await?;
         Ok(serde_json::to_value(outcome)?)

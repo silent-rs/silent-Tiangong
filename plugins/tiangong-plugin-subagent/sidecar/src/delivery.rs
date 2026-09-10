@@ -10,6 +10,7 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 
 use tiangong_plugin_subagent_protocol::hooks::HookEvent;
+use tiangong_plugin_subagent_protocol::ops::AttachmentPayload;
 
 use crate::runtime_store::RuntimeStore;
 
@@ -144,11 +145,13 @@ impl DeliveryWorker {
 ///
 /// `workspace`：消息期望的工作区——服务端创建会话时作为 cwd、已有会话
 /// 不一致时由宿主统一更新；None 表示不指定（Hook/控制通知等）。
+/// `media`：随消息携带的附件（本地路径），Server 端归档后进消息内容。
 pub async fn deliver_message(
     client: &reqwest::Client,
     conversation_id: &str,
     message: &str,
     workspace: Option<&str>,
+    media: &[AttachmentPayload],
 ) -> Result<()> {
     let (url, token) = server_connection();
     let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
@@ -159,6 +162,23 @@ pub async fn deliver_message(
     });
     if let Some(workspace) = workspace.map(str::trim).filter(|value| !value.is_empty()) {
         payload["workspace"] = serde_json::Value::String(workspace.to_string());
+    }
+    if !media.is_empty() {
+        // 对齐 Server ConnectorMessageRequest.media（MediaAsset 形状）；
+        // 本地路径作为 url，Server 归档时按本地文件读取。
+        payload["media"] = serde_json::Value::Array(
+            media
+                .iter()
+                .map(|attachment| {
+                    serde_json::json!({
+                        "kind": attachment.kind,
+                        "url": attachment.path,
+                        "mime_type": attachment.mime_type,
+                        "title": attachment.name,
+                    })
+                })
+                .collect(),
+        );
     }
     let mut request = client
         .post(&endpoint)
@@ -172,6 +192,6 @@ pub async fn deliver_message(
     if status.is_success() || status.as_u16() == 202 {
         Ok(())
     } else {
-        anyhow::bail!("server 返回 {status}");
+        anyhow::bail!("server 返回 {status}")
     }
 }

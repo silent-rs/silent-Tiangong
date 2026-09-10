@@ -131,10 +131,28 @@ pub struct CreateAgentRequest {
     pub activate: Option<bool>,
 }
 
+/// 随消息携带给成员的附件（本地路径）。
+///
+/// 由 WASM 侧自动提取发起会话本轮用户消息的附件注入，模型无需也无法
+/// 手工填写路径；sidecar 透传给 Server 消息接口的 media 字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentPayload {
+    /// 附件本地路径。
+    pub path: String,
+    /// 媒体类型：image / video / audio / file。
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub agent_id: String,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +161,8 @@ pub struct SubmitTaskRequest {
     pub goal: String,
     #[serde(default)]
     pub completion_criteria: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,4 +451,46 @@ pub struct MemoryFileEntry {
 pub struct MemoryReadOutcome {
     pub name: String,
     pub content: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 附件载荷的 wire 形状须与 Server 端 ConnectorMessageRequest.media
+    /// （MediaAsset：kind/url/mime_type/title/capability，除 kind、url 外
+    /// 均可缺省）保持兼容——sidecar 投递时按该形状转换。
+    #[test]
+    fn 附件载荷缺省字段可省略且类型可反序列化() {
+        let payload = AttachmentPayload {
+            path: "/tmp/a.png".to_string(),
+            kind: "image".to_string(),
+            mime_type: Some("image/png".to_string()),
+            name: Some("a.png".to_string()),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["path"], "/tmp/a.png");
+        assert_eq!(json["kind"], "image");
+        assert_eq!(json["mime_type"], "image/png");
+        assert_eq!(json["name"], "a.png");
+
+        // 省略可选字段（mime_type/name 缺失）仍可反序列化——WASM 注入侧
+        // 附件缺失元信息时按 null 序列化。
+        let minimal = serde_json::json!({
+            "path": "/tmp/b.pdf",
+            "kind": "file",
+            "mime_type": null,
+            "name": null,
+        });
+        let parsed: AttachmentPayload = serde_json::from_value(minimal).unwrap();
+        assert_eq!(parsed.path, "/tmp/b.pdf");
+        assert_eq!(parsed.kind, "file");
+        assert!(parsed.mime_type.is_none() && parsed.name.is_none());
+
+        // 工具请求缺省 attachments 字段时兼容（旧调用方/管理页 UI 不带）。
+        let request: SendMessageRequest =
+            serde_json::from_value(serde_json::json!({ "agent_id": "a", "content": "hi" }))
+                .unwrap();
+        assert!(request.attachments.is_empty());
+    }
 }

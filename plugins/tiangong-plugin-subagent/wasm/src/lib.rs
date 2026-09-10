@@ -18,6 +18,7 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     ViewResponse,
 };
 use serde_json::Value;
+use tiangong_plugin_subagent_protocol::ops::{TOOL_SEND_AGENT_MESSAGE, TOOL_SUBMIT_AGENT_TASK};
 use tiangong_plugin_subagent_protocol::{
     MENTION_CANDIDATES, PLUGIN_ID, PLUGIN_VERSION, SESSION_TURN_FINISHED, TOOL_OPERATIONS,
 };
@@ -28,6 +29,13 @@ mod descriptor {
 
 fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
+}
+
+// 缓存的会话消息（thread-local，生命周期钩子注入）——用于向 Subagent
+// 派活/发消息时自动携带本轮用户消息的附件（模型不知道附件本地路径）。
+thread_local! {
+    static SESSION_MESSAGES: std::cell::RefCell<Vec<Value>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// 工具级失败的 ToolResult（区别于 PluginError：后者会被宿主映射为
@@ -75,8 +83,19 @@ impl Guest for Component {
         if !TOOL_OPERATIONS.contains(&call.name.as_str()) {
             return Ok(tool_failure(format!("未知的 Subagent 工具: {}", call.name)));
         }
+        // 派活/发消息自动携带本轮用户消息的附件：模型无法得知附件本地
+        // 路径（多模态看得到图、非多模态只有文字标注），由插件从会话
+        // 消息中提取并注入工具参数，随投递传给成员（成员间协作同链路）。
+        let arguments = if matches!(
+            call.name.as_str(),
+            TOOL_SEND_AGENT_MESSAGE | TOOL_SUBMIT_AGENT_TASK
+        ) {
+            inject_attachments(&call.arguments)
+        } else {
+            call.arguments
+        };
         // sidecar 对全部工具操作返回 ToolOutcome 形状，直接映射。
-        let response = match sidecar_client::invoke_raw(&call.name, &call.arguments) {
+        let response = match sidecar_client::invoke_raw(&call.name, &arguments) {
             Ok(response) => response,
             Err(error) => {
                 return Ok(tool_failure(format!(
@@ -130,11 +149,13 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_session_ready(_session_json: String) -> Result<(), PluginError> {
+    fn on_session_ready(session_json: String) -> Result<(), PluginError> {
+        cache_session(&session_json);
         Ok(())
     }
 
-    fn on_turn_started(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+    fn on_turn_started(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        cache_session(&session_json);
         Ok(())
     }
 
@@ -144,6 +165,7 @@ impl Guest for Component {
     }
 
     fn on_session_ended(_session_json: String) -> Result<(), PluginError> {
+        SESSION_MESSAGES.with(|m| m.borrow_mut().clear());
         Ok(())
     }
 }
@@ -176,6 +198,84 @@ impl UiGuest for Component {
         }
         Err(plugin_err("本插件无视图消息通道"))
     }
+}
+
+/// 缓存 session JSON 中的消息列表。
+fn cache_session(session_json: &str) {
+    let session: Value = serde_json::from_str(session_json).unwrap_or(Value::Null);
+    let messages = session
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    SESSION_MESSAGES.with(|m| {
+        *m.borrow_mut() = messages;
+    });
+}
+
+/// 把最近一条用户消息的附件注入工具参数（无附件时原样返回）。
+///
+/// 附件提取只认 image / asset_reference 块的 asset.local_path（Server 端
+/// 附件归档的统一形状）；本轮轮次内不会再有新用户消息进来，最后一条
+/// user 消息即触发本次工具调用的消息。
+fn inject_attachments(arguments: &str) -> String {
+    let attachments = latest_user_attachments();
+    if attachments.is_empty() {
+        return arguments.to_string();
+    }
+    let mut value: Value = match serde_json::from_str(arguments) {
+        Ok(value) => value,
+        Err(_) => return arguments.to_string(),
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "attachments".to_string(),
+            serde_json::Value::Array(attachments),
+        );
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
+}
+
+/// 提取最近一条用户消息的全部附件（AttachmentPayload JSON 形状）。
+fn latest_user_attachments() -> Vec<Value> {
+    SESSION_MESSAGES.with(|m| {
+        let messages = m.borrow();
+        let Some(last_user) = messages
+            .iter()
+            .rev()
+            .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+        else {
+            return Vec::new();
+        };
+        last_user
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| {
+                        matches!(
+                            block.get("type").and_then(Value::as_str),
+                            Some("image") | Some("asset_reference")
+                        )
+                    })
+                    .filter_map(|block| {
+                        let asset = block.get("asset")?;
+                        let path = asset.get("local_path").and_then(Value::as_str)?;
+                        if path.is_empty() {
+                            return None;
+                        }
+                        Some(serde_json::json!({
+                            "path": path,
+                            "kind": asset.get("kind").and_then(Value::as_str).unwrap_or("file"),
+                            "mime_type": asset.get("mime_type").and_then(Value::as_str),
+                            "name": asset.get("original_name").and_then(Value::as_str),
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// 提取本轮信息并转发 sidecar（天工会话后端的完成回报）。
@@ -275,3 +375,85 @@ fn message_text(message: &Value) -> String {
 }
 
 bindings::export!(Component with_types_in bindings);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user_message_with_attachments(id: &str, text: &str, attachments: &str) -> Value {
+        serde_json::from_str(&format!(
+            r#"{{
+                "id": "{id}",
+                "role": "user",
+                "content": [
+                    {{ "type": "text", "text": "{text}" }},
+                    {attachments}
+                ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    fn cache(messages: Vec<Value>) {
+        SESSION_MESSAGES.with(|m| *m.borrow_mut() = messages);
+    }
+
+    #[test]
+    fn 提取最近用户消息的图片与文件附件() {
+        cache(vec![
+            user_message_with_attachments(
+                "msg-1",
+                "第一张",
+                r#"{ "type": "image", "asset": { "local_path": "/tmp/a.png", "kind": "image", "mime_type": "image/png", "original_name": "a.png" } }"#,
+            ),
+            serde_json::json!({
+                "id": "msg-2", "role": "assistant",
+                "content": [{ "type": "text", "text": "收到" }]
+            }),
+            user_message_with_attachments(
+                "msg-3",
+                "看文件",
+                r#"{ "type": "asset_reference", "asset": { "local_path": "/tmp/b.pdf", "kind": "file", "mime_type": null, "original_name": "b.pdf" } }"#,
+            ),
+        ]);
+        let attachments = latest_user_attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["path"], "/tmp/b.pdf");
+        assert_eq!(attachments[0]["kind"], "file");
+        assert_eq!(attachments[0]["name"], "b.pdf");
+    }
+
+    #[test]
+    fn 最近用户消息无附件时不携带历史附件() {
+        cache(vec![
+            user_message_with_attachments(
+                "msg-1",
+                "带图",
+                r#"{ "type": "image", "asset": { "local_path": "/tmp/a.png", "kind": "image", "mime_type": "image/png", "original_name": "a.png" } }"#,
+            ),
+            serde_json::json!({
+                "id": "msg-2", "role": "user",
+                "content": [{ "type": "text", "text": "纯文本追问" }]
+            }),
+        ]);
+        assert!(latest_user_attachments().is_empty());
+    }
+
+    #[test]
+    fn 注入附件到工具参数且无附件时原样返回() {
+        cache(vec![user_message_with_attachments(
+            "msg-1",
+            "带图",
+            r#"{ "type": "image", "asset": { "local_path": "/tmp/a.png", "kind": "image", "mime_type": "image/png", "original_name": "a.png" } }"#,
+        )]);
+        let injected = inject_attachments(r#"{"agent_id":"x","content":"hi"}"#);
+        let value: Value = serde_json::from_str(&injected).unwrap();
+        assert_eq!(value["attachments"][0]["path"], "/tmp/a.png");
+        // 原有参数保留。
+        assert_eq!(value["agent_id"], "x");
+
+        cache(Vec::new());
+        let untouched = inject_attachments(r#"{"agent_id":"x","content":"hi"}"#);
+        assert_eq!(untouched, r#"{"agent_id":"x","content":"hi"}"#);
+    }
+}
