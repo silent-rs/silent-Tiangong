@@ -399,7 +399,7 @@ fn handle_recall_memory_with_connection_uses_sidecar() {
 }
 
 #[test]
-fn on_config_updated_forwards_to_wasm() {
+fn chat_config_does_not_reload_memory_service() {
     let sidecar = Arc::new(MockMemorySidecar::default());
     let Some(wasm) = wasm_or_skip() else {
         return;
@@ -412,7 +412,7 @@ fn on_config_updated_forwards_to_wasm() {
     let core_config = CoreConfig::default();
     let config_json = serde_json::to_string(&core_config).expect("序列化失败");
     assert!(plugin.on_config_updated(config_json).is_ok());
-    assert!(sidecar.called("reconfigure"));
+    assert!(!sidecar.called("reconfigure"));
 }
 
 #[test]
@@ -622,6 +622,12 @@ fn new_turns_do_not_load_memory_into_system_prompt() {
     ));
     let mut previous_prompt = None;
     for turn in 0..3 {
+        <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
+        <WasmPluginAdapter as Plugin>::set_execution_context(
+            &adapter,
+            Some(std::path::Path::new("/tmp/test-ws")),
+            tiangong_core::permission::TrustMode::FullTrust,
+        );
         session.append_message(tiangong_types::MessageRole::User, format!("继续 {turn}"));
         let start = session.messages.len() - 1;
         <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, start);
@@ -645,8 +651,48 @@ fn new_turns_do_not_load_memory_into_system_prompt() {
         previous_prompt = Some(serialized_prompt);
         assert!(!sidecar.called("load_injection"));
         assert!(!sidecar.called("recall_context"));
+        assert!(
+            !sidecar.called("reconfigure"),
+            "发送准备不得唤醒 Memory 重载独立配置"
+        );
         session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
     }
+}
+
+#[test]
+fn file_plugin_preparation_never_starts_a_sidecar() {
+    let wasm = memory_wasm_path().with_file_name("tiangong_plugin_fs_wasm.wasm");
+    if !wasm.is_file() {
+        eprintln!("跳过测试：请先构建 tiangong-plugin-fs-wasm 的 wasm32-wasip2 制品");
+        return;
+    }
+    let config = PluginRuntimeConfig::default();
+    let sidecar = Arc::new(MockMemorySidecar::default());
+    let loader = WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).unwrap();
+    // 每个新对话仍有独立 WASM 状态；首次及后续准备均不得启动进程。
+    for conversation in 0..3 {
+        let plugin = loader.load(&wasm, &config).unwrap();
+        let adapter = WasmPluginAdapter::new(plugin, config.clone());
+        for turn in 0..3 {
+            let started = Instant::now();
+            adapter.on_config_updated(&CoreConfig::default());
+            adapter.set_execution_context(
+                Some(std::path::Path::new("/tmp/send-workspace")),
+                tiangong_core::permission::TrustMode::FullTrust,
+            );
+            assert!(!adapter.tool_specs().is_empty());
+            let _ = adapter.prompt_sections();
+            eprintln!(
+                "fs preparation conversation={conversation} turn={turn} elapsed_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+        adapter.set_execution_context(None, tiangong_core::permission::TrustMode::Supervised);
+    }
+    assert!(
+        sidecar.calls.lock().unwrap().is_empty(),
+        "仅设置目录、信任模式或读取声明不应调用 sidecar"
+    );
 }
 
 #[test]

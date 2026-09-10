@@ -319,7 +319,7 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
     let spawned = std::thread::Builder::new()
         .name("reverify-sidecars".to_string())
         .spawn(move || {
-            reverify_installed_sidecars_blocking(&storage_root);
+            reverify_installed_sidecars_blocking(&storage_root, true);
             REVERIFY_RUNNING.store(false, Ordering::Release);
         });
     if let Err(error) = spawned {
@@ -329,7 +329,10 @@ pub fn reverify_installed_sidecars(storage_root: &Path) {
 }
 
 /// 同步补验证（后台线程体；测试直接调用）。
-fn reverify_installed_sidecars_blocking(storage_root: &Path) {
+pub(crate) fn reverify_installed_sidecars_blocking(
+    storage_root: &Path,
+    prewarm_after_verification: bool,
+) {
     let (installed_plugins, _) = crate::registry::discover_installed_plugins(storage_root);
     for installed in installed_plugins {
         if installed.manifest.sidecar.is_none() || !installed.enabled {
@@ -356,7 +359,12 @@ fn reverify_installed_sidecars_blocking(storage_root: &Path) {
                     );
                     // 独立验证进程已经退出，此时再启动常驻进程，不会争用
                     // 数据库或索引目录。
-                    crate::registry::prewarm_plugin_sidecar(storage_root, &installed.manifest.id);
+                    if prewarm_after_verification {
+                        crate::registry::prewarm_plugin_sidecar(
+                            storage_root,
+                            &installed.manifest.id,
+                        );
+                    }
                     tracing::info!(plugin_id = %installed.manifest.id, "旧插件 sidecar 补验证完成");
                 }
             }

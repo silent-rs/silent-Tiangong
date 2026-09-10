@@ -201,9 +201,25 @@ impl TiangongApp {
         }
     }
 
-    #[cfg(windows)]
     pub fn start_plugin_preload(&self) {
         self.plugin_preload.send_replace(None);
+        self.spawn_plugin_preload();
+    }
+
+    pub(crate) fn retry_failed_plugin_preload(&self) {
+        if self.plugin_preload.send_if_modified(|result| {
+            if matches!(result, Some(Err(_))) {
+                *result = None;
+                true
+            } else {
+                false
+            }
+        }) {
+            self.spawn_plugin_preload();
+        }
+    }
+
+    fn spawn_plugin_preload(&self) {
         let completion = self.plugin_preload.clone();
         let storage_root = tiangong_config::io::storage_root();
         tauri::async_runtime::spawn(async move {
@@ -211,7 +227,7 @@ impl TiangongApp {
             let result = tauri::async_runtime::spawn_blocking(move || {
                 let _ = tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
                 tracing::info!("启动沙箱检查结束，开始后台加载插件");
-                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
+                tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root);
                 if tiangong_plugin_runtime::registry::sidecars_shutting_down() {
                     Err("应用正在退出，插件加载已取消".to_string())
                 } else {

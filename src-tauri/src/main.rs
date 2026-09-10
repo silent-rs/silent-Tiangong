@@ -147,12 +147,6 @@ fn run_gui() {
 
             // 启动阶段一次性预加载插件快照。后续状态查询、设置页和 Core 创建
             // 只复用该快照，不隐式扫描、编译或热加载插件。
-            #[cfg(not(windows))]
-            {
-                let storage_root = tiangong_config::io::storage_root();
-                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
-            }
-            #[cfg(windows)]
             state.start_plugin_preload();
 
             // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例

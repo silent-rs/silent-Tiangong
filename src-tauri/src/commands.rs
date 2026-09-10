@@ -1649,6 +1649,7 @@ pub async fn prepare_startup_resources(
     state: State<'_, TiangongApp>,
 ) -> Result<StartupPrepareResult, String> {
     use tauri::Emitter as _;
+    state.retry_failed_plugin_preload();
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await
@@ -1661,6 +1662,7 @@ pub async fn prepare_startup_resources(
     .map_err(|error| error.to_string())?;
     if available {
         tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
+        state.wait_plugin_preload().await?;
         return Ok(StartupPrepareResult {
             installed_version: None,
         });
@@ -1677,7 +1679,12 @@ pub async fn prepare_startup_resources(
     match result {
         Ok(version) => {
             tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
-            tiangong_plugin_runtime::registry::prewarm_resident_sidecars(&storage_root);
+            state.wait_plugin_preload().await?;
+            tauri::async_runtime::spawn_blocking(move || {
+                tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root);
+            })
+            .await
+            .map_err(|error| format!("插件启动准备失败：{error}"))?;
             let _ = app.emit(
                 "startup-prepare-step",
                 serde_json::json!({ "step": "done", "version": version }),

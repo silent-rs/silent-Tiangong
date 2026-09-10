@@ -537,6 +537,15 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
+    preload_installed_plugins_inner(storage_root, false)
+}
+
+/// 桌面启动准备：全部验证与常驻进程准备完成后才返回，不把任务留给首次发送。
+pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> usize {
+    preload_installed_plugins_inner(storage_root, true)
+}
+
+fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) -> usize {
     if sidecars_shutting_down() {
         return 0;
     }
@@ -578,11 +587,25 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
         {
             remove_sidecar_connection(&previous.directory);
         }
-        let loaded =
-            load_plugin_record_with_prewarm(storage_root, installed.clone(), !cfg!(windows));
+        let loaded = load_plugin_record_with_prewarm(
+            storage_root,
+            installed.clone(),
+            !wait_for_ready && !cfg!(windows),
+        );
         if let Ok(mut plugins) = loaded_plugins().lock() {
             plugins.insert(installed.manifest.id.clone(), loaded);
         }
+    }
+    drop(_operation);
+    if wait_for_ready {
+        crate::verification::reverify_installed_sidecars_blocking(storage_root, false);
+        for installed in &installed_plugins {
+            if sidecars_shutting_down() {
+                break;
+            }
+            prewarm_plugin_sidecar_blocking(storage_root, &installed.manifest.id);
+        }
+        return installed_plugins.len();
     }
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。

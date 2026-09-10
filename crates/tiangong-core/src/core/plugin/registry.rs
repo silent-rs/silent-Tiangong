@@ -51,8 +51,7 @@ pub(crate) fn prepare_plugins(
     }
     for plugin in plugins {
         plugin.on_config_updated(config);
-        plugin.set_workspace(workspace);
-        plugin.set_trust_mode(trust_mode);
+        plugin.set_execution_context(workspace, trust_mode);
     }
 
     let mut tools = vec![injection_tool_spec()];
