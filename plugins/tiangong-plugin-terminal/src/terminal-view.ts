@@ -72,6 +72,9 @@ export function createTerminalView(
   terminal.loadAddon(fit);
   terminal.open(host);
   const fitToHost = () => {
+    // 隐藏的保活标签没有布局尺寸，FitAddon 此时可能把百分比宽度
+    // 当成像素，或缩成 2×1；不能将这个尺寸传给仍在运行的 PTY。
+    if (host.clientWidth <= 0 || host.clientHeight <= 0) return false;
     try {
       fit.fit();
       return true;
@@ -93,7 +96,7 @@ export function createTerminalView(
 
   // xterm 尺寸同步到 PTY（rows/cols 不一致会导致换行与全屏应用错乱）
   const syncSize = () => {
-    if (!attached) return;
+    if (!attached || host.clientWidth <= 0 || host.clientHeight <= 0) return;
     const sizeKey = `${attached}:${terminal.cols}x${terminal.rows}`;
     if (sizeKey === lastSyncedSize) return;
     lastSyncedSize = sizeKey;
