@@ -16,44 +16,26 @@ use crate::runtime_store::RuntimeStore;
 const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
-/// 当前 Server 连接信息：优先读 `server.json`（宿主落盘的权威配置，
-/// Server 重启换址/换凭据后每次调用都能拿到最新值），无配置文件时
-/// 回退进程启动时注入的 env——清单声明依赖后宿主不再因端点变化
-/// 重启本插件，连接新鲜度由这里保证。
+/// 当前 Server 连接信息：宿主 spawn 时注入的 env（#519 起宿主在
+/// Server 启动后注入最新连接信息）。
+///
+/// 注：宿主的 `server.json` 处于沙箱保护清单（含认证凭据，插件禁读），
+/// 不能作为读取来源；连接信息的新鲜度依赖宿主注入，若需「Server 运行
+/// 中换址/换凭据即时生效」，属宿主安全通道能力缺口，另行提案。
 fn server_connection() -> (String, Option<String>) {
-    let from_file = crate::paths::storage_root().ok().and_then(|root| {
-        std::fs::read_to_string(root.join("server.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .map(|config| {
-                let host = config
-                    .get("host")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("127.0.0.1")
-                    .to_string();
-                let port = config
-                    .get("port")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(9090);
-                let token = config
-                    .get("auth_token")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string);
-                (format!("http://{host}:{port}"), token)
-            })
-    });
-    if let Some(connection) = from_file {
-        return connection;
-    }
-    (
-        std::env::var(SERVER_URL_ENV).unwrap_or_default(),
-        std::env::var(SERVER_TOKEN_ENV)
-            .ok()
-            .map(|token| token.trim().to_string())
-            .filter(|token| !token.is_empty()),
-    )
+    let url = std::env::var(SERVER_URL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        // 常驻 sidecar 可能先于 Server 启动（env 是 spawn 时快照），缺省
+        // 兜底宿主默认地址（127.0.0.1:9090）——连接失败时按普通错误反馈，
+        // 非 Server 未启动即误报。
+        .unwrap_or_else(|| "http://127.0.0.1:9090".to_string());
+    let token = std::env::var(SERVER_TOKEN_ENV)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    (url, token)
 }
 
 /// 正常轮询间隔（投递成功后）。
@@ -169,11 +151,6 @@ pub async fn deliver_message(
     workspace: Option<&str>,
 ) -> Result<()> {
     let (url, token) = server_connection();
-    if url.is_empty() {
-        anyhow::bail!(
-            "天工 Server 未启动，消息暂无法投递：请先在天工设置中开启 Server（或从托盘菜单启动），必要时重启天工后重试"
-        );
-    }
     let endpoint = format!("{}/api/v1/messages", url.trim_end_matches('/'));
     let mut payload = serde_json::json!({
         "connector": "server-api",
