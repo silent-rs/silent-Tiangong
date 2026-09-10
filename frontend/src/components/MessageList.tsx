@@ -76,6 +76,7 @@ export function MessageList() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
+  const prevRunStatusRef = useRef('idle');
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -164,8 +165,11 @@ export function MessageList() {
   // 切换会话时关闭搜索
   useEffect(() => {
     useSearchStore.getState().closeSearch();
-    // 切换会话视为重新进入，默认在底部
+    // 切换会话视为重新进入，默认在底部；同时重置滚动基准，
+    // 避免旧会话残留的流式状态被误判为"回复完成"
     isAtBottomRef.current = true;
+    prevStreamingIdRef.current = null;
+    prevRunStatusRef.current = 'idle';
   }, [activeSessionId]);
 
   // 卸载时清理刻度尺预览卡片的隐藏定时器
@@ -378,15 +382,24 @@ export function MessageList() {
     const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const lastMsg = messages[messages.length - 1];
     const isUserSelfSent = newMessageArrived && lastMsg?.role === 'user';
+    // 回复完成（流式 id 清空且运行态归位 idle，含出错/取消中止）：不再
+    // 强制拉底，保留用户当前阅读位置。工具执行阶段流式 id 同样会暂时
+    // 清空，但运行态仍为 executing，不受此判定影响，跟随照常
+    const streamingFinished =
+      prevStreamingIdRef.current !== null
+      && streamingMessageId === null
+      && prevRunStatusRef.current !== 'idle'
+      && runStatus === 'idle';
     // 用户发起对话（发送或编辑重发）时重新进入自动跟随模式；
     // 用户翻动页面离开底部后跟随自动关闭，拉回最底部时由滚动事件重新开启
     if (isUserSelfSent) {
       isAtBottomRef.current = true;
-      }
-    // 用户离开底部时，新消息/流式 id 变化不强制拉回；用户主动发送始终跟随
+    }
+    // 用户离开底部时，新消息/流式 id 变化不强制拉回；用户主动发送始终
+    // 跟随；回复完成时保持当前位置不动
     const shouldScroll =
       isUserSelfSent
-      || ((newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
+      || (!streamingFinished && (newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
@@ -408,7 +421,8 @@ export function MessageList() {
 
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
-  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup]);
+    prevRunStatusRef.current = runStatus;
+  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, runStatus]);
 
   // 流式输出时自动滚动
   useEffect(() => {
