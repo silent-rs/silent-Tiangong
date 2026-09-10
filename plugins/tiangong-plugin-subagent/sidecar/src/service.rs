@@ -1284,12 +1284,13 @@ impl SubagentService {
             .max_by_key(|run| run.run_id.clone());
         if let Some(run) = injectable {
             if config.backend == BackendKind::Cli {
-                self.runner
-                    .write_line(
-                        &run.run_id,
-                        &json!({ "type": "user_message", "content": content }),
-                    )
-                    .await?;
+                // 补充帧附件约定与启动帧一致（无附件不带字段）。
+                let mut frame = json!({ "type": "user_message", "content": content });
+                if !attachments.is_empty() {
+                    frame["attachments"] =
+                        serde_json::to_value(attachments).context("序列化补充帧附件失败")?;
+                }
+                self.runner.write_line(&run.run_id, &frame).await?;
                 append_event(
                     &self.store,
                     &run,
@@ -1553,7 +1554,7 @@ impl SubagentService {
                 Ok(run)
             }
             _ => {
-                self.spawn_cli_run(config, activation, run, task, message)
+                self.spawn_cli_run(config, activation, run, task, message, attachments)
                     .await
             }
         }
@@ -1649,6 +1650,7 @@ impl SubagentService {
     }
 
     /// CLI 后端：启动子进程（持 ops 锁调用）。
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_cli_run(
         &self,
         config: &AgentConfig,
@@ -1656,6 +1658,7 @@ impl SubagentService {
         mut run: RunRecord,
         task: Option<&TaskRecord>,
         message: Option<&str>,
+        attachments: &[AttachmentPayload],
     ) -> Result<RunRecord> {
         let command = config.command.as_deref().unwrap_or_default();
         let instructions = self.agents.instructions(&config.id).unwrap_or_default();
@@ -1678,6 +1681,8 @@ impl SubagentService {
             completion_criteria: task.and_then(|task| task.completion_criteria.as_deref()),
             message,
             input: message.or_else(|| task.map(|task| task.goal.as_str())),
+            // 附件本地路径随启动帧透传（无附件省略字段，老协议实现兼容）。
+            attachments: (!attachments.is_empty()).then_some(attachments),
         };
         let hooks = RUN_HOOKS
             .get()

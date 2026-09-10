@@ -3,7 +3,8 @@
 //! 协议约定（首版 CLI 后端）：
 //! - sidecar 以 `sh -c <command>`（Windows `cmd /C`）启动子进程，cwd 为绑定的
 //!   Workspace（或独立 worktree），Unix 下 setsid 自立进程组；
-//! - stdin 每行一个 JSON：`begin` → 后续 `user_message` / `interrupt` / `cancel`；
+//! - stdin 每行一个 JSON：`begin` → 后续 `user_message` / `interrupt` / `cancel`，
+//!   `begin` 与 `user_message` 可选携带 `attachments`（本地路径原样透传）；
 //! - stdout 每行一个 JSON 事件（见 [`CliEvent`]），非 JSON 行按 `message` 处理；
 //! - stderr 逐行收进运行日志；
 //! - 子进程在 stdin EOF 时应自行退出（宿主异常退出的级联兜底）。
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tiangong_plugin_subagent_protocol::ops::AttachmentPayload;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -83,6 +85,9 @@ pub struct BeginFrame<'a> {
     /// 触发本次运行的用户输入（消息内容或任务补充说明）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<&'a str>,
+    /// 随消息携带的附件（本地路径原样透传，成员自行读取；无附件省略字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<&'a [AttachmentPayload]>,
 }
 
 #[derive(Debug, Clone)]
@@ -421,5 +426,123 @@ fn process_alive(pid: u32) -> bool {
     match output {
         Ok(result) => String::from_utf8_lossy(&result.stdout).contains(&pid.to_string()),
         Err(_) => false,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn no_hooks() -> RunHooks {
+        RunHooks {
+            on_event: Arc::new(|_, _| {}),
+            on_log: Arc::new(|_, _| {}),
+            on_exit: Arc::new(|_, _| {}),
+        }
+    }
+
+    fn sample_attachments() -> Vec<AttachmentPayload> {
+        vec![AttachmentPayload {
+            path: "/tmp/屏幕截图 2026.png".to_string(),
+            kind: "image".to_string(),
+            mime_type: Some("image/png".to_string()),
+            name: Some("截图.png".to_string()),
+        }]
+    }
+
+    fn begin_frame<'a>(attachments: Option<&'a [AttachmentPayload]>) -> BeginFrame<'a> {
+        BeginFrame {
+            r#type: "begin",
+            agent_id: "agent-1",
+            agent_name: "测试成员",
+            instructions: "",
+            memory: "",
+            activation_id: "act-1",
+            session_id: "sess-1",
+            workspace: "/tmp/ws",
+            task_id: None,
+            goal: None,
+            completion_criteria: None,
+            message: Some("看图"),
+            input: Some("看图"),
+            attachments,
+        }
+    }
+
+    /// 启动帧附件 wire 形状：无附件省略字段（老协议实现兼容）；有附件为
+    /// [{path, kind, mime_type, name}]，路径原样透传（含空格中文不转义破坏）。
+    #[test]
+    fn 启动帧附件序列化形状() {
+        let without = serde_json::to_value(begin_frame(None)).unwrap();
+        assert!(without.get("attachments").is_none(), "无附件必须省略字段");
+
+        let with = serde_json::to_value(begin_frame(Some(&sample_attachments()))).unwrap();
+        let attachments = with["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["path"], "/tmp/屏幕截图 2026.png");
+        assert_eq!(attachments[0]["kind"], "image");
+        assert_eq!(attachments[0]["mime_type"], "image/png");
+        assert_eq!(attachments[0]["name"], "截图.png");
+    }
+
+    /// 端到端：真实子进程收到带附件的启动帧与补充帧（验收口径「读取真实
+    /// 子进程收到的帧」）。cat 把 stdin 落盘到 cwd 下的文件，进程在 stdin
+    /// EOF 后退出，再核对两行 JSON。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 真实子进程接收启动帧与补充帧附件() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = RunnerHub::new();
+        let attachments = sample_attachments();
+        let begin = begin_frame(Some(&attachments));
+        let pid = hub
+            .spawn(
+                "run-test",
+                "cat > frames.jsonl",
+                temp.path(),
+                &[],
+                &begin,
+                no_hooks(),
+            )
+            .await
+            .unwrap();
+        assert!(pid > 0);
+
+        let mut supplement = serde_json::json!({
+            "type": "user_message",
+            "content": "补充：再核对第二张",
+        });
+        supplement["attachments"] = serde_json::to_value(&attachments).unwrap();
+        hub.write_line("run-test", &supplement).await.unwrap();
+        hub.close_stdin("run-test").await.unwrap();
+
+        // cat 在 EOF 后退出；轮询落盘文件直至两行齐。
+        let frames_path = temp.path().join("frames.jsonl");
+        let mut lines: Vec<serde_json::Value> = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(content) = std::fs::read_to_string(&frames_path)
+                && content.lines().count() >= 2
+            {
+                lines = content
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                break;
+            }
+        }
+        assert_eq!(lines.len(), 2, "应收到启动帧与补充帧两行");
+
+        let begin = &lines[0];
+        assert_eq!(begin["type"], "begin");
+        assert_eq!(begin["attachments"][0]["path"], "/tmp/屏幕截图 2026.png");
+        assert_eq!(begin["attachments"][0]["name"], "截图.png");
+
+        let supplement = &lines[1];
+        assert_eq!(supplement["type"], "user_message");
+        assert_eq!(supplement["content"], "补充：再核对第二张");
+        assert_eq!(
+            supplement["attachments"][0]["path"],
+            "/tmp/屏幕截图 2026.png"
+        );
     }
 }
