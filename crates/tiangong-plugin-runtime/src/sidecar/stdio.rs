@@ -260,9 +260,6 @@ impl StdioSidecarConnection {
             plugin_id = %self.config.plugin_id,
             "stdio sidecar 已就绪"
         );
-        // 端点变化重启后的恢复反馈：仅对被标记的插件生效（正常冷启动
-        // 无标记不打扰），经 plugin_availability 注入通告 agent 工具可用。
-        crate::registry::announce_sidecar_recovery(&self.config.plugin_id);
         Ok(process)
     }
 

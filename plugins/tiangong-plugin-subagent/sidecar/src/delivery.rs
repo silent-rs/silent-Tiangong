@@ -16,6 +16,46 @@ use crate::runtime_store::RuntimeStore;
 const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
 const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
+/// 当前 Server 连接信息：优先读 `server.json`（宿主落盘的权威配置，
+/// Server 重启换址/换凭据后每次调用都能拿到最新值），无配置文件时
+/// 回退进程启动时注入的 env——清单声明依赖后宿主不再因端点变化
+/// 重启本插件，连接新鲜度由这里保证。
+fn server_connection() -> (String, Option<String>) {
+    let from_file = crate::paths::storage_root().ok().and_then(|root| {
+        std::fs::read_to_string(root.join("server.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .map(|config| {
+                let host = config
+                    .get("host")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("127.0.0.1")
+                    .to_string();
+                let port = config
+                    .get("port")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(9090);
+                let token = config
+                    .get("auth_token")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string);
+                (format!("http://{host}:{port}"), token)
+            })
+    });
+    if let Some(connection) = from_file {
+        return connection;
+    }
+    (
+        std::env::var(SERVER_URL_ENV).unwrap_or_default(),
+        std::env::var(SERVER_TOKEN_ENV)
+            .ok()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty()),
+    )
+}
+
 /// 正常轮询间隔（投递成功后）。
 const IDLE_INTERVAL: Duration = Duration::from_secs(2);
 /// 投递失败后的退避间隔。
@@ -88,7 +128,7 @@ impl DeliveryWorker {
 
     /// 单事件投递：POST /api/v1/messages（respond-async，202 即成功）。
     async fn deliver_one(&self, event: &HookEvent) -> Result<()> {
-        let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
+        let (url, token) = server_connection();
         if url.is_empty() {
             anyhow::bail!(
                 "天工 Server 未启动，消息暂无法投递：请先在天工设置中开启 Server（或从托盘菜单启动），必要时重启天工后重试"
@@ -104,9 +144,7 @@ impl DeliveryWorker {
                 "channel_id": event.conversation_id,
                 "message": event.render_message(),
             }));
-        if let Ok(token) = std::env::var(SERVER_TOKEN_ENV)
-            && !token.is_empty()
-        {
+        if let Some(token) = token {
             request = request.bearer_auth(token);
         }
         let response = request.send().await?;
@@ -130,7 +168,7 @@ pub async fn deliver_message(
     message: &str,
     workspace: Option<&str>,
 ) -> Result<()> {
-    let url = std::env::var(SERVER_URL_ENV).unwrap_or_default();
+    let (url, token) = server_connection();
     if url.is_empty() {
         anyhow::bail!(
             "天工 Server 未启动，消息暂无法投递：请先在天工设置中开启 Server（或从托盘菜单启动），必要时重启天工后重试"
@@ -149,9 +187,7 @@ pub async fn deliver_message(
         .post(&endpoint)
         .header("Prefer", "respond-async")
         .json(&payload);
-    if let Ok(token) = std::env::var(SERVER_TOKEN_ENV)
-        && !token.is_empty()
-    {
+    if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     let response = request.send().await?;
