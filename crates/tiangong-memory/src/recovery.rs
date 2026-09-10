@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::db::MemoryDb;
+use crate::db::{MemoryDb, sqlite::is_migration_backup_file};
 
 const RECOVERY_MARKER: &str = ".plugin-data-recovered";
 
@@ -11,7 +11,10 @@ const RECOVERY_MARKER: &str = ".plugin-data-recovered";
 /// 仅当来源包含真实记忆、当前标准目录没有节点和其他有效数据时切换。
 /// 返回被保留的空目录备份路径；目标原本不存在时返回 `None`。
 pub fn recover_plugin_data_dir(source: &Path) -> Result<Option<PathBuf>> {
-    let target = crate::paths::memory_data_dir();
+    recover_plugin_data_dir_to(source, &crate::paths::memory_data_dir())
+}
+
+fn recover_plugin_data_dir_to(source: &Path, target: &Path) -> Result<Option<PathBuf>> {
     if source == target
         || source.join(RECOVERY_MARKER).exists()
         || !source.join("metadata.db").is_file()
@@ -30,12 +33,12 @@ pub fn recover_plugin_data_dir(source: &Path) -> Result<Option<PathBuf>> {
     }
 
     let target_count = if target.join("metadata.db").is_file() {
-        count_nodes(&target)
+        count_nodes(target)
             .with_context(|| format!("核对当前 Memory 数据失败: {}", target.display()))?
     } else {
         0
     };
-    if target_count > 0 || has_meaningful_data(&target)? {
+    if target_count > 0 || has_meaningful_data(target)? {
         tracing::warn!(
             source = %source.display(),
             target = %target.display(),
@@ -63,7 +66,7 @@ pub fn recover_plugin_data_dir(source: &Path) -> Result<Option<PathBuf>> {
     .with_context(|| "写入 Memory 数据恢复标记失败")?;
 
     let backup_path = if target.exists() {
-        std::fs::rename(&target, &backup).with_context(|| {
+        std::fs::rename(target, &backup).with_context(|| {
             format!(
                 "备份当前 Memory 数据目录失败: {} -> {}",
                 target.display(),
@@ -75,9 +78,9 @@ pub fn recover_plugin_data_dir(source: &Path) -> Result<Option<PathBuf>> {
         None
     };
 
-    if let Err(error) = std::fs::rename(&staged, &target) {
+    if let Err(error) = std::fs::rename(&staged, target) {
         if let Some(backup) = &backup_path {
-            let _ = std::fs::rename(backup, &target);
+            let _ = std::fs::rename(backup, target);
         }
         return Err(error).with_context(|| {
             format!(
@@ -124,6 +127,11 @@ fn has_meaningful_data(path: &Path) -> Result<bool> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // 节点计数可能刚刚转换过空加密库。迁移备份不是当前有效数据，
+        // 但会随整个目标目录移入 pre-recovery 备份，不能删除。
+        if entry.file_type()?.is_file() && is_migration_backup_file(&name) {
+            continue;
+        }
         if matches!(
             name.as_ref(),
             "metadata.db"
@@ -192,4 +200,92 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
     bail!("Memory 数据包含不支持的文件类型: {}", source.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::test_helpers::create_empty_encrypted_database;
+    use crate::types::{Episode, EpisodeOutcome};
+
+    #[test]
+    fn migration_backups_are_distinct_from_other_data() {
+        let root = tempfile::tempdir().unwrap();
+        for prefix in [".metadata.db.pre-plaintext-", ".metadata.db.pre-key-v2-"] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let path = root
+                    .path()
+                    .join(format!("{prefix}{}.bak{suffix}", scru128::new()));
+                std::fs::write(path, b"preserved backup").unwrap();
+            }
+        }
+        assert!(!has_meaningful_data(root.path()).unwrap());
+        for name in [
+            "notes.txt",
+            ".metadata.db.pre-plaintext-user.bak",
+            ".metadata.db.pre-key-v2-user.bak",
+        ] {
+            let path = root.path().join(name);
+            std::fs::write(&path, b"user data").unwrap();
+            assert!(has_meaningful_data(root.path()).unwrap());
+            std::fs::remove_file(path).unwrap();
+        }
+        let directory = root
+            .path()
+            .join(format!(".metadata.db.pre-plaintext-{}.bak", scru128::new()));
+        std::fs::create_dir(directory).unwrap();
+        assert!(has_meaningful_data(root.path()).unwrap());
+    }
+
+    #[test]
+    fn plugin_history_recovers_over_empty_encrypted_target_without_losing_backups() {
+        for use_v2 in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("plugin-private");
+            let target = root.path().join("memory");
+            let episode = Episode::new(
+                "recovery-session".into(),
+                "历史记忆".into(),
+                "必须完整恢复".into(),
+                EpisodeOutcome::Success,
+                vec![],
+                vec![],
+                0.8,
+            );
+            let db = MemoryDb::open_at_data_dir(&source).unwrap();
+            db.insert_episode(&episode, Some("workspace")).unwrap();
+            drop(db);
+            std::fs::create_dir(source.join("lancedb")).unwrap();
+            std::fs::write(source.join("lancedb/preserved"), b"vector-data").unwrap();
+            create_empty_encrypted_database(&target, use_v2);
+            let original = std::fs::read(target.join("metadata.db")).unwrap();
+            let backup = recover_plugin_data_dir_to(&source, &target)
+                .unwrap()
+                .expect("空加密库不应阻止历史恢复");
+            assert_eq!(count_nodes(&target).unwrap(), 1);
+            assert_eq!(count_nodes(&source).unwrap(), 1);
+            assert_eq!(
+                std::fs::read(target.join("lancedb/preserved")).unwrap(),
+                b"vector-data"
+            );
+            let encrypted_backup = std::fs::read_dir(&backup)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".metadata.db.pre-plaintext-")
+                })
+                .unwrap();
+            assert_eq!(std::fs::read(encrypted_backup).unwrap(), original);
+            assert_eq!(count_nodes(&backup).unwrap(), 0);
+            assert!(
+                recover_plugin_data_dir_to(&source, &target)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(count_nodes(&target).unwrap(), 1);
+        }
+    }
 }

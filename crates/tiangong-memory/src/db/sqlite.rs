@@ -18,6 +18,21 @@ const DB_KEY_DOMAIN_V2: &[u8] = b"tiangong-memory:metadata.db:key:v2\0";
 const DB_KEY_BACKUP_PREFIX: &str = ".metadata.db.pre-plaintext-";
 const LEGACY_BACKUP_PREFIX: &str = ".metadata.db.pre-key-v2-";
 
+/// 供目录恢复识别迁移附属文件；沿用生成备份的格式，避免把用户文件误当成备份。
+pub(crate) fn is_migration_backup_file(name: &str) -> bool {
+    let base = ["-wal", "-shm", "-journal"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    [DB_KEY_BACKUP_PREFIX, LEGACY_BACKUP_PREFIX]
+        .iter()
+        .any(|prefix| {
+            base.strip_prefix(prefix)
+                .and_then(|value| value.strip_suffix(".bak"))
+                .is_some_and(|id| id.parse::<scru128::Id>().is_ok())
+        })
+}
+
 /// Memory 元数据库（普通 SQLite）
 pub(crate) struct MemoryDb {
     conn: Connection,
@@ -1717,6 +1732,17 @@ fn recover_interrupted_migration(
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use super::*;
+
+    pub(crate) fn create_empty_encrypted_database(data_dir: &Path, use_v2: bool) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        let password = if use_v2 {
+            derive_db_password()
+        } else {
+            legacy_db_passwords().into_iter().next().unwrap()
+        };
+        let conn = open_connection_with_key(&data_dir.join("metadata.db"), &password).unwrap();
+        schema::init_schema(&conn).unwrap();
+    }
 
     /// 创建仅用于测试的内存数据库（不加密）
     pub(crate) fn open_in_memory() -> Result<MemoryDb> {
