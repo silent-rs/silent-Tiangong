@@ -1246,15 +1246,6 @@ pub async fn reset_context(app: AppHandle, state: State<'_, TiangongApp>) -> Res
     run_context_slash_command(ContextSlashCommand::Reset, app, state.inner()).await
 }
 
-/// 取消当前会话中指定 Agent 的执行
-#[tauri::command]
-pub async fn cancel_agent(role: String, state: State<'_, TiangongApp>) -> Result<bool, String> {
-    let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
-    Ok(state.cancel_agent_core(&session_id, role))
-}
-
 /// 向正在执行的 turn 追加用户消息
 #[tauri::command]
 pub async fn append_message(

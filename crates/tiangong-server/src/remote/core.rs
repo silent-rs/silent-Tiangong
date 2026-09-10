@@ -341,29 +341,6 @@ impl ServerCoreManager {
             ));
             // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
             // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
-            // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
-            // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
-            //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
-            // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-            // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
-            let child_plugin_factory = Arc::new({
-                let storage_root = storage_root.clone();
-                move || {
-                    let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
-                        Vec::new();
-                    child_plugins.extend(
-                        tiangong_plugin_runtime::registry::load_installed_plugins(
-                            &storage_root,
-                            tiangong_plugin_runtime::registry::RuntimeKind::Server,
-                        ),
-                    );
-                    child_plugins
-                }
-            });
-            plugins.extend(tiangong_plugin_agent_team::default_plugins(
-                storage_root.clone(),
-                child_plugin_factory,
-            ));
             plugins
         };
         let ensured = self

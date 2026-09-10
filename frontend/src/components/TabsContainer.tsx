@@ -3,7 +3,6 @@ import { Globe, Grid3x3, Puzzle, X } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { SandboxKind, TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
-import { AgentTeamPanel } from './AgentTeamPanel';
 import { PluginAppTabContent } from './PluginAppTabContent';
 import { runPluginBeforeClose } from './PluginSandbox';
 import { Button } from './ui/button';
@@ -813,13 +812,9 @@ export function TabsContainer({
                   : 'hidden'
               }
             >
-              {tab.contribution_id === 'agent-team' ? (
-                <AgentTeamPanel />
-              ) : (
-                <div className="p-4 text-sm text-muted-foreground">
-                  该官方 App 内容组件未注册。
-                </div>
-              )}
+              <div className="p-4 text-sm text-muted-foreground">
+                该官方 App 内容组件未注册。
+              </div>
             </div>
           ) : (
             <PluginAppTabContent

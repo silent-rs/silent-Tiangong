@@ -870,11 +870,6 @@ impl TiangongApp {
             .ok_or_else(|| "会话 Core 投递失败".to_string())
     }
 
-    /// 取消指定会话中某个 Agent 的当前执行（plugin 直调，不经 Core）。
-    pub fn cancel_agent_core(&self, session_id: &str, role: String) -> bool {
-        tiangong_plugin_agent_team::cancel_agent(session_id, &role)
-    }
-
     /// 启动嵌入式 Server（共享 app 的 state 和 config）
     pub fn start_embedded_server(
         &self,

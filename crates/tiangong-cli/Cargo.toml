@@ -11,7 +11,6 @@ tiangong-llm = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }
-tiangong-plugin-agent-team = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-types = { workspace = true }
 tracing = { workspace = true }

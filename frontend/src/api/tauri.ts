@@ -779,9 +779,6 @@ export const api = {
   cancelTurn: (): Promise<boolean> =>
     invoke('cancel_turn'),
 
-  cancelAgent: (role: string): Promise<boolean> =>
-    invoke('cancel_agent', { role }),
-
   appendMessage: (
     sessionId: string,
     content: string,

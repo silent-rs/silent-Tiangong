@@ -819,21 +819,6 @@ function applyEventToSessionView(
   };
 }
 
-function stripLeadingAgentMention(content: string, agents: AgentInfo[]): string {
-  const match = content.match(/^@([A-Za-z0-9_-]+)\s*/);
-  if (!match) return content;
-  const role = match[1];
-  const agentRoles = new Set([...agents.map((agent) => agent.role), 'all']);
-  if (!agentRoles.has(role)) return content;
-  return content.slice(match[0].length).trimStart();
-}
-
-function applyAgentMention(content: string, tab: string | null, agents: AgentInfo[]): string {
-  const body = stripLeadingAgentMention(content, agents);
-  if (!tab) return body;
-  return body.length > 0 ? `@${tab} ${body}` : `@${tab} `;
-}
-
 export interface AppState {
   // 状态
   sessions: Session[];
@@ -900,7 +885,6 @@ export interface AppState {
 
   // Agent 团队
   agents: AgentInfo[];
-  selectedAgentTab: string | null; // null = 主对话, role = 指定 Agent
 
   // 加载状态
   isLoadingSessions: boolean;
@@ -947,7 +931,6 @@ export interface AppState {
     baseContent: ContentBlock[],
   ) => Promise<boolean>;
   cancelTurn: () => Promise<boolean>;
-  cancelAgent: (role: string) => Promise<boolean>;
 
   setInputCacheText: (cacheKey: string, content: string) => void;
   setInputCacheAttachments: (cacheKey: string, attachments: RawAttachment[]) => void;
@@ -972,7 +955,6 @@ export interface AppState {
 
   loadMcpServers: () => Promise<void>;
 
-  setSelectedAgentTab: (tab: string | null) => void;
   beginContextManagement: (summary: string) => void;
   endContextManagement: () => void;
 
@@ -1063,7 +1045,6 @@ export const useStore = create<AppState>((set, get) => ({
   },
   isLoadingSessions: false,
   agents: [],
-  selectedAgentTab: null,
 
   // 加载会话列表
   loadSessions: async (options?: { protective?: boolean }) => {
@@ -1213,7 +1194,6 @@ export const useStore = create<AppState>((set, get) => ({
           streamingReasoningContent: '',
           sessionCwd: newConversationCwd,
           agents: [],
-          selectedAgentTab: null,
           reasoningEffort: newConversationEffort,
         };
       });
@@ -1281,7 +1261,6 @@ export const useStore = create<AppState>((set, get) => ({
             ? cache.streamingReasoningContent
             : '',
           agents: parseAgentsFromMessages(cache.messages),
-          selectedAgentTab: null,
           reasoningEffort: cache.reasoningEffort,
           reasoningEffortPerSession: {
             ...state.reasoningEffortPerSession,
@@ -1943,23 +1922,6 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  cancelAgent: async (role: string) => {
-    try {
-      const cancelled = await api.cancelAgent(role);
-      if (cancelled) {
-        set((state) => ({
-          agents: state.agents.map((agent) =>
-            agent.role === role ? { ...agent, status: 'idle' } : agent
-          ),
-        }));
-      }
-      return cancelled;
-    } catch (error) {
-      console.error('取消 Agent 执行失败:', error);
-      return false;
-    }
-  },
-
   setInputCacheText: (cacheKey: string, content: string) => {
     let nextCache: InputCache | undefined;
     set((state) => {
@@ -2063,15 +2025,6 @@ export const useStore = create<AppState>((set, get) => ({
     } catch (error) {
       console.error('加载 MCP 服务器失败:', error);
     }
-  },
-
-  setSelectedAgentTab: (tab: string | null) => {
-    const state = get();
-    const cacheKey = selectCurrentInputCacheKey(state);
-    const currentCache = selectCurrentInputCache(state);
-    const nextInput = applyAgentMention(currentCache.text, tab, state.agents);
-    set({ selectedAgentTab: tab });
-    if (cacheKey) get().setInputCacheText(cacheKey, nextInput);
   },
 
   beginContextManagement: (summary: string) => {
