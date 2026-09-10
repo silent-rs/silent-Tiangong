@@ -1,4 +1,4 @@
-//! SQLite 加密连接与 CRUD 操作
+//! SQLite 明文连接、历史加密库恢复与 CRUD 操作
 
 use std::path::{Path, PathBuf};
 
@@ -15,15 +15,16 @@ use crate::types::{
 use super::schema;
 
 const DB_KEY_DOMAIN_V2: &[u8] = b"tiangong-memory:metadata.db:key:v2\0";
-const DB_KEY_BACKUP_PREFIX: &str = ".metadata.db.pre-key-v2-";
+const DB_KEY_BACKUP_PREFIX: &str = ".metadata.db.pre-plaintext-";
+const LEGACY_BACKUP_PREFIX: &str = ".metadata.db.pre-key-v2-";
 
-/// Memory 元数据库（加密 SQLite）
+/// Memory 元数据库（普通 SQLite）
 pub(crate) struct MemoryDb {
     conn: Connection,
 }
 
 impl MemoryDb {
-    /// 打开或创建加密数据库，并初始化 Schema
+    /// 打开或创建普通数据库，必要时转换历史加密库，并初始化 Schema
     pub(crate) fn open() -> Result<Self> {
         Self::open_at_data_dir(&memory_base_path())
     }
@@ -37,7 +38,7 @@ impl MemoryDb {
                 .with_context(|| format!("创建数据库目录失败: {}", parent.display()))?;
         }
 
-        let conn = open_encrypted_conn(&db_path)?;
+        let conn = open_plaintext_conn(&db_path)?;
         schema::init_schema(&conn)?;
 
         Ok(Self { conn })
@@ -550,7 +551,15 @@ impl MemoryDb {
         let query_like = query
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| format!("%{}%", value.replace('%', "\\%").replace('_', "\\_")));
+            .map(|value| {
+                format!(
+                    "%{}%",
+                    value
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                )
+            });
         let limit = if limit == 0 { 100 } else { limit.min(500) };
 
         let mut sql = String::from(
@@ -610,7 +619,15 @@ impl MemoryDb {
         let query_like = query
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| format!("%{}%", value.replace('%', "\\%").replace('_', "\\_")));
+            .map(|value| {
+                format!(
+                    "%{}%",
+                    value
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                )
+            });
 
         let mut sql = String::from("SELECT COUNT(*) FROM memory_nodes WHERE 1 = 1");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1264,7 +1281,7 @@ fn home_dir() -> Option<PathBuf> {
     None
 }
 
-/// 当前数据库密钥只基于宿主明确注入的存储根做词法归一化，不访问文件系统。
+/// 仅用于读取历史 v2 加密库：密钥基于宿主明确注入的存储根做词法归一化，不访问文件系统。
 /// 这样同一存储根在宿主与 AppContainer 中得到完全相同的结果。
 fn derive_db_password() -> String {
     derive_current_db_password(&crate::paths::storage_root())
@@ -1394,48 +1411,33 @@ fn entity_type_to_str(entity_type: &EntityType) -> &'static str {
     }
 }
 
-/// 打开加密数据库连接
-fn open_encrypted_conn(db_path: &Path) -> Result<Connection> {
+/// 优先打开明文库，仅为历史加密库派生兼容密钥
+fn open_plaintext_conn(db_path: &Path) -> Result<Connection> {
     let current_password = derive_db_password();
     let legacy_passwords = legacy_db_passwords();
-    open_encrypted_conn_with_passwords(db_path, &current_password, &legacy_passwords)
+    open_plaintext_conn_with_passwords(db_path, &current_password, &legacy_passwords)
 }
 
-fn open_encrypted_conn_with_passwords(
+fn open_plaintext_conn_with_passwords(
     db_path: &Path,
     current_password: &str,
     legacy_passwords: &[String],
 ) -> Result<Connection> {
-    let has_existing_data = match std::fs::metadata(db_path) {
-        Ok(metadata) => metadata.len() > 0,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取数据库信息失败: {}", db_path.display()));
-        }
-    };
-
-    match open_connection_with_key(db_path, current_password) {
+    recover_interrupted_migration(db_path, current_password, legacy_passwords)?;
+    match open_connection_with_key(db_path, "") {
         Ok(conn) => configure_connection(conn),
-        Err(error) if !has_existing_data => Err(error),
-        Err(current_error) => {
-            for legacy_password in legacy_passwords {
-                if legacy_password == current_password {
-                    continue;
-                }
-                let Ok(legacy_conn) = open_connection_with_key(db_path, legacy_password) else {
+        Err(plain_error) => {
+            for password in
+                std::iter::once(current_password).chain(legacy_passwords.iter().map(String::as_str))
+            {
+                let Ok(conn) = open_connection_with_key(db_path, password) else {
                     continue;
                 };
-                return migrate_legacy_database(
-                    db_path,
-                    legacy_conn,
-                    legacy_password,
-                    current_password,
-                );
+                return migrate_legacy_database(db_path, conn);
             }
-            Err(current_error).with_context(|| {
+            Err(plain_error).with_context(|| {
                 format!(
-                    "无法使用当前密钥或兼容旧密钥打开 Memory 数据库: {}",
+                    "无法读取 Memory 数据库（明文及历史密钥均失败）: {}",
                     db_path.display()
                 )
             })
@@ -1446,8 +1448,10 @@ fn open_encrypted_conn_with_passwords(
 fn open_connection_with_key(db_path: &Path, password: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("打开数据库失败: {}", db_path.display()))?;
-    conn.pragma_update(None, "key", password)
-        .with_context(|| "设置数据库加密密钥失败")?;
+    if !password.is_empty() {
+        conn.pragma_update(None, "key", password)
+            .with_context(|| "设置历史数据库密钥失败")?;
+    }
     validate_database_key(&conn)?;
     Ok(conn)
 }
@@ -1470,26 +1474,21 @@ fn configure_connection(conn: Connection) -> Result<Connection> {
     Ok(conn)
 }
 
-fn migrate_legacy_database(
-    db_path: &Path,
-    legacy_conn: Connection,
-    legacy_password: &str,
-    current_password: &str,
-) -> Result<Connection> {
+fn migrate_legacy_database(db_path: &Path, legacy_conn: Connection) -> Result<Connection> {
     verify_database_integrity(&legacy_conn).with_context(|| "旧 Memory 数据库完整性检查失败")?;
     checkpoint_wal(&legacy_conn)?;
-    drop(legacy_conn);
-
     let staged = StagedDatabase::new(db_path)?;
-    std::fs::copy(db_path, &staged.path).with_context(|| {
-        format!(
-            "创建 Memory 密钥迁移副本失败: {} -> {}",
-            db_path.display(),
-            staged.path.display()
-        )
-    })?;
-    rekey_staged_database(&staged.path, legacy_password, current_password)?;
-    install_migrated_database(db_path, &staged, current_password)
+    export_plaintext_database(&legacy_conn, &staged.path)?;
+    drop(legacy_conn);
+    // 最后一个连接关闭后 SQLite 会移除日志；仍存在日志时拒绝替换，避免并发连接继续写旧库。
+    if database_files(db_path)
+        .iter()
+        .skip(1)
+        .any(|path| path.exists())
+    {
+        bail!("Memory 日志仍被占用，暂不替换数据库");
+    }
+    install_migrated_database(db_path, &staged)
 }
 
 fn checkpoint_wal(conn: &Connection) -> Result<()> {
@@ -1506,29 +1505,41 @@ fn checkpoint_wal(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn rekey_staged_database(
-    staged_path: &Path,
-    legacy_password: &str,
-    current_password: &str,
-) -> Result<()> {
-    let conn = open_connection_with_key(staged_path, legacy_password)
-        .with_context(|| "使用旧密钥打开 Memory 迁移副本失败")?;
-    verify_database_integrity(&conn).with_context(|| "Memory 迁移副本换密钥前检查失败")?;
-    let mode: String = conn
-        .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
-        .with_context(|| "设置 Memory 迁移副本日志模式失败")?;
-    if !mode.eq_ignore_ascii_case("delete") {
-        bail!("设置 Memory 迁移副本日志模式失败: 返回模式为 {mode}");
+fn export_plaintext_database(conn: &Connection, staged_path: &Path) -> Result<()> {
+    conn.execute(
+        "ATTACH DATABASE ?1 AS plaintext KEY ''",
+        [staged_path.to_string_lossy().as_ref()],
+    )?;
+    conn.query_row("SELECT sqlcipher_export('plaintext')", [], |_| Ok(()))
+        .with_context(|| "导出普通 SQLite 数据库失败")?;
+    for pragma in ["user_version", "application_id"] {
+        let value: i64 = conn.pragma_query_value(None, pragma, |row| row.get(0))?;
+        conn.pragma_update(Some("plaintext"), pragma, value)?;
     }
-    conn.pragma_update(None, "rekey", current_password)
-        .with_context(|| "更新 Memory 迁移副本密钥失败")?;
-    validate_database_key(&conn).with_context(|| "Memory 迁移副本换密钥后验证失败")?;
-    verify_database_integrity(&conn).with_context(|| "Memory 迁移副本换密钥后检查失败")?;
-    drop(conn);
-
-    let reopened = open_connection_with_key(staged_path, current_password)
-        .with_context(|| "使用新密钥重新打开 Memory 迁移副本失败")?;
-    verify_database_integrity(&reopened).with_context(|| "重新打开后的 Memory 迁移副本检查失败")?;
+    // 除完整性外，逐表核对数量及双向内容差集，包括所有关联表。
+    let tables = conn
+        .prepare("SELECT name FROM main.sqlite_schema WHERE type='table'")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for table in tables {
+        let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+        let sql = format!(
+            "SELECT (SELECT count(*) FROM main.{quoted}) = (SELECT count(*) FROM plaintext.{quoted})
+             AND NOT EXISTS (SELECT * FROM main.{quoted} EXCEPT SELECT * FROM plaintext.{quoted})
+             AND NOT EXISTS (SELECT * FROM plaintext.{quoted} EXCEPT SELECT * FROM main.{quoted})"
+        );
+        if !conn.query_row(&sql, [], |row| row.get::<_, bool>(0))? {
+            bail!("Memory 明文副本内容不一致: {table}");
+        }
+    }
+    conn.execute_batch("DETACH DATABASE plaintext")?;
+    let reopened = open_connection_with_key(staged_path, "")?;
+    verify_database_integrity(&reopened)?;
+    drop(reopened);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(staged_path)?
+        .sync_all()?;
     Ok(())
 }
 
@@ -1592,109 +1603,115 @@ fn database_files(db_path: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn install_migrated_database(
-    db_path: &Path,
-    staged: &StagedDatabase,
-    current_password: &str,
-) -> Result<Connection> {
-    let parent = db_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Memory 数据库缺少父目录"))?;
+fn install_migrated_database(db_path: &Path, staged: &StagedDatabase) -> Result<Connection> {
+    let parent = db_path.parent().context("Memory 数据库缺少父目录")?;
     let backup_path = parent.join(format!("{DB_KEY_BACKUP_PREFIX}{}.bak", scru128::new()));
-    let original_files = database_files(db_path);
-    let backup_files = database_files(&backup_path);
-    if backup_files.iter().any(|path| path.exists()) {
-        bail!("Memory 数据库迁移备份路径已存在: {}", backup_path.display());
-    }
-
-    let mut moved = Vec::new();
-    for (original, backup) in original_files.iter().zip(backup_files.iter()) {
-        if !original.exists() {
-            continue;
-        }
-        if let Err(error) = std::fs::rename(original, backup) {
-            restore_moved_database_files(&moved)?;
-            return Err(error).with_context(|| {
-                format!(
-                    "备份旧 Memory 数据库文件失败: {} -> {}",
-                    original.display(),
-                    backup.display()
-                )
-            });
-        }
-        moved.push((original.clone(), backup.clone()));
-    }
-
-    if let Err(error) = std::fs::rename(&staged.path, db_path) {
-        restore_moved_database_files(&moved)?;
-        return Err(error).with_context(|| {
-            format!(
-                "启用 Memory 密钥迁移副本失败: {} -> {}",
-                staged.path.display(),
-                db_path.display()
-            )
-        });
-    }
-
-    let reopened = open_connection_with_key(db_path, current_password)
-        .and_then(|conn| {
-            verify_database_integrity(&conn)?;
-            configure_connection(conn)
-        })
-        .with_context(|| "替换后重新打开 Memory 数据库失败");
-    match reopened {
-        Ok(conn) => {
-            tracing::info!(
-                database = %db_path.display(),
-                backup = %backup_path.display(),
-                "Memory 数据库已迁移到稳定密钥"
-            );
-            Ok(conn)
-        }
-        Err(error) => {
-            rollback_installed_database(db_path, &staged.path, &moved)?;
-            Err(error)
-        }
-    }
+    // 先复制并落盘备份，原库始终留在原位置，最后以同目录 rename 原子替换。
+    // 进程在替换前退出仍读取原库，替换后退出则读取已校验的明文库。
+    let mut backup = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)?;
+    std::io::copy(&mut std::fs::File::open(db_path)?, &mut backup)?;
+    backup.sync_all()?;
+    drop(backup);
+    std::fs::rename(&staged.path, db_path)
+        .with_context(|| "启用 Memory 明文数据库失败，原库及备份已保留")?;
+    let conn = open_connection_with_key(db_path, "").and_then(configure_connection)?;
+    tracing::info!(database = %db_path.display(), backup = %backup_path.display(), "Memory 已转换为普通 SQLite，原加密库备份已保留");
+    Ok(conn)
 }
 
-fn restore_moved_database_files(moved: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for (original, backup) in moved.iter().rev() {
-        if backup.exists() {
-            std::fs::rename(backup, original).with_context(|| {
-                format!(
-                    "恢复旧 Memory 数据库文件失败: {} -> {}",
-                    backup.display(),
-                    original.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn rollback_installed_database(
+/// 兼容 #521 先移动原库、后安装副本的中断状态。恢复完成前绝不创建空库。
+fn recover_interrupted_migration(
     db_path: &Path,
-    staged_path: &Path,
-    moved: &[(PathBuf, PathBuf)],
+    current_password: &str,
+    legacy_passwords: &[String],
 ) -> Result<()> {
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let path = database_sidecar_path(db_path, suffix);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("清理无效 Memory 迁移文件失败: {}", path.display()))?;
+    if db_path.try_exists()? {
+        return Ok(());
+    }
+    let parent = db_path.parent().context("Memory 数据库缺少父目录")?;
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with(LEGACY_BACKUP_PREFIX) || name.starts_with(DB_KEY_BACKUP_PREFIX))
+            && name.ends_with(".bak")
+        {
+            backups.push(entry.path());
         }
     }
-    if db_path.exists() {
-        std::fs::rename(db_path, staged_path).with_context(|| {
-            format!(
-                "移除无效 Memory 迁移数据库失败: {} -> {}",
-                db_path.display(),
-                staged_path.display()
-            )
-        })?;
+    // SCRU128 后缀按时间排序，不按备份格式排序。最新备份损坏时明确失败，不静默退回更旧数据。
+    backups.sort_by_key(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .rsplit('-')
+            .next()
+            .unwrap()
+            .to_string()
+    });
+    let Some(backup) = backups.last() else {
+        if database_files(db_path)
+            .iter()
+            .skip(1)
+            .any(|path| path.exists())
+        {
+            bail!("Memory 主库缺失但存在日志文件，拒绝创建空数据库");
+        }
+        return Ok(());
+    };
+    let staged = StagedDatabase::new(db_path)?;
+    if std::fs::metadata(backup)?.len() == 0 {
+        bail!("Memory 迁移备份为空，拒绝创建空库");
     }
-    restore_moved_database_files(moved)
+    std::fs::copy(backup, &staged.path)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let moved = database_sidecar_path(backup, suffix);
+        let original = database_sidecar_path(db_path, suffix);
+        if !moved.try_exists()? && original.try_exists()? {
+            // 旧流程可能只移动了主库。先把尚未移动的日志保存在备份旁，
+            // 使本次恢复在清理旧日志后再次退出时仍有完整的重试来源。
+            let saved = StagedDatabase::new(db_path)?;
+            std::fs::copy(&original, &saved.path)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&saved.path)?
+                .sync_all()?;
+            std::fs::rename(&saved.path, &moved)?;
+        }
+        if moved.try_exists()? {
+            std::fs::copy(moved, database_sidecar_path(&staged.path, suffix))?;
+        }
+    }
+    let mut recovered = None;
+    for password in std::iter::once("")
+        .chain(std::iter::once(current_password))
+        .chain(legacy_passwords.iter().map(String::as_str))
+    {
+        if let Ok(conn) = open_connection_with_key(&staged.path, password) {
+            recovered = Some(conn);
+            break;
+        }
+    }
+    let conn = recovered.context("Memory 迁移备份无法读取；已保留备份，拒绝创建空库")?;
+    verify_database_integrity(&conn)?;
+    checkpoint_wal(&conn)?;
+    drop(conn);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staged.path)?
+        .sync_all()?;
+    for path in database_files(db_path).iter().skip(1) {
+        if path.try_exists()? {
+            std::fs::remove_file(path)?;
+        }
+    }
+    std::fs::rename(&staged.path, db_path)?;
+    tracing::info!(backup = %backup.display(), "已恢复中断的 Memory 数据库迁移");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1714,7 +1731,7 @@ mod tests {
     use super::test_helpers::open_in_memory;
     use super::{
         DB_KEY_BACKUP_PREFIX, derive_current_db_password, open_connection_with_key,
-        open_encrypted_conn_with_passwords,
+        open_plaintext_conn_with_passwords,
     };
     use crate::types::{Episode, EpisodeOutcome};
 
@@ -1732,7 +1749,7 @@ mod tests {
 
     #[test]
     #[ignore = "手动提供已有数据库路径，在副本上验证，不修改原数据"]
-    fn existing_database_copy_opens_with_stable_key() {
+    fn existing_database_copy_converts_to_plaintext() {
         let source = std::path::PathBuf::from(
             std::env::var_os("MEMORY_PROBE_DATABASE").expect("需要数据库路径"),
         );
@@ -1747,12 +1764,23 @@ mod tests {
         if wal.exists() {
             std::fs::copy(wal, super::database_sidecar_path(&copy, "-wal")).unwrap();
         }
-        let conn = open_connection_with_key(&copy, &derive_current_db_password(&storage)).unwrap();
+        let conn = open_plaintext_conn_with_passwords(
+            &copy,
+            &derive_current_db_password(&storage),
+            &super::legacy_db_passwords(),
+        )
+        .unwrap();
         super::verify_database_integrity(&conn).unwrap();
         let nodes: i64 = conn
             .query_row("SELECT COUNT(*) FROM memory_nodes", [], |row| row.get(0))
             .unwrap();
         eprintln!("已有数据库副本完整性通过，记忆节点数={nodes}");
+        super::checkpoint_wal(&conn).unwrap();
+        drop(conn);
+        assert_eq!(&std::fs::read(&copy).unwrap()[..16], b"SQLite format 3\0");
+        if let Some(output) = std::env::var_os("MEMORY_PROBE_OUTPUT") {
+            std::fs::copy(&copy, output).unwrap();
+        }
         assert_eq!(std::fs::read(source).unwrap(), original);
     }
 
@@ -1779,7 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_database_is_rekeyed_from_copy_and_original_is_backed_up() {
+    fn legacy_database_is_decrypted_from_copy_and_original_is_backed_up() {
         let root = tempfile::tempdir().expect("创建迁移测试目录失败");
         let db_path = root.path().join("metadata.db");
         let legacy_password = "legacy-test-password".to_string();
@@ -1787,7 +1815,7 @@ mod tests {
         create_encrypted_test_database(&db_path, &legacy_password);
         let original = std::fs::read(&db_path).expect("读取迁移前数据库失败");
 
-        let conn = open_encrypted_conn_with_passwords(
+        let conn = open_plaintext_conn_with_passwords(
             &db_path,
             current_password,
             std::slice::from_ref(&legacy_password),
@@ -1820,8 +1848,141 @@ mod tests {
         assert_eq!(backup_value, "preserved");
         drop(backup_conn);
 
-        assert!(open_connection_with_key(&db_path, current_password).is_ok());
+        assert!(open_connection_with_key(&db_path, "").is_ok());
         assert!(open_connection_with_key(&db_path, &legacy_password).is_err());
+    }
+
+    #[test]
+    fn plaintext_new_and_v2_databases_reopen_without_password() {
+        for password in [None, Some("stable-v2-test-password")] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("metadata.db");
+            if let Some(password) = password {
+                create_encrypted_test_database(&path, password);
+            }
+            let conn =
+                open_plaintext_conn_with_passwords(&path, "stable-v2-test-password", &[]).unwrap();
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS plain_probe (id TEXT PRIMARY KEY); INSERT INTO plain_probe VALUES ('readable');").unwrap();
+            drop(conn);
+            assert_eq!(&std::fs::read(&path).unwrap()[..16], b"SQLite format 3\0");
+            for _ in 0..2 {
+                let conn = open_plaintext_conn_with_passwords(&path, "unrelated-storage-root", &[])
+                    .unwrap();
+                assert_eq!(
+                    conn.query_row("SELECT id FROM plain_probe", [], |row| row
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "readable"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_old_migration_recovers_backup_and_preserves_it() {
+        for password in ["legacy-test-password", "stable-v2-test-password"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("metadata.db");
+            create_encrypted_test_database(&path, password);
+            let backup = root.path().join(format!(
+                "{}{}.bak",
+                super::LEGACY_BACKUP_PREFIX,
+                scru128::new()
+            ));
+            std::fs::rename(&path, &backup).unwrap();
+            let bytes = std::fs::read(&backup).unwrap();
+            for _ in 0..2 {
+                let conn = open_plaintext_conn_with_passwords(
+                    &path,
+                    "stable-v2-test-password",
+                    &["legacy-test-password".into()],
+                )
+                .unwrap();
+                assert_eq!(
+                    conn.query_row("SELECT value FROM migration_probe", [], |row| row
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "preserved"
+                );
+            }
+            assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn interrupted_migration_recovers_unmoved_wal() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = source.path().join("metadata.db");
+        let conn = open_connection_with_key(&source_path, "legacy-test-password").unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch("CREATE TABLE migration_probe (value TEXT); INSERT INTO migration_probe VALUES ('preserved-in-wal');").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("metadata.db");
+        let backup = root.path().join(format!(
+            "{}{}.bak",
+            super::LEGACY_BACKUP_PREFIX,
+            scru128::new()
+        ));
+        std::fs::copy(&source_path, &backup).unwrap();
+        std::fs::copy(
+            super::database_sidecar_path(&source_path, "-wal"),
+            super::database_sidecar_path(&path, "-wal"),
+        )
+        .unwrap();
+        let recovered =
+            open_plaintext_conn_with_passwords(&path, "v2", &["legacy-test-password".into()])
+                .unwrap();
+        assert_eq!(
+            recovered
+                .query_row("SELECT value FROM migration_probe", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserved-in-wal"
+        );
+        assert!(super::database_sidecar_path(&backup, "-wal").exists());
+    }
+
+    #[test]
+    fn unreadable_migration_backup_never_creates_empty_database() {
+        for bytes in [b"".as_slice(), b"corrupted backup".as_slice()] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("metadata.db");
+            let backup = root.path().join(format!(
+                "{}{}.bak",
+                super::LEGACY_BACKUP_PREFIX,
+                scru128::new()
+            ));
+            std::fs::write(&backup, bytes).unwrap();
+            assert!(open_plaintext_conn_with_passwords(&path, "v2", &[]).is_err());
+            assert!(!path.exists());
+            assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn windows_path_search_and_count_treat_backslashes_and_wildcards_literally() {
+        let db = open_in_memory().unwrap();
+        let mut episode = make_episode("path-session");
+        episode.title = r"D:\work_100%\notes\memory.txt".into();
+        db.insert_episode(&episode, None).unwrap();
+        for query in [episode.title.as_str(), r"D:\", r"work_100%\", r"\notes\"] {
+            assert_eq!(
+                db.list_memory_nodes(None, Some(query), None, None, 0, 10)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                db.count_memory_nodes(None, Some(query), None, None)
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            db.count_memory_nodes(None, Some(r"workX100Y\"), None, None)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1832,7 +1993,7 @@ mod tests {
         create_encrypted_test_database(&db_path, legacy_password);
         let original = std::fs::read(&db_path).expect("读取失败迁移前数据库失败");
 
-        let result = open_encrypted_conn_with_passwords(
+        let result = open_plaintext_conn_with_passwords(
             &db_path,
             "stable-v2-test-password",
             &["wrong-legacy-test-password".to_string()],

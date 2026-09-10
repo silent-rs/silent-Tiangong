@@ -1,4 +1,4 @@
-//! 数据库模块（SQLite 加密元数据库）
+//! 数据库模块（SQLite 明文元数据库与历史加密库兼容）
 
 pub(crate) mod migration;
 mod schema;
