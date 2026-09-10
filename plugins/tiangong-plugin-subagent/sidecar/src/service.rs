@@ -1744,6 +1744,72 @@ impl SubagentService {
         }
         let timestamp = now_string();
         if run.pid.is_none() {
+            // 会话后端：硬取消优先——直接终止成员会话执行中的轮次（等待方
+            // 立即收到取消错误），run 终态由 turn_finished(cancelled) 归因链
+            // 自动落定（Cancelled + 释放占用）；端点不可达时回退通知式取消。
+            let config = self.agents.load(&run.agent_id)?;
+            let executor = run
+                .executor_session
+                .as_deref()
+                .or(config.session_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("运行缺少执行会话，无法取消"))?
+                .to_string();
+            match crate::delivery::cancel_session_turn(&self.http, &executor).await {
+                Ok(true) => {
+                    // 取消信号已送达：轮次终止后归因链收尾，此处只登记取消
+                    // 裁定与任务层逻辑取消，不抢改 run 终态。
+                    if let Some(task_id) = run.task_id.clone()
+                        && let Ok(mut task) = self.store.load_task(&task_id)
+                        && task.status != TaskStatus::Completed
+                    {
+                        task.status = TaskStatus::Cancelled;
+                        task.updated_at = now_string();
+                        let _ = self.store.save_task(&task);
+                    }
+                    append_event(
+                        &self.store,
+                        &run,
+                        "cancel_requested",
+                        &json!({ "hard": true }),
+                        &timestamp,
+                    );
+                    notify_run_status(&run);
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // 没有可取消的活跃执行（状态滞后或已收尾）：直接落终态
+                    // ——取消即裁定，无需等待任何收尾确认。
+                    run.status = RunStatus::Cancelled;
+                    run.summary = Some("任务已取消（成员会话无活跃执行，直接终态）".to_string());
+                    run.finished_at = Some(timestamp.clone());
+                    run.updated_at = timestamp.clone();
+                    self.store.save_run(&run)?;
+                    if let Some(task_id) = run.task_id.clone()
+                        && let Ok(mut task) = self.store.load_task(&task_id)
+                        && task.status != TaskStatus::Completed
+                    {
+                        task.status = TaskStatus::Cancelled;
+                        task.updated_at = now_string();
+                        let _ = self.store.save_task(&task);
+                    }
+                    append_event(
+                        &self.store,
+                        &run,
+                        "cancelled",
+                        &json!({ "hard": false, "reason": "no-active-turn" }),
+                        &timestamp,
+                    );
+                    notify_run_status(&run);
+                    return Ok(());
+                }
+                Err(error) => {
+                    // 取消端点不可达（Server 未启动等）：回退通知式取消
+                    // （原语义：投递停止请求，等待执行侧收尾确认）。
+                    tracing::warn!(run_id = %run.run_id, %error, "硬取消不可达，回退通知式取消");
+                }
+            }
             // 会话后端：取消是「不再需要结果」的裁定，不等于执行已停止——
             // 投递失败如实上抛（取消未送达）；成功后任务逻辑取消、运行置
             // Stopping（占用保留），待成员会话本轮收尾归因确认实际停止。

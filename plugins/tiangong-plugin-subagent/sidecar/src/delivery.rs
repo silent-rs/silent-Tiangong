@@ -141,6 +141,31 @@ impl DeliveryWorker {
     }
 }
 
+/// 取消指定会话当前执行中的轮次（硬取消：Core 立即终止，等待方收到
+/// 「已取消」错误快速返回）。返回 false 表示没有可取消的活跃执行。
+pub async fn cancel_session_turn(client: &reqwest::Client, conversation_id: &str) -> Result<bool> {
+    let (url, token) = server_connection();
+    let endpoint = format!(
+        "{}/api/v1/sessions/{}/cancel",
+        url.trim_end_matches('/'),
+        conversation_id.trim()
+    );
+    let mut request = client.post(&endpoint);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    if status.is_success() {
+        let body: serde_json::Value = response.json().await?;
+        Ok(body
+            .get("cancelled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true))
+    } else {
+        anyhow::bail!("server 返回 {status}")
+    }
+}
 /// 向指定会话投递一条用户可见消息（respond-async；Hook 队列与会话后端共用）。
 ///
 /// `workspace`：消息期望的工作区——服务端创建会话时作为 cwd、已有会话
