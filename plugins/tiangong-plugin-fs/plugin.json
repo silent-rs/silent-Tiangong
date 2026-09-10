@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "fs",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "wasm": {
     "binary": "tiangong_plugin_fs_wasm.wasm"
   },

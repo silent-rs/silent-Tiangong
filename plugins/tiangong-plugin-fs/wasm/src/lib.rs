@@ -22,8 +22,8 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 use bindings::tiangong::plugin::{clock, feedback};
 use tiangong_plugin_fs_protocol::tools::{
     ApplyPatch, ApplyPatchRequest, FsToolResponse, ListDir, ListDirRequest, ReadFile,
-    ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, SetWorkspace, SetWorkspaceRequest,
-    TreeDir, TreeDirRequest, WriteFile, WriteFileRequest,
+    ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, TreeDir, TreeDirRequest, WriteFile,
+    WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{
     FsOperation, TOOL_APPLY_PATCH, TOOL_CURRENT_TIME, TOOL_LIST_DIR, TOOL_READ_FILE,
@@ -318,13 +318,8 @@ impl Guest for Component {
         }
         state::set_workspace(workspace.clone());
         state::set_full_trust(full_trust);
-        // 通知 sidecar 工作区与信任模式变更（路径解析基准）。
-        let request = SetWorkspaceRequest {
-            workspace,
-            full_trust,
-        };
-        sidecar_client::invoke::<SetWorkspace>(&request)
-            .map_err(|error| plugin_err(format!("set_workspace 调用 sidecar 失败: {error}")))?;
+        // 按需 sidecar 没有跨请求状态；每次真实文件操作已携带 access。
+        // 此处只更新 WASM 状态，不能为无状态的确认启动再销毁进程。
         Ok(())
     }
 

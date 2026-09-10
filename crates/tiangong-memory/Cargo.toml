@@ -36,6 +36,7 @@ rusqlite = { workspace = true, features = [
 ] }
 sha2 = { workspace = true }
 hex = { workspace = true }
+url = { workspace = true }
 tantivy = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
