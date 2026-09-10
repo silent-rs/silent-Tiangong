@@ -77,6 +77,8 @@ export function MessageList() {
   const prevMessagesLengthRef = useRef(0);
   const prevStreamingIdRef = useRef<string | null>(null);
   const prevRunStatusRef = useRef('idle');
+  // undefined 表示尚未跑过首次定位（挂载时走新消息路径），此后记录上次会话 id
+  const prevActiveSessionRef = useRef<string | null | undefined>(undefined);
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -165,11 +167,8 @@ export function MessageList() {
   // 切换会话时关闭搜索
   useEffect(() => {
     useSearchStore.getState().closeSearch();
-    // 切换会话视为重新进入，默认在底部；同时重置滚动基准，
-    // 避免旧会话残留的流式状态被误判为"回复完成"
+    // 切换会话视为重新进入，默认在底部
     isAtBottomRef.current = true;
-    prevStreamingIdRef.current = null;
-    prevRunStatusRef.current = 'idle';
   }, [activeSessionId]);
 
   // 卸载时清理刻度尺预览卡片的隐藏定时器
@@ -378,6 +377,18 @@ export function MessageList() {
 
   // 新消息到达时滚动到底部
   useEffect(() => {
+    let cancelled = false;
+    const sessionSwitched = prevActiveSessionRef.current !== undefined
+      && activeSessionId !== prevActiveSessionRef.current;
+    if (sessionSwitched) {
+      // 切换会话视为重新进入：重置滚动基准并直接定位到底部，不依赖
+      // 消息数量/流式标识的变化检测（避免旧会话残留的流式状态被误判
+      // 为"回复完成"，或变化检测落空导致停在旧位置）
+      prevStreamingIdRef.current = null;
+      prevRunStatusRef.current = 'idle';
+      prevMessagesLengthRef.current = messages.length;
+    }
+
     const newMessageArrived = messages.length > prevMessagesLengthRef.current;
     const streamingIdChanged = streamingMessageId !== prevStreamingIdRef.current;
     const lastMsg = messages[messages.length - 1];
@@ -398,13 +409,17 @@ export function MessageList() {
     // 用户离开底部时，新消息/流式 id 变化不强制拉回；用户主动发送始终
     // 跟随；回复完成时保持当前位置不动
     const shouldScroll =
-      isUserSelfSent
+      sessionSwitched
+      || isUserSelfSent
       || (!streamingFinished && (newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
       if (completedGroups.length > 0 && !streamingGroup) {
         // 滚动到虚拟列表最后一项
         requestAnimationFrame(() => {
+          // 帧执行前重跑的 effect 已作废本次定位（如回复在排队期间完成），
+          // 回复完成后不再拉底
+          if (cancelled) return;
           // 跟随滚动用瞬时定位：平滑动画期间内容持续增长会让滚动事件
           // 误判"离开底部"而中断跟随
           virtualizer.scrollToIndex(completedGroups.length - 1, {
@@ -414,6 +429,7 @@ export function MessageList() {
         });
       } else if (streamingGroup) {
         requestAnimationFrame(() => {
+          if (cancelled) return;
           scrollRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
         });
       }
@@ -422,7 +438,11 @@ export function MessageList() {
     prevMessagesLengthRef.current = messages.length;
     prevStreamingIdRef.current = streamingMessageId;
     prevRunStatusRef.current = runStatus;
-  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, runStatus]);
+    prevActiveSessionRef.current = activeSessionId;
+    return () => {
+      cancelled = true;
+    };
+  }, [messages.length, streamingMessageId, completedGroups.length, streamingGroup, runStatus, activeSessionId]);
 
   // 流式输出时自动滚动
   useEffect(() => {
@@ -431,16 +451,18 @@ export function MessageList() {
     if (!el) return;
 
     let ticking = false;
+    let disposed = false;
     const observer = new MutationObserver(() => {
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
-        if (isAtBottomRef.current) {
-          // 瞬时贴底：流式内容增长期间保持视口贴底，滚动事件判定不受
-          // 平滑动画与内容增长的竞态影响；用户翻离底部后自动停止跟随
-          el.scrollIntoView({ behavior: "auto", block: "end" });
-        }
         ticking = false;
+        // 帧执行时流式可能已结束（回复完成先于本帧提交，观察器已断开），
+        // 已排队的帧不再执行，避免完成后被拉底
+        if (disposed || !isAtBottomRef.current) return;
+        // 瞬时贴底：流式内容增长期间保持视口贴底，滚动事件判定不受
+        // 平滑动画与内容增长的竞态影响；用户翻离底部后自动停止跟随
+        el.scrollIntoView({ behavior: "auto", block: "end" });
       });
     });
     observer.observe(el.parentElement!, {
@@ -448,7 +470,10 @@ export function MessageList() {
       subtree: true,
       characterData: true,
     });
-    return () => observer.disconnect();
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
   }, [streamingMessageId]);
 
   // 滚动到底部：瞬时贴底并重新进入跟随模式。平滑动画期间内容增长
