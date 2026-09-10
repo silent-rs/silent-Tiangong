@@ -1652,7 +1652,12 @@ impl SubagentService {
     /// CLI 成员的 MCP 接入引导：sidecar 二进制外部直起即 stdio MCP server
     ///（标准 JSON-RPC），透传绝对路径与协作说明——注册与否、注册到用户级
     /// 还是项目级由 CLI 工具与其用户决定，总线不代写任何外部配置文件。
+    /// 去重：该 workspace 已完成过 MCP 握手（mcp_access 登记）即视为已
+    /// 接入，不再携带引导。
     fn mcp_guide(workspace: &str) -> Option<McpGuide> {
+        if crate::mcp_access::is_connected(workspace) {
+            return None;
+        }
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
         Some(McpGuide {
             server: "tiangong-subagent",

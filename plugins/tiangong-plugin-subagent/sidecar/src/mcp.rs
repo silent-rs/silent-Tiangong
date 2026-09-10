@@ -89,6 +89,9 @@ pub async fn run_mcp(
         let reply = match method {
             "initialize" => {
                 seq += 1;
+                // 握手即视为该 workspace 已接入：登记后派活引导不再重复
+                // 携带（去重以「真的握手过」为准，失败不影响握手返回）。
+                crate::mcp_access::record_handshake(&workspace);
                 rpc_result(
                     id,
                     json!({

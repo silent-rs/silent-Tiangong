@@ -276,7 +276,7 @@ agents/<agent-id>/
 ## CLI Adapter JSONL 协议（首版）
 
 - sidecar 以 `sh -c <command>`（Windows `cmd /C`）启动子进程，cwd 为绑定的 workspace（或独立 worktree）；子进程留在 sidecar 进程组内（宿主退出时级联清理）；
-- stdin 每行一个 JSON：`begin`（含 agent/activation/task 信息）→ 后续 `user_message` / `interrupt` / `cancel`；`begin` 与 `user_message` 可选携带 `attachments`（随消息附件数组 `[{path, kind, mime_type?, name?}]`，本地路径原样透传、成员自行读取，无附件省略字段）；`begin` 可选携带 `mcp`（天工协作接入引导 `{server, command, workspace, hint}`——sidecar 可执行文件外部直起即标准 stdio MCP server，CLI 工具据此自行注册，注册到用户级或项目级由其与用户决定，总线不代写外部配置文件；已注册时忽略）；
+- stdin 每行一个 JSON：`begin`（含 agent/activation/task 信息）→ 后续 `user_message` / `interrupt` / `cancel`；`begin` 与 `user_message` 可选携带 `attachments`（随消息附件数组 `[{path, kind, mime_type?, name?}]`，本地路径原样透传、成员自行读取，无附件省略字段）；`begin` 可选携带 `mcp`（天工协作接入引导 `{server, command, workspace, hint}`——sidecar 可执行文件外部直起即标准 stdio MCP server，CLI 工具据此自行注册，注册到用户级或项目级由其与用户决定，总线不代写外部配置文件）。引导去重：sidecar 以 MCP 形态被 CLI 启动并完成 initialize 握手时登记该 workspace（`agents-runtime/mcp_access.json`，跨进程 flock、两侧路径 canonicalize 归一）；已登记的 workspace 派活不再携带 `mcp`——以「真的握手过」为准，不依赖提示语自觉忽略；CLI 卸载注册后登记保留（不再引导同样成立）。
 - stdout 每行一个 JSON 事件：`message` / `status` / `blocked` / `approval_required` / `completed` / `failed`；非 JSON 行按 `message` 处理；
 - stderr 收进 run 日志；协议要求子进程在 stdin EOF 时自行退出（宿主异常退出的级联兜底）。
 

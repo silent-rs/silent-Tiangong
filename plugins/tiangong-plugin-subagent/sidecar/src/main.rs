@@ -10,6 +10,7 @@
 mod agent_store;
 mod delivery;
 mod mcp;
+mod mcp_access;
 mod memory;
 mod paths;
 mod runner;
