@@ -1163,7 +1163,7 @@ impl SubagentService {
     /// 发起会话是否为某成员的后端会话（专属/关联）——集群协作识别。
     fn collaboration_origin(&self, session_id: &str) -> Option<AgentConfig> {
         // 会话归属经成员×工作区映射反查（老全局绑定在映射内兜底）。
-        let session_owner = crate::workspace_state::agent_for_session(&self.agents, &session_id);
+        let session_owner = crate::workspace_state::agent_for_session(&self.agents, session_id);
         self.agents.list().into_iter().find(|config| {
             matches!(
                 config.backend,
@@ -1591,10 +1591,14 @@ impl SubagentService {
             "\n【任务工作区】{}\n本次任务的所有文件操作（读/写/搜索/执行命令）都必须在此目录下进行——这是发起会话的工作区，你的会话默认目录可能与它不同，请始终使用基于此目录的绝对路径。如需其他成员协助，可用 send_agent_message 向其发送协作消息。",
             activation.workspace
         ));
-        // 回复地址：成员回报必须明确接收方（纯消息投递，不再由总线按
-        // 运行记录推断发起方）。
+        // 回复地址 = 发起方会话（协作时为协作发起成员的会话，主会话
+        // 发起时为激活源会话）——source_session 是本条消息的接收会话
+        // （成员执行会话），不得误作回复地址。
+        let reply_to = origin
+            .map(|origin| origin.session)
+            .unwrap_or(activation.session_id.as_str());
         body.push_str(&format!(
-            "\n\n【回复地址】会话 {source_session}\n完成、阻塞或失败时，用 report_agent_result 向该地址回报结果（to_session 填此地址）；同一工作区有多项工作时在 task.md 中区分各自进展。"
+            "\n\n【回复地址】会话 {reply_to}\n完成、阻塞或失败时，用 report_agent_result 向该地址回报结果（to_session 填此地址）；同一工作区有多项工作时在 task.md 中区分各自进展。"
         ));
         if !instructions.trim().is_empty() {
             body.push_str(&format!("\n\n【长期指令】\n{}", instructions.trim()));
@@ -1946,9 +1950,11 @@ impl SubagentService {
             request.assistant_text.trim().to_string()
         };
         run.status = status;
-        // 轮次收尾抓取是未主动回报时的兜底：结果来源明确标记，供发起方
-        // 与观测区分「成员主动投递」和「系统抓取的最终回复」。
-        run.summary = Some(format!("[轮次收尾兜底] {text}"));
+        // 轮次结束只记录执行事实：本轮执行完毕与最终文本（来源标记为
+        // 系统抓取，供观测区分「成员主动投递」）。业务回报由成员经
+        // report_agent_result 主动发送——这里不代替成员生成完成回报，
+        // 也不代为归档成果（工作含义与反馈内容由成员维护）。
+        run.summary = Some(format!("[轮次收尾] {text}"));
         run.finished_at = Some(timestamp.clone());
         run.updated_at = timestamp.clone();
         self.store.save_run(&run)?;
@@ -1960,23 +1966,6 @@ impl SubagentService {
             _ => ("cancelled", json!({ "text": text })),
         };
         append_event(&self.store, &run, event_type, &payload, &timestamp);
-        if status == RunStatus::Completed {
-            let agents_ref = Some(&self.agents);
-            archive_completion(&self.store, agents_ref, &run, &text);
-        }
-        let agents_ref = Some(&self.agents);
-        enqueue_hook(
-            &self.store,
-            agents_ref,
-            &run,
-            match status {
-                RunStatus::Completed => HookEventType::Completed,
-                RunStatus::Failed => HookEventType::Failed,
-                _ => HookEventType::Message,
-            },
-            payload,
-            &timestamp,
-        );
         notify_run_status(&run);
         Ok(format!(
             "运行 {} 已随源会话本轮结束归因（{}）",
@@ -2620,7 +2609,7 @@ impl SubagentService {
         // 发起方标定：发起会话是某成员的后端会话 → 该成员；否则主会话。
         // 归属按成员×工作区映射逐会话反查（老全局绑定兜底）。
         let origin_label = |session_id: &str| {
-            let owner = crate::workspace_state::agent_for_session(&self.agents, &session_id);
+            let owner = crate::workspace_state::agent_for_session(&self.agents, session_id);
             agents
                 .iter()
                 .find(|config| owner.as_deref() == Some(config.id.as_str()))
@@ -2974,11 +2963,24 @@ impl SubagentService {
         ) {
             bail!("整理请求仅适用于天工会话后端的成员（其他后端的记忆来源是任务归档与手动记录）");
         }
-        let (session_id, workspace) = Self::require_context()?;
+        // UI 桥接没有工具调用上下文：发起方会话与工作区由管理页从宿主
+        // 上下文显式传递（与其他 ui_* 请求同一模式）。
+        let session_id = request
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("缺少当前会话上下文（session_id），无法发送整理请求"))?;
+        let workspace = request
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("缺少当前工作区（workspace），无法发送整理请求"))?;
         let content = format!(
             "请整理当前工作区的重要结论：用 update_workspace_state 更新当前工作（task.md）、背景约定（context.md）与计划（plan.md），把可复用经验用 append_agent_memory 追加到 lessons.md，完成后用 report_agent_result 向我反馈整理结果（to_session 填会话 {session_id}）。"
         );
-        self.send_message_core(&request.agent_id, &session_id, &workspace, &content)
+        self.send_message_core(&request.agent_id, session_id, workspace, &content)
             .await?;
         notify(json!({ "kind": "memory_request_sent", "agent_id": request.agent_id }));
         Ok(json!({ "sent": true }))

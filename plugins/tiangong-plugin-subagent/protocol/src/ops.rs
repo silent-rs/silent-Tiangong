@@ -293,6 +293,12 @@ pub struct UiDeleteMemoryRequest {
 #[derive(Debug, Deserialize)]
 pub struct AgentMemoryRequest {
     pub agent_id: String,
+    /// 管理页整理请求用：发起方会话与工作区（UI 桥接无工具调用上下文，
+    /// 由页面从宿主上下文显式传递）。
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

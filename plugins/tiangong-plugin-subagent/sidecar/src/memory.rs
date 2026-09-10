@@ -14,8 +14,6 @@ use crate::paths::{now_string, validate_id_segment};
 
 /// 追加到 tasks.md 的单条任务结论最大长度。
 const TASK_ENTRY_MAX_CHARS: usize = 800;
-/// 从会话整理时单轮用户/回复的截断长度。
-const SESSION_TURN_MAX_CHARS: usize = 1200;
 /// 运行注入（begin 帧/投递消息）携带的记忆摘要上限。
 const INJECTION_MAX_CHARS: usize = 6000;
 /// 记忆文件名单段约束。

@@ -454,9 +454,15 @@ async function deleteMemory(agentId: string, name: string) {
 }
 
 async function compileMemory(agent: AgentSummary) {
+  if (!sessionContext.value) {
+    memoryError.value = '缺少当前会话上下文，无法发送整理请求';
+    return;
+  }
   void withBusy(agent.config.id, async () => {
     await sidecarCall<{ sent: boolean }>('ui_compile_memory', {
       agent_id: agent.config.id,
+      session_id: sessionId.value,
+      workspace: workspace.value,
     });
     memoryError.value = '';
     memoryNotice.value = '';
