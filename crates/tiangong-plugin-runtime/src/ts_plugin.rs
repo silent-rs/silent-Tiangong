@@ -22,6 +22,8 @@ use crate::manifest::{PluginManifest, TsToolDecl};
 struct TsPluginState {
     tools: Vec<TsToolDecl>,
     prompts: Vec<String>,
+    /// 旧版插件以此声明工具全部由 sidecar 执行，页面仅负责展示。
+    legacy_tools_direct: bool,
     /// @提及展示：候选 label（UI 贡献标题或插件 id）、副标题（mention.hint）
     /// 与标记字符（mention.mark，可选）。
     mention: Option<(String, String, String)>,
@@ -69,6 +71,10 @@ impl TsPluginAdapter {
             state: RwLock::new(TsPluginState {
                 tools: manifest.tools.clone().unwrap_or_default(),
                 prompts: manifest.prompt.clone().unwrap_or_default(),
+                legacy_tools_direct: manifest
+                    .sidecar
+                    .as_ref()
+                    .is_some_and(|s| s.tools_direct == Some(true)),
                 mention: mention_candidate_parts(manifest),
             }),
             enabled: AtomicBool::new(enabled),
@@ -89,6 +95,10 @@ impl TsPluginAdapter {
         let next = TsPluginState {
             tools: manifest.tools.clone().unwrap_or_default(),
             prompts: manifest.prompt.clone().unwrap_or_default(),
+            legacy_tools_direct: manifest
+                .sidecar
+                .as_ref()
+                .is_some_and(|s| s.tools_direct == Some(true)),
             mention: mention_candidate_parts(manifest),
         };
         match self.state.write() {
@@ -114,6 +124,38 @@ impl TsPluginAdapter {
 
     fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
+    }
+
+    fn handler_for_tool(&self, name: &str) -> Result<crate::invocation::HandlerKind, &'static str> {
+        let legacy_direct = self
+            .state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .legacy_tools_direct;
+        let verified = self
+            .verified_sidecar
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if legacy_direct && self.has_ui.load(Ordering::Acquire) {
+            // 旧握手没有 capabilities。只在完整制品检查仍有效时兼容旧声明，
+            // 不因清单标记绕过验证，也不能回退到不接收工具的展示页面。
+            let capabilities = verified
+                .as_deref()
+                .ok_or("插件运行检查尚未完成或已失效，请在插件管理中重新验证后重试")?;
+            if capabilities.is_empty()
+                || crate::invocation::capabilities_handle_tool(capabilities, name)
+            {
+                return Ok(crate::invocation::HandlerKind::Sidecar);
+            }
+            return Err("插件后台未声明支持该工具，请更新插件后重试");
+        }
+        Ok(crate::invocation::select_ts_handler(
+            self.sidecar_direct.load(Ordering::Acquire),
+            self.has_sidecar.load(Ordering::Acquire),
+            self.has_ui.load(Ordering::Acquire),
+            verified.as_deref(),
+            name,
+        ))
     }
 
     fn tool(&self, name: &str) -> Option<TsToolDecl> {
@@ -186,16 +228,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         // 路由只消费安装阶段保存的验证能力，不启动 sidecar 探测。
-        let handler = crate::invocation::select_ts_handler(
-            self.sidecar_direct.load(Ordering::Acquire),
-            self.has_sidecar.load(Ordering::Acquire),
-            self.has_ui.load(Ordering::Acquire),
-            self.verified_sidecar
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_deref(),
-            &call.name,
-        );
+        let handler = self.handler_for_tool(&call.name);
         let invocation = crate::invocation::RuntimeInvocation::new(
             &plugin_id,
             call.clone(),
@@ -208,7 +241,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
             invocation.clone(),
             async move {
                 match handler {
-                    crate::invocation::HandlerKind::Sidecar => Some(
+                    Ok(crate::invocation::HandlerKind::Sidecar) => Some(
                         invoke_sidecar_tool(
                             &plugin_id,
                             call,
@@ -217,7 +250,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                         )
                         .await,
                     ),
-                    crate::invocation::HandlerKind::Ui => Some(
+                    Ok(crate::invocation::HandlerKind::Ui) => Some(
                         crate::ts_tools::execute(
                             plugin_id,
                             call,
@@ -226,6 +259,7 @@ impl ToolOverrideHandler for TsPluginAdapter {
                         )
                         .await,
                     ),
+                    Err(error) => Some(sidecar_tool_failure(&plugin_id, error)),
                 }
             },
         ))
@@ -654,20 +688,32 @@ mod tests {
             adapter_route(&adapter, "demo"),
             crate::invocation::HandlerKind::Ui
         );
+        // 旧版有 UI 的直连插件：空能力仍可使用已验证的旧声明；检查缺失
+        // 或新版能力明确不支持时返回错误，不能交给纯展示页面无限等待。
+        manifest.sidecar.as_mut().unwrap().tools_direct = Some(true);
+        let adapter = TsPluginAdapter::from_manifest(&manifest, true, Some(Vec::new()));
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Sidecar
+        );
+        adapter.reconfigure(&manifest, true, None);
+        assert!(adapter.handler_for_tool("demo").is_err());
+        adapter.reconfigure(&manifest, true, Some(vec!["tool:other".into()]));
+        assert!(adapter.handler_for_tool("demo").is_err());
+        assert_eq!(
+            adapter_route(&adapter, "other"),
+            crate::invocation::HandlerKind::Sidecar
+        );
+        manifest.sidecar.as_mut().unwrap().tools_direct = Some(false);
+        adapter.reconfigure(&manifest, true, Some(Vec::new()));
+        assert_eq!(
+            adapter_route(&adapter, "demo"),
+            crate::invocation::HandlerKind::Ui
+        );
     }
 
     fn adapter_route(adapter: &TsPluginAdapter, tool_name: &str) -> crate::invocation::HandlerKind {
-        crate::invocation::select_ts_handler(
-            adapter
-                .sidecar_direct
-                .load(std::sync::atomic::Ordering::Acquire),
-            adapter
-                .has_sidecar
-                .load(std::sync::atomic::Ordering::Acquire),
-            adapter.has_ui.load(std::sync::atomic::Ordering::Acquire),
-            adapter.verified_sidecar.read().unwrap().as_deref(),
-            tool_name,
-        )
+        adapter.handler_for_tool(tool_name).unwrap()
     }
 
     #[test]

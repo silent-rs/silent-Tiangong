@@ -227,6 +227,8 @@ pub(crate) fn save_verification(
             .with_context(|| format!("写入验证记录临时文件失败: {}", temp_path.display()))?;
         file.sync_all()
             .with_context(|| format!("落盘验证记录临时文件失败: {}", temp_path.display()))?;
+        // Windows ReplaceFileW 需要重新打开替换文件；先释放写入句柄。
+        drop(file);
         replace_verification_file(&temp_path, &path).with_context(|| {
             format!(
                 "替换验证记录失败: {} -> {}",
@@ -433,6 +435,8 @@ mod tests {
             capabilities: vec!["tool:demo".into()],
             verified_at: "2026-09-03 12:00:00".into(),
         };
+        save_verification(&plugin, &record).unwrap();
+        // 补验证必须能覆盖已有记录（Windows 不能持写入句柄替换文件）。
         save_verification(&plugin, &record).unwrap();
         let stored_path = verification_path(&plugin).unwrap();
         assert_eq!(
