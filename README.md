@@ -77,6 +77,8 @@ Sandbox Launcher 也可作为独立程序使用，平台能力、策略格式和
 
 持久 Subagent 适合资料搜集、代码实现、测试验证、方案评审等需要长期身份、跨会话上下文与任务跟踪的工作。Subagent 统一由官方 `subagent` 插件管理；可关联已有天工会话，也可接入受管 CLI 后端，并在任意会话中激活后绑定当前 Workspace。
 
+> 内置的进程内 Agent Team 已移除，多智能体协作统一由 `subagent` 插件提供。升级后如未安装该插件，可在设置的「插件管理」页从官方目录安装；旧会话中已保存的 Agent 消息与事件仍可只读查看。
+
 ```text
 在扩展区创建或选择持久 Subagent
     ↓
@@ -151,7 +153,6 @@ crates/
                         scheduler/index/media/prompt/coding/computer-use/
                         browser/terminal/interaction 等，含 WASM 与
                         TypeScript/纯 UI 多种形态）
-  crates/plugins/       内置插件（agent-team）
 frontend/               桌面前端
 src-tauri/              Tauri 桌面壳
 ```
