@@ -131,7 +131,7 @@
     }
   ],
   "prompt": [
-    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。长命令只在有明确时间边界时设置 timeout（秒）。"
+    "终端工具使用规范：执行命令用 run_command（带参数列表），执行 shell 脚本用 run_shell；终端选择、新建和界面打开由插件自动处理，Agent 不传终端编号。结果会告知实际终端编号；后续向该终端输入时用 terminal_send 并传 terminal_id，关闭该终端时用 terminal_close 并传 terminal_id。仅主动打开空终端时使用 terminal_open。长命令只在有明确时间边界时设置 timeout（秒）。Windows 默认使用 PowerShell，run_shell 应使用 PowerShell 语法；CMD 脚本可用 run_command 调用 cmd.exe，并传入 /d、/c 和脚本参数。显式选择其他 Shell 时以实际终端为准。"
   ],
   "ui": {
     "sandbox": "shadow",

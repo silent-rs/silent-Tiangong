@@ -59,6 +59,8 @@ enum SessionPhase {
 }
 
 struct PtySession {
+    shell: ShellKind,
+    shell_ready: bool,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -141,41 +143,128 @@ struct ExecRequest {
     cwd: Option<String>,
 }
 
-/// 用户默认交互 shell（SHELL 环境变量，缺省回退 sh/cmd）。
-fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "cmd".to_string()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    Posix,
+    Cmd,
+    PowerShell,
+}
+
+impl ShellKind {
+    fn of(program: &str) -> Self {
+        let name = std::path::Path::new(program)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or(program);
+        if name.eq_ignore_ascii_case("cmd") {
+            Self::Cmd
+        } else if name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh") {
+            Self::PowerShell
         } else {
-            "sh".to_string()
+            Self::Posix
         }
-    })
+    }
+
+    fn quote(self, value: &str) -> String {
+        match self {
+            Self::PowerShell => format!("'{}'", value.replace('\'', "''")),
+            Self::Cmd => {
+                if value.is_empty()
+                    || value.contains(|ch: char| ch.is_whitespace() || "\"&|<>()^".contains(ch))
+                {
+                    format!("\"{}\"", value.replace('"', "\"\""))
+                } else {
+                    value.to_string()
+                }
+            }
+            Self::Posix => posix_quote(value),
+        }
+    }
 }
 
-/// 登录 shell 启动参数（对齐原版终端：bash/zsh 用 --login，sh 用 -l）。
-fn login_shell_args(shell: &str) -> Vec<&'static str> {
-    if cfg!(target_os = "windows") {
-        return Vec::new();
-    }
-    let basename = std::path::Path::new(shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(shell);
-    match basename {
-        "bash" | "zsh" => vec!["--login"],
-        "sh" => vec!["-l"],
-        _ => Vec::new(),
-    }
-}
-
-fn shell_ready_probe(marker: &str) -> String {
-    if cfg!(windows) {
-        // cmd.exe 会把单引号当普通字符，且 ConPTY 会回显输入。用 ^ 拆开
-        // 输入中的 marker；cmd 输出时会去掉 ^，因此完整 marker 只来自结果。
-        let suffix = marker.strip_prefix(MARKER_PREFIX).unwrap_or(marker);
-        format!("echo {MARKER_PREFIX}^{suffix}\r")
+fn posix_quote(value: &str) -> String {
+    if value.is_empty()
+        || value.contains(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '\'' | '"'
+                        | '\\'
+                        | '$'
+                        | '`'
+                        | '!'
+                        | '*'
+                        | '?'
+                        | '['
+                        | ']'
+                        | '('
+                        | ')'
+                        | '{'
+                        | '}'
+                        | '|'
+                        | '&'
+                        | ';'
+                        | '<'
+                        | '>'
+                        | '~'
+                )
+        })
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
     } else {
-        format!("echo '{marker}'\r")
+        value.to_string()
+    }
+}
+
+fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                std::path::PathBuf::from(
+                    std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+                )
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe")
+                .to_string_lossy()
+                .into_owned()
+            } else {
+                "sh".to_string()
+            }
+        })
+}
+
+fn login_shell_args(shell: &str) -> Vec<&'static str> {
+    match ShellKind::of(shell) {
+        // 禁用第三方交互扩展及个人启动脚本，确保代理命令边界可预测。
+        ShellKind::PowerShell => vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NoExit",
+            "-Command",
+            "Remove-Module PSReadLine -ErrorAction SilentlyContinue",
+        ],
+        ShellKind::Cmd => vec!["/d"],
+        ShellKind::Posix => {
+            let basename = std::path::Path::new(shell)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(shell);
+            match basename {
+                "bash" | "zsh" => vec!["--login"],
+                "sh" => vec!["-l"],
+                _ => Vec::new(),
+            }
+        }
+    }
+}
+
+fn shell_ready_probe(shell: ShellKind, marker: &str) -> String {
+    let suffix = marker.strip_prefix(MARKER_PREFIX).unwrap_or(marker);
+    match shell {
+        ShellKind::Cmd => format!("echo {MARKER_PREFIX}^{suffix}\r"),
+        ShellKind::PowerShell => format!("Write-Output ('{MARKER_PREFIX}' + '{suffix}')\r"),
+        ShellKind::Posix => format!("echo '{marker}'\r"),
     }
 }
 
@@ -489,18 +578,30 @@ impl TerminalService {
             })
             .context("创建 PTY 失败")?;
 
-        // 脚本走 shell -c；命令直接执行
+        let shell_program = if request.cmd.is_empty() || request.script.is_some() {
+            default_shell()
+        } else {
+            request.cmd.clone()
+        };
+        let shell_kind = ShellKind::of(&shell_program);
+        // 脚本参数和交互协议均跟随实际 Shell。
         let mut command = if let Some(script) = request.script.as_deref() {
-            let shell = default_shell();
+            let shell = shell_program.clone();
             let mut builder = CommandBuilder::new(shell);
-            builder.arg("-c");
+            if shell_kind == ShellKind::PowerShell {
+                builder.args(["-NoLogo", "-NoProfile", "-Command"]);
+            } else if shell_kind == ShellKind::Cmd {
+                builder.args(["/d", "/c"]);
+            } else {
+                builder.arg("-c");
+            }
             builder.arg(script);
             builder
         } else if request.cmd.is_empty() {
             // 登录 shell 启动（对齐原版终端与 Terminal.app 行为）：source
             // /etc/profile 与 ~/.zprofile 等，拿到用户真实 PATH；并设置
             // TERM 让 zsh/zle 以全功能终端运行（否则语法高亮/补全降级错乱）。
-            let shell = default_shell();
+            let shell = shell_program.clone();
             let mut builder = CommandBuilder::new(&shell);
             for arg in login_shell_args(&shell) {
                 builder.arg(arg);
@@ -551,6 +652,8 @@ impl TerminalService {
         self.sessions.lock().expect("会话表锁损坏").insert(
             session_id.clone(),
             PtySession {
+                shell: shell_kind,
+                shell_ready: false,
                 writer,
                 killer,
                 master,
@@ -929,7 +1032,8 @@ impl TerminalService {
     }
 
     async fn exec_in_session(&self, request: ExecRequest) -> Result<ExecResponse> {
-        let command = command_from_request(&request)?;
+        let shell = self.with_session(&request.session_id, |session| Ok(session.shell))?;
+        let command = command_from_request(&request, shell)?;
         let exec_lock = self.with_session(&request.session_id, |session| {
             Ok(Arc::clone(&session.exec_lock))
         })?;
@@ -981,31 +1085,42 @@ impl TerminalService {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let marker = format!("__TIANGONG_READY_{}__", scru128::new());
-        let start_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
-        self.with_session(session_id, |session| {
-            session
-                .writer
-                .write_all(b"\x03")
-                .context("清理终端残留输入失败")?;
-            session.writer.flush().context("刷新终端中断输入失败")
-        })?;
+        let initialized = self.with_session(session_id, |session| Ok(session.shell_ready))?;
+        if initialized {
+            let start_offset =
+                self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
+            self.with_session(session_id, |session| {
+                session
+                    .writer
+                    .write_all(b"\x03")
+                    .context("清理终端残留输入失败")?;
+                session.writer.flush().context("刷新终端中断输入失败")
+            })?;
 
-        // 提示符空闲时部分 shell 处理 Ctrl+C 不会产生完整新行。短暂等待
-        // 任意输出变化；即使没有回显也继续由下面的精确探针判断是否就绪。
-        let interrupt_deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            let raw = self.raw_output_since(session_id, start_offset)?;
-            if !raw.is_empty() || Instant::now() >= interrupt_deadline {
-                break;
+            // 提示符空闲时部分 shell 处理 Ctrl+C 不会产生完整新行。短暂等待
+            // 任意输出变化；即使没有回显也继续由下面的精确探针判断是否就绪。
+            let interrupt_deadline = Instant::now() + Duration::from_millis(300);
+            loop {
+                let raw = self.raw_output_since(session_id, start_offset)?;
+                if !raw.is_empty() || Instant::now() >= interrupt_deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
             }
-            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
-
+        if initialized
+            && self.with_session(session_id, |session| {
+                Ok(session.shell == ShellKind::PowerShell)
+            })?
+        {
+            // PowerShell 的 Ctrl+C 处理完成前送入的下一行可能被丢弃。
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
         let probe_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
         self.with_session(session_id, |session| {
             session
                 .writer
-                .write_all(shell_ready_probe(&marker).as_bytes())
+                .write_all(shell_ready_probe(session.shell, &marker).as_bytes())
                 .context("发送 Shell 就绪探针失败")?;
             session.writer.flush().context("刷新 Shell 就绪探针失败")
         })?;
@@ -1025,6 +1140,10 @@ impl TerminalService {
                 lines.iter().any(|line| line.trim() == marker)
             };
             if probe_completed {
+                self.with_session(session_id, |session| {
+                    session.shell_ready = true;
+                    Ok(())
+                })?;
                 return Ok(());
             }
             if Instant::now() >= probe_deadline {
@@ -1052,7 +1171,8 @@ impl TerminalService {
     ) -> Result<ExecResponse> {
         let marker_id = scru128::new().to_string();
         let markers = CommandMarkers::new(&marker_id);
-        let prepared = prepare_non_interactive_command(command, &markers)?;
+        let shell = self.with_session(&request.session_id, |session| Ok(session.shell))?;
+        let prepared = prepare_non_interactive_command(command, &markers, shell)?;
         let start_offset =
             self.with_session(&request.session_id, |session| Ok(session.raw_bytes_total))?;
 
@@ -1428,7 +1548,7 @@ impl ParsedCommandOutput {
     }
 }
 
-fn command_from_request(request: &ExecRequest) -> Result<String> {
+fn command_from_request(request: &ExecRequest, shell: ShellKind) -> Result<String> {
     let command = if let Some(script) = request.script.as_deref() {
         if script.trim().is_empty() {
             bail!("script 不能为空");
@@ -1442,10 +1562,13 @@ fn command_from_request(request: &ExecRequest) -> Result<String> {
         // 感知规则拆分成程序名 + 内联参数，再逐词 quote 拼接，避免
         // "git status" 被整体 quote 成单个命令名导致找不到命令。
         let (program, inline_args) = split_command(request.cmd.trim());
-        let mut command = shell_quote(&program);
+        let mut command = shell.quote(&program);
+        if shell == ShellKind::PowerShell {
+            command.insert_str(0, "& ");
+        }
         for arg in inline_args.iter().chain(request.args.iter()) {
             command.push(' ');
-            command.push_str(&shell_quote(arg));
+            command.push_str(&shell.quote(arg));
         }
         command
     };
@@ -1458,10 +1581,14 @@ fn command_from_request(request: &ExecRequest) -> Result<String> {
         return Ok(command);
     };
     let cwd = shell_compatible_cwd(cwd);
-    if cfg!(windows) {
-        Ok(format!("cd /d {} && {}", shell_quote(cwd), command))
-    } else {
-        Ok(format!("cd {} && {}", shell_quote(cwd), command))
+    match shell {
+        ShellKind::Cmd => Ok(format!("cd /d {} && {}", shell.quote(cwd), command)),
+        ShellKind::PowerShell => Ok(format!(
+            "Set-Location -LiteralPath {} -ErrorAction Stop; {}",
+            shell.quote(cwd),
+            command
+        )),
+        ShellKind::Posix => Ok(format!("cd {} && {}", shell.quote(cwd), command)),
     }
 }
 
@@ -1494,7 +1621,7 @@ fn split_command(raw: &str) -> (String, Vec<String>) {
             continue;
         }
         match ch {
-            '\\' if !in_single => escaped = true,
+            '\\' if !in_single && !cfg!(windows) => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             c if c.is_whitespace() && !in_single && !in_double => {
@@ -1515,47 +1642,6 @@ fn split_command(raw: &str) -> (String, Vec<String>) {
     (cmd, parts)
 }
 
-fn shell_quote(value: &str) -> String {
-    if cfg!(windows) {
-        if value.is_empty() || value.contains(' ') || value.contains('"') {
-            format!("\"{}\"", value.replace('"', "\"\""))
-        } else {
-            value.to_string()
-        }
-    } else if value.is_empty()
-        || value.contains(|ch: char| {
-            ch.is_whitespace()
-                || matches!(
-                    ch,
-                    '\'' | '"'
-                        | '\\'
-                        | '$'
-                        | '`'
-                        | '!'
-                        | '*'
-                        | '?'
-                        | '['
-                        | ']'
-                        | '('
-                        | ')'
-                        | '{'
-                        | '}'
-                        | '|'
-                        | '&'
-                        | ';'
-                        | '<'
-                        | '>'
-                        | '~'
-                )
-        })
-    {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    } else {
-        value.to_string()
-    }
-}
-
-/// terminal_send 接受 Agent 常用的字面控制键写法（如 `\x1b`、`\r`）。
 fn decode_terminal_escapes(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -1623,14 +1709,10 @@ fn visible_text_from_raw(raw: &[u8]) -> String {
 struct PreparedCommand {
     input: String,
     /// Unix 下保持临时脚本存活到命令结束；drop 后自动删除。
-    _file: Option<tempfile::NamedTempFile>,
+    _file: Option<tempfile::TempPath>,
 }
 
-#[cfg(not(windows))]
-fn prepare_non_interactive_command(
-    command: &str,
-    markers: &CommandMarkers,
-) -> Result<PreparedCommand> {
+fn prepare_posix_command(command: &str, markers: &CommandMarkers) -> Result<PreparedCommand> {
     let script = format!(
         "echo '{}'\n__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n{}\n__tiangong_rc=$?\nif [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n",
         markers.start, command, markers.cwd, markers.exit_code, markers.end,
@@ -1647,16 +1729,12 @@ fn prepare_non_interactive_command(
     Ok(PreparedCommand {
         // marker 放在输入行最前面，reader 从首个 chunk 起就会暂存并过滤
         // shell/ZLE 回显，不会因路径换行或语法高亮把内部 source 命令漏到 UI。
-        input: format!("__TIANGONG_= . {}\r", shell_quote(&path)),
-        _file: Some(file),
+        input: format!("__TIANGONG_= . {}\r", ShellKind::Posix.quote(&path)),
+        _file: Some(file.into_temp_path()),
     })
 }
 
-#[cfg(windows)]
-fn prepare_non_interactive_command(
-    command: &str,
-    markers: &CommandMarkers,
-) -> Result<PreparedCommand> {
+fn prepare_cmd_command(command: &str, markers: &CommandMarkers) -> Result<PreparedCommand> {
     let script = format!(
         "@echo off\r\necho {}\r\n{}\r\nset \"__TIANGONG_RC_VALUE=%errorlevel%\"\r\necho {}\r\necho %cd%\r\necho {}%__TIANGONG_RC_VALUE%\r\necho {}\r\n",
         markers.start, command, markers.cwd, markers.exit_code, markers.end,
@@ -1671,9 +1749,52 @@ fn prepare_non_interactive_command(
     file.flush().context("刷新 Windows 终端命令临时文件失败")?;
     let path = file.path().to_string_lossy();
     Ok(PreparedCommand {
-        input: format!("echo {}>nul & call {}\r", markers.start, shell_quote(&path)),
-        _file: Some(file),
+        input: format!(
+            "echo {}>nul & call {}\r",
+            markers.start,
+            ShellKind::Cmd.quote(&path)
+        ),
+        _file: Some(file.into_temp_path()),
     })
+}
+
+fn prepare_non_interactive_command(
+    command: &str,
+    markers: &CommandMarkers,
+    shell: ShellKind,
+) -> Result<PreparedCommand> {
+    match shell {
+        ShellKind::Posix => prepare_posix_command(command, markers),
+        ShellKind::Cmd => prepare_cmd_command(command, markers),
+        ShellKind::PowerShell => {
+            // Out-Default 强制格式化在结束标记前完成，否则表格会延迟到提示符才输出。
+            let script = format!(
+                "Write-Output '{start}'\n$script:__TIANGONG_RC_VALUE = 0\n$global:LASTEXITCODE = 0\ntry {{ & {{\n{command}\n$script:__TIANGONG_RC_VALUE = if ($?) {{ 0 }} elseif ($LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 1 }}\n}} | Out-Default }} catch {{ $script:__TIANGONG_RC_VALUE = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + $script:__TIANGONG_RC_VALUE)\nWrite-Output '{end}'\n",
+                start = markers.start,
+                cwd = markers.cwd,
+                rc = markers.exit_code,
+                end = markers.end,
+            );
+            let mut file = tempfile::Builder::new()
+                .prefix(&markers.start)
+                .suffix(".ps1")
+                .tempfile()
+                .context("创建 PowerShell 命令临时文件失败")?;
+            file.write_all(script.as_bytes())?;
+            file.flush()?;
+            // 用 UTF-8 读取已生成内容，不修改用户的执行策略。
+            let path = ShellKind::PowerShell.quote(&file.path().to_string_lossy());
+            Ok(PreparedCommand {
+                input: format!(
+                    "$__TIANGONG_=0; try {{ . ([scriptblock]::Create([IO.File]::ReadAllText({path}))) }} catch {{ Write-Output '{start}'; $_ | Out-Default; Write-Output '{rc}1'; Write-Output '{end}' }}\r",
+                    start = markers.start,
+                    rc = markers.exit_code,
+                    end = markers.end
+                ),
+                _file: Some(file.into_temp_path()),
+            })
+        }
+    }
 }
 
 fn parse_command_output(raw: &[u8], markers: &CommandMarkers) -> ParsedCommandOutput {
@@ -2343,6 +2464,7 @@ fn _pty_system_type_check(_: &dyn PtySystem) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use tiangong_plugin_sidecar::SidecarService as _;
 
     #[test]
@@ -2370,7 +2492,7 @@ mod tests {
     #[test]
     fn shell_ready_probe_uses_cmd_syntax() {
         assert_eq!(
-            shell_ready_probe("__TIANGONG_READY_test__"),
+            shell_ready_probe(ShellKind::Cmd, "__TIANGONG_READY_test__"),
             "echo __TIANGONG_^READY_test__\r"
         );
     }
@@ -2597,7 +2719,17 @@ mod tests {
                 ))
                 .await,
         );
-        assert_eq!(first["ok"], true, "首次执行结果: {first}");
+        let diagnostic = service
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|session| String::from_utf8_lossy(&session.raw_history).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first["ok"], true,
+            "首次执行结果: {first}; raw={diagnostic:?}"
+        );
         assert_eq!(first["exit_code"], 0);
         assert_eq!(first["stdout"], "marker.txt");
         // 权威 cwd 生效：命令在宿主注入的会话工作目录执行（shell 回显的
@@ -2630,7 +2762,7 @@ mod tests {
             service
                 .dispatch_test(tool_request(
                     "run_command",
-                    serde_json::json!({"cmd": "echo", "args": ["again"]}),
+                    serde_json::json!({"cmd": "echo", "args": ["again"], "timeout": 10}),
                     Some(("session-a", workspace.as_str())),
                 ))
                 .await,
@@ -2655,102 +2787,166 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_command_windows_首次执行并复用同一终端() {
-        let cwd = tempfile::tempdir().expect("创建 Windows 测试目录失败");
-        let workspace = cwd
-            .path()
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        std::fs::write(cwd.path().join("terminal-ready-windows.txt"), "ok")
-            .expect("写 Windows 测试文件失败");
-        let service = TerminalService::new();
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        for explicit_shell in [None, Some("cmd.exe")] {
+            let cwd = tempfile::tempdir().expect("创建 Windows 测试目录失败");
+            let workspace = cwd
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            std::fs::write(cwd.path().join("terminal-ready-windows.txt"), "ok")
+                .expect("写 Windows 测试文件失败");
+            let service = TerminalService::new();
+            if let Some(shell) = explicit_shell {
+                service
+                    .spawn_session(SpawnRequest {
+                        session_id: None,
+                        cmd: shell.into(),
+                        args: vec!["/d".into()],
+                        script: None,
+                        cwd: Some(workspace.clone()),
+                        scope_id: Some("windows-session".into()),
+                        reserve: false,
+                        cols: 80,
+                        rows: 24,
+                    })
+                    .unwrap();
+            }
 
-        let first = outcome_of(
-            service
-                .dispatch_test(tool_request(
-                    "run_command",
-                    serde_json::json!({"cmd": "dir", "args": []}),
-                    Some(("windows-session", workspace.as_str())),
-                ))
-                .await,
-        );
-        assert_eq!(first["ok"], true, "首次执行结果: {first}");
-        assert_eq!(first["exit_code"], 0, "首次执行结果: {first}");
-        assert!(
-            first["stdout"]
+            let first = outcome_of(
+                service
+                    .dispatch_test(tool_request(
+                        "run_command",
+                        serde_json::json!({"cmd": "dir", "args": [], "timeout": 10}),
+                        Some(("windows-session", workspace.as_str())),
+                    ))
+                    .await,
+            );
+            let diagnostic = service
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .map(|session| String::from_utf8_lossy(&session.raw_history).to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                first["ok"], true,
+                "首次执行结果: {first}; raw={diagnostic:?}"
+            );
+            assert_eq!(first["exit_code"], 0, "首次执行结果: {first}");
+            assert!(
+                first["stdout"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("terminal-ready-windows.txt"),
+                "首次执行未返回目录内容: {first}"
+            );
+            let terminal = first["summary"]
                 .as_str()
-                .unwrap_or_default()
-                .contains("terminal-ready-windows.txt"),
-            "首次执行未返回目录内容: {first}"
-        );
-        let terminal = first["summary"]
-            .as_str()
-            .and_then(|summary| {
-                summary
-                    .split("终端 ")
-                    .nth(1)
-                    .and_then(|rest| rest.split('（').next())
-            })
-            .expect("首次执行摘要应含终端编号")
-            .to_string();
+                .and_then(|summary| {
+                    summary
+                        .split("终端 ")
+                        .nth(1)
+                        .and_then(|rest| rest.split('（').next())
+                })
+                .expect("首次执行摘要应含终端编号")
+                .to_string();
 
-        let second = outcome_of(
+            let second = outcome_of(
+                service
+                    .dispatch_test(tool_request(
+                        "run_command",
+                        serde_json::json!({"cmd": "echo", "args": ["again"], "timeout": 10}),
+                        Some(("windows-session", workspace.as_str())),
+                    ))
+                    .await,
+            );
+            assert_eq!(second["ok"], true, "第二次执行结果: {second}");
+            assert_eq!(second["exit_code"], 0, "第二次执行结果: {second}");
+            let raw = service
+                .with_session(&terminal, |session| {
+                    Ok(String::from_utf8_lossy(&session.raw_history).to_string())
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                second["stdout"], "again",
+                "第二次执行结果: {second}\nraw={raw:?}"
+            );
+            assert!(
+                second["summary"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("复用空闲终端"),
+                "第二次执行未复用终端: {second}"
+            );
+
+            let failed = outcome_of(
+                service
+                    .dispatch_test(tool_request(
+                        "run_command",
+                        serde_json::json!({"cmd":"cmd.exe","args":["/c","exit","7"],"timeout":5}),
+                        Some(("windows-session", workspace.as_str())),
+                    ))
+                    .await,
+            );
+            assert_eq!(failed["exit_code"], 7, "失败返回: {failed}");
+            assert_eq!(failed["ok"], false, "非零退出状态不能报告工具成功");
+
+            if explicit_shell.is_none() {
+                let invalid = outcome_of(
+                    service
+                        .dispatch_test(tool_request(
+                            "run_shell",
+                            serde_json::json!({"script": "if (", "timeout": 5}),
+                            Some(("windows-session", workspace.as_str())),
+                        ))
+                        .await,
+                );
+                assert_eq!(invalid["exit_code"], 1, "语法错误必须及时返回: {invalid}");
+                assert_eq!(invalid["ok"], false);
+            }
+            let script = if explicit_shell.is_some() {
+                "echo content>roundtrip.txt & type roundtrip.txt & del roundtrip.txt"
+            } else {
+                "Set-Content -LiteralPath 'roundtrip.txt' -Value 'content'; Get-Content -LiteralPath 'roundtrip.txt'; Remove-Item -LiteralPath 'roundtrip.txt'"
+            };
+            let roundtrip = outcome_of(
+                service
+                    .dispatch_test(tool_request(
+                        "run_shell",
+                        serde_json::json!({"script": script, "timeout": 10}),
+                        Some(("windows-session", workspace.as_str())),
+                    ))
+                    .await,
+            );
+            assert_eq!(roundtrip["ok"], true, "文件读写: {roundtrip}");
+            assert!(
+                roundtrip["stdout"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("content")
+            );
+            assert!(!cwd.path().join("roundtrip.txt").exists());
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let display = service
+                .with_session(&terminal, |session| {
+                    Ok(String::from_utf8_lossy(&session.display_history).to_string())
+                })
+                .expect("读取 Windows 终端可见历史失败");
+            assert!(display.contains("terminal-ready-windows.txt"));
+            assert!(
+                !contains_marker(&display),
+                "可见输出泄露内部标记: {display:?}"
+            );
             service
-                .dispatch_test(tool_request(
-                    "run_command",
-                    serde_json::json!({"cmd": "echo", "args": ["again"]}),
-                    Some(("windows-session", workspace.as_str())),
-                ))
-                .await,
-        );
-        assert_eq!(second["ok"], true, "第二次执行结果: {second}");
-        assert_eq!(second["exit_code"], 0, "第二次执行结果: {second}");
-        let raw = service
-            .with_session(&terminal, |session| {
-                Ok(String::from_utf8_lossy(&session.raw_history).to_string())
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            second["stdout"], "again",
-            "第二次执行结果: {second}\nraw={raw:?}"
-        );
-        assert!(
-            second["summary"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("复用空闲终端"),
-            "第二次执行未复用终端: {second}"
-        );
-
-        let failed = outcome_of(
-            service
-                .dispatch_test(tool_request(
-                    "run_command",
-                    serde_json::json!({"cmd":"cmd.exe","args":["/c","exit","7"],"timeout":5}),
-                    Some(("windows-session", workspace.as_str())),
-                ))
-                .await,
-        );
-        assert_eq!(failed["exit_code"], 7);
-        assert_eq!(failed["ok"], false, "非零退出状态不能报告工具成功");
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let display = service
-            .with_session(&terminal, |session| {
-                Ok(String::from_utf8_lossy(&session.display_history).to_string())
-            })
-            .expect("读取 Windows 终端可见历史失败");
-        assert!(display.contains("terminal-ready-windows.txt"));
-        assert!(
-            !contains_marker(&display),
-            "可见输出泄露内部标记: {display:?}"
-        );
-        service
-            .kill_session(SessionIdRequest {
-                session_id: terminal,
-            })
-            .expect("清理 Windows 测试终端失败");
+                .kill_session(SessionIdRequest {
+                    session_id: terminal,
+                })
+                .expect("清理 Windows 测试终端失败");
+        }
     }
 
     #[cfg(unix)]
