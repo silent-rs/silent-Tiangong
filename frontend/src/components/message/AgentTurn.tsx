@@ -1,5 +1,4 @@
-import { memo, useEffect, useState } from "react";
-import { MdPreview } from "md-editor-rt";
+import { memo, useEffect, useMemo, useState } from "react";
 import { FileText, ChevronRight, ChevronDown } from "lucide-react";
 import { useSearchStore } from "@/store/useSearchStore";
 import { useStore } from "@/store/useStore";
@@ -27,6 +26,7 @@ import {
 } from "./utils";
 import type { MessageItem } from "./types";
 import { useExpansionState } from "./useExpansionState";
+import { LazyMdPreview } from "./LazyMdPreview";
 import { StreamingMessage } from "./StreamingMessage";
 import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
@@ -74,32 +74,6 @@ function AgentTurnView({
     setShowProcess(isActive);
   }, [isActive]);
 
-  // 工具调用参数配对：assistant 消息携带 tool_calls（含参数），
-  // role:'tool' 结果消息按 tool_call_id 反查参数，用于派生单行摘要与展开内容。
-  const toolCallArgs = new Map<string, { id: string; name: string; arguments?: unknown }>();
-  const settledToolCallIds = new Set<string>();
-  for (const msg of messages) {
-    for (const call of msg.tool_calls ?? []) toolCallArgs.set(call.id, call);
-    if (msg.role === "tool" && msg.tool_call_id) settledToolCallIds.add(msg.tool_call_id);
-  }
-  const argsOfToolMessage = (msg: MessageItem): unknown =>
-    msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
-  // 执行中的调用：tool_calls 已发出但结果未到达，仅活跃轮次渲染为运行行。
-  // 携带发起时刻（store 记录），运行行据此实时跳秒。
-  const runningToolCalls = isActive
-    ? [...toolCallArgs.values()]
-        .filter((call) => !settledToolCallIds.has(call.id))
-        .map((call) => ({ ...call, startedAt: toolCallStartedAt[call.id] }))
-    : [];
-
-  const renderWithHighlight = (msgId: string, text: string) => {
-    if (!searchQuery) return text;
-    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
-    if (occurrences.length === 0) return text;
-    const isCurrent = msgId === currentMessageId;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
-  };
-
   type Fragment =
     | { type: "explanation"; text: string; time?: string }
     | { type: "thinking"; content: string; time?: string; elapsedMs?: number | null }
@@ -113,139 +87,206 @@ function AgentTurnView({
     | { type: "subagent_report"; agentName: string; status: string; content: string; time: string; msgId: string }
     | { type: "other_system"; msg: MessageItem };
 
-  const fragments: Fragment[] = [];
-  const shownReasonings = new Set<string>();
-  let pendingTools: MessageItem[] = [];
+  // 消息分类/合并/分桶全量计算装进 useMemo：依赖仅 messages 引用、流式
+  // 消息 id 与 agents——流式正文高频更新、父级重渲、搜索高亮变化都不再
+  // 触发重算（长轮次上百条消息的分类是毫秒级同步计算，重算会在切换
+  // 会话挂载可见组时叠加成可感知的卡顿）
+  const {
+    toolCallArgs,
+    settledToolCallIds,
+    userFrag,
+    mergedFragments,
+    summaryFrags,
+    processFrags,
+    errorFrags,
+    usageAnchorId,
+    lastToolGroupIndex,
+  } = useMemo(() => {
+    // 工具调用参数配对：assistant 消息携带 tool_calls（含参数），
+    // role:'tool' 结果消息按 tool_call_id 反查参数，用于派生单行摘要与展开内容。
+    const toolCallArgs = new Map<string, { id: string; name: string; arguments?: unknown }>();
+    const settledToolCallIds = new Set<string>();
+    for (const msg of messages) {
+      for (const call of msg.tool_calls ?? []) toolCallArgs.set(call.id, call);
+      if (msg.role === "tool" && msg.tool_call_id) settledToolCallIds.add(msg.tool_call_id);
+    }
 
-  const flushTools = () => {
-    if (pendingTools.length === 0) return;
-    fragments.push({ type: "tool_group", key: pendingTools[0].id, tools: [...pendingTools] });
-    pendingTools = [];
-  };
+    const fragments: Fragment[] = [];
+    const shownReasonings = new Set<string>();
+    let pendingTools: MessageItem[] = [];
 
-  for (const msg of messages) {
-    if (msg.role === "notice" && msg.usage) continue;
-    if (msg.role === "user" && textContent(msg).startsWith("[Subagent·")) {
-      flushTools();
-      const raw = textContent(msg);
-      const match = raw.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
-      if (match) {
-        const [, name, body] = match;
-        const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
-        const status = statusMatch ? statusMatch[1] : "消息";
-        const content = statusMatch ? body.slice(statusMatch[0].length) : body;
-        fragments.push({ type: "subagent_report", agentName: name.trim(), status, content: content.trim(), time: msg.created_at, msgId: msg.id });
-      } else {
-        fragments.push({ type: "user", msg });
+    // 同一消息在分类链上会被多次取文本（前缀判断 + 正文提取），
+    // 全量拼接按消息缓存一份，避免长轮次（上百条消息）重复分配
+    const textCache = new Map<MessageItem, string>();
+    const textOf = (msg: MessageItem): string => {
+      let text = textCache.get(msg);
+      if (text === undefined) {
+        text = textContent(msg);
+        textCache.set(msg, text);
       }
-    } else if (msg.role === "user") {
-      flushTools();
-      fragments.push({ type: "user", msg });
-    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索] 策略:")) {
-      pendingTools.push(msg);
-    } else if (msg.role === "system" && textContent(msg).startsWith("[记忆检索]")) {
-      pendingTools.push(msg);
-    } else if (msg.role === "system" && textContent(msg).startsWith("LLM 输出")) {
-      const reasoning = msgReasoning(msg);
-      const explanation = extractLlmExplanation(textContent(msg));
-      if (!reasoning && !explanation && llmOutputHasToolCalls(textContent(msg))) continue;
-      flushTools();
-      if (reasoning && !shownReasonings.has(reasoning)) {
-        shownReasonings.add(reasoning);
-        fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
-      }
-      if (explanation) fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
-    } else if (msg.role === "system" && (textContent(msg).includes("tool_name:") || textContent(msg).includes("exit_code") || textContent(msg).startsWith("工具执行 ["))) {
-      pendingTools.push(msg);
-    } else if (msg.role === "tool") {
-      pendingTools.push(msg);
-      continue;
-    } else if (msg.role === "assistant") {
-      const isStreaming = msg.id === streamingMessageId;
-      const assistantReasoning = msgReasoning(msg);
-      const hasVisibleAssistantContent = isStreaming || textContent(msg).trim().length > 0 || assistantReasoning.length > 0 || !!msg.media?.length || hasMediaBlocks(msg);
-      if (!hasVisibleAssistantContent) continue;
-      flushTools();
-      const prevFrag = fragments[fragments.length - 1];
-      if (prevFrag?.type === "explanation" && prevFrag.text === textContent(msg).trim() && !isStreaming) fragments.pop();
-      if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
-        shownReasonings.add(assistantReasoning);
-        fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: msg.reasoning_elapsed_ms });
-      }
-      // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
-      // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
-      if (isNeedMoreWorkMessage(msg)) {
-        const needMoreWorkBody = stripSummaryStatusMarker(textContent(msg)).trim();
-        if (needMoreWorkBody || isStreaming) {
-          fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: msg.text_elapsed_ms });
+      return text;
+    };
+
+    const flushTools = () => {
+      if (pendingTools.length === 0) return;
+      fragments.push({ type: "tool_group", key: pendingTools[0].id, tools: [...pendingTools] });
+      pendingTools = [];
+    };
+
+    for (const msg of messages) {
+      if (msg.role === "notice" && msg.usage) continue;
+      if (msg.role === "user" && textOf(msg).startsWith("[Subagent·")) {
+        flushTools();
+        const raw = textOf(msg);
+        const match = raw.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
+        if (match) {
+          const [, name, body] = match;
+          const statusMatch = body.match(/^(任务完成|执行失败|运行阻塞|等待审批)：?\s*/);
+          const status = statusMatch ? statusMatch[1] : "消息";
+          const content = statusMatch ? body.slice(statusMatch[0].length) : body;
+          fragments.push({ type: "subagent_report", agentName: name.trim(), status, content: content.trim(), time: msg.created_at, msgId: msg.id });
+        } else {
+          fragments.push({ type: "user", msg });
         }
+      } else if (msg.role === "user") {
+        flushTools();
+        fragments.push({ type: "user", msg });
+      } else if (msg.role === "system" && textOf(msg).startsWith("[记忆检索] 策略:")) {
+        pendingTools.push(msg);
+      } else if (msg.role === "system" && textOf(msg).startsWith("[记忆检索]")) {
+        pendingTools.push(msg);
+      } else if (msg.role === "system" && textOf(msg).startsWith("LLM 输出")) {
+        const reasoning = msgReasoning(msg);
+        const explanation = extractLlmExplanation(textOf(msg));
+        if (!reasoning && !explanation && llmOutputHasToolCalls(textOf(msg))) continue;
+        flushTools();
+        if (reasoning && !shownReasonings.has(reasoning)) {
+          shownReasonings.add(reasoning);
+          fragments.push({ type: "thinking", content: reasoning, time: msg.created_at });
+        }
+        if (explanation) fragments.push({ type: "explanation", text: explanation, time: msg.created_at });
+      } else if (msg.role === "system" && (textOf(msg).includes("tool_name:") || textOf(msg).includes("exit_code") || textOf(msg).startsWith("工具执行 ["))) {
+        pendingTools.push(msg);
+      } else if (msg.role === "tool") {
+        pendingTools.push(msg);
+        continue;
+      } else if (msg.role === "assistant") {
+        const isStreaming = msg.id === streamingMessageId;
+        const assistantReasoning = msgReasoning(msg);
+        const hasVisibleAssistantContent = isStreaming || textOf(msg).trim().length > 0 || assistantReasoning.length > 0 || !!msg.media?.length || hasMediaBlocks(msg);
+        if (!hasVisibleAssistantContent) continue;
+        flushTools();
+        const prevFrag = fragments[fragments.length - 1];
+        if (prevFrag?.type === "explanation" && prevFrag.text === textOf(msg).trim() && !isStreaming) fragments.pop();
+        if (!isStreaming && assistantReasoning && !shownReasonings.has(assistantReasoning)) {
+          shownReasonings.add(assistantReasoning);
+          fragments.push({ type: "thinking", content: assistantReasoning, time: msg.created_at, elapsedMs: msg.reasoning_elapsed_ms });
+        }
+        // 总结阶段判定"任务未完成、需重入 Loop"的回复（[NEED_MORE_WORK] 标头）：
+        // 前端作为思考过程展示，剥除标头，不作为最终回复正文。
+        if (isNeedMoreWorkMessage(msg)) {
+          const needMoreWorkBody = stripSummaryStatusMarker(textOf(msg)).trim();
+          if (needMoreWorkBody || isStreaming) {
+            fragments.push({ type: "thinking", content: needMoreWorkBody, time: msg.created_at, elapsedMs: msg.text_elapsed_ms });
+          }
+          continue;
+        }
+        fragments.push({ type: "assistant", msg, isStreaming });
+      } else if ((msg.role === "notice" || msg.role === "system") && textOf(msg).startsWith("[错误]")) {
+        flushTools();
+        fragments.push({ type: "error_system", msg });
+      } else if (msg.role === "system" && textOf(msg).startsWith("[重试]")) {
+        flushTools();
+        fragments.push({ type: "retry_system", msg });
+      } else if (msg.role === "system" && textOf(msg).startsWith("[上下文管理]")) {
+        if (textOf(msg).includes("正在压缩")) continue;
+        flushTools();
+        fragments.push({ type: "context_management", msg });
+      } else if (msg.role === "system" && (textOf(msg).startsWith("[Agent]") || textOf(msg).startsWith("[文件锁]"))) {
+        flushTools();
+        const category = textOf(msg).startsWith("[文件锁]") ? "lock" : "info";
+        fragments.push({ type: "agent_event", category, content: textOf(msg), agentRoles: extractAgentRoles(textOf(msg), agents) });
+      } else if (msg.role === "system" || msg.role === "notice") {
+        flushTools();
+        fragments.push({ type: "other_system", msg });
+      }
+    }
+    flushTools();
+
+    const mergedFragments: Fragment[] = [];
+    for (const frag of fragments) {
+      const previous = mergedFragments[mergedFragments.length - 1];
+      if (frag.type === "tool_group" && previous?.type === "tool_group") {
+        previous.tools.push(...frag.tools);
         continue;
       }
-      fragments.push({ type: "assistant", msg, isStreaming });
-    } else if ((msg.role === "notice" || msg.role === "system") && textContent(msg).startsWith("[错误]")) {
-      flushTools();
-      fragments.push({ type: "error_system", msg });
-    } else if (msg.role === "system" && textContent(msg).startsWith("[重试]")) {
-      flushTools();
-      fragments.push({ type: "retry_system", msg });
-    } else if (msg.role === "system" && textContent(msg).startsWith("[上下文管理]")) {
-      if (textContent(msg).includes("正在压缩")) continue;
-      flushTools();
-      fragments.push({ type: "context_management", msg });
-    } else if (msg.role === "system" && (textContent(msg).startsWith("[Agent]") || textContent(msg).startsWith("[文件锁]"))) {
-      flushTools();
-      const category = textContent(msg).startsWith("[文件锁]") ? "lock" : "info";
-      fragments.push({ type: "agent_event", category, content: textContent(msg), agentRoles: extractAgentRoles(textContent(msg), agents) });
-    } else if (msg.role === "system" || msg.role === "notice") {
-      flushTools();
-      fragments.push({ type: "other_system", msg });
+      mergedFragments.push(frag);
     }
-  }
-  flushTools();
 
-  const mergedFragments: Fragment[] = [];
-  for (const frag of fragments) {
-    const previous = mergedFragments[mergedFragments.length - 1];
-    if (frag.type === "tool_group" && previous?.type === "tool_group") {
-      previous.tools.push(...frag.tools);
-      continue;
+    // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/ 总结回复。
+    // 已完成轮次默认折叠「过程」仅保留总结可见；活跃轮次全部展示。
+    // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
+    // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
+    const summaryFrags: Fragment[] = [];
+    const processFrags: Fragment[] = [];
+    // 错误通知不随过程折叠：失败轮次往往没有其他可见输出，错误原因必须始终可见。
+    const errorFrags: Fragment[] = [];
+    let userFrag: Fragment | null = null;
+    for (const frag of mergedFragments) {
+      if (frag.type === "user") {
+        userFrag = frag;
+      } else if (frag.type === "error_system") {
+        errorFrags.push(frag);
+      } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
+        summaryFrags.push(frag);
+      } else {
+        processFrags.push(frag);
+      }
     }
-    mergedFragments.push(frag);
-  }
 
-  // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/ 总结回复。
-  // 已完成轮次默认折叠「过程」仅保留总结可见；活跃轮次全部展示。
-  // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
-  // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
-  let userFrag: Fragment | null = null;
-  const summaryFrags: Fragment[] = [];
-  const processFrags: Fragment[] = [];
-  // 错误通知不随过程折叠：失败轮次往往没有其他可见输出，错误原因必须始终可见。
-  const errorFrags: Fragment[] = [];
-  for (const frag of mergedFragments) {
-    if (frag.type === "user") {
-      userFrag = frag;
-    } else if (frag.type === "error_system") {
-      errorFrags.push(frag);
-    } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
-      summaryFrags.push(frag);
-    } else {
-      processFrags.push(frag);
-    }
-  }
+    // 同一轮的合计只挂在最后一个带操作栏的回复上。
+    const usageAnchor = [...summaryFrags].reverse().find((frag) =>
+      frag.type === "assistant" && !frag.isStreaming && displayTextContent(frag.msg) && !parseAgentReply(displayTextContent(frag.msg))
+    );
+    const usageAnchorId = usageAnchor?.type === "assistant" ? usageAnchor.msg.id : null;
+    // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
+    const lastToolGroupIndex = (() => {
+      for (let i = mergedFragments.length - 1; i >= 0; i--) {
+        if (mergedFragments[i].type === "tool_group") return i;
+      }
+      return -1;
+    })();
 
-  // 同一轮的合计只挂在最后一个带操作栏的回复上。
-  const usageAnchor = [...summaryFrags].reverse().find((frag) =>
-    frag.type === "assistant" && !frag.isStreaming && displayTextContent(frag.msg) && !parseAgentReply(displayTextContent(frag.msg))
-  );
-  const usageAnchorId = usageAnchor?.type === "assistant" ? usageAnchor.msg.id : null;
-  // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
-  const lastToolGroupIndex = (() => {
-    for (let i = mergedFragments.length - 1; i >= 0; i--) {
-      if (mergedFragments[i].type === "tool_group") return i;
-    }
-    return -1;
-  })();
+    return {
+      toolCallArgs,
+      settledToolCallIds,
+      userFrag,
+      mergedFragments,
+      summaryFrags,
+      processFrags,
+      errorFrags,
+      usageAnchorId,
+      lastToolGroupIndex,
+    };
+  }, [messages, streamingMessageId, agents]);
+
+  const argsOfToolMessage = (msg: MessageItem): unknown =>
+    msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
+
+  const renderWithHighlight = (msgId: string, text: string) => {
+    if (!searchQuery) return text;
+    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
+    if (occurrences.length === 0) return text;
+    const isCurrent = msgId === currentMessageId;
+    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
+  };
+  // 执行中的调用：tool_calls 已发出但结果未到达，仅活跃轮次渲染为运行行。
+  // 携带发起时刻（store 记录），运行行据此实时跳秒。
+  const runningToolCalls = isActive
+    ? [...toolCallArgs.values()]
+        .filter((call) => !settledToolCallIds.has(call.id))
+        .map((call) => ({ ...call, startedAt: toolCallStartedAt[call.id] }))
+    : [];
 
   const renderFragment = (frag: Fragment, i: number) => {
     if (frag.type === "thinking") {
@@ -337,7 +378,7 @@ function AgentTurnView({
                   <ContentMedia message={msg} />
                   {searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0
                     ? <div className="text-sm whitespace-pre-wrap break-words">{renderWithHighlight(msg.id, visibleText)}</div>
-                    : <MdPreview modelValue={resolveMarkdownImages(visibleText)} theme={resolvedTheme} previewTheme="github" />}
+                    : <LazyMdPreview modelValue={resolveMarkdownImages(visibleText)} theme={resolvedTheme} />}
                 </div>
               ) : null}
               {!isStreaming && msg.content && visibleText && (
