@@ -2117,18 +2117,26 @@ impl TerminalService {
         } else {
             format!("终端 {session_id}（复用空闲终端）")
         };
-        // 失败/超时场景把退出码等失败事实放在摘要最前：终端调度附注
-        // （新终端、复用、都在忙）对定位错误没有帮助，只保留终端编号
-        // 供回溯输出位置。
+        // 失败/超时场景把退出码等失败事实放在摘要最前：调度解释（都在
+        // 忙、没有写入旧终端）对定位错误没有帮助，只保留终端编号与是否
+        // 新开供回溯输出位置；超时的中断语义（会话保留、可继续输入）
+        // 也不与 stderr 的「命令执行超时」重复表述。
+        let terminal_note = if created_new {
+            format!("新终端 {session_id}")
+        } else {
+            format!("终端 {session_id}")
+        };
         let summary = if executed.interactive_mode {
             format!("命令已在{selection}进入交互状态")
         } else if executed.timed_out {
-            format!("命令执行超时（终端 {session_id}，可发送输入续看）{cwd_note}")
+            format!(
+                "命令超时已中断（{terminal_note} 仍可继续输入，此前输出见 stdout/stderr）{cwd_note}"
+            )
         } else if exit_code == 0 {
             format!("命令已在{selection}执行完成{cwd_note}")
         } else {
             format!(
-                "命令失败，退出码 {exit_code}（终端 {session_id}，完整输出见 stdout）{cwd_note}"
+                "命令失败，退出码 {exit_code}（{terminal_note}，完整输出见 stdout/stderr）{cwd_note}"
             )
         };
         ToolOutcome {
