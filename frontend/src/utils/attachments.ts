@@ -58,20 +58,44 @@ export function imageExtFromMime(mimeType: string): string {
   return 'png';
 }
 
+/** file:// URL 还原为本地路径；非 file 协议返回 null。
+ *  手动切分而非 new URL：文件名中的 # 与 ? 会被 URL 当作 fragment/query
+ *  切掉导致路径丢失（如 report#1.png）；scheme 与主机名按大小写不敏感
+ *  处理，localhost 主机视为本机路径。 */
+export function fileUrlToLocalPath(url: string): string | null {
+  if (!/^file:/i.test(url)) return null;
+  let rest = url.replace(/^file:/i, '');
+  const hasAuthority = rest.startsWith('//');
+  if (hasAuthority) rest = rest.slice(2);
+
+  let path = rest;
+  if (hasAuthority && !rest.startsWith('/')) {
+    const slash = rest.indexOf('/');
+    const authority = slash === -1 ? rest : rest.slice(0, slash);
+    path = slash === -1 ? '' : rest.slice(slash);
+    if (/^[A-Za-z]:$/.test(authority)) {
+      // file://C:/x 误写：主机位实为盘符
+      path = `${authority}${path}`;
+    } else if (!/^localhost$/i.test(authority)) {
+      // 其余主机名按 UNC 服务器处理；localhost 指本机，路径原样
+      path = `\\\\${authority}${path}`;
+    }
+  }
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // 路径含未编码的 % 等非法序列时保留原样
+  }
+  return path.replace(/^\/([A-Za-z]:)/, '$1');
+}
+
 export function resolveAttachmentUrl(url: string): string {
   if (!url) return '';
   // 历史消息或剪贴板可能保存为 file:// URL；先还原为本地路径，
   // 再交给 Tauri 的资源协议转换，避免 Windows WebView 将其当网页地址解析。
-  if (url.startsWith('file://')) {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === 'file:') {
-        const path = decodeURIComponent(parsed.pathname).replace(/^\/[A-Za-z]:/, match => match.slice(1));
-        return convertFileSrc(parsed.hostname ? `\\\\${parsed.hostname}${path}` : path);
-      }
-    } catch {
-      // 保留原值，让调用方按普通 URL 处理。
-    }
+  const localPath = fileUrlToLocalPath(url);
+  if (localPath !== null) {
+    return convertFileSrc(localPath);
   }
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
     return url;
@@ -87,14 +111,7 @@ export function clipboardImagePaths(text: string): string[] {
     .split(/\r?\n/)
     .map(part => part.trim())
     .map(part => part.replace(/^["']|["']$/g, ''))
-    .map(part => {
-      if (!part.startsWith('file://')) return part;
-      try {
-        return decodeURIComponent(part.replace(/^file:\/\//, ''));
-      } catch {
-        return part.replace(/^file:\/\//, '');
-      }
-    })
+    .map(part => fileUrlToLocalPath(part) ?? part)
     .filter(part => !!part && !!imageMimeType(part));
 }
 
