@@ -381,12 +381,11 @@ export function MessageList() {
     const sessionSwitched = prevActiveSessionRef.current !== undefined
       && activeSessionId !== prevActiveSessionRef.current;
     if (sessionSwitched) {
-      // 切换会话视为重新进入：重置滚动基准并直接定位到底部，不依赖
-      // 消息数量/流式标识的变化检测（避免旧会话残留的流式状态被误判
-      // 为"回复完成"，或变化检测落空导致停在旧位置）
+      // 切换会话时仅重置流式基准，避免旧会话残留的流式状态被误判为
+      // "回复完成"；滚动与否交给通用的变化检测（新会话消息更多且
+      // 在底部时才跟随到底），不做强制定位
       prevStreamingIdRef.current = null;
       prevRunStatusRef.current = 'idle';
-      prevMessagesLengthRef.current = messages.length;
     }
 
     const newMessageArrived = messages.length > prevMessagesLengthRef.current;
@@ -409,8 +408,7 @@ export function MessageList() {
     // 用户离开底部时，新消息/流式 id 变化不强制拉回；用户主动发送始终
     // 跟随；回复完成时保持当前位置不动
     const shouldScroll =
-      sessionSwitched
-      || isUserSelfSent
+      isUserSelfSent
       || (!streamingFinished && (newMessageArrived || streamingIdChanged) && isAtBottomRef.current);
 
     if (shouldScroll) {
