@@ -1182,6 +1182,7 @@ impl BrowserManager {
             }
         };
         let data_dir = browser_data_directory(&session_id);
+        let data_dir_for_error = data_dir.clone();
         let label = webview_label(&session_id, tab_id);
         let tab_id_for_closure = tab_id.to_string();
         // on_page_load 回调直接写入目标 session 的 state（不再经 app.state().manager() 串台）
@@ -1321,7 +1322,10 @@ impl BrowserManager {
                 Ok(webview) => webview,
                 Err(error) => {
                     Self::fail_navigation_for_tab(app, state, tab_id, navigation_id);
-                    return Err(format!("创建浏览器 WebView 失败：{error}"));
+                    return Err(format!(
+                        "创建浏览器 WebView 失败（数据目录 {}）：{error}",
+                        data_dir_for_error.display()
+                    ));
                 }
             };
 
