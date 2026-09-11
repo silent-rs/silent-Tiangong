@@ -37,6 +37,15 @@ import {
 } from "./message";
 import { type MentionEditorHandle } from "./MentionEditor";
 
+/** 每个会话的阅读位置锚点：视口顶部对齐的分组索引 + 离开时是否贴底。
+ * 切换会话时按锚点恢复阅读位置（贴底则回到底部保持跟随语义）；
+ * 无记录（首次进入）才定位到底部。 */
+interface SessionScrollAnchor {
+  index: number;
+  atBottom: boolean;
+}
+const sessionScrollAnchors = new Map<string, SessionScrollAnchor>();
+
 /** 取路径最后 1-2 级目录用于简短展示，例如 /a/b/tiangong -> b/tiangong */
 function shortDir(path: string): string {
   if (!path) return '';
@@ -164,33 +173,16 @@ export function MessageList() {
     };
   }, []);
 
-  // 切换会话时关闭搜索
+  // 切换会话时关闭搜索；贴底状态由切换恢复逻辑按锚点位置判定，
+  // 不再无条件视为在底部
   useEffect(() => {
     useSearchStore.getState().closeSearch();
-    // 切换会话视为重新进入，默认在底部
-    isAtBottomRef.current = true;
   }, [activeSessionId]);
 
   // 卸载时清理刻度尺预览卡片的隐藏定时器
   useEffect(() => () => {
     if (railPreviewHideTimerRef.current) window.clearTimeout(railPreviewHideTimerRef.current);
   }, []);
-
-  // 监听滚动位置，维护 isAtBottom 状态
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const handleScroll = () => {
-      const threshold = 80;
-      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const next = distance < threshold;
-      if (next !== isAtBottomRef.current) {
-        isAtBottomRef.current = next;
-      }
-    };
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    return () => el.removeEventListener('scroll', handleScroll);
-  }, [activeSessionId]);
 
   // Cmd/Ctrl+F 全局快捷键
   useEffect(() => {
@@ -329,6 +321,31 @@ export function MessageList() {
     overscan: 5,
   });
 
+  // 监听滚动位置，维护 isAtBottom 状态与当前会话的阅读位置锚点。
+  // 置于 virtualizer 声明之后（handleScroll 需要按像素偏移取顶部组索引）
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const threshold = 80;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const next = distance < threshold;
+      if (next !== isAtBottomRef.current) {
+        isAtBottomRef.current = next;
+      }
+      // 滚动瞬间记录锚点，保证切走会话时的位置始终是最新的
+      // （新对话态 activeSessionId 为空，无会话内容可记）
+      if (activeSessionId) {
+        const topItem = virtualizer.getVirtualItemForOffset(el.scrollTop);
+        if (topItem) {
+          sessionScrollAnchors.set(activeSessionId, { index: topItem.index, atBottom: next });
+        }
+      }
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [activeSessionId, virtualizer]);
+
   // 搜索导航：通过 store subscription 监听 searchQuery 和 currentMatchIndex 变化
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -380,12 +397,40 @@ export function MessageList() {
     let cancelled = false;
     const sessionSwitched = prevActiveSessionRef.current !== undefined
       && activeSessionId !== prevActiveSessionRef.current;
-    if (sessionSwitched) {
-      // 切换会话时仅重置流式基准，避免旧会话残留的流式状态被误判为
-      // "回复完成"；滚动与否交给通用的变化检测（新会话消息更多且
-      // 在底部时才跟随到底），不做强制定位
+    if (sessionSwitched && activeSessionId) {
+      // 切换会话：重置流式与消息数基准（避免旧会话残留的流式状态被
+      // 误判为"回复完成"、跨会话长度比较误触发跟随），本次定位完全
+      // 由阅读位置锚点接管，不走通用滚动判定
       prevStreamingIdRef.current = null;
       prevRunStatusRef.current = 'idle';
+      prevMessagesLengthRef.current = messages.length;
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        const lastIndex = completedGroups.length - 1;
+        const anchor = sessionScrollAnchors.get(activeSessionId);
+        // 有记录则恢复到离开时的阅读位置（贴底的回到底部保持跟随）；
+        // 首次进入（或记录越界，如消息被删除/压缩）定位到底部看最新内容
+        if (anchor && anchor.index <= lastIndex) {
+          if (anchor.atBottom) {
+            isAtBottomRef.current = true;
+            if (streamingGroup && scrollRef.current) {
+              scrollRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
+            } else if (lastIndex >= 0) {
+              virtualizer.scrollToIndex(lastIndex, { behavior: 'auto', align: 'end' });
+            }
+          } else {
+            virtualizer.scrollToIndex(anchor.index, { behavior: 'auto', align: 'start' });
+          }
+        } else if (streamingGroup && scrollRef.current) {
+          scrollRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
+        } else if (lastIndex >= 0) {
+          virtualizer.scrollToIndex(lastIndex, { behavior: 'auto', align: 'end' });
+        }
+      });
+      prevStreamingIdRef.current = streamingMessageId;
+      prevRunStatusRef.current = runStatus;
+      prevActiveSessionRef.current = activeSessionId;
+      return () => { cancelled = true; };
     }
 
     const newMessageArrived = messages.length > prevMessagesLengthRef.current;
