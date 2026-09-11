@@ -1770,12 +1770,14 @@ fn prepare_non_interactive_command(
             // Out-Default 强制格式化在结束标记前完成，否则表格会延迟到提示符才输出。
             let result_variable = format!("{}VALUE", markers.exit_code);
             let script = format!(
-                "try {{\nWrite-Output '{start}'\n${state} = 0\ntry {{ . {{\n{command}\n${state} = if ($?) {{ 0 }} elseif ($LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 1 }}\n}} | Out-Default }} catch {{ ${state} = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state})\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}' -Scope Local -ErrorAction SilentlyContinue }}\n",
+                "try {{\nWrite-Output '{start}'\n${state} = 0\ntry {{ ${before} = $LASTEXITCODE; ${errors} = $Error.Count; . {{\n{command}\n${state} = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${before}) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${errors}) {{ 1 }} else {{ ${before} }}\n}} | Out-Default }} catch {{ ${state} = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state})\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}','{before}','{errors}' -Scope Local -ErrorAction SilentlyContinue }}\n",
                 start = markers.start,
                 cwd = markers.cwd,
                 rc = markers.exit_code,
                 end = markers.end,
                 state = result_variable,
+                before = "__TG_COMMAND_BEFORE".to_string(),
+                errors = "__TG_COMMAND_ERRORS".to_string(),
             );
             let mut file = tempfile::Builder::new()
                 .prefix(&markers.start)
@@ -2897,6 +2899,20 @@ mod tests {
             assert_eq!(failed["ok"], false, "非零退出状态不能报告工具成功");
 
             if explicit_shell.is_none() {
+                let native_error = outcome_of(
+                    service
+                        .dispatch_test(tool_request(
+                            "run_shell",
+                            serde_json::json!({"script": "Write-Error 'bad'", "timeout": 5}),
+                            Some(("windows-session", workspace.as_str())),
+                        ))
+                        .await,
+                );
+                assert_eq!(
+                    native_error["exit_code"], 1,
+                    "PowerShell 错误不能沿用上一条退出码: {native_error}"
+                );
+                assert_eq!(native_error["ok"], false);
                 for script in [
                     "if ($LASTEXITCODE -ne 7) { throw 'last exit lost' }; $value = 123; function Get-ReviewValue { $value }; Set-Variable -Name ('__' + 'TIANGONG_RC_VALUE') -Value 'user-owned'",
                     "if ($value -ne 123 -or (Get-ReviewValue) -ne 123) { throw 'scope lost' }; $value += 1",
