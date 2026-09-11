@@ -867,6 +867,19 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
     if installed.manifest.wasm_binary().is_none() {
         crate::ts_tools::cancel_plugin_calls(&installed.manifest.id);
+        // 停掉旧 sidecar（连接 + 进程）：热加载的前提是插件目录可能已被
+        // 整体替换，残留的旧进程会让工具继续打到旧二进制。停止后下次
+        // 调用按磁盘最新版本重新拉起；失败仅告警不阻断声明层重载。
+        if installed.manifest.sidecar.is_some()
+            && let Err(error) = stop_loaded_sidecar(&installed.manifest.id)
+                .and_then(|_| stop_connection_for_directory(&installed.directory))
+        {
+            tracing::warn!(
+                plugin_id = %installed.manifest.id,
+                %error,
+                "热加载停止 sidecar 失败，工具调用将沿用旧进程"
+            );
+        }
         let ts_instances = loaded_plugins()
             .lock()
             .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
