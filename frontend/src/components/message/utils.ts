@@ -1,5 +1,5 @@
 import { textContent } from "@/api/tauri";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { resolveAttachmentUrl } from "@/utils/attachments";
 import {
   Brain,
   Plug,
@@ -100,19 +100,12 @@ export function displayTextContent(message: MessageItem): string {
 }
 
 export function resolveAssetUrl(url: string): string {
-  if (!url) return "";
-  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("asset://")) {
-    return url;
-  }
-  if (url.startsWith("/")) {
-    return convertFileSrc(url);
-  }
-  return url;
+  return resolveAttachmentUrl(url);
 }
 
 export function resolveMarkdownImages(md: string): string {
   return md.replace(
-    /(!\[[^\]]*\]\()(\/[^\s)]+)(\))/g,
+    /(!\[[^\]]*\]\()([^\s)]+)(\))/g,
     (_, prefix, path, suffix) => prefix + resolveAssetUrl(path) + suffix,
   );
 }

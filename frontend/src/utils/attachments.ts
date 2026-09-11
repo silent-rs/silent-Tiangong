@@ -60,6 +60,19 @@ export function imageExtFromMime(mimeType: string): string {
 
 export function resolveAttachmentUrl(url: string): string {
   if (!url) return '';
+  // 历史消息或剪贴板可能保存为 file:// URL；先还原为本地路径，
+  // 再交给 Tauri 的资源协议转换，避免 Windows WebView 将其当网页地址解析。
+  if (url.startsWith('file://')) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'file:') {
+        const path = decodeURIComponent(parsed.pathname).replace(/^\/[A-Za-z]:/, match => match.slice(1));
+        return convertFileSrc(parsed.hostname ? `\\\\${parsed.hostname}${path}` : path);
+      }
+    } catch {
+      // 保留原值，让调用方按普通 URL 处理。
+    }
+  }
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
     return url;
   }
