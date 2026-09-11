@@ -518,15 +518,17 @@ pub(crate) fn tool_result_full_output(result: &crate::tool::ToolResult) -> Strin
         };
     }
 
+    // 失败时真实输出（stderr/stdout）放在摘要之前：工具摘要常带编排
+    // 附注，先呈现命令自身的报错更利于模型与用户定位原因。
     let mut lines = Vec::new();
-    if !result.summary.trim().is_empty() {
-        lines.push(format!("summary: {}", result.summary));
-    }
     if !result.stderr.trim().is_empty() {
         lines.push(format!("stderr:\n{}", result.stderr));
     }
     if !result.stdout.trim().is_empty() {
         lines.push(format!("stdout:\n{}", result.stdout));
+    }
+    if !result.summary.trim().is_empty() {
+        lines.push(format!("summary: {}", result.summary));
     }
     if lines.is_empty() {
         "工具执行失败，但没有返回详细错误".to_string()
