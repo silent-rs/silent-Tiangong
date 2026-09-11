@@ -1770,14 +1770,12 @@ fn prepare_non_interactive_command(
             // Out-Default 强制格式化在结束标记前完成，否则表格会延迟到提示符才输出。
             let result_variable = format!("{}VALUE", markers.exit_code);
             let script = format!(
-                "try {{\nWrite-Output '{start}'\n${state} = 0\ntry {{ ${before} = $LASTEXITCODE; ${errors} = $Error.Count; . {{\n{command}\n${state} = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${before}) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${errors}) {{ 1 }} else {{ ${before} }}\n}} | Out-Default }} catch {{ ${state} = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state})\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}','{before}','{errors}' -Scope Local -ErrorAction SilentlyContinue }}\n",
+                "try {{\nWrite-Output '{start}'\n${state} = [pscustomobject]@{{ Result = 0; Before = $LASTEXITCODE; Errors = $Error.Count }}\ntry {{ . {{\n{command}\n${state}.Result = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${state}.Before) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${state}.Errors) {{ 1 }} else {{ ${state}.Before }}\n}} | Out-Default }} catch {{ ${state}.Result = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state}.Result)\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}' -ErrorAction SilentlyContinue }}\n",
                 start = markers.start,
                 cwd = markers.cwd,
                 rc = markers.exit_code,
                 end = markers.end,
                 state = result_variable,
-                before = "__TG_COMMAND_BEFORE".to_string(),
-                errors = "__TG_COMMAND_ERRORS".to_string(),
             );
             let mut file = tempfile::Builder::new()
                 .prefix(&markers.start)
@@ -2914,9 +2912,9 @@ mod tests {
                 );
                 assert_eq!(native_error["ok"], false);
                 for script in [
-                    "if ($LASTEXITCODE -ne 7) { throw 'last exit lost' }; $value = 123; function Get-ReviewValue { $value }; Set-Variable -Name ('__' + 'TIANGONG_RC_VALUE') -Value 'user-owned'",
+                    "if ($LASTEXITCODE -ne 7) { throw 'last exit lost' }; $value = 123; function Get-ReviewValue { $value }; Set-Variable -Name ('__' + 'TIANGONG_RC_VALUE') -Value 'user-owned'; $__TG_COMMAND_BEFORE = 'before-owned'; $__TG_COMMAND_ERRORS = 'errors-owned'",
                     "if ($value -ne 123 -or (Get-ReviewValue) -ne 123) { throw 'scope lost' }; $value += 1",
-                    "if ($value -ne 124 -or (Get-ReviewValue) -ne 124) { throw 'state update lost' }; if ((Get-Variable ('__' + 'TIANGONG_RC_VALUE')).Value -ne 'user-owned') { throw 'user variable overwritten' }; $helpers = @(Get-Variable ('__' + 'TIANGONG_*') | Where-Object { $_.Name -ne ('__' + 'TIANGONG_RC_VALUE') }); if ($helpers.Count -ne 1) { throw 'helper leaked' }",
+                    "if ($value -ne 124 -or (Get-ReviewValue) -ne 124) { throw 'state update lost' }; if ((Get-Variable ('__' + 'TIANGONG_RC_VALUE')).Value -ne 'user-owned') { throw 'user variable overwritten' }; if ($__TG_COMMAND_BEFORE -ne 'before-owned' -or $__TG_COMMAND_ERRORS -ne 'errors-owned') { throw 'fixed helper variable overwritten' }; $helpers = @(Get-Variable ('__' + 'TIANGONG_*') | Where-Object { $_.Name -ne ('__' + 'TIANGONG_RC_VALUE') }); if ($helpers.Count -ne 1) { throw ('helper leaked: ' + ($helpers.Name -join ',')) }",
                 ] {
                     let result = outcome_of(
                         service
