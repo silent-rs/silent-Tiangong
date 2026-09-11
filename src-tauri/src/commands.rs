@@ -5194,21 +5194,29 @@ pub async fn bridge_call(
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     // 前端实例只传会话 ID；sidecar 可写域必须由宿主从权威 Session 加载，
-    // 不能采用抢到全局工具事件的界面实例所携带的工作区。
+    // 不能采用抢到全局工具事件的界面实例所携带的工作区。新对话首条消息
+    // 发出前只有前端本地编号（未落盘）或工作区未定：此时按无会话处理，
+    // 走通用可写域——终端等面板在新对话中立即可用，不因会话未就绪被拒。
     let authoritative_workspace = if method.starts_with("sidecar.") {
         match session_id.filter(|id| !id.trim().is_empty()) {
-            Some(session_id) => {
-                let session = state
-                    .inner()
-                    .core_manager
-                    .load_session(&session_id)
-                    .map_err(|error| format!("加载 sidecar 调用所属会话失败: {error}"))?;
-                let cwd = session.cwd.trim();
-                if cwd.is_empty() {
-                    return Err(format!("会话 {session_id} 未配置工作区"));
+            Some(session_id) => match state.inner().core_manager.load_session(&session_id) {
+                Ok(session) => {
+                    let cwd = session.cwd.trim();
+                    if cwd.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(cwd))
+                    }
                 }
-                Some(PathBuf::from(cwd))
-            }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        %error,
+                        "sidecar 调用所属会话加载失败，降级为通用可写域"
+                    );
+                    None
+                }
+            },
             None => None,
         }
     } else {
