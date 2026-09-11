@@ -918,7 +918,16 @@ await runSidecar({
         assert!(
             crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_none()
         );
-        crate::registry::reverify_plugin_sidecar(root.path(), id).expect("重新验证应恢复记录");
+        let verification_path = crate::verification::verification_path(&plugin_directory).unwrap();
+        // 握手成功但验证记录无法保存时，启动仍必须失败；恢复写入后同入口可重试。
+        std::fs::create_dir(&verification_path).unwrap();
+        let error = crate::registry::prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("保存 sidecar 验证记录失败"),
+            "{error:#}"
+        );
+        std::fs::remove_dir(&verification_path).unwrap();
+        crate::registry::prepare_desktop_startup_plugins(root.path()).expect("启动重试应恢复记录");
         assert!(
             crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_some(),
             "重新验证后记录应恢复"

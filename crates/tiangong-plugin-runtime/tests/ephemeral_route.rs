@@ -902,7 +902,7 @@ fn collect_windows_sandbox_probe(
         // .git 可写是功能要求（agent 需要完整 git 工作流）：写入探测标记
         // 并回读验证；父/子探针共用标记，重复探测幂等（初始 "safe\n"）。
         git_metadata_write: std::fs::write(&request.git_config, "GITWRITE").is_ok()
-            && std::fs::read_to_string(&request.git_config).as_deref() == Ok("GITWRITE"),
+            && std::fs::read_to_string(&request.git_config).ok().as_deref() == Some("GITWRITE"),
         git_metadata_readable: std::fs::read_to_string(&request.git_config)
             .is_ok_and(|value| value == "safe\n" || value == "GITWRITE"),
         network_blocked: request.network_address.parse().ok().is_some_and(|address| {

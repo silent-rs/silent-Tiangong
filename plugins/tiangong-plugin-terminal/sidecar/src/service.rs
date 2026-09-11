@@ -1768,12 +1768,14 @@ fn prepare_non_interactive_command(
         ShellKind::Cmd => prepare_cmd_command(command, markers),
         ShellKind::PowerShell => {
             // Out-Default 强制格式化在结束标记前完成，否则表格会延迟到提示符才输出。
+            let result_variable = format!("{}VALUE", markers.exit_code);
             let script = format!(
-                "Write-Output '{start}'\n$script:__TIANGONG_RC_VALUE = 0\n$global:LASTEXITCODE = 0\ntry {{ & {{\n{command}\n$script:__TIANGONG_RC_VALUE = if ($?) {{ 0 }} elseif ($LASTEXITCODE) {{ $LASTEXITCODE }} else {{ 1 }}\n}} | Out-Default }} catch {{ $script:__TIANGONG_RC_VALUE = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + $script:__TIANGONG_RC_VALUE)\nWrite-Output '{end}'\n",
+                "try {{\nWrite-Output '{start}'\n${state} = [pscustomobject]@{{ Result = 0; Before = $LASTEXITCODE; Errors = $Error.Count }}\ntry {{ . {{\n{command}\n${state}.Result = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${state}.Before) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${state}.Errors) {{ 1 }} else {{ ${state}.Before }}\n}} | Out-Default }} catch {{ ${state}.Result = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state}.Result)\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}' -ErrorAction SilentlyContinue }}\n",
                 start = markers.start,
                 cwd = markers.cwd,
                 rc = markers.exit_code,
                 end = markers.end,
+                state = result_variable,
             );
             let mut file = tempfile::Builder::new()
                 .prefix(&markers.start)
@@ -1786,7 +1788,7 @@ fn prepare_non_interactive_command(
             let path = ShellKind::PowerShell.quote(&file.path().to_string_lossy());
             Ok(PreparedCommand {
                 input: format!(
-                    "$__TIANGONG_=0; try {{ . ([scriptblock]::Create([IO.File]::ReadAllText({path}))) }} catch {{ Write-Output '{start}'; $_ | Out-Default; Write-Output '{rc}1'; Write-Output '{end}' }}\r",
+                    "$null='__TIANGONG_'; try {{ . ([scriptblock]::Create([IO.File]::ReadAllText({path}))) }} catch {{ Write-Output '{start}'; $_ | Out-Default; Write-Output '{rc}1'; Write-Output '{end}' }}\r",
                     start = markers.start,
                     rc = markers.exit_code,
                     end = markers.end
@@ -2895,6 +2897,39 @@ mod tests {
             assert_eq!(failed["ok"], false, "非零退出状态不能报告工具成功");
 
             if explicit_shell.is_none() {
+                let native_error = outcome_of(
+                    service
+                        .dispatch_test(tool_request(
+                            "run_shell",
+                            serde_json::json!({"script": "Write-Error 'bad'", "timeout": 5}),
+                            Some(("windows-session", workspace.as_str())),
+                        ))
+                        .await,
+                );
+                assert_eq!(
+                    native_error["exit_code"], 1,
+                    "PowerShell 错误不能沿用上一条退出码: {native_error}"
+                );
+                assert_eq!(native_error["ok"], false);
+                for script in [
+                    "if ($LASTEXITCODE -ne 7) { throw 'last exit lost' }; $value = 123; function Get-ReviewValue { $value }; Set-Variable -Name ('__' + 'TIANGONG_RC_VALUE') -Value 'user-owned'; $__TG_COMMAND_BEFORE = 'before-owned'; $__TG_COMMAND_ERRORS = 'errors-owned'",
+                    "if ($value -ne 123 -or (Get-ReviewValue) -ne 123) { throw 'scope lost' }; $value += 1",
+                    "if ($value -ne 124 -or (Get-ReviewValue) -ne 124) { throw 'state update lost' }; if ((Get-Variable ('__' + 'TIANGONG_RC_VALUE')).Value -ne 'user-owned') { throw 'user variable overwritten' }; if ($__TG_COMMAND_BEFORE -ne 'before-owned' -or $__TG_COMMAND_ERRORS -ne 'errors-owned') { throw 'fixed helper variable overwritten' }; $helpers = @(Get-Variable ('__' + 'TIANGONG_*') | Where-Object { $_.Name -ne ('__' + 'TIANGONG_RC_VALUE') }); if ($helpers.Count -ne 1) { throw ('helper leaked: ' + ($helpers.Name -join ',')) }",
+                ] {
+                    let result = outcome_of(
+                        service
+                            .dispatch_test(tool_request(
+                                "run_shell",
+                                serde_json::json!({"script": script, "timeout": 10}),
+                                Some(("windows-session", workspace.as_str())),
+                            ))
+                            .await,
+                    );
+                    assert_eq!(
+                        result["ok"], true,
+                        "PowerShell 状态应在连续命令中保留: {result}"
+                    );
+                }
                 let invalid = outcome_of(
                     service
                         .dispatch_test(tool_request(
