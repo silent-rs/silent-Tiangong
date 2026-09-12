@@ -30,6 +30,10 @@ fn sanitize_path_segment(id: &str) -> String {
         .collect()
 }
 
+/// webview 标签仅在进程内标识，tab_id 全局唯一（SCRU128）兜底不撞车，
+/// 因此用替换式清洗即可；数据目录名（browser_session_directory_name）会
+/// 落盘且不同 scope 必须不碰撞，用百分号编码——两处规则刻意不统一，
+/// 勿合并。
 fn webview_label(session_id: &str, tab_id: &str) -> String {
     format!(
         "browser-webview-{}-{}",
@@ -145,7 +149,10 @@ fn normalize_url_for_compare(url: &str) -> String {
 /// 构造中的 file URL 先编码会破坏结构的字符再经 Url 解析规范化编码
 /// （空格/非 ASCII 等）；# 与 ? 不预编码会被切成 fragment/query。
 fn canonical_file_url(candidate: String) -> String {
-    let encoded = candidate.replace('#', "%23").replace('?', "%3F");
+    let encoded = candidate
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3F");
     match encoded.parse::<Url>() {
         Ok(url) => url.to_string(),
         Err(_) => encoded,
@@ -156,8 +163,11 @@ fn canonical_file_url(candidate: String) -> String {
 /// Windows 盘符路径（`C:\x`、`c:/x`，允许混合斜杠）与 UNC 路径
 /// （`\\server\share\x`）按平台无关规则转写，盘符统一大写。
 fn local_path_to_file_url(value: &str) -> String {
-    if let Some(rest) = value.strip_prefix(r"\\") {
-        return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
+    // UNC 网络路径：反斜杠与正斜杠两种写法同义，主机名进 URL authority
+    for prefix in [r"\\", "//"] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
+        }
     }
     let bytes = value.as_bytes();
     if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
@@ -224,6 +234,7 @@ fn parse_web_document_snapshot(result: &str) -> Option<WebDocumentSnapshot> {
 
 /// 图片、PDF、音视频、字体等按扩展名识别的非 HTML 资源地址。此类资源页
 /// 没有可注入脚本的 HTML 文档（eval 无响应），不能走 DOM 快照流程。
+/// SVG 例外：浏览器中按 XML 文档渲染，有 DOM 且可执行脚本，按正常页面处理。
 fn is_non_html_resource_url(url: &str) -> bool {
     let Ok(parsed) = url.parse::<Url>() else {
         return false;
@@ -245,7 +256,6 @@ fn is_non_html_resource_url(url: &str) -> bool {
             | "avif"
             | "ico"
             | "bmp"
-            | "svg"
             | "pdf"
             | "mp4"
             | "webm"
@@ -2319,7 +2329,30 @@ impl BrowserManager {
                 );
                 return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
             }
-            NavigationPhase::Loaded => {}
+            NavigationPhase::Loaded => {
+                // 资源页（图片/PDF/音视频）没有可注入的正文提取脚本，导航
+                // 完成即成功：标题取文件名、正文留空，不再等必然超时的 eval。
+                if is_non_html_resource_url(&navigation.requested_url) {
+                    let final_url = navigation
+                        .final_url
+                        .clone()
+                        .unwrap_or_else(|| url.to_string());
+                    let file_name = final_url
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .split('?')
+                        .next()
+                        .unwrap_or_default();
+                    return BrowserResponse {
+                        ok: true,
+                        title: file_name.to_string(),
+                        content: String::new(),
+                        final_url,
+                        error: None,
+                    };
+                }
+            }
         }
 
         let result = self.eval_tab_with_result_timeout(
@@ -3437,10 +3470,43 @@ mod tests {
         assert!(is_non_html_resource_url("file:///C:/Users/EDY/pic.PNG"));
         assert!(is_non_html_resource_url("file:///C:/Users/EDY/report.pdf"));
         assert!(is_non_html_resource_url("https://cdn.example.com/a.mp4"));
+        // 查询串不影响扩展名识别
+        assert!(is_non_html_resource_url(
+            "https://cdn.example.com/a.png?v=2&size=large"
+        ));
+        // SVG 有 DOM 可脚本，按正常页面处理，不算资源页
+        assert!(!is_non_html_resource_url("file:///C:/Users/EDY/icon.svg"));
         // HTML、无扩展名、非法 URL 不是资源页
         assert!(!is_non_html_resource_url("file:///C:/Users/EDY/page.html"));
         assert!(!is_non_html_resource_url("file:///C:/Users/EDY/noext"));
         assert!(!is_non_html_resource_url("not a url"));
+    }
+
+    #[test]
+    fn fetch_page_content_returns_success_for_resource_pages() {
+        // 资源页导航完成即成功：不再等待正文脚本（对图片/PDF 必然超时），
+        // 标题取文件名、正文留空
+        let manager = BrowserManager::new();
+        let url = "file:///C:/docs/pic.png";
+        {
+            let mut state = manager.state.lock().unwrap();
+            state
+                .navigation_signals
+                .insert("tab-1".to_string(), navigation_signal(url));
+        }
+        let response = manager.fetch_page_content(
+            url,
+            1000,
+            &NavigationTicket {
+                tab_id: "tab-1".to_string(),
+                navigation_id: 0,
+            },
+        );
+        assert!(response.ok);
+        assert_eq!(response.error, None);
+        assert_eq!(response.title, "pic.png");
+        assert_eq!(response.final_url, url);
+        assert!(response.content.is_empty());
     }
 
     #[test]
@@ -3494,6 +3560,21 @@ mod tests {
         assert_eq!(
             normalize_navigation_url(r"\\server\share\doc.pdf"),
             "file://server/share/doc.pdf"
+        );
+        // 正斜杠 UNC 写法与反斜杠同义
+        assert_eq!(
+            normalize_navigation_url("//server/share/doc.pdf"),
+            "file://server/share/doc.pdf"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_percent_encodes_literal_percent() {
+        // 字面 % 预编码为 %25，避免被按百分号解码误读（a%20b.png 是字面
+        // 文件名而非已编码空格）
+        assert_eq!(
+            normalize_navigation_url(r"C:\tmp\a%20b.png"),
+            "file:///C:/tmp/a%2520b.png"
         );
     }
 
