@@ -117,6 +117,7 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
         "png" => "image/png",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "svg" => "image/svg+xml",
         "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

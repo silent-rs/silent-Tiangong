@@ -35,7 +35,11 @@ export function ContentMedia({ message }: { message: MessageItem }) {
           return <div key={`${message.id}-media-${index}`} className="text-sm text-muted-foreground">旧附件无法安全恢复，请重新上传。</div>;
         }
         const src = resolveAssetUrl(asset.url);
-        if (asset.kind === "image") {
+        // 历史消息里 SVG 曾按 file 归档，按 mime 或扩展名兜底回图片渲染
+        const rendersAsImage = asset.kind === "image"
+          || (asset.kind === "file"
+            && (asset.mime_type === "image/svg+xml" || asset.url.toLowerCase().endsWith(".svg")));
+        if (rendersAsImage) {
           return <img key={`${message.id}-media-${index}`} src={src} alt={asset.title || "生成的图片"} className="max-w-full max-h-96 rounded-md cursor-pointer hover:opacity-90 transition-opacity" loading="lazy" />;
         }
         if (asset.kind === "video") {
