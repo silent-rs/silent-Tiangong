@@ -103,8 +103,31 @@ export function resolveAssetUrl(url: string): string {
   return resolveAttachmentUrl(url);
 }
 
-export function resolveMarkdownImages(md: string): string {
+/** 判断链接目标是否本地路径形态（file://、POSIX 绝对路径、Windows 盘符或 UNC）。 */
+function isLocalFileUrl(url: string): boolean {
+  return url.startsWith('file:')
+    || url.startsWith('/')
+    || /^[A-Za-z]:[\\/]/.test(url)
+    || url.startsWith('\\\\');
+}
+
+/** 把指向本地 SVG 文件的链接改写为图片语法。模型常用 [名称](file:///…/x.svg)
+ *  引用生成的矢量图，按链接渲染只是一行文本；改写后经下方图片路径解析内联显示
+ *  （img 上下文中的 SVG 不执行脚本）。远程地址不改写，保留链接点击行为。 */
+function inlineLocalSvgLinks(md: string): string {
   return md.replace(
+    /(?<!!)\[([^\]]*)\]\(([^\s)]+)\)/g,
+    (match, alt: string, url: string) => {
+      const path = url.split(/[?#]/)[0];
+      return path.toLowerCase().endsWith('.svg') && isLocalFileUrl(url)
+        ? `![${alt}](${url})`
+        : match;
+    },
+  );
+}
+
+export function resolveMarkdownImages(md: string): string {
+  return inlineLocalSvgLinks(md).replace(
     /(!\[[^\]]*\]\()([^\s)]+)(\))/g,
     (_, prefix, path, suffix) => prefix + resolveAssetUrl(path) + suffix,
   );
