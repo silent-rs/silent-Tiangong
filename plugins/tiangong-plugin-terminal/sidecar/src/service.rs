@@ -58,6 +58,17 @@ enum SessionPhase {
     Interactive,
 }
 
+/// 会话相对死亡/回收的三态，见 [`TerminalService::session_end_state`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEndState {
+    /// 会话在表且 shell 存活。
+    Alive,
+    /// shell 已退出（携带退出码），等待命令收尾后回收。
+    Ended(i32),
+    /// 会话已被移出表（手动关闭或回收路径先一步完成）。
+    Reaped,
+}
+
 struct PtySession {
     shell: ShellKind,
     shell_ready: bool,
@@ -83,6 +94,10 @@ struct PtySession {
     /// xterm 回传的当前可见画面，供 terminal_send 返回交互结果。
     screen_snapshot: String,
     screen_updates: u64,
+    /// shell 已退出（信号等异常退出时取不到退出码记 -1）。标记死亡而非
+    /// 立即出表：执行中的命令仍需读取输出与退出码正常收尾；出表由命令
+    /// 收尾或下次选终端时完成。
+    exited_code: Option<i32>,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -294,6 +309,9 @@ struct ExecResponse {
     timed_out: bool,
     cwd_after: String,
     interactive_mode: bool,
+    /// 命令使 shell 本身退出（如 exit/登出）：终端已不可复用，
+    /// 下次调用将自动新建终端。
+    session_ended: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,9 +452,15 @@ impl TerminalService {
             .spawn(move || {
                 loop {
                     std::thread::sleep(Duration::from_millis(250));
+                    // 已死亡未回收的会话不算活跃：否则 shell 退出后 sidecar
+                    // 永远等不到空闲退出。
                     let has_sessions = sessions
                         .lock()
-                        .map(|sessions| !sessions.is_empty())
+                        .map(|sessions| {
+                            sessions
+                                .values()
+                                .any(|session| session.exited_code.is_none())
+                        })
                         .unwrap_or(true);
                     if has_sessions {
                         continue;
@@ -671,6 +695,7 @@ impl TerminalService {
                 display_history: Vec::new(),
                 screen_snapshot: String::new(),
                 screen_updates: 0,
+                exited_code: None,
                 logger,
             },
         );
@@ -725,8 +750,9 @@ impl TerminalService {
             }
         });
 
-        // 等待线程：退出通知 + 会话出表（find 不再命中死会话，
-        // write/resize 自然返回「会话不存在」）。
+        // 等待线程：退出通知 + 标记死亡（不出表）。正在执行的命令仍需
+        // 从会话读取输出与退出码正常收尾；出表由命令收尾或下次选终端
+        // 时完成，write/resize 等操作在此期间按会话状态自行判断。
         let exit_session = session_id.clone();
         let exit_sequence = sequence;
         let exit_sessions = Arc::clone(&self.sessions);
@@ -743,8 +769,9 @@ impl TerminalService {
             if sessions
                 .get(&exit_session)
                 .is_some_and(|session| session.sequence == exit_sequence)
+                && let Some(session) = sessions.get_mut(&exit_session)
             {
-                sessions.remove(&exit_session);
+                session.exited_code = Some(exit_code.map(|code| code as i32).unwrap_or(-1));
             }
         });
 
@@ -764,6 +791,70 @@ impl TerminalService {
             .get_mut(session_id)
             .ok_or_else(|| anyhow::anyhow!("会话不存在: {session_id}"))?;
         operation(session)
+    }
+
+    /// 回收已死亡的会话（出表并清前端附着标记）。命令收尾时调用，
+    /// 防御性保留给选终端等路径复用。
+    fn reap_ended_session(&self, session_id: &str) {
+        let removed = self
+            .sessions
+            .lock()
+            .expect("会话表锁损坏")
+            .remove(session_id);
+        if removed.is_some() {
+            self.frontend_attached
+                .lock()
+                .expect("前端附着表锁损坏")
+                .remove(session_id);
+        }
+    }
+
+    /// 会话相对死亡/回收的三态：调用方需区分「活着」（正常继续）、
+    /// 「已退出带码」（按死亡收尾）与「已被回收」（手动关闭或回收路径
+    /// 先一步出表，读输出只会撞「会话不存在」，须给出明确错误）。
+    fn session_end_state(&self, session_id: &str) -> SessionEndState {
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
+        match sessions.get(session_id) {
+            Some(session) => match session.exited_code {
+                Some(code) => SessionEndState::Ended(code),
+                None => SessionEndState::Alive,
+            },
+            None => SessionEndState::Reaped,
+        }
+    }
+
+    /// 命令使 shell 本身退出时的收尾：已解析出的命令退出码优先于
+    /// shell 退出码（结束标记先于 shell 退出的组合场景），超时语义下
+    /// 固定 -1；已收集输出照常返回，并回收死亡会话。
+    fn ended_session_response(
+        &self,
+        session_id: &str,
+        start_offset: u64,
+        markers: &CommandMarkers,
+        timed_out: bool,
+    ) -> Result<ExecResponse> {
+        let shell_exit = match self.session_end_state(session_id) {
+            SessionEndState::Ended(code) => Some(code),
+            SessionEndState::Alive => None,
+            SessionEndState::Reaped => {
+                bail!("终端会话已被关闭或回收，命令结果不可恢复：{session_id}")
+            }
+        };
+        let raw = self.raw_output_since(session_id, start_offset)?;
+        let parsed = parse_command_output(&raw, markers);
+        let parsed_exit_code = parsed.exit_code;
+        let mut response = parsed.into_response(timed_out);
+        if timed_out {
+            response.exit_code = -1;
+            response.stderr = "命令执行超时".to_string();
+        } else {
+            response.exit_code = parsed_exit_code.or(shell_exit).unwrap_or(0);
+        }
+        response.session_ended = true;
+        if shell_exit.is_some() {
+            self.reap_ended_session(session_id);
+        }
+        Ok(response)
     }
 
     fn kill_session(&self, request: SessionIdRequest) -> Result<OkResponse> {
@@ -907,9 +998,35 @@ impl TerminalService {
 
     fn acquire_session(&self, request: AcquireRequest) -> AcquireResponse {
         let mut sessions = self.sessions.lock().expect("会话表锁损坏");
-        let had_live_terminal = sessions
-            .values()
-            .any(|session| session.scope_id.as_deref() == Some(request.scope_id.as_str()));
+        let had_live_terminal = sessions.values().any(|session| {
+            session.scope_id.as_deref() == Some(request.scope_id.as_str())
+                && session.exited_code.is_none()
+        });
+        // 防御性回收已死亡但尚未被命令收尾清理的会话（出表并清附着标记）。
+        // 仅限本会话（scope）且空闲的死亡终端：执行中/交互中的死亡会话
+        // 正被它自己的命令等待收尾读取（感知窗口最长一个轮询周期），
+        // 选终端不得抢先摘表，否则该命令撞回「会话不存在」；其他会话的
+        // 死终端同理留给其收尾路径。
+        let ended_ids: Vec<String> = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.exited_code.is_some()
+                    && session.phase == SessionPhase::Idle
+                    && session.scope_id.as_deref() == Some(request.scope_id.as_str())
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        sessions.retain(|_, session| {
+            session.exited_code.is_none()
+                || session.phase != SessionPhase::Idle
+                || session.scope_id.as_deref() != Some(request.scope_id.as_str())
+        });
+        if !ended_ids.is_empty() {
+            let mut attached = self.frontend_attached.lock().expect("前端附着表锁损坏");
+            for session_id in &ended_ids {
+                attached.remove(session_id);
+            }
+        }
         let selected = sessions
             .iter()
             .filter(|(_, session)| {
@@ -1196,13 +1313,25 @@ impl TerminalService {
             .map(|timeout| Instant::now() + Duration::from_secs(timeout.max(1)));
         let mut exit_code_seen_at = None;
         loop {
+            // 会话状态先行：已被回收（手动关闭或选终端回收先一步出表）时
+            // 给出明确错误，不再读输出撞「会话不存在」内部错误。
+            let end_state = match self.session_end_state(&request.session_id) {
+                SessionEndState::Reaped => bail!(
+                    "终端会话已被关闭或回收，命令结果不可恢复：{}",
+                    request.session_id
+                ),
+                state => state,
+            };
             let raw = self.raw_output_since(&request.session_id, start_offset)?;
             let parsed = parse_command_output(&raw, &markers);
+            // 完成判断优先于死亡收尾：结束标记已闭合时以命令结果为准，
+            // shell 随后的退出只补「终端已退出」标记并回收，不覆盖命令
+            // 退出码（命令带 exit 的组合、shell 自身异常退出等场景）。
             if parsed.completed {
                 // end marker 已闭合后让登录 shell 完成提示符绘制，避免紧随其后的
                 // terminal_send 与 wrapper 收尾交错，造成输入多字或终端状态异常。
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                return Ok(parsed.into_response(false));
+                return Ok(self.finish_parsed(&request.session_id, parsed, end_state));
             }
             if parsed.exit_code.is_some() {
                 let seen_at = exit_code_seen_at.get_or_insert_with(Instant::now);
@@ -1210,10 +1339,32 @@ impl TerminalService {
                 // 未见 end 时按已完成兜底，不能固定等到整个命令超时。
                 if seen_at.elapsed() >= Duration::from_millis(500) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    return Ok(parsed.into_response(false));
+                    return Ok(self.finish_parsed(&request.session_id, parsed, end_state));
                 }
             }
+            // 命令使 shell 本身退出（如 exit/登出）：end marker 不会出现，
+            // 以已解析退出码（无则 shell 退出码）收尾，已收集输出照常返回。
+            if matches!(end_state, SessionEndState::Ended(_)) {
+                return self.ended_session_response(
+                    &request.session_id,
+                    start_offset,
+                    &markers,
+                    false,
+                );
+            }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                // 会话已在等待中死亡：不能再向其发送中断键，按死亡收尾。
+                if matches!(
+                    self.session_end_state(&request.session_id),
+                    SessionEndState::Ended(_)
+                ) {
+                    return self.ended_session_response(
+                        &request.session_id,
+                        start_offset,
+                        &markers,
+                        true,
+                    );
+                }
                 self.with_session(&request.session_id, |session| {
                     session
                         .writer
@@ -1229,6 +1380,22 @@ impl TerminalService {
         }
     }
 
+    /// 命令正常完成时的收尾：shell 若已随之退出（Ended），补「终端已
+    /// 退出」标记并回收会话，命令退出码保持解析结果不被覆盖。
+    fn finish_parsed(
+        &self,
+        session_id: &str,
+        parsed: ParsedCommandOutput,
+        end_state: SessionEndState,
+    ) -> ExecResponse {
+        let mut response = parsed.into_response(false);
+        if matches!(end_state, SessionEndState::Ended(_)) {
+            response.session_ended = true;
+            self.reap_ended_session(session_id);
+        }
+        response
+    }
+
     async fn collect_after_interrupt(
         &self,
         session_id: &str,
@@ -1237,6 +1404,17 @@ impl TerminalService {
     ) -> Result<ExecResponse> {
         let grace_deadline = Instant::now() + Duration::from_secs(2);
         loop {
+            match self.session_end_state(session_id) {
+                // 中断后 shell 也可能随命令退出：按死亡收尾，不再等满宽限期。
+                SessionEndState::Ended(_) => {
+                    return self.ended_session_response(session_id, start_offset, markers, true);
+                }
+                // 已被回收：给出明确错误，不再读输出撞「会话不存在」。
+                SessionEndState::Reaped => {
+                    bail!("终端会话已被关闭或回收，命令结果不可恢复：{session_id}")
+                }
+                SessionEndState::Alive => {}
+            }
             let raw = self.raw_output_since(session_id, start_offset)?;
             let parsed = parse_command_output(&raw, markers);
             if parsed.completed || Instant::now() >= grace_deadline {
@@ -1268,6 +1446,10 @@ impl TerminalService {
         let mut changed_at = None;
         let mut last_len = 0;
         loop {
+            // 已被回收：给出明确错误，不再读输出撞「会话不存在」。
+            if let SessionEndState::Reaped = self.session_end_state(session_id) {
+                bail!("终端会话已被关闭或回收，命令结果不可恢复：{session_id}");
+            }
             let raw = self.raw_output_since(session_id, start_offset)?;
             if raw.len() != last_len {
                 last_len = raw.len();
@@ -1282,6 +1464,15 @@ impl TerminalService {
                 if !current.trim().is_empty() {
                     lines.push(current);
                 }
+                // 交互命令也可能结束 shell 本身（如 exit）：标记并回收，
+                // 让下次调用自然新建终端。
+                let session_ended = matches!(
+                    self.session_end_state(session_id),
+                    SessionEndState::Ended(_)
+                );
+                if session_ended {
+                    self.reap_ended_session(session_id);
+                }
                 return Ok(ExecResponse {
                     stdout: lines.join("\n"),
                     stderr: String::new(),
@@ -1289,6 +1480,7 @@ impl TerminalService {
                     timed_out: false,
                     cwd_after: String::new(),
                     interactive_mode: true,
+                    session_ended,
                 });
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
@@ -1544,6 +1736,7 @@ impl ParsedCommandOutput {
             timed_out,
             cwd_after: self.cwd_after,
             interactive_mode: false,
+            session_ended: false,
         }
     }
 }
@@ -2117,14 +2310,40 @@ impl TerminalService {
         } else {
             format!("终端 {session_id}（复用空闲终端）")
         };
-        let summary = if executed.interactive_mode {
-            format!("命令已在{selection}进入交互状态")
-        } else if executed.timed_out {
-            format!("命令在{selection}执行超时{cwd_note}")
-        } else if exit_code == 0 {
-            format!("命令已在{selection}执行完成{cwd_note}")
+        // 失败/超时场景把退出码等失败事实放在摘要最前：调度解释（都在
+        // 忙、没有写入旧终端）对定位错误没有帮助，只保留终端编号与是否
+        // 新开供回溯输出位置；超时的中断语义（会话保留、可继续输入）
+        // 也不与 stderr 的「命令执行超时」重复表述。
+        let terminal_note = if created_new {
+            format!("新终端 {session_id}")
         } else {
-            format!("命令已在{selection}结束，退出码 {exit_code}{cwd_note}")
+            format!("终端 {session_id}")
+        };
+        // 命令使 shell 本身退出：终端已不可复用，明示下次调用将新建。
+        let ended_note = if executed.session_ended {
+            "，终端已随命令退出，下次调用将新建终端"
+        } else {
+            ""
+        };
+        let summary = if executed.interactive_mode {
+            format!("命令已在{selection}进入交互状态{ended_note}")
+        } else if executed.timed_out {
+            // 超时与 shell 退出同时命中时终端已不可输入，两种说法不能并存。
+            if executed.session_ended {
+                format!(
+                    "命令超时已中断（{terminal_note} 已随命令退出，输出见 stdout/stderr）{cwd_note}，下次调用将新建终端"
+                )
+            } else {
+                format!(
+                    "命令超时已中断（{terminal_note} 仍可继续输入，此前输出见 stdout/stderr）{cwd_note}"
+                )
+            }
+        } else if exit_code == 0 {
+            format!("命令已在{selection}执行完成{cwd_note}{ended_note}")
+        } else {
+            format!(
+                "命令失败，退出码 {exit_code}（{terminal_note}，完整输出见 stdout/stderr）{cwd_note}{ended_note}"
+            )
         };
         ToolOutcome {
             ok: !executed.timed_out && (executed.interactive_mode || exit_code == 0),
@@ -2645,6 +2864,169 @@ mod tests {
                 session_id: spawned.session_id,
             })
             .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_exiting_shell_returns_code_output_and_reaps_session() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        // 命令先输出内容再 exit 7：退出码、此前输出与会话结束标记都应保留。
+        let result = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("echo before-exit; exit 7".to_string()),
+                timeout: Some(10),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("结束 shell 的命令执行失败");
+        assert_eq!(result.exit_code, 7, "应以 shell 退出码收尾: {result:?}");
+        assert!(
+            result.stdout.contains("before-exit"),
+            "应保留命令输出: {result:?}"
+        );
+        assert!(result.session_ended, "应标记终端已随命令退出: {result:?}");
+        assert!(
+            service
+                .sessions
+                .lock()
+                .expect("会话表锁损坏")
+                .get(&spawned.session_id)
+                .is_none(),
+            "死亡会话应已出表"
+        );
+
+        // 同一会话紧接着执行：选终端判定无可用（旧死终端已清、不占用
+        // all_busy 名额），新建终端后正常返回。
+        let acquired = service.acquire_session(AcquireRequest {
+            scope_id: "terminal-sidecar-test".to_string(),
+        });
+        assert_eq!(
+            acquired.reason, "no_available",
+            "死终端不应计入可用或占用名额: {acquired:?}"
+        );
+        let respawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("重建测试终端失败");
+        let second = service
+            .exec_in_session(ExecRequest {
+                session_id: respawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("echo recovered".to_string()),
+                timeout: Some(10),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("死终端后的命令执行失败");
+        assert_eq!(second.exit_code, 0);
+        assert_eq!(second.stdout, "recovered");
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: respawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_does_not_reap_running_ended_session() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        // 模拟「shell 刚死、命令尚未收尾」：执行中的死亡会话不被选终端回收，
+        // 留给它自己的收尾路径。
+        {
+            let mut sessions = service.sessions.lock().expect("会话表锁损坏");
+            let session = sessions.get_mut(&spawned.session_id).expect("会话应在表");
+            session.exited_code = Some(3);
+            session.phase = SessionPhase::Running;
+        }
+        let acquired = service.acquire_session(AcquireRequest {
+            scope_id: "terminal-sidecar-test".to_string(),
+        });
+        assert!(
+            service
+                .sessions
+                .lock()
+                .expect("会话表锁损坏")
+                .get(&spawned.session_id)
+                .is_some(),
+            "执行中的死亡会话不应被选终端回收"
+        );
+        assert_ne!(
+            acquired.session_id.as_deref(),
+            Some(spawned.session_id.as_str())
+        );
+        if let Some(new_session) = acquired.session_id {
+            service
+                .kill_session(SessionIdRequest {
+                    session_id: new_session,
+                })
+                .expect("清理新终端失败");
+        }
+
+        // 空闲后（命令已收尾）：同会话再次选终端时应被回收。
+        {
+            let mut sessions = service.sessions.lock().expect("会话表锁损坏");
+            let session = sessions.get_mut(&spawned.session_id).expect("会话应在表");
+            session.phase = SessionPhase::Idle;
+        }
+        let _ = service.acquire_session(AcquireRequest {
+            scope_id: "terminal-sidecar-test".to_string(),
+        });
+        assert!(
+            service
+                .sessions
+                .lock()
+                .expect("会话表锁损坏")
+                .get(&spawned.session_id)
+                .is_none(),
+            "空闲的死亡会话应被选终端回收"
+        );
     }
 
     #[derive(Clone)]
