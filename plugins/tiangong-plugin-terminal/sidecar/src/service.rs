@@ -977,12 +977,20 @@ impl TerminalService {
                 && session.exited_code.is_none()
         });
         // 防御性回收已死亡但尚未被命令收尾清理的会话（出表并清附着标记）。
+        // 只清理本会话（scope）的死终端：其他会话的死终端可能正被其
+        // 执行中的命令等待收尾读取，跨会话清理会让它撞回「会话不存在」。
         let ended_ids: Vec<String> = sessions
             .iter()
-            .filter(|(_, session)| session.exited_code.is_some())
+            .filter(|(_, session)| {
+                session.exited_code.is_some()
+                    && session.scope_id.as_deref() == Some(request.scope_id.as_str())
+            })
             .map(|(session_id, _)| session_id.clone())
             .collect();
-        sessions.retain(|_, session| session.exited_code.is_none());
+        sessions.retain(|_, session| {
+            session.exited_code.is_none()
+                || session.scope_id.as_deref() != Some(request.scope_id.as_str())
+        });
         if !ended_ids.is_empty() {
             let mut attached = self.frontend_attached.lock().expect("前端附着表锁损坏");
             for session_id in &ended_ids {
@@ -2245,9 +2253,16 @@ impl TerminalService {
         let summary = if executed.interactive_mode {
             format!("命令已在{selection}进入交互状态{ended_note}")
         } else if executed.timed_out {
-            format!(
-                "命令超时已中断（{terminal_note} 仍可继续输入，此前输出见 stdout/stderr）{cwd_note}{ended_note}"
-            )
+            // 超时与 shell 退出同时命中时终端已不可输入，两种说法不能并存。
+            if executed.session_ended {
+                format!(
+                    "命令超时已中断（{terminal_note} 已随命令退出，输出见 stdout/stderr）{cwd_note}"
+                )
+            } else {
+                format!(
+                    "命令超时已中断（{terminal_note} 仍可继续输入，此前输出见 stdout/stderr）{cwd_note}"
+                )
+            }
         } else if exit_code == 0 {
             format!("命令已在{selection}执行完成{cwd_note}{ended_note}")
         } else {
