@@ -163,11 +163,15 @@ fn canonical_file_url(candidate: String) -> String {
 /// Windows 盘符路径（`C:\x`、`c:/x`，允许混合斜杠）与 UNC 路径
 /// （`\\server\share\x`）按平台无关规则转写，盘符统一大写。
 fn local_path_to_file_url(value: &str) -> String {
-    // UNC 网络路径：反斜杠与正斜杠两种写法同义，主机名进 URL authority
-    for prefix in [r"\\", "//"] {
-        if let Some(rest) = value.strip_prefix(prefix) {
-            return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
-        }
+    // UNC 网络路径：反斜杠写法各平台一致按主机名处理；正斜杠写法
+    // （//server/share）在 Windows 生态常见，但 Unix 上前导双斜杠是
+    // implementation-defined 的本地路径，因此仅 Windows 按 UNC 归一。
+    #[cfg(windows)]
+    if let Some(rest) = value.strip_prefix("//") {
+        return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\") {
+        return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
     }
     let bytes = value.as_bytes();
     if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
@@ -175,7 +179,7 @@ fn local_path_to_file_url(value: &str) -> String {
         return canonical_file_url(format!("file:///{drive}:{}", value[2..].replace('\\', "/")));
     }
     if bytes.first() == Some(&b'/') {
-        return canonical_file_url(format!("file://{value}"));
+        return canonical_file_url(format!("file:///{}", value.trim_start_matches('/')));
     }
     value.to_string()
 }
@@ -199,13 +203,25 @@ pub(crate) fn normalize_navigation_url(raw: &str) -> String {
                     && bytes[1].is_ascii_alphabetic()
                     && bytes[2] == b':'
                 {
+                    // 盘符统一大写时重拼字符串，query 与 fragment 需一并带回
                     let drive = bytes[1].to_ascii_uppercase() as char;
-                    return format!("file:///{drive}{}", &path[2..]);
+                    let mut rebuilt = format!("file:///{drive}{}", &path[2..]);
+                    if let Some(query) = parsed.query() {
+                        rebuilt.push('?');
+                        rebuilt.push_str(query);
+                    }
+                    if let Some(fragment) = parsed.fragment() {
+                        rebuilt.push('#');
+                        rebuilt.push_str(fragment);
+                    }
+                    return rebuilt;
                 }
             }
             return parsed.to_string();
         }
-        // 解析失败的 file: 变体（如 file:C:\x）剥掉协议与斜杠后按裸路径重建
+        // 解析失败的 file: 变体剥掉协议与斜杠后按裸路径重建兜底。
+        // 注意与裸路径的语义差异：此处 % 视为已编码序列原样保留，
+        // 裸路径则把字面 % 预编码为 %25——两种写法约定不同，勿"统一"。
         return local_path_to_file_url(value[5..].trim_start_matches('/'));
     }
     local_path_to_file_url(value)
@@ -273,13 +289,52 @@ fn is_non_html_resource_url(url: &str) -> bool {
     )
 }
 
+/// 展示用百分号解码：文件名等 UI 文本按 UTF-8 解回原文；
+/// 非法编码序列原样保留，不因解码失败丢信息。
+fn percent_decode_lossy(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let hex = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+            out.push(hex(bytes[index + 1]) * 16 + hex(bytes[index + 2]));
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 资源页展示标题：地址最后一段路径解码后的文件名（标签页与工具
+/// 结果共用，保证界面与 web_fetch 汇报一致）。
+fn resource_page_title(url: &str) -> String {
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .split('#')
+        .next()
+        .unwrap_or_default();
+    percent_decode_lossy(file_name)
+}
+
 /// 资源页合成快照：Finished 事件本身即代表资源响应完成，不依赖页面脚本。
 fn resource_document_snapshot(url: &str, navigation_id: u64) -> WebDocumentSnapshot {
     WebDocumentSnapshot {
         document_id: format!("resource-{navigation_id}"),
         ready_state: "complete".to_string(),
         url: url.to_string(),
-        title: String::new(),
+        title: resource_page_title(url),
         text: String::new(),
         has_content: false,
         internal_error: false,
@@ -2337,16 +2392,10 @@ impl BrowserManager {
                         .final_url
                         .clone()
                         .unwrap_or_else(|| url.to_string());
-                    let file_name = final_url
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or_default()
-                        .split('?')
-                        .next()
-                        .unwrap_or_default();
+                    let title = resource_page_title(&final_url);
                     return BrowserResponse {
                         ok: true,
-                        title: file_name.to_string(),
+                        title,
                         content: String::new(),
                         final_url,
                         error: None,
@@ -3507,6 +3556,23 @@ mod tests {
         assert_eq!(response.title, "pic.png");
         assert_eq!(response.final_url, url);
         assert!(response.content.is_empty());
+        // 编码文件名解码为原文展示（%E6%8A%A5%E8%A1%A8 → 报表）
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.navigation_signals.insert(
+                "tab-2".to_string(),
+                navigation_signal("file:///C:/docs/%E6%8A%A5%E8%A1%A8.pdf"),
+            );
+        }
+        let response = manager.fetch_page_content(
+            "file:///C:/docs/%E6%8A%A5%E8%A1%A8.pdf",
+            1000,
+            &NavigationTicket {
+                tab_id: "tab-2".to_string(),
+                navigation_id: 0,
+            },
+        );
+        assert_eq!(response.title, "报表.pdf");
     }
 
     #[test]
@@ -3515,8 +3581,9 @@ mod tests {
         assert_eq!(snapshot.document_id, "resource-7");
         assert_eq!(snapshot.ready_state, "complete");
         assert_eq!(snapshot.url, "file:///C:/a.png");
+        assert_eq!(snapshot.title, "a.png");
         assert!(!snapshot.internal_error);
-        assert!(snapshot.title.is_empty() && snapshot.text.is_empty());
+        assert!(snapshot.text.is_empty());
     }
 
     #[test]
@@ -3561,10 +3628,39 @@ mod tests {
             normalize_navigation_url(r"\\server\share\doc.pdf"),
             "file://server/share/doc.pdf"
         );
-        // 正斜杠 UNC 写法与反斜杠同义
+        // 正斜杠 UNC 仅 Windows 按网络路径归一；Unix 视为本地路径剥多余斜杠
+        #[cfg(windows)]
         assert_eq!(
             normalize_navigation_url("//server/share/doc.pdf"),
             "file://server/share/doc.pdf"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            normalize_navigation_url("//server/share/doc.pdf"),
+            "file:///server/share/doc.pdf"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_keeps_query_and_fragment_for_drive_urls() {
+        // 盘符大写重拼时 query 与 fragment 必须一并带回（Unix 与网络路径
+        // 本就走 Url::to_string 保留，仅盘符分支是手工重拼）
+        assert_eq!(
+            normalize_navigation_url("file:///c:/x/index.html?name=1#sec2"),
+            "file:///C:/x/index.html?name=1#sec2"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///C:/x/index.html#sec2"),
+            "file:///C:/x/index.html#sec2"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///c:/x/index.html?name=1"),
+            "file:///C:/x/index.html?name=1"
+        );
+        // 参照：Unix 与网络路径形式原样保留
+        assert_eq!(
+            normalize_navigation_url("file:///Users/x/index.html?q=1#s2"),
+            "file:///Users/x/index.html?q=1#s2"
         );
     }
 
