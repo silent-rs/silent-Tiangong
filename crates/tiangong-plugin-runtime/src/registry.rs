@@ -1213,9 +1213,32 @@ mod tests {
             "permissions":["tool.provide"],"entrypoints":["desktop"],
             "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}});
         std::fs::write(directory.join(MANIFEST_FILE), manifest_value.to_string()).unwrap();
-        let manifest: PluginManifest =
-            serde_json::from_str(&std::fs::read_to_string(directory.join(MANIFEST_FILE)).unwrap())
-                .unwrap();
+        let parse_manifest = || {
+            serde_json::from_str::<PluginManifest>(
+                &std::fs::read_to_string(directory.join(MANIFEST_FILE)).unwrap(),
+            )
+            .unwrap()
+        };
+
+        // 断言失败也清理全局状态，避免污染后续用例。
+        struct GlobalStateGuard {
+            id: String,
+            directory: PathBuf,
+        }
+        impl Drop for GlobalStateGuard {
+            fn drop(&mut self) {
+                if let Ok(mut connections) = sidecar_connections().lock() {
+                    connections.retain(|key, _| key.directory != self.directory);
+                }
+                if let Ok(mut plugins) = loaded_plugins().lock() {
+                    plugins.remove(&self.id);
+                }
+            }
+        }
+        let _guard = GlobalStateGuard {
+            id: id.clone(),
+            directory: directory.clone(),
+        };
 
         let healthy = std::sync::Arc::new(StubSidecarConnection {
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -1242,17 +1265,44 @@ mod tests {
                 std::sync::Arc::clone(&failing) as std::sync::Arc<dyn SidecarConnection>,
             );
         }
+        // 注册表记录里的旧 sidecar（stop_loaded_sidecar 分支的目标）也种桩。
+        let loaded_stub = std::sync::Arc::new(StubSidecarConnection {
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            fail_stop: false,
+        });
+        loaded_plugins().lock().unwrap().insert(
+            id.clone(),
+            LoadedPlugin {
+                directory: directory.clone(),
+                manifest: parse_manifest(),
+                wasm_bytes: None,
+                component: None,
+                ui_plugin: None,
+                descriptor: None,
+                generation: 0,
+                instances: Vec::new(),
+                ts_instances: Vec::new(),
+                sidecar: Some(
+                    std::sync::Arc::clone(&loaded_stub) as std::sync::Arc<dyn SidecarConnection>
+                ),
+                verified_sidecar: None,
+                load_error: None,
+                runtime_error: None,
+                enabled: true,
+            },
+        );
 
         let installed = InstalledPlugin {
             directory: directory.clone(),
-            manifest,
+            manifest: parse_manifest(),
             enabled: true,
             signed_release: None,
         };
+        // 热加载自身尽力而为：连接清理报错（failing 桩）只告警，重载仍成功。
         reload_plugin_inner(root.path(), &installed).expect("热加载应成功");
 
         // 无条件清理：该目录的连接全部出表；个别 stop 失败不阻断摘表，
-        // 也不阻断其余连接的停止。
+        // 也不阻断其余连接的停止；注册表记录里的旧 sidecar 同样被停。
         let remaining = sidecar_connections()
             .lock()
             .unwrap()
@@ -1262,7 +1312,7 @@ mod tests {
         assert_eq!(remaining, 0, "热加载后连接表不应残留该目录的连接");
         assert!(healthy.stopped.load(Ordering::SeqCst));
         assert!(failing.stopped.load(Ordering::SeqCst));
-        loaded_plugins().lock().unwrap().remove(&id);
+        assert!(loaded_stub.stopped.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -3493,8 +3543,11 @@ pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
         .map(|(_, connection)| connection.clone())
         .collect::<Vec<_>>();
     // 先摘表再停进程：任一连接停止失败也不能让连接残留在表中（残留
-    // 会被下次调用直接复用并打到旧二进制），失败仅告警并继续处理其余。
+    // 会被下次调用直接复用并打到旧二进制）。停止失败聚合成首个错误
+    // 照常上报——停用回滚、卸载的 Windows 二进制占用保护等调用方依赖
+    // 失败语义；需要尽力而为语义的调用点（如热加载）自行吞错告警。
     remove_sidecar_connection(directory);
+    let mut first_error = None;
     for connection in connections {
         if let Err(error) = connection.stop() {
             tracing::warn!(
@@ -3502,9 +3555,15 @@ pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
                 %error,
                 "停止 sidecar 连接失败（连接已从表中摘除）"
             );
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
         }
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// 兜底按二进制 image 名清理该插件的所有残留 sidecar 进程。
