@@ -601,6 +601,18 @@ async fn cancel_running_turn_ends_cancelled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_idle_core_is_rejected() {
+    let (env, sid) = TestEnv::new("cancel-idle");
+    let (core, _events) = core_for(&env, &sid, "http://unused.invalid");
+
+    let error = core
+        .deliver(AgentInputKind::cancel())
+        .expect_err("空闲 Core 不应报告取消命令已投递");
+    assert!(matches!(error, crate::core::CoreError::WorkerStopped));
+    core.shutdown_join().expect("关闭失败");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_injection_deferred_into_next_request() {
     let (env, sid) = TestEnv::new("inject");
     let server = MockServer::builder().start().await;

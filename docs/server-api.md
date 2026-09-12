@@ -270,6 +270,25 @@ GET /api/v1/sessions/{id}
 GET /api/v1/sessions/{id}/cost
 ```
 
+#### 取消会话当前轮次
+
+```
+POST /api/v1/sessions/{id}/cancel
+```
+
+无需请求体。需要认证，并要求调用方拥有管理会话权限（`can_manage_sessions`）。接口只
+尝试向当前活跃执行投递取消命令，不等待整轮收尾；发送请求正处于准备或入队边界时，
+接口会短暂等待该边界后再重试一次。
+
+**响应**：
+
+```json
+{ "cancelled": true, "id": "会话 ID" }
+```
+
+`cancelled: true` 表示取消命令已投递到活跃执行，`false` 表示本次没有可接受取消命令
+的活跃执行。`false` 不等同于 HTTP 404，也不表示会话资源不存在。
+
 #### 删除会话
 
 ```

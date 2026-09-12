@@ -123,7 +123,7 @@ where
 
 /// 向当前活跃任务发送命令（取消、工具注入和运行配置更新等）。
 ///
-/// 无活跃任务时返回 false(命令被忽略)。
+/// 无活跃任务或命令通道已关闭时返回 false（命令被忽略）。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
     if let Ok(tasks) = turn_tasks().lock()
         && let Some(task) = tasks.get(session_id)
