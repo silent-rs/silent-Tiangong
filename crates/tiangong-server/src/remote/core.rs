@@ -54,6 +54,26 @@ impl ServerCoreManager {
         }
     }
 
+    /// 取消指定会话当前执行中的轮次：向活跃 turn 投递 Cancel 信号，Core
+    /// 立即终止并以「已取消」错误唤醒全部等待方（快速停止，不排队）。
+    /// 返回 true 表示命令已投递到活跃执行，false 表示当时没有可接受命令的活跃
+    /// 执行。首轮未命中时只等待发送准备到消息入队的操作边界，不等待整轮完成。
+    pub async fn cancel_session_turn(&self, session_id: &str) -> Result<bool> {
+        let session_id = normalize_session_id(session_id)?;
+        let core_manager = {
+            let state = self.state.lock().await;
+            state.core_manager.clone()
+        };
+        if core_manager.cancel_core(&session_id) {
+            return Ok(true);
+        }
+
+        // 发送流程在消息入队前持有 operation lock；取消不拿 wait lock，避免等待整轮。
+        let operation_lock = self.session_operation_lock(&session_id);
+        let _operation_guard = operation_lock.lock().await;
+        Ok(core_manager.cancel_core(&session_id))
+    }
+
     /// 从 App State 刷新全局模板，并按 session 为每个 Core 替换独立配置快照。
     pub async fn sync_config_from_state(&self) {
         let _config_guard = self.config_update_lock.lock().await;
@@ -1168,6 +1188,44 @@ mod tests {
 
         cleanup_created_attachment_paths(&created_paths).unwrap();
         assert!(!created_paths[0].exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_idle_session_returns_false() {
+        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
+        let (manager, session, _session_path, _state) = isolated_test_manager(root.path());
+
+        assert!(!manager.cancel_session_turn(&session.id).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_waits_only_for_operation_boundary() {
+        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
+        let (manager, session, _session_path, _state) = isolated_test_manager(root.path());
+        let wait_lock = manager.session_wait_lock(&session.id);
+        let _wait_guard = wait_lock.lock().await;
+        let operation_lock = manager.session_operation_lock(&session.id);
+        let operation_guard = operation_lock.lock_owned().await;
+
+        let cancelling = {
+            let manager = manager.clone();
+            let session_id = session.id.clone();
+            tokio::spawn(async move { manager.cancel_session_turn(&session_id).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!cancelling.is_finished(), "取消应等待发送操作边界");
+
+        drop(operation_guard);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), cancelling)
+            .await
+            .expect("释放操作锁后取消应立即返回")
+            .expect("取消任务不应 panic")
+            .unwrap();
+        assert!(!result);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

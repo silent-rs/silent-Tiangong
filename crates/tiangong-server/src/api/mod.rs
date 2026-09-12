@@ -107,6 +107,7 @@ pub fn build_routes(
                 Route::new("<id>")
                     .get(sessions::get_session)
                     .append(Route::new("cost").get(sessions::get_session_cost))
+                    .append(Route::new("cancel").post(sessions::cancel_session_turn))
                     .delete(sessions::delete_session),
             ),
         )
@@ -199,6 +200,11 @@ mod tests {
         }
 
         async fn delete_session(&self, _session_id: &str) -> Result<bool> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+
+        async fn cancel_session_turn(&self, _session_id: &str) -> Result<bool> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(anyhow!("not used"))
         }

@@ -107,7 +107,10 @@ impl CoreManager {
         }
     }
 
-    /// 取消指定会话的执行（向活跃 turn task 投递 Cancel；无活跃 task 则忽略）。
+    /// 取消指定会话的执行。
+    ///
+    /// 返回 true 表示 Cancel 已投递到活跃 turn task，false 表示当时没有可接受
+    /// 取消命令的活跃 task；它不表示 turn 已经完成收尾。
     pub fn cancel_core(&self, session_id: &str) -> bool {
         let registry = self.registry();
         registry

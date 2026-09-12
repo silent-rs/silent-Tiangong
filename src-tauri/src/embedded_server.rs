@@ -49,6 +49,11 @@ enum EmbeddedCoreRequest {
         session_id: String,
         reply: oneshot::Sender<HostResult<bool>>,
     },
+    /// 取消会话当前执行中的轮次（快速停止：等待方立即收到取消错误）。
+    CancelTurn {
+        session_id: String,
+        reply: oneshot::Sender<HostResult<bool>>,
+    },
     SyncConfig {
         reply: oneshot::Sender<HostResult<()>>,
     },
@@ -128,6 +133,20 @@ impl ServerCoreBackend for DesktopServerCoreBridge {
         reply_rx
             .await
             .map_err(|_| anyhow!("Desktop 内嵌 Server 未返回删除结果"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn cancel_session_turn(&self, session_id: &str) -> Result<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.request_tx
+            .send(EmbeddedCoreRequest::CancelTurn {
+                session_id: session_id.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow!("Desktop 内嵌 Server 桥接已关闭"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("Desktop 内嵌 Server 未返回取消结果"))?
             .map_err(anyhow::Error::msg)
     }
 
@@ -221,6 +240,20 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                         let state = request_app.state::<TiangongApp>();
                         let result = delete_session(&request_app, state.inner(), &session_id).await;
                         let _ = reply.send(result);
+                    }
+                    EmbeddedCoreRequest::CancelTurn { session_id, reply } => {
+                        let state = request_app.state::<TiangongApp>();
+                        // 只投取消信号：轮次终态由原投递路径的等待器链处理
+                        // （等待方收到「执行已取消」错误并释放远端轮次）。
+                        let cancelled = state
+                            .with_state_read(|core_state| {
+                                Ok::<_, anyhow::Error>(
+                                    core_state.core_manager.cancel_core(&session_id),
+                                )
+                            })
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(cancelled);
                     }
                     EmbeddedCoreRequest::SyncConfig { reply } => {
                         let state = request_app.state::<TiangongApp>();

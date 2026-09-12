@@ -555,8 +555,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
             ),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => {
-                    let _ = crate::shared_runtime::send_command(&self.session_id, Command::Cancel);
-                    Ok(())
+                    if crate::shared_runtime::send_command(&self.session_id, Command::Cancel) {
+                        Ok(())
+                    } else {
+                        Err(CoreError::WorkerStopped)
+                    }
                 }
                 CommandInput::SetTrustMode(trust_mode) => {
                     self.set_trust_mode(trust_mode);
