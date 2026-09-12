@@ -2256,7 +2256,7 @@ impl TerminalService {
             // 超时与 shell 退出同时命中时终端已不可输入，两种说法不能并存。
             if executed.session_ended {
                 format!(
-                    "命令超时已中断（{terminal_note} 已随命令退出，输出见 stdout/stderr）{cwd_note}"
+                    "命令超时已中断（{terminal_note} 已随命令退出，输出见 stdout/stderr）{cwd_note}，下次调用将新建终端"
                 )
             } else {
                 format!(
