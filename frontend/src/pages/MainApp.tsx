@@ -566,6 +566,16 @@ export function MainApp() {
         void openWorkspacePanel('plugin');
       }));
       guard();
+      // 插件热加载完成：卸载该插件的后台执行壳。壳内可能是目录替换前
+      // 的旧页面（桥订阅已断），保留会让工具调用的"已有实例"判重吞掉
+      // 重新挂载的请求，永远等不到新订阅。卸载后下次调用自动按磁盘
+      // 最新页面重建并接续执行；在途调用已由后端热加载先行取消。
+      track(await listen<string>('plugin_reloaded', (event) => {
+        const pluginId = event.payload;
+        if (!pluginId) return;
+        setBgPluginInstances((prev) => prev.filter((item) => item.pluginId !== pluginId));
+      }));
+      guard();
       // app.close 原语落地：宿主请求关闭插件 App 实例（Agent/插件在必要
       // 时收起对应 tab）。instance_id 精确关一个实例，all 收起全部。
       track(await listen<{

@@ -5142,12 +5142,16 @@ pub async fn reload_plugin(
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
+    let reloaded_id = plugin_id.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
         tiangong_plugin_runtime::registry::reload_plugin(&storage_root, &plugin_id)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("重载插件任务失败: {error}"))??;
+    // 定向通知前端该插件已热加载：前端据此卸载旧的后台执行壳，下次
+    // 工具调用按磁盘最新页面重建，避免旧壳吞掉重新挂载的请求。
+    let _ = app.emit("plugin_reloaded", &reloaded_id);
     notify_plugins_changed(&app);
     Ok(status)
 }
