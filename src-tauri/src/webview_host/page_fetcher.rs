@@ -432,13 +432,8 @@ impl BrowserToolOverride {
             Some(u) => u.to_string(),
             None => return Box::pin(async { None }),
         };
-
-        // 本地路径统一转为 file:// URL，与 HTTP 走同一条浏览器打开路径
-        let url = if url.starts_with('/') {
-            format!("file://{url}")
-        } else {
-            url
-        };
+        // 本地路径（Unix / Windows 盘符 / UNC）→ file:// 的归一化统一在
+        // 浏览器导航入口（normalize_navigation_url）完成，此处直接透传。
 
         if mode != "text" {
             return Box::pin(async { None });

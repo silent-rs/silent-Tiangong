@@ -30,6 +30,10 @@ fn sanitize_path_segment(id: &str) -> String {
         .collect()
 }
 
+/// webview 标签仅在进程内标识，tab_id 全局唯一（SCRU128）兜底不撞车，
+/// 因此用替换式清洗即可；数据目录名（browser_session_directory_name）会
+/// 落盘且不同 scope 必须不碰撞，用百分号编码——两处规则刻意不统一，
+/// 勿合并。
 fn webview_label(session_id: &str, tab_id: &str) -> String {
     format!(
         "browser-webview-{}-{}",
@@ -142,6 +146,87 @@ fn normalize_url_for_compare(url: &str) -> String {
     s.to_string()
 }
 
+/// 构造中的 file URL 先编码会破坏结构的字符再经 Url 解析规范化编码
+/// （空格/非 ASCII 等）；# 与 ? 不预编码会被切成 fragment/query。
+fn canonical_file_url(candidate: String) -> String {
+    let encoded = candidate
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3F");
+    match encoded.parse::<Url>() {
+        Ok(url) => url.to_string(),
+        Err(_) => encoded,
+    }
+}
+
+/// 裸本地路径转标准 file URL；非本地路径形式原样返回。
+/// Windows 盘符路径（`C:\x`、`c:/x`，允许混合斜杠）与 UNC 路径
+/// （`\\server\share\x`）按平台无关规则转写，盘符统一大写。
+fn local_path_to_file_url(value: &str) -> String {
+    // UNC 网络路径：反斜杠写法各平台一致按主机名处理；正斜杠写法
+    // （//server/share）在 Windows 生态常见，但 Unix 上前导双斜杠是
+    // implementation-defined 的本地路径，因此仅 Windows 按 UNC 归一。
+    #[cfg(windows)]
+    if let Some(rest) = value.strip_prefix("//") {
+        return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
+    }
+    if let Some(rest) = value.strip_prefix(r"\\") {
+        return canonical_file_url(format!("file://{}", rest.replace('\\', "/")));
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let drive = bytes[0].to_ascii_uppercase() as char;
+        return canonical_file_url(format!("file:///{drive}:{}", value[2..].replace('\\', "/")));
+    }
+    if bytes.first() == Some(&b'/') {
+        return canonical_file_url(format!("file:///{}", value.trim_start_matches('/')));
+    }
+    value.to_string()
+}
+
+/// 导航地址统一归一化：本地路径（Windows 盘符 / UNC / Unix 绝对路径）
+/// 与 file: 变体（`file:C:/x`、`file://C:/x`）收敛为标准三斜杠形式并
+/// 大写盘符（对齐 Chromium 实际地址，保证导航状态比较一致）；其余
+/// 地址原样返回。幂等：已是标准形式的输入输出不变。
+pub(crate) fn normalize_navigation_url(raw: &str) -> String {
+    let value = raw.trim();
+    if value
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+    {
+        if let Ok(parsed) = value.parse::<Url>() {
+            let path = parsed.path();
+            if parsed.host_str().is_none() {
+                let bytes = path.as_bytes();
+                if bytes.len() >= 3
+                    && bytes[0] == b'/'
+                    && bytes[1].is_ascii_alphabetic()
+                    && bytes[2] == b':'
+                {
+                    // 盘符统一大写时重拼字符串，query 与 fragment 需一并带回
+                    let drive = bytes[1].to_ascii_uppercase() as char;
+                    let mut rebuilt = format!("file:///{drive}{}", &path[2..]);
+                    if let Some(query) = parsed.query() {
+                        rebuilt.push('?');
+                        rebuilt.push_str(query);
+                    }
+                    if let Some(fragment) = parsed.fragment() {
+                        rebuilt.push('#');
+                        rebuilt.push_str(fragment);
+                    }
+                    return rebuilt;
+                }
+            }
+            return parsed.to_string();
+        }
+        // 解析失败的 file: 变体剥掉协议与斜杠后按裸路径重建兜底。
+        // 注意与裸路径的语义差异：此处 % 视为已编码序列原样保留，
+        // 裸路径则把字面 % 预编码为 %25——两种写法约定不同，勿"统一"。
+        return local_path_to_file_url(value[5..].trim_start_matches('/'));
+    }
+    local_path_to_file_url(value)
+}
+
 fn push_recent_unique(values: &mut Vec<String>, value: String) {
     if value.is_empty() || values.iter().any(|item| item == &value) {
         return;
@@ -161,6 +246,99 @@ fn remember_superseded_navigation(navigation: &mut TabNavigationState) {
 
 fn parse_web_document_snapshot(result: &str) -> Option<WebDocumentSnapshot> {
     serde_json::from_str(result).ok()
+}
+
+/// 图片、PDF、音视频、字体等按扩展名识别的非 HTML 资源地址。此类资源页
+/// 没有可注入脚本的 HTML 文档（eval 无响应），不能走 DOM 快照流程。
+/// SVG 例外：浏览器中按 XML 文档渲染，有 DOM 且可执行脚本，按正常页面处理。
+fn is_non_html_resource_url(url: &str) -> bool {
+    let Ok(parsed) = url.parse::<Url>() else {
+        return false;
+    };
+    let Some(extension) = parsed
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension))
+    else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "ico"
+            | "bmp"
+            | "pdf"
+            | "mp4"
+            | "webm"
+            | "mov"
+            | "mkv"
+            | "ogg"
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "m4a"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "otf"
+    )
+}
+
+/// 展示用百分号解码：文件名等 UI 文本按 UTF-8 解回原文；
+/// 非法编码序列原样保留，不因解码失败丢信息。
+fn percent_decode_lossy(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            let hex = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+            out.push(hex(bytes[index + 1]) * 16 + hex(bytes[index + 2]));
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 资源页展示标题：地址最后一段路径解码后的文件名（标签页与工具
+/// 结果共用，保证界面与 web_fetch 汇报一致）。
+fn resource_page_title(url: &str) -> String {
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .split('#')
+        .next()
+        .unwrap_or_default();
+    percent_decode_lossy(file_name)
+}
+
+/// 资源页合成快照：Finished 事件本身即代表资源响应完成，不依赖页面脚本。
+fn resource_document_snapshot(url: &str, navigation_id: u64) -> WebDocumentSnapshot {
+    WebDocumentSnapshot {
+        document_id: format!("resource-{navigation_id}"),
+        ready_state: "complete".to_string(),
+        url: url.to_string(),
+        title: resource_page_title(url),
+        text: String::new(),
+        has_content: false,
+        internal_error: false,
+    }
 }
 
 fn accept_loading_document(
@@ -1049,6 +1227,7 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<Webview<Wry>, String> {
+        let url = normalize_navigation_url(url);
         let window = app
             .get_window("main")
             .ok_or_else(|| "主窗口未找到".to_string())?;
@@ -1059,7 +1238,7 @@ impl BrowserManager {
             s.session_id.clone()
         };
         let navigation_id =
-            Self::begin_navigation_for_tab(app, state.clone(), tab_id, url, intent)?;
+            Self::begin_navigation_for_tab(app, state.clone(), tab_id, &url, intent)?;
         let parsed_url: Url = match url.parse() {
             Ok(url) => url,
             Err(error) => {
@@ -1068,6 +1247,7 @@ impl BrowserManager {
             }
         };
         let data_dir = browser_data_directory(&session_id);
+        let data_dir_for_error = data_dir.clone();
         let label = webview_label(&session_id, tab_id);
         let tab_id_for_closure = tab_id.to_string();
         // on_page_load 回调直接写入目标 session 的 state（不再经 app.state().manager() 串台）
@@ -1160,6 +1340,21 @@ impl BrowserManager {
                         navigation.navigation_id
                     };
 
+                    // 资源页（图片/PDF/音视频等）没有可注入的 HTML bridge，
+                    // eval 读快照永远无响应；Finished 事件即代表资源响应
+                    // 完成，用合成快照直接结束导航，避免等到超时。
+                    if is_non_html_resource_url(&event_url) {
+                        Self::handle_page_load_finished(
+                            &app_clone,
+                            state_clone_holder.clone(),
+                            &tab_id_for_closure,
+                            navigation_id,
+                            &event_url,
+                            resource_document_snapshot(&event_url, navigation_id),
+                        );
+                        return;
+                    }
+
                     let state_for_finished = state_clone_holder.clone();
                     let tab_id_for_finished = tab_id_for_closure.clone();
                     let app_for_finished = app_clone.clone();
@@ -1192,7 +1387,10 @@ impl BrowserManager {
                 Ok(webview) => webview,
                 Err(error) => {
                     Self::fail_navigation_for_tab(app, state, tab_id, navigation_id);
-                    return Err(format!("创建浏览器 WebView 失败：{error}"));
+                    return Err(format!(
+                        "创建浏览器 WebView 失败（数据目录 {}）：{error}",
+                        data_dir_for_error.display()
+                    ));
                 }
             };
 
@@ -1215,6 +1413,7 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<(), String> {
+        let url = normalize_navigation_url(url);
         let existing_action = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.is_empty() {
@@ -1229,7 +1428,7 @@ impl BrowserManager {
                     .map(|tab| tab.url.as_str())
                     .unwrap_or_default();
                 let same_url =
-                    normalize_url_for_compare(current_url) == normalize_url_for_compare(url);
+                    normalize_url_for_compare(current_url) == normalize_url_for_compare(&url);
                 if let Some(webview) = state.webviews.get(&target_id) {
                     let _ = webview.set_position(LogicalPosition::new(x, y));
                     let _ = webview.set_size(LogicalSize::new(w, h));
@@ -1259,7 +1458,7 @@ impl BrowserManager {
                     app,
                     self.state.clone(),
                     &tab_id,
-                    url,
+                    &url,
                     intent,
                     x,
                     y,
@@ -1269,10 +1468,10 @@ impl BrowserManager {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id, webview);
                 drop(state);
-                self.start_url_poll(app, url);
+                self.start_url_poll(app, &url);
                 self.start_event_poll(app);
             } else if should_navigate {
-                self.navigate(app, url)?;
+                self.navigate(app, &url)?;
             }
             return Ok(());
         }
@@ -1285,10 +1484,10 @@ impl BrowserManager {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state
                 .navigation_signals
-                .insert(tab_id.clone(), navigation_signal(url));
+                .insert(tab_id.clone(), navigation_signal(&url));
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
-                url: url.to_string(),
+                url: url.clone(),
                 title: String::new(),
                 source: BrowserTabSource::User,
                 agent_domain: None,
@@ -1305,7 +1504,7 @@ impl BrowserManager {
                 app,
                 self.state.clone(),
                 &tab_id,
-                url,
+                &url,
                 NavigationIntent::Normal,
                 x,
                 y,
@@ -1317,7 +1516,7 @@ impl BrowserManager {
             }
         }
 
-        self.start_url_poll(app, url);
+        self.start_url_poll(app, &url);
         self.start_event_poll(app);
 
         Ok(())
@@ -1730,6 +1929,7 @@ impl BrowserManager {
         url: &str,
         intent: NavigationIntent,
     ) -> Result<NavigationTicket, String> {
+        let url = normalize_navigation_url(url);
         let (tab_id, webview) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
             let tab_id = state
@@ -1744,7 +1944,7 @@ impl BrowserManager {
             (tab_id, webview)
         };
         let navigation_id =
-            Self::begin_navigation_for_tab(app, self.state.clone(), &tab_id, url, intent)?;
+            Self::begin_navigation_for_tab(app, self.state.clone(), &tab_id, &url, intent)?;
         let parsed_url: Url = match url.parse() {
             Ok(url) => url,
             Err(error) => {
@@ -1777,10 +1977,11 @@ impl BrowserManager {
         app: &AppHandle<Wry>,
         url: &str,
     ) -> Result<NavigationTicket, String> {
+        let url = normalize_navigation_url(url);
         self.set_visible(true);
         if !self.is_open() {
             if let Some((_, _, w, h)) = default_browser_rect(app) {
-                self.open(app, url, -10000.0, -10000.0, w, h)?;
+                self.open(app, &url, -10000.0, -10000.0, w, h)?;
                 return self
                     .active_navigation_ticket()
                     .ok_or_else(|| "浏览器导航状态未初始化".to_string());
@@ -1809,7 +2010,7 @@ impl BrowserManager {
                 app,
                 self.state.clone(),
                 &tab_id,
-                url,
+                &url,
                 NavigationIntent::Normal,
                 rect.0,
                 rect.1,
@@ -1819,14 +2020,14 @@ impl BrowserManager {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab_id.clone(), webview);
             drop(state);
-            self.start_url_poll(app, url);
+            self.start_url_poll(app, &url);
             self.start_event_poll(app);
             return self
                 .navigation_ticket_for_tab(&tab_id)
                 .ok_or_else(|| "浏览器导航状态未初始化".to_string());
         }
 
-        self.navigate(app, url)
+        self.navigate(app, &url)
     }
 
     /// Agent 按主域名复用自己的工作标签，不占用用户标签。
@@ -1835,8 +2036,9 @@ impl BrowserManager {
         app: &AppHandle<Wry>,
         url: &str,
     ) -> Result<NavigationTicket, String> {
+        let url = normalize_navigation_url(url);
         self.set_visible(true);
-        let agent_domain = agent_domain_for_url(url)?;
+        let agent_domain = agent_domain_for_url(&url)?;
         let (agent_tab_id, rect, has_tabs) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
             let matching_tab = agent_tab_id_for_domain(&state, &agent_domain);
@@ -1854,7 +2056,7 @@ impl BrowserManager {
                     .is_some_and(|navigation| {
                         navigation.phase == NavigationPhase::Failed
                             && normalize_url_for_compare(&navigation.requested_url)
-                                == normalize_url_for_compare(url)
+                                == normalize_url_for_compare(&url)
                     });
                 (
                     !state.webviews.contains_key(&tab_id),
@@ -1871,7 +2073,7 @@ impl BrowserManager {
                     app,
                     self.state.clone(),
                     &tab_id,
-                    url,
+                    &url,
                     intent,
                     rect.0,
                     rect.1,
@@ -1881,14 +2083,14 @@ impl BrowserManager {
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id.clone(), webview);
                 drop(state);
-                self.start_url_poll(app, url);
+                self.start_url_poll(app, &url);
                 self.start_event_poll(app);
                 return self
                     .navigation_ticket_for_tab(&tab_id)
                     .ok_or_else(|| "浏览器导航状态未初始化".to_string());
             }
 
-            return self.navigate_with_intent(app, url, intent);
+            return self.navigate_with_intent(app, &url, intent);
         }
 
         let rect_override = if rect.2 > 0.0 && rect.3 > 0.0 {
@@ -1906,13 +2108,13 @@ impl BrowserManager {
         };
         let tab_id = self.tab_new_with_source(
             app,
-            url,
+            &url,
             BrowserTabSource::Agent,
             Some(agent_domain),
             rect_override,
             None,
         )?;
-        self.start_url_poll(app, url);
+        self.start_url_poll(app, &url);
         self.start_event_poll(app);
         self.navigation_ticket_for_tab(&tab_id)
             .ok_or_else(|| "浏览器导航状态未初始化".to_string())
@@ -2182,7 +2384,24 @@ impl BrowserManager {
                 );
                 return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
             }
-            NavigationPhase::Loaded => {}
+            NavigationPhase::Loaded => {
+                // 资源页（图片/PDF/音视频）没有可注入的正文提取脚本，导航
+                // 完成即成功：标题取文件名、正文留空，不再等必然超时的 eval。
+                if is_non_html_resource_url(&navigation.requested_url) {
+                    let final_url = navigation
+                        .final_url
+                        .clone()
+                        .unwrap_or_else(|| url.to_string());
+                    let title = resource_page_title(&final_url);
+                    return BrowserResponse {
+                        ok: true,
+                        title,
+                        content: String::new(),
+                        final_url,
+                        error: None,
+                    };
+                }
+            }
         }
 
         let result = self.eval_tab_with_result_timeout(
@@ -2536,6 +2755,7 @@ impl BrowserManager {
         external_id: Option<&str>,
     ) -> Result<String, String> {
         // 插件可自带标签编号（阶段 3 标签模型上移后由插件主导标识）
+        let url = normalize_navigation_url(url);
         let tab_id = external_id
             .map(str::to_string)
             .unwrap_or_else(|| scru128::new().to_string());
@@ -2555,10 +2775,10 @@ impl BrowserManager {
             }
             state
                 .navigation_signals
-                .insert(tab_id.clone(), navigation_signal(url));
+                .insert(tab_id.clone(), navigation_signal(&url));
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
-                url: url.to_string(),
+                url: url.clone(),
                 title: String::new(),
                 source,
                 agent_domain,
@@ -2574,7 +2794,7 @@ impl BrowserManager {
                 app,
                 self.state.clone(),
                 &tab_id,
-                url,
+                &url,
                 NavigationIntent::Normal,
                 rect.0,
                 rect.1,
@@ -3210,10 +3430,51 @@ fn browser_data_directory(session_id: &str) -> PathBuf {
     let dir = if session_id.is_empty() {
         base
     } else {
-        base.join(session_id)
+        base.join(browser_session_directory_name(session_id))
     };
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// 会话 scope 转合法的数据目录名。scope 形如 `webview:browser:<id>`，
+/// Windows 文件名不允许冒号，WebView2 拿到含非法字符的 userDataFolder
+/// 会报 os error 123（文件名、目录名或卷标语法不正确）导致创建失败；
+/// 非 Windows 平台冒号合法，保持原样以沿用既有目录。
+fn browser_session_directory_name(session_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        encode_session_directory_name(session_id)
+    }
+    #[cfg(not(windows))]
+    {
+        session_id.to_string()
+    }
+}
+
+/// 只保留 ASCII 字母数字与短横线/下划线，其余 UTF-8 字节做稳定百分号
+/// 编码，保证不同 scope 不碰撞、同一 scope 每次得到相同目录。
+/// 非 Windows 构建下仅测试引用（平台分支不调用），豁免 dead_code。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn encode_session_directory_name(session_id: &str) -> String {
+    let mut encoded = String::from("session-");
+    for byte in session_id.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(
+                char::from_digit((byte >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            encoded.push(
+                char::from_digit((byte & 0x0f) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+        }
+    }
+    encoded
 }
 
 pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {
@@ -3229,6 +3490,236 @@ pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_directory_name_encoding_is_windows_legal() {
+        // scope 含冒号（webview:browser:<id>），Windows 不允许冒号出现在
+        // 文件名中；编码后只含字母数字与 %，且同 scope 编码稳定。
+        let scope = "webview:browser:03guj8e2h1rko94862xx59zf2";
+        let encoded = encode_session_directory_name(scope);
+        assert_eq!(
+            encoded,
+            "session-webview%3Abrowser%3A03guj8e2h1rko94862xx59zf2"
+        );
+        assert_eq!(encoded, encode_session_directory_name(scope));
+        assert!(!encoded.contains(':'));
+        assert_ne!(
+            encode_session_directory_name("webview:browser:a"),
+            encode_session_directory_name("webview:browser:b")
+        );
+        // 非 ASCII（如中文会话名）按 UTF-8 字节稳定编码
+        assert_eq!(
+            encode_session_directory_name("会话"),
+            "session-%E4%BC%9A%E8%AF%9D"
+        );
+    }
+
+    #[test]
+    fn non_html_resource_url_detection_by_extension() {
+        assert!(is_non_html_resource_url("file:///C:/Users/EDY/pic.PNG"));
+        assert!(is_non_html_resource_url("file:///C:/Users/EDY/report.pdf"));
+        assert!(is_non_html_resource_url("https://cdn.example.com/a.mp4"));
+        // 查询串不影响扩展名识别
+        assert!(is_non_html_resource_url(
+            "https://cdn.example.com/a.png?v=2&size=large"
+        ));
+        // SVG 有 DOM 可脚本，按正常页面处理，不算资源页
+        assert!(!is_non_html_resource_url("file:///C:/Users/EDY/icon.svg"));
+        // HTML、无扩展名、非法 URL 不是资源页
+        assert!(!is_non_html_resource_url("file:///C:/Users/EDY/page.html"));
+        assert!(!is_non_html_resource_url("file:///C:/Users/EDY/noext"));
+        assert!(!is_non_html_resource_url("not a url"));
+    }
+
+    #[test]
+    fn fetch_page_content_returns_success_for_resource_pages() {
+        // 资源页导航完成即成功：不再等待正文脚本（对图片/PDF 必然超时），
+        // 标题取文件名、正文留空
+        let manager = BrowserManager::new();
+        let url = "file:///C:/docs/pic.png";
+        {
+            let mut state = manager.state.lock().unwrap();
+            state
+                .navigation_signals
+                .insert("tab-1".to_string(), navigation_signal(url));
+        }
+        let response = manager.fetch_page_content(
+            url,
+            1000,
+            &NavigationTicket {
+                tab_id: "tab-1".to_string(),
+                navigation_id: 0,
+            },
+        );
+        assert!(response.ok);
+        assert_eq!(response.error, None);
+        assert_eq!(response.title, "pic.png");
+        assert_eq!(response.final_url, url);
+        assert!(response.content.is_empty());
+        // 编码文件名解码为原文展示（%E6%8A%A5%E8%A1%A8 → 报表）
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.navigation_signals.insert(
+                "tab-2".to_string(),
+                navigation_signal("file:///C:/docs/%E6%8A%A5%E8%A1%A8.pdf"),
+            );
+        }
+        let response = manager.fetch_page_content(
+            "file:///C:/docs/%E6%8A%A5%E8%A1%A8.pdf",
+            1000,
+            &NavigationTicket {
+                tab_id: "tab-2".to_string(),
+                navigation_id: 0,
+            },
+        );
+        assert_eq!(response.title, "报表.pdf");
+    }
+
+    #[test]
+    fn resource_document_snapshot_is_complete_and_matching() {
+        let snapshot = resource_document_snapshot("file:///C:/a.png", 7);
+        assert_eq!(snapshot.document_id, "resource-7");
+        assert_eq!(snapshot.ready_state, "complete");
+        assert_eq!(snapshot.url, "file:///C:/a.png");
+        assert_eq!(snapshot.title, "a.png");
+        assert!(!snapshot.internal_error);
+        assert!(snapshot.text.is_empty());
+    }
+
+    #[test]
+    fn normalize_navigation_url_converts_windows_drive_paths() {
+        assert_eq!(
+            normalize_navigation_url(r"C:\Users\foo\bar.png"),
+            "file:///C:/Users/foo/bar.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("c:/users/foo/bar.png"),
+            "file:///C:/users/foo/bar.png"
+        );
+        assert_eq!(
+            normalize_navigation_url(r"d:\docs\mixed/slashes\x.pdf"),
+            "file:///D:/docs/mixed/slashes/x.pdf"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_encodes_local_path_specials() {
+        assert_eq!(
+            normalize_navigation_url(r"C:\docs\报表 图.pdf"),
+            "file:///C:/docs/%E6%8A%A5%E8%A1%A8%20%E5%9B%BE.pdf"
+        );
+        assert_eq!(
+            normalize_navigation_url(r"C:\tmp\a#b.png"),
+            "file:///C:/tmp/a%23b.png"
+        );
+        assert_eq!(
+            normalize_navigation_url(r"C:\tmp\a?b.png"),
+            "file:///C:/tmp/a%3Fb.png"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_converts_unix_and_unc_paths() {
+        assert_eq!(
+            normalize_navigation_url("/Users/foo/bar.png"),
+            "file:///Users/foo/bar.png"
+        );
+        assert_eq!(
+            normalize_navigation_url(r"\\server\share\doc.pdf"),
+            "file://server/share/doc.pdf"
+        );
+        // 正斜杠 UNC 仅 Windows 按网络路径归一；Unix 视为本地路径剥多余斜杠
+        #[cfg(windows)]
+        assert_eq!(
+            normalize_navigation_url("//server/share/doc.pdf"),
+            "file://server/share/doc.pdf"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            normalize_navigation_url("//server/share/doc.pdf"),
+            "file:///server/share/doc.pdf"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_keeps_query_and_fragment_for_drive_urls() {
+        // 盘符大写重拼时 query 与 fragment 必须一并带回（Unix 与网络路径
+        // 本就走 Url::to_string 保留，仅盘符分支是手工重拼）
+        assert_eq!(
+            normalize_navigation_url("file:///c:/x/index.html?name=1#sec2"),
+            "file:///C:/x/index.html?name=1#sec2"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///C:/x/index.html#sec2"),
+            "file:///C:/x/index.html#sec2"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///c:/x/index.html?name=1"),
+            "file:///C:/x/index.html?name=1"
+        );
+        // 参照：Unix 与网络路径形式原样保留
+        assert_eq!(
+            normalize_navigation_url("file:///Users/x/index.html?q=1#s2"),
+            "file:///Users/x/index.html?q=1#s2"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_percent_encodes_literal_percent() {
+        // 字面 % 预编码为 %25，避免被按百分号解码误读（a%20b.png 是字面
+        // 文件名而非已编码空格）
+        assert_eq!(
+            normalize_navigation_url(r"C:\tmp\a%20b.png"),
+            "file:///C:/tmp/a%2520b.png"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_normalizes_file_scheme_variants() {
+        assert_eq!(
+            normalize_navigation_url("file:C:/Users/x/a.png"),
+            "file:///C:/Users/x/a.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("file://C:/Users/x/a.png"),
+            "file:///C:/Users/x/a.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///c:/Users/x/a.png"),
+            "file:///C:/Users/x/a.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:/c:/Users/x/a.png"),
+            "file:///C:/Users/x/a.png"
+        );
+        // UNC 形式（带主机名）保持结构
+        assert_eq!(
+            normalize_navigation_url("file://server/share/a.png"),
+            "file://server/share/a.png"
+        );
+    }
+
+    #[test]
+    fn normalize_navigation_url_is_idempotent_and_keeps_remote_urls() {
+        assert_eq!(
+            normalize_navigation_url("file:///C:/Users/x/a.png"),
+            "file:///C:/Users/x/a.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("file:///Users/x/a.png"),
+            "file:///Users/x/a.png"
+        );
+        assert_eq!(
+            normalize_navigation_url("https://example.com/a"),
+            "https://example.com/a"
+        );
+        assert_eq!(normalize_navigation_url("about:blank"), "about:blank");
+        assert_eq!(normalize_navigation_url("example.com"), "example.com");
+        assert_eq!(
+            normalize_navigation_url("  C:\\a.png  "),
+            "file:///C:/a.png"
+        );
+    }
 
     #[test]
     fn ack_events_removes_only_injected_events() {
