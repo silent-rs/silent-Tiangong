@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => {
     getSessions: vi.fn(),
     getReasoningEffort: vi.fn(() => Promise.resolve('medium')),
     getWorkspaceDir: vi.fn(() => Promise.resolve('/workspace')),
+    pluginOpenEntry: vi.fn(() => Promise.resolve('<div>stub-plugin-page</div>')),
     onStreamEvent: vi.fn((callback: (event: unknown) => void) => {
       streamEventHandlers.add(callback);
       return makeRegistration().then((unlisten) => {
@@ -294,6 +295,49 @@ describe('MainApp sessions_updated scheduling contract', () => {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
     expect(mocks.eventHandlers.get('sessions_updated')?.size ?? 0).toBe(0);
+  });
+
+  it('plugin_reloaded 卸载该插件的后台执行壳，下次后台挂载重建', async () => {
+    mocks.api.pluginOpenEntry.mockClear();
+    await mountMainApp();
+    useStore.setState({ activeSessionId: 's1' });
+    const openEntry = vi.mocked(mocks.api.pluginOpenEntry);
+    const emit = (name: string, payload: unknown) => {
+      act(() => {
+        for (const handler of mocks.eventHandlers.get(name) ?? []) {
+          handler({ payload });
+        }
+      });
+    };
+    const openBackground = () => emit('app:open_plugin', {
+      plugin_id: 'terminal',
+      contribution_id: 'app',
+      background: true,
+    });
+
+    openBackground();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(openEntry).toHaveBeenCalledTimes(1);
+
+    // 同插件同会话再次后台挂载命中判重，不重建实例。
+    openBackground();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(openEntry).toHaveBeenCalledTimes(1);
+
+    // 热加载事件卸载旧壳后判重不再命中，重新挂载会拉取磁盘最新页面。
+    emit('plugin_reloaded', 'terminal');
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    openBackground();
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(openEntry).toHaveBeenCalledTimes(2);
   });
 });
 

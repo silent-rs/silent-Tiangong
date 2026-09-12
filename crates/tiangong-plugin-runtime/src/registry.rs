@@ -867,17 +867,26 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     // UI 记录直接替换；存活 Core 中的 TS 适配器原位更新，下一轮立即使用新清单。
     if installed.manifest.wasm_binary().is_none() {
         crate::ts_tools::cancel_plugin_calls(&installed.manifest.id);
-        // 停掉旧 sidecar（连接 + 进程）：热加载的前提是插件目录可能已被
-        // 整体替换，残留的旧进程会让工具继续打到旧二进制。停止后下次
-        // 调用按磁盘最新版本重新拉起；失败仅告警不阻断声明层重载。
-        if installed.manifest.sidecar.is_some()
-            && let Err(error) = stop_loaded_sidecar(&installed.manifest.id)
-                .and_then(|_| stop_connection_for_directory(&installed.directory))
-        {
+        // 停掉旧 sidecar（进程 + 该安装目录的连接缓存）：热加载的前提是
+        // 插件目录可能已被整体替换，残留会让工具继续打到旧二进制；新清
+        // 单即使去掉 sidecar 声明也照清（此时旧连接/旧进程正是要清除的
+        // 残留，Windows 上还会占用目录导致替换失败）。两步独立执行、各
+        // 自告警：停进程失败不能阻断连接清理，否则下次调用会复用表内
+        // 旧连接。桥订阅有意不清——可见标签里的旧页面仍可接应工具调用
+        //（执行走重启后的 sidecar），后台执行壳则由前端收到
+        // plugin_reloaded 后卸载重建。
+        if let Err(error) = stop_loaded_sidecar(&installed.manifest.id) {
             tracing::warn!(
                 plugin_id = %installed.manifest.id,
                 %error,
                 "热加载停止 sidecar 失败，工具调用将沿用旧进程"
+            );
+        }
+        if let Err(error) = stop_connection_for_directory(&installed.directory) {
+            tracing::warn!(
+                plugin_id = %installed.manifest.id,
+                %error,
+                "热加载清理 sidecar 连接缓存失败，下次调用可能复用旧连接"
             );
         }
         let ts_instances = loaded_plugins()
@@ -1162,6 +1171,99 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tiangong_core::MentionCandidate;
+
+    /// 记录 stop 调用的桩连接：验证热加载清理连接缓存的行为，
+    /// 可注入 stop 失败验证「先摘表再停」不被个别失败阻断。
+    struct StubSidecarConnection {
+        stopped: std::sync::atomic::AtomicBool,
+        fail_stop: bool,
+    }
+    impl SidecarConnection for StubSidecarConnection {
+        fn invoke(&self, _: &str, _: &str) -> Result<String> {
+            Ok("{}".into())
+        }
+        fn ensure_running(&self) -> Result<()> {
+            Ok(())
+        }
+        fn stop(&self) -> Result<()> {
+            use std::sync::atomic::Ordering;
+            self.stopped.store(true, Ordering::SeqCst);
+            if self.fail_stop {
+                bail!("stub stop failure");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reload_clears_stale_connections_even_without_sidecar_declaration() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let config_directory = root.path().join("config");
+        std::fs::create_dir_all(&config_directory).unwrap();
+        tiangong_config::registry::init_from_dir(&config_directory);
+        let id = format!("reload-stale-{}", scru128::new());
+        let directory = root.path().join("plugins").join(&id);
+        std::fs::create_dir_all(directory.join("app")).unwrap();
+        std::fs::write(directory.join("app/index.html"), "ui").unwrap();
+        // 新清单不含 sidecar 声明：目录整体替换后去掉 sidecar 的场景，
+        // 热加载仍必须清掉旧连接缓存（否则旧进程残留、Windows 上目录被占用）。
+        let manifest_value = serde_json::json!({"schema_version":2,"id":id,"version":"0.1.0",
+            "permissions":["tool.provide"],"entrypoints":["desktop"],
+            "ui":{"contributions":[{"slot":"extension.tab","id":"app","entry":"app/index.html"}]}});
+        std::fs::write(directory.join(MANIFEST_FILE), manifest_value.to_string()).unwrap();
+        let manifest: PluginManifest =
+            serde_json::from_str(&std::fs::read_to_string(directory.join(MANIFEST_FILE)).unwrap())
+                .unwrap();
+
+        let healthy = std::sync::Arc::new(StubSidecarConnection {
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            fail_stop: false,
+        });
+        let failing = std::sync::Arc::new(StubSidecarConnection {
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            fail_stop: true,
+        });
+        {
+            let mut connections = sidecar_connections().lock().unwrap();
+            connections.insert(
+                SidecarConnectionKey {
+                    directory: directory.clone(),
+                    workspace: None,
+                },
+                std::sync::Arc::clone(&healthy) as std::sync::Arc<dyn SidecarConnection>,
+            );
+            connections.insert(
+                SidecarConnectionKey {
+                    directory: directory.clone(),
+                    workspace: Some(root.path().to_path_buf()),
+                },
+                std::sync::Arc::clone(&failing) as std::sync::Arc<dyn SidecarConnection>,
+            );
+        }
+
+        let installed = InstalledPlugin {
+            directory: directory.clone(),
+            manifest,
+            enabled: true,
+            signed_release: None,
+        };
+        reload_plugin_inner(root.path(), &installed).expect("热加载应成功");
+
+        // 无条件清理：该目录的连接全部出表；个别 stop 失败不阻断摘表，
+        // 也不阻断其余连接的停止。
+        let remaining = sidecar_connections()
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.directory == directory)
+            .count();
+        assert_eq!(remaining, 0, "热加载后连接表不应残留该目录的连接");
+        assert!(healthy.stopped.load(Ordering::SeqCst));
+        assert!(failing.stopped.load(Ordering::SeqCst));
+        loaded_plugins().lock().unwrap().remove(&id);
+    }
 
     #[test]
     #[serial_test::serial]
@@ -3390,10 +3492,18 @@ pub(crate) fn stop_connection_for_directory(directory: &Path) -> Result<()> {
         .filter(|(key, _)| key.directory == directory)
         .map(|(_, connection)| connection.clone())
         .collect::<Vec<_>>();
-    for connection in connections {
-        connection.stop()?;
-    }
+    // 先摘表再停进程：任一连接停止失败也不能让连接残留在表中（残留
+    // 会被下次调用直接复用并打到旧二进制），失败仅告警并继续处理其余。
     remove_sidecar_connection(directory);
+    for connection in connections {
+        if let Err(error) = connection.stop() {
+            tracing::warn!(
+                directory = %directory.display(),
+                %error,
+                "停止 sidecar 连接失败（连接已从表中摘除）"
+            );
+        }
+    }
     Ok(())
 }
 
