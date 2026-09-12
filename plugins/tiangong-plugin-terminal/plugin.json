@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "terminal",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "entrypoints": [
     "desktop"
   ],
