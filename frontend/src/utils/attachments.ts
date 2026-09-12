@@ -11,6 +11,7 @@ export function imageMimeType(path: string): string | undefined {
   if (lower.endsWith('.webp')) return 'image/webp';
   if (lower.endsWith('.gif')) return 'image/gif';
   if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
   return undefined;
 }
 
@@ -55,6 +56,7 @@ export function imageExtFromMime(mimeType: string): string {
   if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') return 'jpg';
   if (mimeType === 'image/webp') return 'webp';
   if (mimeType === 'image/gif') return 'gif';
+  if (mimeType === 'image/svg+xml') return 'svg';
   return 'png';
 }
 

@@ -296,6 +296,16 @@ impl AttachmentTransaction {
             };
 
             match stored.kind {
+                // SVG 矢量图不 inline 发送：主流模型 API 仅接受 png/jpeg/webp/gif，
+                // 直发 base64 会被拒收导致整轮消息失败，统一走文件引用路径
+                MediaKind::Image if stored.mime_type == "image/svg+xml" => {
+                    content.push(ContentBlock::AssetReference {
+                        asset: asset.clone(),
+                    });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: file_attachment_instruction(index, &asset),
+                    });
+                }
                 MediaKind::Image if capabilities.chat_multimodal => {
                     let bytes = fs::read(&stored.local_path)
                         .map_err(|error| format!("读取内联图片失败：{error}"))?;
@@ -1000,6 +1010,49 @@ mod tests {
             &stable[2],
             ContentBlock::ModelInstruction { text } if text.contains("path=")
         ));
+    }
+
+    #[test]
+    fn svg_image_uses_file_reference_even_with_multimodal() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![data_attachment(
+                MediaKind::Image,
+                "diagram.svg",
+                "image/svg+xml",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+            )])
+            .unwrap();
+        let message = transaction
+            .prepare_message(
+                "message-svg",
+                "look",
+                AttachmentCapabilitySnapshot {
+                    chat_multimodal: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(transaction.assets().len(), 1);
+        assert_eq!(transaction.assets()[0].mime_type, "image/svg+xml");
+        assert_eq!(message.len(), 3);
+        match &message[1] {
+            ContentBlock::AssetReference { asset } => {
+                assert_eq!(asset, &transaction.assets()[0]);
+            }
+            other => panic!("SVG 应走文件引用，实际：{other:?}"),
+        }
+        assert!(matches!(
+            &message[2],
+            ContentBlock::ModelInstruction { text } if text.contains("path=")
+        ));
+        assert!(
+            !message
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        );
     }
 
     #[test]

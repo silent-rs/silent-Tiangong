@@ -753,7 +753,7 @@ export function MessageInput({
           {
             name: '图片、音视频和文件',
             extensions: [
-              'png', 'jpg', 'jpeg', 'webp', 'gif',
+              'png', 'jpg', 'jpeg', 'webp', 'gif', 'svg',
               'mp3', 'wav', 'm4a', 'ogg', 'flac',
               'mp4', 'mov', 'webm', 'mkv',
               'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'json', 'csv',
