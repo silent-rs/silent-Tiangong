@@ -228,31 +228,88 @@ export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
   };
 }
 
+/** 分组结果引用缓存：流式期间 messages 数组每批（约 16ms）都是新引用，但
+ * 历史组的消息元素引用不变。按组 key 缓存上一次结果，消息引用完全一致时
+ * 复用旧组对象——下游（AgentTurn memo、各 useMemo）依赖组内数组引用即可
+ * 保持命中，不必每批全量重建分组造成级联重算与分配压力。
+ *
+ * 不可变契约：复用判定按「消息对象引用逐条相等」进行，调用方必须以替换
+ * 引用的方式更新消息（store 现有写入路径均为不可变更新）。若将来出现就
+ * 地修改消息对象的写入路径，本缓存与 AgentTurn 的 sameMessageRefs memo
+ * 都会静默跳过重渲染而不报错。 */
+let groupReuseCache: Map<string, { refs: MessageItem[]; group: MessageGroup }> | null = null;
+
+/** 上一次返回的分组数组：本次所有组均命中复用时直接沿用，让依赖分组数组
+ * 本身的 useMemo（turnResultByGroupKey、userGroupIndices 等）也保持命中。 */
+let lastGroupsResult: MessageGroup[] | null = null;
+
 export function groupMessages(messages: MessageItem[]): MessageGroup[] {
-  const groups: MessageGroup[] = [];
-  let currentAgentTurn: MessageGroup | null = null;
+  // 第一遍：按原规则聚合出每组的消息列表（临时结构）。
+  type PendingGroup = {
+    key: string;
+    type: MessageGroup["type"];
+    worker_id?: string;
+    msgs: MessageItem[];
+  };
+  const pending: PendingGroup[] = [];
+  let currentAgentTurn: PendingGroup | null = null;
 
   for (const msg of messages) {
     if (msg.phase === "compressedresume") continue;
     if (msg.worker_id) {
-      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
-      const previous = groups[groups.length - 1];
+      if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
+      const previous = pending[pending.length - 1];
       if (previous?.type === "worker" && previous.worker_id === msg.worker_id) {
-        previous.messages.push(msg);
+        previous.msgs.push(msg);
       } else {
-        groups.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, messages: [msg] });
+        pending.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, msgs: [msg] });
       }
     } else if (msg.role === "user") {
-      if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
-      groups.push({ key: msg.id, type: "user", messages: [msg] });
+      if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
+      pending.push({ key: msg.id, type: "user", msgs: [msg] });
     } else {
       if (!currentAgentTurn) {
-        currentAgentTurn = { key: `turn-${msg.id}`, type: "agent_turn", messages: [] };
+        currentAgentTurn = { key: `turn-${msg.id}`, type: "agent_turn", msgs: [] };
       }
-      currentAgentTurn.messages.push(msg);
+      currentAgentTurn.msgs.push(msg);
     }
   }
-  if (currentAgentTurn) groups.push(currentAgentTurn);
+  if (currentAgentTurn) pending.push(currentAgentTurn);
+
+  // 第二遍：引用复用——消息引用逐条一致的组沿用上次的组对象。
+  const nextCache = new Map<string, { refs: MessageItem[]; group: MessageGroup }>();
+  const groups: MessageGroup[] = pending.map((p) => {
+    const cached = groupReuseCache?.get(p.key);
+    if (
+      cached
+      && cached.group.type === p.type
+      && cached.refs.length === p.msgs.length
+      && cached.refs.every((m, i) => m === p.msgs[i])
+    ) {
+      nextCache.set(p.key, cached);
+      return cached.group;
+    }
+    const group: MessageGroup = {
+      key: p.key,
+      type: p.type,
+      ...(p.type === "worker" ? { worker_id: p.worker_id } : {}),
+      messages: p.msgs,
+    };
+    nextCache.set(p.key, { refs: p.msgs, group });
+    return group;
+  });
+  groupReuseCache = nextCache;
+  // 逐位比对确认本次结果与上一次完全一致——组对象同序、同引用——才沿用上次
+  // 数组，让依赖分组数组本身的派生 useMemo 也保持命中。逐位比对同时蕴含
+  // 「全部组命中复用」「无重复 key」「长度一致」三个条件，并在同一批消息被
+  // 重排（对象未变、顺序变化）时正确退回新建数组，不会把上一次的顺序当作
+  // 本次结果。
+  // 返回的数组可能与上一次调用共享，调用方必须视为只读。
+  const previousGroups = lastGroupsResult;
+  if (previousGroups !== null && groups.every((group, index) => group === previousGroups[index])) {
+    return previousGroups;
+  }
+  lastGroupsResult = groups;
   return groups;
 }
 
