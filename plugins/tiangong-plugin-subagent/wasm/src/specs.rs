@@ -66,7 +66,7 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "cancel_agent_run",
-        "取消某个运行（终态，托管进程会被终止）。",
+        "取消某个运行（终态）：CLI 托管进程会被终止；会话成员即时标记为已取消并尽力通知其不再需要结果，执行侧按需自然收尾。",
         r#"{"type":"object","properties":{"run_id":{"type":"string","description":"要取消的运行 ID"}},"required":["run_id"]}"#,
     ),
     (
