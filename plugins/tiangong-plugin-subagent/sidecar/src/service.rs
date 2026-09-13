@@ -601,6 +601,15 @@ fn extract_run_tag(user_text: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// 运行是否属于指定会话（面板调度记录隔离用）：发起会话（session_id）
+/// 或协作发起会话（origin_session）命中皆算；session_id 为空（无会话
+/// 上下文）时不过滤，保持全局视图兜底。
+fn run_in_session(run: &RunRecord, session_id: &str) -> bool {
+    session_id.is_empty()
+        || run.session_id == session_id
+        || run.origin_session.as_deref() == Some(session_id)
+}
+
 fn short_workspace(workspace: &str) -> String {
     let mut tail: Vec<&str> = workspace.split('/').filter(|p| !p.is_empty()).collect();
     if tail.len() > 2 {
@@ -2889,6 +2898,15 @@ impl SubagentService {
 
     async fn ui_state_snapshot(&self, payload: &serde_json::Value) -> Result<serde_json::Value> {
         let request: UiSessionRequest = parse_request(payload)?;
+        // 调度记录按会话隔离：任务/运行/事件只显示本会话发起的工作——
+        // 运行的 origin_session 为协作发起成员会话，一并归入；成员列表保持
+        // 全局（身份与激活管理不分会话）。session_id 为空（无会话上下文）
+        // 时保持全局视图兜底。
+        let session_id = request.session_id.trim().to_string();
+        let mut runs = self.store.list_runs();
+        runs.retain(|run| run_in_session(run, &session_id));
+        runs.sort_by(|a, b| b.run_id.cmp(&a.run_id));
+        runs.truncate(30);
         let snapshot = StateSnapshot {
             agents: self.build_summaries(Some(&request.session_id)),
             session_id: request.session_id,
@@ -2896,18 +2914,19 @@ impl SubagentService {
                 .store
                 .list_tasks()
                 .into_iter()
+                .filter(|task| session_id.is_empty() || task.session_id == session_id)
                 .filter(|task| {
                     task.status == TaskStatus::Running || task.status == TaskStatus::Pending
                 })
                 .take(50)
                 .collect(),
-            recent_runs: {
-                let mut runs = self.store.list_runs();
-                runs.sort_by(|a, b| b.run_id.cmp(&a.run_id));
-                runs.truncate(30);
-                runs
-            },
-            recent_events: self.store.list_events(None, None, 200),
+            recent_runs: runs,
+            recent_events: self
+                .store
+                .list_events(None, None, 200)
+                .into_iter()
+                .filter(|event| session_id.is_empty() || event.session_id == session_id)
+                .collect(),
         };
         Ok(serde_json::to_value(snapshot)?)
     }
@@ -3218,5 +3237,43 @@ mod tests {
             extract_run_tag("（运行标记 r- DDDDDDDD ）"),
             Some("DDDDDDDD")
         );
+    }
+
+    /// 面板调度记录按会话隔离：运行按发起会话或协作发起会话命中；
+    /// 空会话（无上下文）不过滤兜底。
+    #[test]
+    fn 运行按会话隔离判定() {
+        let base = || RunRecord {
+            run_id: "r-1".to_string(),
+            task_id: None,
+            agent_id: "agent-1".to_string(),
+            activation_id: "act-1".to_string(),
+            session_id: "sess-dev".to_string(),
+            executor_session: None,
+            kind: RunKind::Message,
+            status: RunStatus::Working,
+            pid: None,
+            workspace: "/ws".to_string(),
+            origin_session: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            finished_at: None,
+            summary: None,
+        };
+
+        // 发起会话命中。
+        assert!(run_in_session(&base(), "sess-dev"));
+        // 其他会话（如 gaming life）看不到开发会话的运行。
+        assert!(!run_in_session(&base(), "sess-gaming"));
+        // 协作发起会话也命中。
+        let collab = RunRecord {
+            session_id: "sess-member-exec".to_string(),
+            origin_session: Some("sess-dev".to_string()),
+            ..base()
+        };
+        assert!(run_in_session(&collab, "sess-dev"));
+        assert!(!run_in_session(&collab, "sess-gaming"));
+        // 无会话上下文：全局兜底不过滤。
+        assert!(run_in_session(&base(), ""));
     }
 }
