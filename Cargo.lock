@@ -11700,6 +11700,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-subagent-protocol"
+version = "0.2.38"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-subagent-sidecar"
+version = "0.2.38"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fs2",
+ "libc",
+ "reqwest 0.13.4",
+ "scru128",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tiangong-plugin-subagent-protocol",
+ "tokio",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-subagent-wasm"
+version = "0.2.38"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-subagent-protocol",
+ "wit-bindgen 0.60.0",
+]
+
+[[package]]
 name = "tiangong-plugin-terminal-sidecar"
 version = "0.3.6"
 dependencies = [

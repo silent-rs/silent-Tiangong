@@ -376,11 +376,24 @@ const TERMINAL: PluginConfig = PluginConfig {
     protocol_manifest: None,
 };
 
+const SUBAGENT: PluginConfig = PluginConfig {
+    id: "subagent",
+    name: "Subagent",
+    description: "持久 Subagent 统一管理：身份、激活、任务运行与 Hook 反馈",
+    protocol_crate: Some("tiangong-plugin-subagent-protocol"),
+    wasm_crate: Some("tiangong-plugin-subagent-wasm"),
+    wasm_artifact: Some("tiangong_plugin_subagent_wasm.wasm"),
+    sidecar_crate: Some("tiangong-plugin-subagent-sidecar"),
+    sidecar_artifact: Some("tiangong-subagent-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-subagent",
+    plugin_manifest: "plugins/tiangong-plugin-subagent/plugin.json",
+    protocol_manifest: Some("plugins/tiangong-plugin-subagent/protocol/Cargo.toml"),
+};
+
 fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
-        "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator" => {
-            &["dist/index.html"]
-        }
+        "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator"
+        | "subagent" => &["dist/index.html"],
         _ => &[],
     }
 }
@@ -409,6 +422,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "plugin-creator" => Ok(&PLUGIN_CREATOR),
         "browser" => Ok(&BROWSER),
         "terminal" => Ok(&TERMINAL),
+        "subagent" => Ok(&SUBAGENT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

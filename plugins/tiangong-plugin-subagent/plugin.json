@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "require_server": true,
+  "id": "subagent",
+  "version": "0.2.38",
+  "entrypoints": [
+    "desktop"
+  ],
+  "permissions": [
+    "tool.provide",
+    "sidecar.invoke",
+    "bridge.call",
+    "bridge.events",
+    "app.use"
+  ],
+  "wasm": {
+    "binary": "tiangong_plugin_subagent_wasm.wasm"
+  },
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "extension.tab",
+        "id": "subagent",
+        "title": "Subagent",
+        "description": "持久 Subagent 管理台：身份、激活、任务与运行状态",
+        "icon": "bot",
+        "entry": "dist/index.html",
+        "open_mode": "multi",
+        "context": [
+          "session",
+          "workspace"
+        ]
+      }
+    ]
+  },
+  "capabilities": {
+    "tools": true,
+    "prompt": true,
+    "events": [
+      "tool.*",
+      "sidecar.*"
+    ]
+  },
+  "sidecar": {
+    "binary": "tiangong-subagent-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 120000,
+    "lifecycle": "resident"
+  }
+}

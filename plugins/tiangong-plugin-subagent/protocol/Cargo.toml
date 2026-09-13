@@ -1,0 +1,14 @@
+[package]
+name = "tiangong-plugin-subagent-protocol"
+version = "0.2.38"
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata.tiangong]
+business-protocol = 1
+description = "Subagent 插件宿主、UI 与 sidecar 共用的私有业务协议"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
