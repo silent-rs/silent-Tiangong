@@ -231,8 +231,17 @@ export function getToolMessageMeta(msg: MessageItem): SystemMessageMeta {
 /** 分组结果引用缓存：流式期间 messages 数组每批（约 16ms）都是新引用，但
  * 历史组的消息元素引用不变。按组 key 缓存上一次结果，消息引用完全一致时
  * 复用旧组对象——下游（AgentTurn memo、各 useMemo）依赖组内数组引用即可
- * 保持命中，不必每批全量重建分组造成级联重算与分配压力。 */
+ * 保持命中，不必每批全量重建分组造成级联重算与分配压力。
+ *
+ * 不可变契约：复用判定按「消息对象引用逐条相等」进行，调用方必须以替换
+ * 引用的方式更新消息（store 现有写入路径均为不可变更新）。若将来出现就
+ * 地修改消息对象的写入路径，本缓存与 AgentTurn 的 sameMessageRefs memo
+ * 都会静默跳过重渲染而不报错。 */
 let groupReuseCache: Map<string, { refs: MessageItem[]; group: MessageGroup }> | null = null;
+
+/** 上一次返回的分组数组：本次所有组均命中复用时直接沿用，让依赖分组数组
+ * 本身的 useMemo（turnResultByGroupKey、userGroupIndices 等）也保持命中。 */
+let lastGroupsResult: MessageGroup[] | null = null;
 
 export function groupMessages(messages: MessageItem[]): MessageGroup[] {
   // 第一遍：按原规则聚合出每组的消息列表（临时结构）。
@@ -269,6 +278,7 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
 
   // 第二遍：引用复用——消息引用逐条一致的组沿用上次的组对象。
   const nextCache = new Map<string, { refs: MessageItem[]; group: MessageGroup }>();
+  let reusedCount = 0;
   const groups: MessageGroup[] = pending.map((p) => {
     const cached = groupReuseCache?.get(p.key);
     if (
@@ -277,6 +287,7 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
       && cached.refs.length === p.msgs.length
       && cached.refs.every((m, i) => m === p.msgs[i])
     ) {
+      reusedCount += 1;
       nextCache.set(p.key, cached);
       return cached.group;
     }
@@ -290,6 +301,17 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
     return group;
   });
   groupReuseCache = nextCache;
+  // 所有组均命中复用且无 key 覆盖（重复 key 时 nextCache 更小）时，分组结果
+  // 与上一次完全一致，直接沿用上次数组引用，派生 useMemo 也保持命中。
+  if (
+    reusedCount === pending.length
+    && nextCache.size === pending.length
+    && lastGroupsResult !== null
+    && lastGroupsResult.length === groups.length
+  ) {
+    return lastGroupsResult;
+  }
+  lastGroupsResult = groups;
   return groups;
 }
 
