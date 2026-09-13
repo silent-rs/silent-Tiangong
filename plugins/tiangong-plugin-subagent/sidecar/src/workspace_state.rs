@@ -549,7 +549,8 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn 会话映射_并发首次访问只产生一个会话() {
-        let (store, _root, agent_id) = store_with_agent("mapping-concurrent");
+        // store 仅用于建出成员身份；并发由各线程自建 AgentStore 验证。
+        let (_store, _root, agent_id) = store_with_agent("mapping-concurrent");
         let w = tempfile::tempdir().unwrap();
         let p = w.path().to_string_lossy().into_owned();
         let mut handles = Vec::new();

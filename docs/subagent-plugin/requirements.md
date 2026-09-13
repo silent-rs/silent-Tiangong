@@ -257,6 +257,42 @@ agents/<agent-id>/
 - **强工作区指令**：任务投递正文的「任务工作区」改为强指令——明确告知成员「所有文件操作必须在此目录下进行，使用基于此目录的绝对路径」（成员专属会话的默认 cwd 不随发起会话变化，须显式引导）；系统提示同步补工作区纪律；
 - send/submit 的 workspace 参数去下划线前缀（此前标记为未用，自动激活已实际使用）。
 
+**0.2.31 追加（专属会话对齐与投递连接加固）**
+- **投递前对齐专属会话工作区**：成员×工作区映射会话在投递前校验工作区一致，避免成员在错误的 cwd 下执行；
+- **投递连接改宿主注入 + 默认地址兜底**：`TIANGONG_SERVER_URL` / `TIANGONG_SERVER_TOKEN` 由宿主在 Server 启动后注入（`server.json` 属沙箱保护清单、插件禁读，**不得**作为读取来源）；缺失时兜底宿主默认地址 `127.0.0.1:9090`，连接失败按普通错误如实反馈，不再误报成「Server 未启动」；
+- 运行时依赖改由清单声明，撤销自动重启与恢复广播（端点变化重启后的工具恢复改由 runtime 反馈管道通告）。
+
+**前端：Subagent 消息卡片（随本版一并落地）**
+- 任务指派 / 消息投递 / Hook 回报三类卡片差异化渲染，挂载点移至 `UserMessageGroup`，隐藏底部操作并在头部提供复制按钮；
+- 卡片元信息解析改为「按标记定位后提取」，修复 Unicode 转义乱码（还原真实中文）；
+- 内容默认按最多 5 行折叠，附加信息改手风琴模式逐条独立展开。
+
+**0.2.32 追加（用户裁定：派活与协作消息自动携带发起方附件）**
+- WASM 侧从会话缓存提取发起方本轮用户消息的附件（只认 `image` / `asset_reference` 块的 `asset.local_path`，Server 归档的统一形状），随 `send_agent_message` / `submit_agent_task` 注入工具参数——模型多模态看得到图、非多模态只有文字标注，均无法得知本地路径，故由插件注入而非模型填写；
+- sidecar 把附件透传给 Server 消息接口 `media` 字段；成员间协作消息走同一链路；无附件不带字段（老协议实现兼容）。
+
+**0.2.33 追加（用户裁定：会话运行改硬取消端点直达）**
+- `cancel_agent_run` 与管理页停止对会话后端运行改为调 Server `POST /api/v1/sessions/:id/cancel`：成员会话执行中的轮次立即终止，等待方收到取消错误快速返回；运行终态由 `turn_finished(cancelled)` 归因链落定并释放工作区占用；
+- 「无可取消执行」（端点返回 `cancelled=false`）直接落取消终态；端点不可达回退原通知式取消；
+- 打断（`interrupt_agent_run`）保持通知式尽力语义，本轮不扩展；
+- **解除 0.2.10「已知限制」**：会话型运行现已可硬取消（server 已提供取消端点），该条限制作废。
+
+**0.2.34 追加（CLI 后端附件输入）**
+- CLI 后端 `begin` 与 `user_message` 帧均可携带 `attachments`（`[{path, kind, mime_type?, name?}]`），本地路径原样透传、成员自行读取；
+
+**0.2.35 追加（CLI 成员 MCP 接入引导）**
+- `begin` 帧透传 `mcp` 引导（`{server, command, workspace, hint}`）：sidecar 二进制外部直起即标准 stdio MCP server（暴露 `list_agents` / `send_agent_message` / `load_workspace_state` / `list_pending_work` 四个协作工具），由 CLI 工具自行决定注册到用户级还是项目级；**总线不代写任何外部配置文件**（沙箱内也不可写）；
+- **CLI 子进程不再继承宿主插件通道变量**（`TIANGONG_PLUGIN_TRANSPORT` / `TIANGONG_PLUGIN_ID` / `TIANGONG_PLUGIN_STDIO_TOKEN` / `TIANGONG_PLUGIN_ENDPOINT` / `TIANGONG_PLUGIN_DATA_DIR` / `TIANGONG_PLUGIN_VERSION`）：否则成员据引导注册的 MCP 子进程会带着 `TIANGONG_PLUGIN_TRANSPORT=stdio` 误走宿主 stdio 分支（无宿主连接，MCP 握手直接不通），同时避免把不属于成员的凭据交给外部工具；存储根与服务连接信息保留（成员及其 MCP 进程需访问同一份存储与本机服务）。
+
+**0.2.36 追加（MCP 引导去重）**
+- sidecar 以 MCP 形态被启动并完成 `initialize` 握手时登记该 workspace（`agents-runtime/mcp_access.json`，跨进程 flock、读写两侧路径 canonicalize 归一防 `/private` 前缀形态失配）；
+- 已登记的 workspace 派活不再携带 `mcp` 引导——以「真的握手过」为准，不依赖提示语自觉忽略；登记失败只记日志、不阻断 MCP 服务；CLI 卸载注册后登记保留（不再引导同样成立）。
+
+**成员状态与回报语义收敛（同期一并落地）**
+- 回报与整理记忆统一为会话间消息投递；回复地址取发起方会话（协作时取协作发起成员会话）；
+- 补充消息与控制通知沿实际执行会话路由，老绑定迁移按工作目录收紧；
+- 补充轮次只记执行事件，**不**自动改写原运行结论、**不**代发修订回报——修订成果由成员经 `report_agent_result` 主动反馈。
+
 **sidecar 收敛方向（依赖成员状态能力成熟，分阶段执行，不一步撤销现有可靠性基础）**：收敛项——按最新运行猜归属、轮次结束自动认定完成、从回复文本推断修订、替成员决定记忆归档。执行事实层（送达/退出/中断/占用）与消息路由、身份与 workspace 上下文传递、状态存取、查询视图保留。
 
 ## 关键决策
@@ -286,7 +322,8 @@ agents/<agent-id>/
 ~/.tiangong/agents/<agent-id>/
 ├── agent.toml          # 身份、后端、Workspace 策略、启用状态
 ├── instructions.md     # 长期职责与工作要求
-├── memory/             # 长期记忆（首版由 Agent 后端自行维护）
+├── memory/             # 长期记忆（lessons.md 经验优先注入，notes.md 次之）
+├── workspaces/         # 成员×工作区自维护状态（index.json 路径→ws-id；各 ws-id/ 下 plan.md / context.md / task.md）
 └── artifacts/          # 历史产物
 
 ~/.tiangong/agents-runtime/
@@ -294,5 +331,6 @@ agents/<agent-id>/
 ├── tasks/<task_id>.json
 ├── runs/<run_id>.json
 ├── hooks/queue/<event_id>.json   # 待投递 Hook（投递成功即移除）
+├── mcp_access.json     # MCP 接入登记（workspace 已完成握手，派活引导去重用）
 └── worktrees/<activation_id>/    # isolated-worktree 策略产物
 ```

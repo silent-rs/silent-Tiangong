@@ -346,19 +346,39 @@ async fn supervise_process(
     exit_code
 }
 
+/// 宿主注入的「宿主 ↔ 本 sidecar」私有通道变量（传输标识、认证令牌、端点）。
+/// 不得随 CLI 成员子进程外传：成员据此启动的下游进程（典型是同二进制以
+/// MCP 形态被成员注册为 server）会误判传输形态——带着
+/// `TIANGONG_PLUGIN_TRANSPORT=stdio` 就走进宿主 stdio 协议分支，而它并没有
+/// 宿主连接，MCP 握手直接不通；同时也避免把不属于成员的凭据交给外部工具。
+/// 存储根与服务连接信息（TIANGONG_STORAGE_ROOT / TIANGONG_SERVER_*）保留：
+/// 成员及其 MCP 进程需要访问同一份存储与本机服务。
+const HOST_CHANNEL_ENV: &[&str] = &[
+    "TIANGONG_PLUGIN_TRANSPORT",
+    "TIANGONG_PLUGIN_ID",
+    "TIANGONG_PLUGIN_STDIO_TOKEN",
+    "TIANGONG_PLUGIN_ENDPOINT",
+    "TIANGONG_PLUGIN_DATA_DIR",
+    "TIANGONG_PLUGIN_VERSION",
+];
+
 fn build_command(command: &str) -> tokio::process::Command {
     #[cfg(unix)]
-    {
+    let mut cmd = {
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(command);
         cmd
-    }
+    };
     #[cfg(windows)]
-    {
+    let mut cmd = {
         let mut cmd = tokio::process::Command::new("cmd");
         cmd.arg("/C").arg(command);
         cmd
+    };
+    for key in HOST_CHANNEL_ENV {
+        cmd.env_remove(key);
     }
+    cmd
 }
 
 /// Windows 抑制控制台窗口；Unix 不 setsid——子进程留在 sidecar 进程组内。
@@ -583,5 +603,56 @@ mod tests {
             supplement["attachments"][0]["path"],
             "/tmp/屏幕截图 2026.png"
         );
+    }
+
+    /// 端到端：CLI 成员子进程不继承宿主插件通道变量（传输标识、认证令牌），
+    /// 但保留存储根与服务连接信息。成员据 begin 帧的 mcp 引导把 sidecar 注册
+    /// 为 MCP server 时，带 `TIANGONG_PLUGIN_TRANSPORT=stdio` 会误走宿主 stdio
+    /// 分支、MCP 握手不通——子进程侧实测环境变量取值。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn 成员子进程不继承插件通道变量() {
+        // 模拟宿主 spawn 本 sidecar 时注入的通道环境。
+        unsafe {
+            std::env::set_var("TIANGONG_PLUGIN_TRANSPORT", "stdio");
+            std::env::set_var("TIANGONG_PLUGIN_STDIO_TOKEN", "host-token");
+            std::env::set_var("TIANGONG_STORAGE_ROOT", "/tmp/kept-root");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let hub = RunnerHub::new();
+        let begin = begin_frame(None);
+        hub.spawn(
+            "run-env",
+            r#"printf '%s|%s|%s' "${TIANGONG_PLUGIN_TRANSPORT-<unset>}" "${TIANGONG_PLUGIN_STDIO_TOKEN-<unset>}" "$TIANGONG_STORAGE_ROOT" > env.txt"#,
+            temp.path(),
+            &[],
+            &begin,
+            no_hooks(),
+        )
+        .await
+        .unwrap();
+        hub.close_stdin("run-env").await.unwrap();
+
+        let env_path = temp.path().join("env.txt");
+        let mut observed = String::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(content) = std::fs::read_to_string(&env_path)
+                && !content.is_empty()
+            {
+                observed = content;
+                break;
+            }
+        }
+        unsafe {
+            std::env::remove_var("TIANGONG_PLUGIN_TRANSPORT");
+            std::env::remove_var("TIANGONG_PLUGIN_STDIO_TOKEN");
+            std::env::remove_var("TIANGONG_STORAGE_ROOT");
+        }
+        let fields: Vec<&str> = observed.split('|').collect();
+        assert_eq!(fields.len(), 3, "子进程环境落盘失败: {observed:?}");
+        assert_eq!(fields[0], "<unset>", "传输标识不得外传");
+        assert_eq!(fields[1], "<unset>", "宿主令牌不得外传");
+        assert_eq!(fields[2], "/tmp/kept-root", "存储根必须保留");
     }
 }

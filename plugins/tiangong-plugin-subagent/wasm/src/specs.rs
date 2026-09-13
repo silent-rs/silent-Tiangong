@@ -96,8 +96,8 @@ pub const TOOL_SPECS: &[(&str, &str, &str)] = &[
     ),
     (
         "load_workspace_state",
-        "读取成员在某工作区的自维护工作状态：工作规划 plan、背景约定 context 和当前工作 task——收到消息后先加载，判断新工作/补充/协作结果/控制意图，决定关联、拆分或调整。",
-        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID（缺省=自己）"}},"required":["agent_id"]}"#,
+        "读取成员在某工作区的自维护工作状态：工作规划 plan、背景约定 context 和当前工作 task——收到消息后先加载，判断新工作/补充/协作结果/控制意图，决定关联、拆分或调整。成员在自己的执行会话内可直接省略 agent_id（读自己的状态）；主会话或成员间查询其他成员时显式指定。",
+        r#"{"type":"object","properties":{"agent_id":{"type":"string","description":"成员 ID（缺省=自己：自己的执行会话内可省略）"}},"required":[]}"#,
     ),
     (
         "update_workspace_state",

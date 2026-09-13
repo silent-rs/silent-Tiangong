@@ -588,6 +588,19 @@ async fn handle_exit(
 }
 
 /// workspace 短显示（末两段路径），视图标注用。
+/// 从投递正文提取本轮运行标记（`（运行标记 r-xxxx）` 的短码）。
+///
+/// 取**最后一次**出现：投递正文把标记排在最后，而正文中注入的长期记忆与
+/// 成员自维护工作区状态（task/plan/context）由成员自己书写，可能包含早先
+/// 工作的标记字样——按首次出现取会把本轮归因到旧运行。
+fn extract_run_tag(user_text: &str) -> Option<&str> {
+    user_text
+        .rsplit_once("（运行标记 r-")
+        .and_then(|(_, rest)| rest.split('）').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 fn short_workspace(workspace: &str) -> String {
     let mut tail: Vec<&str> = workspace.split('/').filter(|p| !p.is_empty()).collect();
     if tail.len() > 2 {
@@ -1785,7 +1798,17 @@ impl SubagentService {
             match crate::delivery::cancel_session_turn(&self.http, &executor).await {
                 Ok(true) => {
                     // 取消信号已送达：轮次终止后归因链收尾，此处只登记取消
-                    // 裁定与任务层逻辑取消，不抢改 run 终态。
+                    // 裁定与任务层逻辑取消，不抢改终态。
+                    //
+                    // 但运行必须显式置 Stopping：归因链对成员已表态的
+                    // （Blocked / ApprovalRequired）运行只记事件、不落终态，
+                    // 若沿用原状态，取消会永不收尾、写占用也不释放；置
+                    // Stopping 后归因即以 Cancelled 终态收尾。
+                    run.status = RunStatus::Stopping;
+                    run.summary =
+                        Some("任务已取消（硬取消已送达），等待执行侧收尾确认".to_string());
+                    run.updated_at = timestamp.clone();
+                    let _ = self.store.save_run(&run);
                     if let Some(task_id) = run.task_id.clone()
                         && let Ok(mut task) = self.store.load_task(&task_id)
                         && task.status != TaskStatus::Completed
@@ -1954,13 +1977,7 @@ impl SubagentService {
         }
         // 归因只认运行标记：无标记的轮次（用户在成员会话直接对话等）
         // 不属于任何任务投递，忽略；绝不泛化为「最新活跃运行」。
-        let tag = request
-            .user_text
-            .split("（运行标记 r-")
-            .nth(1)
-            .and_then(|rest| rest.split('）').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let tag = extract_run_tag(&request.user_text);
         let Some(tag) = tag else {
             return Ok("本轮回报缺少运行标记（非任务投递触发），忽略".to_string());
         };
@@ -3236,4 +3253,38 @@ pub fn handshake_payload() -> serde_json::Value {
         "instance_id": format!("subagent-sidecar-{}", std::process::id()),
         "status": "ready",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 正文尾部的标记才是本轮标记：注入段落（长期记忆、成员自维护的
+    /// task/plan/context）里的历史标记不得抢先命中。
+    #[test]
+    fn 运行标记取最后一次出现() {
+        let body = "【Subagent 任务】来自主会话：\n目标：做一件事\n\n【长期记忆】\n上次工作（运行标记 r-AAAAAAAA）已交付。\n\n【当前任务】\n继续（运行标记 r-BBBBBBBB）的后续。\n\n（运行标记 r-CCCCCCCC）";
+        assert_eq!(extract_run_tag(body), Some("CCCCCCCC"));
+    }
+
+    #[test]
+    fn 无标记的正文不归因() {
+        assert_eq!(extract_run_tag("【Subagent 消息】来自主会话：\n你好"), None);
+        assert_eq!(extract_run_tag(""), None);
+    }
+
+    #[test]
+    fn 标记为空或未闭合时不归因() {
+        assert_eq!(extract_run_tag("（运行标记 r-）"), None);
+        assert_eq!(extract_run_tag("（运行标记 r-   ）"), None);
+        assert_eq!(extract_run_tag("（运行标记 r-"), None);
+    }
+
+    #[test]
+    fn 标记两侧空白被容忍() {
+        assert_eq!(
+            extract_run_tag("（运行标记 r- DDDDDDDD ）"),
+            Some("DDDDDDDD")
+        );
+    }
 }
