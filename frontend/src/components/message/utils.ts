@@ -278,7 +278,6 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
 
   // 第二遍：引用复用——消息引用逐条一致的组沿用上次的组对象。
   const nextCache = new Map<string, { refs: MessageItem[]; group: MessageGroup }>();
-  let reusedCount = 0;
   const groups: MessageGroup[] = pending.map((p) => {
     const cached = groupReuseCache?.get(p.key);
     if (
@@ -287,7 +286,6 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
       && cached.refs.length === p.msgs.length
       && cached.refs.every((m, i) => m === p.msgs[i])
     ) {
-      reusedCount += 1;
       nextCache.set(p.key, cached);
       return cached.group;
     }
@@ -301,15 +299,15 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
     return group;
   });
   groupReuseCache = nextCache;
-  // 所有组均命中复用且无 key 覆盖（重复 key 时 nextCache 更小）时，分组结果
-  // 与上一次完全一致，直接沿用上次数组引用，派生 useMemo 也保持命中。
-  if (
-    reusedCount === pending.length
-    && nextCache.size === pending.length
-    && lastGroupsResult !== null
-    && lastGroupsResult.length === groups.length
-  ) {
-    return lastGroupsResult;
+  // 逐位比对确认本次结果与上一次完全一致——组对象同序、同引用——才沿用上次
+  // 数组，让依赖分组数组本身的派生 useMemo 也保持命中。逐位比对同时蕴含
+  // 「全部组命中复用」「无重复 key」「长度一致」三个条件，并在同一批消息被
+  // 重排（对象未变、顺序变化）时正确退回新建数组，不会把上一次的顺序当作
+  // 本次结果。
+  // 返回的数组可能与上一次调用共享，调用方必须视为只读。
+  const previousGroups = lastGroupsResult;
+  if (previousGroups !== null && groups.every((group, index) => group === previousGroups[index])) {
+    return previousGroups;
   }
   lastGroupsResult = groups;
   return groups;

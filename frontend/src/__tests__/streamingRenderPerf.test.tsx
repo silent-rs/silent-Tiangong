@@ -42,6 +42,16 @@ describe('groupMessages 引用复用（流式期间历史组保持稳定）', ()
     expect(second).toBe(first);
   });
 
+  it('同一批消息对象被重排时按新顺序返回分组（数组复用带逐位校验）', () => {
+    const m1 = message('u1', 'user', '问题');
+    const m2 = message('a1', 'assistant', '回答');
+    groupMessages([m1, m2]);
+    // 对象未变、顺序颠倒：不得沿用上一次的数组顺序。
+    const reordered = groupMessages([m2, m1]);
+    expect(reordered.map((g) => g.key)).toEqual(['turn-a1', 'u1']);
+    expect(groupMessages([m1, m2]).map((g) => g.key)).toEqual(['u1', 'turn-a1']);
+  });
+
   it('组内消息被替换引用（流式增量）时该组重建、其他组复用', () => {
     const m1 = message('u1', 'user', '问题');
     const m2 = message('a1', 'assistant', '');
@@ -99,6 +109,7 @@ describe('StreamingMessage 流式渲染节流', () => {
   let root: Root;
 
   beforeEach(() => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.useFakeTimers();
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -109,6 +120,7 @@ describe('StreamingMessage 流式渲染节流', () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   const previewText = () =>
