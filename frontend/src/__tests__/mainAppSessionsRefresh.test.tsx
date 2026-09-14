@@ -339,6 +339,47 @@ describe('MainApp sessions_updated scheduling contract', () => {
     });
     expect(openEntry).toHaveBeenCalledTimes(2);
   });
+
+  it('后台会话的终端 App 不挂后台执行壳，其他插件仍隐藏挂壳', async () => {
+    mocks.api.pluginOpenEntry.mockClear();
+    await mountMainApp();
+    useStore.setState({ activeSessionId: 's1' });
+    const openEntry = vi.mocked(mocks.api.pluginOpenEntry);
+    const emit = (name: string, payload: unknown) => {
+      act(() => {
+        for (const handler of mocks.eventHandlers.get(name) ?? []) {
+          handler({ payload });
+        }
+      });
+    };
+
+    // 非当前激活会话的终端拉起：工具编排已下沉 sidecar 直连执行，
+    // 不占任何前端资源，等切回该会话时经 terminalListByScope 恢复标签。
+    emit('app:open_plugin', {
+      plugin_id: 'terminal',
+      contribution_id: 'terminal',
+      session_id: 's-other',
+      background: true,
+      instance_id: 'tty-1',
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(openEntry).not.toHaveBeenCalled();
+
+    // 其他插件（如浏览器）在后台会话仍隐藏挂壳，保证其工具有人执行。
+    emit('app:open_plugin', {
+      plugin_id: 'browser',
+      contribution_id: 'browser',
+      session_id: 's-other',
+      background: true,
+      instance_id: 'wv-1',
+    });
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(openEntry).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('MainApp StrictMode 异步监听注册竞态', () => {

@@ -529,10 +529,15 @@ export function MainApp() {
           });
         };
         // 后台会话（Sub Agent/Bot 等）的实例无法进入当前会话的标签栏，
-        // 仍隐藏挂载保证其工具有人执行，不计入前台标签与绿点。
+        // 仍隐藏挂载保证其工具有人执行，不计入前台标签与绿点。终端插件
+        // 例外：工具编排已下沉 sidecar 直连执行，不需要前端壳接应；后台
+        // 会话不占任何前端资源，切回该会话时由拓展区按 terminalListByScope
+        // 恢复真实使用中的终端标签。
         if ((useStore.getState().activeSessionId || useStore.getState().newConversationId)
           !== requestedSessionId) {
-          mountBackgroundShell();
+          if (payload.plugin_id !== 'terminal') {
+            mountBackgroundShell();
+          }
           return;
         }
         // 宿主无订阅兜底拉起（不带实例编号）：只挂隐藏执行壳，插件工具
