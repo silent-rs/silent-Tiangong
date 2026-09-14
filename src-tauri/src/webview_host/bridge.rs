@@ -30,15 +30,15 @@ pub fn handle_webview_primitive(
     let manager =
         crate::webview_host::BrowserManager::from_state(state.registry.session_state(&scope));
     let result = match method {
-        // 创建 webview 实例：真实创建（open 复用现有基础设施，含默认 tab）
-        // → { view_id, tabs, active_tab_id }
+        // 创建 webview 实例：真实创建（open 无头创建，展示由前端
+        // instanceShow 下发）→ { view_id, tabs, active_tab_id }
         "webview.create" => {
             let url = request
                 .get("url")
                 .and_then(|v| v.as_str())
                 .unwrap_or("about:blank");
             manager
-                .open(app, url, 60.0, 60.0, 1024.0, 720.0)
+                .open(app, url)
                 .map_err(|error| anyhow::anyhow!("创建 webview 失败：{error}"))?;
             let snapshot = manager.snapshot_tabs();
             serde_json::json!({
