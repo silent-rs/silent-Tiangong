@@ -424,6 +424,14 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
+            "__tiangong.mention_candidates.v1" => serde_json::to_string(&[serde_json::json!({
+                "value": "@plugin:scheduler",
+                "label": "定时任务",
+                "kind": "plugin",
+                "hint": "创建、管理定时任务（Cron 调度）",
+                "mark": "",
+            })])
+            .map_err(|e| plugin_err(e.to_string()))?,
             "list" => invoke_for_ui::<ListJobs>(&Empty {})?,
             "create" => {
                 let req: CreateJobRequest = serde_json::from_str(&request.payload)

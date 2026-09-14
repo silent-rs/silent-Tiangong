@@ -11527,7 +11527,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-protocol"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -11535,7 +11535,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-sidecar"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11625,7 +11625,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-protocol"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -11633,7 +11633,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
