@@ -63,6 +63,8 @@ const URL_POLL_TICK: Duration = Duration::from_millis(1000);
 /// 无头创建矩形：任何代码路径新建 WebView 一律先落在这屏幕外坐标，
 /// 展示位置只由前端显式下发（webview.instanceShow / setPosition）。
 /// agent 或后台会话拉起的页面因此不会裸浮在窗口上盖住对话区。
+/// 1024×720 同时决定无头页面的 viewport（影响媒体查询与布局），
+/// 是执行语义的一部分，改动前先确认无头页面的布局假设。
 const HEADLESS_RECT: (f64, f64, f64, f64) = (-10000.0, -10000.0, 1024.0, 720.0);
 
 /// 展示矩形是否可直接用于摆放 WebView（初始值 (0,0,0,0) 宽高无效）。
@@ -444,7 +446,9 @@ pub struct BrowserState {
     pub poll_stop: Arc<std::sync::atomic::AtomicBool>,
     /// 事件消费线程停止信号
     pub event_poll_stop: Arc<std::sync::atomic::AtomicBool>,
-    /// 浏览器面板是否可见（不可见时跳过页面数据读取）
+    /// 浏览器"活跃"开关（并非窗口可见性）：控制 url/event 后台轮询是否
+    /// 产出页面数据与事件。页面在窗口中的实际呈现只由展示矩形决定，
+    /// 与本标记无关——无头页面（后台会话/面板收起）同样可为 true。
     pub visible: Arc<std::sync::atomic::AtomicBool>,
     /// 已由后台事件线程读取、等待 Agent 消费的浏览器事件
     pub pending_events: Vec<BrowserEvent>,
@@ -1708,11 +1712,14 @@ impl BrowserManager {
     }
 
     pub fn hide(&self) -> Result<(), String> {
-        let state = self.state.lock().map_err(|e| e.to_string())?;
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
         for wv in state.webviews.values() {
             let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
             let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
         }
+        // 展示矩形随收起失效：否则后续 tab_switch/关标签切换会按旧矩形把
+        // 页面重新摆回窗口，浮层死灰复燃。下次 instanceShow 会带来新矩形。
+        state.browser_rect = (0.0, 0.0, 0.0, 0.0);
         state
             .visible
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1989,16 +1996,16 @@ impl BrowserManager {
                 .ok_or_else(|| "浏览器导航状态未初始化".to_string());
         }
 
-        let tab_id = {
+        // 一次加锁原子取快照：tab_id 与 needs_create 分离读取会引入竞态
+        // 窗口（他人先建好 webview 时此处会重复创建顶掉旧实例）。
+        let (tab_id, needs_create) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
-            state
+            let tab_id = state
                 .active_tab_id
                 .clone()
-                .ok_or_else(|| "当前没有可用标签".to_string())?
-        };
-        let needs_create = {
-            let state = self.state.lock().map_err(|e| e.to_string())?;
-            !state.webviews.contains_key(&tab_id)
+                .ok_or_else(|| "当前没有可用标签".to_string())?;
+            let needs_create = !state.webviews.contains_key(&tab_id);
+            (tab_id, needs_create)
         };
 
         if needs_create {
@@ -2095,14 +2102,8 @@ impl BrowserManager {
 
         // Agent 工作标签一律无头创建：是否把页面呈现给用户由前端
         // （browser:open 事件 → 拓展区面板 → instanceShow）决定。
-        let tab_id = self.tab_new_with_source(
-            app,
-            &url,
-            BrowserTabSource::Agent,
-            Some(agent_domain),
-            None,
-            None,
-        )?;
+        let tab_id =
+            self.tab_new_with_source(app, &url, BrowserTabSource::Agent, Some(agent_domain), None)?;
         self.start_url_poll(app, &url);
         self.start_event_poll(app);
         self.navigation_ticket_for_tab(&tab_id)
@@ -2721,7 +2722,7 @@ impl BrowserManager {
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
-        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, None)
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None)
     }
 
     /// 以插件自带编号新建标签（阶段 3：标签模型上移插件后由插件主导标识）。
@@ -2731,7 +2732,7 @@ impl BrowserManager {
         url: &str,
         tab_id: &str,
     ) -> Result<String, String> {
-        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None, Some(tab_id))
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, Some(tab_id))
     }
 
     fn tab_new_with_source(
@@ -2740,17 +2741,16 @@ impl BrowserManager {
         url: &str,
         source: BrowserTabSource,
         agent_domain: Option<String>,
-        rect_override: Option<(f64, f64, f64, f64)>,
         external_id: Option<&str>,
     ) -> Result<String, String> {
-        // 插件可自带标签编号（阶段 3 标签模型上移后由插件主导标识）
+        // 插件可自带标签编号（阶段 3：标签模型上移插件后由插件主导标识）
         let url = normalize_navigation_url(url);
         let tab_id = external_id
             .map(str::to_string)
             .unwrap_or_else(|| scru128::new().to_string());
         let is_blank = url == "about:blank";
 
-        let rect = {
+        {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             // 隐藏旧活跃 WebView
             if let Some(old_id) = &state.active_tab_id {
@@ -2758,9 +2758,8 @@ impl BrowserManager {
                     let _ = old_wv.set_position(LogicalPosition::new(-10000, -10000));
                 }
             }
-            // 新标签一律无头起步：无 override 用屏幕外矩形；override 只定
-            // 创建位置、不写 browser_rect（展示矩形仅由展示路径维护，
-            // 展示交给前端 webview.instanceShow）。
+            // 新标签一律无头起步（创建位置不可由调用方指定，展示交给前端
+            // webview.instanceShow）。
             state
                 .navigation_signals
                 .insert(tab_id.clone(), navigation_signal(&url));
@@ -2772,8 +2771,7 @@ impl BrowserManager {
                 agent_domain,
             });
             state.active_tab_id = Some(tab_id.clone());
-            rect_override.unwrap_or(HEADLESS_RECT)
-        };
+        }
 
         // about:blank 不创建 WebView（WKWebView 对 about:blank 的 URL() 返回 None，
         // 会导致 Tauri 权限检查内部 panic），延迟到 navigate 时按需创建
@@ -2784,10 +2782,10 @@ impl BrowserManager {
                 &tab_id,
                 &url,
                 NavigationIntent::Normal,
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
+                HEADLESS_RECT.0,
+                HEADLESS_RECT.1,
+                HEADLESS_RECT.2,
+                HEADLESS_RECT.3,
             )?;
 
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
@@ -3472,6 +3470,18 @@ fn encode_session_directory_name(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rect_is_displayable_rejects_invalid_rects() {
+        // 初始/收起后的失效矩形不可用于摆位（无头页面保持屏幕外）
+        assert!(!rect_is_displayable((0.0, 0.0, 0.0, 0.0)));
+        assert!(!rect_is_displayable((60.0, 60.0, 0.0, 720.0)));
+        assert!(!rect_is_displayable((60.0, 60.0, 1024.0, 0.0)));
+        assert!(!rect_is_displayable((60.0, 60.0, -1024.0, 720.0)));
+        // 前端 instanceShow 下发的展示矩形宽高有效
+        assert!(rect_is_displayable((60.0, 60.0, 1024.0, 720.0)));
+        assert!(rect_is_displayable((0.0, 0.0, 1.0, 1.0)));
+    }
 
     #[test]
     fn session_directory_name_encoding_is_windows_legal() {
