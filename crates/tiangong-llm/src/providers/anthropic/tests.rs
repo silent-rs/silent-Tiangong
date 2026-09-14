@@ -117,10 +117,21 @@ fn test_request_mapping_with_system_and_tools() {
             budget_tokens: None
         })
     ));
+    // 开启思考时官方要求 temperature 为 1：省略字段而非透传 0.2。
+    assert_eq!(mapped.temperature, None);
     assert!(matches!(
         mapped.tool_choice,
         Some(tiangong_anthropic::types::ToolChoice::Auto)
     ));
+}
+
+#[test]
+fn test_temperature_kept_when_thinking_disabled() {
+    let mut request = sample_request();
+    request.reasoning_effort = ReasoningEffort::None;
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(mapped.temperature, Some(0.2));
+    assert_eq!(mapped.thinking, None);
 }
 
 #[test]

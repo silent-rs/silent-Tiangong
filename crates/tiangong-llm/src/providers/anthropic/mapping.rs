@@ -51,6 +51,7 @@ pub(super) fn to_anthropic_request(
         ToolChoice::None => AnthropicToolChoice::None,
     });
 
+    let thinking = map_thinking_config(request);
     Ok(MessagesCreateRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens,
@@ -59,7 +60,9 @@ pub(super) fn to_anthropic_request(
             .clone()
             .filter(|value| !value.trim().is_empty()),
         messages,
-        temperature: request.temperature,
+        // 官方约束：开启思考时 temperature 只能为 1，省略字段走协议
+        // 默认即满足；Claude Code 同款行为，兼容端点用各自默认采样。
+        temperature: request.temperature.filter(|_| thinking.is_none()),
         stop_sequences: (!request.stop_sequences.is_empty())
             .then(|| request.stop_sequences.clone()),
         top_p: request.top_p,
@@ -67,7 +70,7 @@ pub(super) fn to_anthropic_request(
         tools,
         tool_choice,
         stream: None,
-        thinking: map_thinking_config(request),
+        thinking,
     })
 }
 
