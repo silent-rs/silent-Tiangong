@@ -1055,6 +1055,9 @@ fn run_windows_enforcement_probes(report: &mut serde_json::Map<String, serde_jso
             }
         }
         Err(error) => {
+            // 探针失败原因同时走 stderr：宿主拼装用户报错只取 stderr，
+            // 只写 stdout JSON 会让真实死因（如探针退出码）对用户不可见。
+            eprintln!("Windows 沙箱探针失败: {error:#}");
             report.insert(
                 "windows_probe_error".into(),
                 serde_json::Value::String(format!("{error:#}")),
@@ -1151,7 +1154,10 @@ fn windows_enforcement_probes() -> Result<WindowsEnforcementResult> {
         },
     )?;
     if exit_code != 0 {
-        bail!("Windows 文件隔离探测进程退出码异常: {exit_code}");
+        bail!(
+            "Windows 文件隔离探测进程退出码异常: {exit_code}（0x{:08X}）",
+            exit_code as u32
+        );
     }
     let mut probe: WindowsProbeReport = serde_json::from_slice(
         &std::fs::read(&report_path).context("读取 Windows 隔离探测报告失败")?,
@@ -1340,6 +1346,7 @@ fn create_directory_junction(target: &Path, link: &Path) -> Result<bool> {
 #[cfg(windows)]
 fn run_windows_file_probe(raw: &str) -> i32 {
     let Ok(request) = serde_json::from_str::<WindowsProbeRequest>(raw) else {
+        eprintln!("Windows 文件隔离探针: 请求参数解析失败");
         return 2;
     };
     eprintln!("Windows 文件隔离探针: 验证父进程边界");
