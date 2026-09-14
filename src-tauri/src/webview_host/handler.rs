@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::webview_host::manager::{default_browser_rect, BrowserManager, POLL_EVAL_TIMEOUT};
+use crate::webview_host::manager::{BrowserManager, POLL_EVAL_TIMEOUT};
 
 /// Agent 命令严格按 session_id 解析：空 session_id 返回 None（调用方应跳过/报错）。
 /// 不 fallback active/bootstrap——空 session_id 是调用方错误。
@@ -533,11 +533,9 @@ pub async fn browser_command_handler(
                     continue;
                 };
                 let manager = BrowserManager::from_state(agent_state);
-                // 浏览器未打开时先打开，再加载 HTML
+                // 浏览器未打开时先打开（无头），再加载 HTML
                 if !manager.is_open() {
-                    if let Some((x, y, w, h)) = default_browser_rect(&app) {
-                        let _ = manager.open(&app, "about:blank", x, y, w, h);
-                    }
+                    let _ = manager.open(&app, "about:blank");
                     let _ = app.emit(
                         "browser:open",
                         BrowserOpenEvent {
