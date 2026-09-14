@@ -1,7 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 1,
   "id": "scheduler",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "wasm": {
     "binary": "tiangong_plugin_scheduler_wasm.wasm"
   },
@@ -12,16 +12,5 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": [
-    "app-storage.read",
-    "sidecar.invoke"
-  ],
-  "entrypoints": [
-    "desktop",
-    "cli",
-    "server"
-  ],
-  "mention": {
-    "hint": "创建、管理定时任务（Cron 调度）"
-  }
+  "permissions": ["app-storage.read", "sidecar.invoke"]
 }
