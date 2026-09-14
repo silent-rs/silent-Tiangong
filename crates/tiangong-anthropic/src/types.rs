@@ -129,9 +129,9 @@ pub struct Tool {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     Enabled {
-        /// 思考预算。Anthropic 官方端点要求必填且须小于 max_tokens；
-        /// DeepSeek/GLM 等兼容实现可省略——省略时思考量由上游决定，
-        /// 且该字段不会序列化进请求。
+        /// 思考预算（≥1024 且须小于 max_tokens，协议要求必填）。
+        /// 调用方可省略：发送前由 AnthropicClient 统一补默认预算，
+        /// 省略值不会序列化进请求。
         #[serde(skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u32>,
     },
@@ -139,8 +139,7 @@ pub enum ThinkingConfig {
 }
 
 impl ThinkingConfig {
-    /// 开启思考且不限制预算：兼容 DeepSeek/GLM 等 Anthropic 兼容实现。
-    /// 接入官方 Anthropic 端点时改用 [`ThinkingConfig::with_budget`]。
+    /// 开启思考，预算由客户端发送前统一填充。
     pub fn enabled() -> Self {
         Self::Enabled {
             budget_tokens: None,

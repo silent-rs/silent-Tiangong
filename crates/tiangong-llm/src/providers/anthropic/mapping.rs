@@ -73,7 +73,7 @@ pub(super) fn to_anthropic_request(
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
     // reasoning_effort 有值即开启思考；预算是 Anthropic 协议自身细节，
-    // 由 tiangong-anthropic 库的 ThinkingConfig 决定（默认不限制）。
+    // 省略时由 tiangong-anthropic 客户端在发送前统一填充默认值。
     request
         .reasoning_effort
         .is_thinking_enabled()

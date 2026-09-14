@@ -112,11 +112,9 @@ async fn read_complete_response(
         .map_err(|_| AnthropicError::Timeout(format!("{} ms", timeout.as_millis())))?
 }
 
-/// 官方 Anthropic API 域名。
-const OFFICIAL_API_HOST: &str = "api.anthropic.com";
 /// 默认思考预算下，为正文（含工具调用）保留的输出空间。
 const DEFAULT_BUDGET_TEXT_RESERVE_TOKENS: u32 = 8_192;
-/// 官方协议要求的思考预算下限（官方拒绝小于 1024 的值）。
+/// 协议要求的思考预算下限（官方拒绝小于 1024 的值）。
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
 
 #[derive(Clone)]
@@ -148,7 +146,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<MessagesCreateResponse, AnthropicError> {
-        self.apply_official_thinking_budget(&mut request);
+        self.fill_default_thinking_budget(&mut request);
         let response = self
             .request_builder("/v1/messages")
             .json(&request)
@@ -162,7 +160,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<EventStream, AnthropicError> {
-        self.apply_official_thinking_budget(&mut request);
+        self.fill_default_thinking_budget(&mut request);
         request.stream = Some(true);
         // 建连与等待响应头受用户配置的请求超时约束，避免网关建连后
         // 不返回响应头导致永久等待；SSE 建流成功后不受总时限限制。
@@ -227,18 +225,20 @@ impl AnthropicClient {
         self.request_builder_with_client(&self.http_client, path)
     }
 
-    /// 官方 Anthropic 端点要求 thinking.enabled 必须携带 budget_tokens
-    /// （≥1024 且严格小于 max_tokens）。DeepSeek/GLM 等兼容实现可省略预算，
-    /// 且部分实现（实测 GLM）会执行预算并在思考超限时截断输出，因此仅对
-    /// 官方端点填充默认推荐预算：max_tokens 保留正文空间后全部交给思考。
-    fn apply_official_thinking_budget(&self, request: &mut MessagesCreateRequest) {
+    /// Anthropic 协议要求 thinking.enabled 必须携带 budget_tokens
+    /// （≥1024 且严格小于 max_tokens），缺失会被官方端点直接拒收。
+    /// 与 Claude Code 同策略：不区分端点，一律下发官方形态请求——
+    /// DeepSeek/GLM/Kimi 等厂商的 Anthropic 兼容端点本就以接住
+    /// Claude Code 请求为兼容基线，budget_tokens 均可透传。
+    /// 预算取 max_tokens 保留正文空间后的全部剩余（下限 1024），
+    /// 对兼容端点也足够宽裕，不会出现思考被预算截断的情况。
+    fn fill_default_thinking_budget(&self, request: &mut MessagesCreateRequest) {
         if !matches!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
                 budget_tokens: None
             })
-        ) || !self.is_official_endpoint()
-        {
+        ) {
             return;
         }
         let budget = request
@@ -249,13 +249,6 @@ impl AnthropicClient {
         request.thinking = Some(ThinkingConfig::Enabled {
             budget_tokens: Some(budget),
         });
-    }
-
-    /// 判断端点是否为官方 Anthropic API（DeepSeek/GLM 等兼容端点返回 false）。
-    fn is_official_endpoint(&self) -> bool {
-        let base = self.config.base_url.trim_end_matches('/');
-        let host = base.split("://").nth(1).unwrap_or(base);
-        host.eq_ignore_ascii_case(OFFICIAL_API_HOST)
     }
 
     fn stream_request_builder(&self, path: &str) -> reqwest::RequestBuilder {
@@ -465,23 +458,31 @@ mod tests {
     }
 
     #[test]
-    fn official_endpoint_fills_default_budget() {
-        let client = client_with_base_url("https://api.anthropic.com");
-        let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
-        client.apply_official_thinking_budget(&mut request);
-        assert_eq!(
-            request.thinking,
-            Some(ThinkingConfig::Enabled {
-                budget_tokens: Some(24_576)
-            })
-        );
+    fn any_endpoint_fills_default_budget() {
+        // 与 Claude Code 同策略：官方直连、自建中转、厂商兼容端点一律补预算。
+        for base_url in [
+            "https://api.anthropic.com",
+            "https://tools.tisshue.com",
+            "https://open.bigmodel.cn/api/anthropic",
+            "http://127.0.0.1:3456/v1",
+        ] {
+            let client = client_with_base_url(base_url);
+            let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+            client.fill_default_thinking_budget(&mut request);
+            assert_eq!(
+                request.thinking,
+                Some(ThinkingConfig::Enabled {
+                    budget_tokens: Some(24_576)
+                })
+            );
+        }
     }
 
     #[test]
-    fn official_endpoint_keeps_explicit_budget() {
+    fn explicit_budget_is_kept() {
         let client = client_with_base_url("https://api.anthropic.com");
         let mut request = request_with(32_768, Some(ThinkingConfig::with_budget(2_048)));
-        client.apply_official_thinking_budget(&mut request);
+        client.fill_default_thinking_budget(&mut request);
         assert_eq!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
@@ -491,26 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn compatible_endpoint_leaves_budget_unset() {
-        // DeepSeek/GLM 等兼容端点：实测会执行预算并在思考超限时截断，
-        // 不下发预算，思考量由上游决定。
-        for base_url in [
-            "https://open.bigmodel.cn/api/anthropic",
-            "http://127.0.0.1:3456/v1",
-        ] {
-            let client = client_with_base_url(base_url);
-            let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
-            client.apply_official_thinking_budget(&mut request);
-            assert_eq!(request.thinking, Some(ThinkingConfig::enabled()));
-        }
-    }
-
-    #[test]
     fn small_max_tokens_clamps_budget() {
         let client = client_with_base_url("https://api.anthropic.com");
         // max_tokens 小于正文预留时：取下限 1024，并保证严格小于 max_tokens。
         let mut request = request_with(1_500, Some(ThinkingConfig::enabled()));
-        client.apply_official_thinking_budget(&mut request);
+        client.fill_default_thinking_budget(&mut request);
         assert_eq!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
@@ -523,7 +509,7 @@ mod tests {
     fn disabled_thinking_is_untouched() {
         let client = client_with_base_url("https://api.anthropic.com");
         let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
-        client.apply_official_thinking_budget(&mut request);
+        client.fill_default_thinking_budget(&mut request);
         assert_eq!(request.thinking, Some(ThinkingConfig::Disabled));
     }
 
