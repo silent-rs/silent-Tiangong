@@ -112,11 +112,6 @@ async fn read_complete_response(
         .map_err(|_| AnthropicError::Timeout(format!("{} ms", timeout.as_millis())))?
 }
 
-/// 默认思考预算下，为正文（含工具调用）保留的输出空间。
-const DEFAULT_BUDGET_TEXT_RESERVE_TOKENS: u32 = 8_192;
-/// 协议要求的思考预算下限（官方拒绝小于 1024 的值）。
-const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
-
 #[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
@@ -227,11 +222,13 @@ impl AnthropicClient {
 
     /// Anthropic 协议要求 thinking.enabled 必须携带 budget_tokens
     /// （≥1024 且严格小于 max_tokens），缺失会被官方端点直接拒收。
-    /// 与 Claude Code 同策略：不区分端点，一律下发官方形态请求——
-    /// DeepSeek/GLM/Kimi 等厂商的 Anthropic 兼容端点本就以接住
-    /// Claude Code 请求为兼容基线，budget_tokens 均可透传。
-    /// 预算取 max_tokens 保留正文空间后的全部剩余（下限 1024），
-    /// 对兼容端点也足够宽裕，不会出现思考被预算截断的情况。
+    /// 与 Claude Code 同策略：不区分端点，一律下发官方形态请求，预算拉足
+    /// 到协议上限 max_tokens-1（opencode 的 max 档同款取值）。实测智谱
+    /// GLM-4.6/5.3 的 Anthropic 兼容端点对 budget_tokens 接受但不执行
+    /// （小预算下思考照常超出运行），预算值对兼容端点无行为影响；
+    /// 官方端点思考用量由任务决定，预算仅为上限，拉足不挤占正文。
+    /// max_tokens ≤ 1024 时预算取 max_tokens-1，优先满足"严格小于
+    /// max_tokens"约束（此类请求实际不发生于主链路）。
     fn fill_default_thinking_budget(&self, request: &mut MessagesCreateRequest) {
         if !matches!(
             request.thinking,
@@ -241,11 +238,7 @@ impl AnthropicClient {
         ) {
             return;
         }
-        let budget = request
-            .max_tokens
-            .saturating_sub(DEFAULT_BUDGET_TEXT_RESERVE_TOKENS)
-            .max(MIN_THINKING_BUDGET_TOKENS)
-            .min(request.max_tokens.saturating_sub(1));
+        let budget = request.max_tokens.saturating_sub(1);
         request.thinking = Some(ThinkingConfig::Enabled {
             budget_tokens: Some(budget),
         });
@@ -472,7 +465,7 @@ mod tests {
             assert_eq!(
                 request.thinking,
                 Some(ThinkingConfig::Enabled {
-                    budget_tokens: Some(24_576)
+                    budget_tokens: Some(32_767)
                 })
             );
         }
@@ -494,13 +487,14 @@ mod tests {
     #[test]
     fn small_max_tokens_clamps_budget() {
         let client = client_with_base_url("https://api.anthropic.com");
-        // max_tokens 小于正文预留时：取下限 1024，并保证严格小于 max_tokens。
+        // 预算拉足到 max_tokens-1：max_tokens ≤ 1024 时优先满足
+        // "严格小于 max_tokens"约束（低于协议下限 1024，此类请求不发生于主链路）。
         let mut request = request_with(1_500, Some(ThinkingConfig::enabled()));
         client.fill_default_thinking_budget(&mut request);
         assert_eq!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
-                budget_tokens: Some(1_024)
+                budget_tokens: Some(1_499)
             })
         );
     }
