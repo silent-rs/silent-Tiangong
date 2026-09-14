@@ -411,6 +411,24 @@ struct FindResponse {
     history: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListByScopeRequest {
+    scope_id: String,
+}
+
+/// terminalListByScope 条目：宿主会话下仍存活的终端（前端切换会话时
+/// 恢复可见标签，历史输出由页面经 terminalFind/幂等 spawn 自行回放）。
+#[derive(Debug, Serialize)]
+struct ScopeTerminalEntry {
+    session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListByScopeResponse {
+    terminals: Vec<ScopeTerminalEntry>,
+}
+
 #[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
@@ -1531,6 +1549,31 @@ impl TerminalService {
             session_id: None,
             history: String::new(),
         }
+    }
+
+    /// 列出宿主会话下全部存活终端（按创建序）。前端切换会话时恢复可见
+    /// 标签用；已退出的终端（含死亡未出表）不返回——那些由既有收尾与
+    /// GC 机制回收，恢复展示没有意义。
+    fn list_by_scope(&self, request: &ListByScopeRequest) -> Result<ListByScopeResponse> {
+        let scope_id = request.scope_id.trim();
+        if scope_id.is_empty() {
+            bail!("terminalListByScope 需要有效的 scope_id");
+        }
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
+        let mut terminals: Vec<(u64, String)> = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.scope_id.as_deref() == Some(scope_id) && session.exited_code.is_none()
+            })
+            .map(|(session_id, session)| (session.sequence, session_id.clone()))
+            .collect();
+        terminals.sort_unstable();
+        Ok(ListByScopeResponse {
+            terminals: terminals
+                .into_iter()
+                .map(|(_, session_id)| ScopeTerminalEntry { session_id })
+                .collect(),
+        })
     }
 }
 
@@ -2673,6 +2716,11 @@ async fn dispatch_operation(
             let request: FindRequest =
                 serde_json::from_value(payload).context("terminalFind 参数无效")?;
             Ok(serde_json::to_value(service.find_by_scope(&request))?)
+        }
+        "terminalListByScope" => {
+            let request: ListByScopeRequest =
+                serde_json::from_value(payload).context("terminalListByScope 参数无效")?;
+            Ok(serde_json::to_value(service.list_by_scope(&request)?)?)
         }
         other => bail!("未知操作: {other}"),
     }
@@ -3939,6 +3987,85 @@ mod tests {
                 session_id: terminal_id,
             })
             .expect("清理测试终端失败");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_list_by_scope_只列同会话存活终端并按创建序() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawn = |session_id: &str, scope_id: &str| SpawnRequest {
+            session_id: Some(session_id.to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(cwd.path().to_string_lossy().to_string()),
+            scope_id: Some(scope_id.to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        };
+        service
+            .spawn_session(spawn("terminal-first", "session-list"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-second", "session-list"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-other", "session-b"))
+            .unwrap();
+        service
+            .spawn_session(spawn("terminal-dead", "session-list"))
+            .unwrap();
+        // 死亡未出表：shell 已退出但等命令收尾，列表不得恢复其标签。
+        service
+            .with_session("terminal-dead", |session| {
+                session.exited_code = Some(-1);
+                Ok(())
+            })
+            .unwrap();
+
+        let listed = service
+            .list_by_scope(&ListByScopeRequest {
+                scope_id: "session-list".to_string(),
+            })
+            .expect("terminalListByScope 查询失败");
+        let ids: Vec<&str> = listed
+            .terminals
+            .iter()
+            .map(|terminal| terminal.session_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["terminal-first", "terminal-second"]);
+
+        // 前端经 bridgeCall 走 dispatch 通道，协议形状一并验证。
+        let response = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("创建测试 runtime 失败")
+            .block_on(service.dispatch(Request::new(
+                "terminalListByScope",
+                serde_json::json!({ "scope_id": "session-list" }),
+            )));
+        assert!(
+            response.success,
+            "terminalListByScope dispatch 失败: {response:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&listed).expect("序列化失败"),
+            response.payload.expect("dispatch 成功响应缺少 payload"),
+        );
+
+        for terminal in [
+            "terminal-first",
+            "terminal-second",
+            "terminal-other",
+            "terminal-dead",
+        ] {
+            service
+                .kill_session(SessionIdRequest {
+                    session_id: terminal.to_string(),
+                })
+                .unwrap();
+        }
     }
 
     #[cfg(unix)]

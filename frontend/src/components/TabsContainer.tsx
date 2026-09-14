@@ -37,6 +37,14 @@ interface TabsContainerProps {
 
 const DEFAULT_BROWSER_URL = 'about:blank';
 
+/** 恢复终端标签所用 App 元数据（与终端插件清单 extension.tab 贡献一致）。 */
+const TERMINAL_TAB_META = {
+  pluginId: 'terminal',
+  contributionId: 'terminal',
+  title: '终端',
+  sandbox: 'shadow' as const,
+};
+
 /** 宿主（矩阵菜单等）下发的 App 实例命令，version 递增触发执行。 */
 export interface AppTabCommand {
   kind: TabKind;
@@ -356,17 +364,72 @@ export function TabsContainer({
     };
   }, [terminalSessionId]);
 
+  // 会话挂载后向终端插件查询该会话仍存活的终端并重建可见标签：后台
+  // 会话执行终端命令不占前端资源，切回（或首次打开拓展区）时按真实
+  // 使用情况恢复。标签编号即终端编号，页面挂载后经 terminalFind/幂等
+  // spawn 自行回放历史输出；已有同编号标签（工具静默拉起抢先建好）
+  // 时仅跳过，聚焦交由既有命令通道决定。
+  const restoreTerminalTabs = useCallback(async (sessionId: string) => {
+    if (!sessionId) return;
+    let result: { terminals?: { session_id?: string }[] };
+    try {
+      const raw = await api.bridgeCall(
+        'terminal',
+        'sidecar.terminalListByScope',
+        JSON.stringify({ scope_id: sessionId }),
+        sessionId,
+      );
+      result = JSON.parse(raw);
+    } catch {
+      // 终端插件未启用或会话未就绪：无终端可恢复，保持空标签栏。
+      return;
+    }
+    if (mountedSessionIdRef.current !== sessionId) return;
+    const ids = (result.terminals ?? [])
+      .map((terminal) => terminal.session_id)
+      .filter((id): id is string => Boolean(id));
+    let nextTabs = tabsRef.current;
+    let changed = false;
+    for (const id of ids) {
+      if (nextTabs.some((tab) => tab.id === id)) continue;
+      nextTabs = [...nextTabs, {
+        id,
+        kind: 'plugin',
+        title: TERMINAL_TAB_META.title,
+        url: '',
+        created_at: nowText(),
+        plugin_id: TERMINAL_TAB_META.pluginId,
+        contribution_id: TERMINAL_TAB_META.contributionId,
+        sandbox: TERMINAL_TAB_META.sandbox,
+      }];
+      changed = true;
+    }
+    if (!changed) return;
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    // 竞态下工具拉起的标签已建好并聚焦时不抢占；正常切换路径标签栏
+    // 已被清空，聚焦创建序最新的终端。
+    if (!activeTabIdRef.current) {
+      activeTabIdRef.current = ids[ids.length - 1];
+      setActiveTabId(ids[ids.length - 1]);
+    }
+  }, []);
+
   // 拓展区 Tab 仅驻留当前进程。会话变化时通知当前插件实例关闭并清空，
-  // 不读取旧会话记录，也不尝试恢复任何运行实例。
+  // 不读取旧会话记录，也不尝试恢复任何运行实例（终端除外，见下）。
   useEffect(() => {
     if (mountedSessionIdRef.current === terminalSessionId) return;
     const previousSessionId = mountedSessionIdRef.current;
     const closingTabs = tabsRef.current;
     mountedSessionIdRef.current = terminalSessionId;
 
+    // 终端插件例外：切换会话不触发 beforeClose（那会提交不含该终端的
+    // 存活集合，把仍在使用的 PTY 当失效回收）。终端的存活跨越会话切换，
+    // 切回时按 terminalListByScope 的真实使用情况恢复标签；用户显式
+    // 关闭标签仍走 handleCloseTab 的 beforeClose 正常回收。
     void Promise.allSettled(
       closingTabs
-        .filter((tab) => tab.kind === 'plugin')
+        .filter((tab) => tab.kind === 'plugin' && tab.plugin_id !== 'terminal')
         .map((tab) => runPluginBeforeClose(tab.id)),
     );
     if (previousSessionId) {
@@ -381,7 +444,8 @@ export function TabsContainer({
     setReloadGenerations({});
     setSessionResetVersion((version) => version + 1);
     setActivationRetryVersion((version) => version + 1);
-  }, [hideWebviewPluginTabs, syncMountedBrowserTabs, terminalSessionId]);
+    restoreTerminalTabs(terminalSessionId);
+  }, [hideWebviewPluginTabs, restoreTerminalTabs, syncMountedBrowserTabs, terminalSessionId]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
