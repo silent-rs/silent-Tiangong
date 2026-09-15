@@ -15,7 +15,7 @@ import type { MessageGroup } from "./types";
 import { VoiceBubble } from "./VoiceBubble";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
-import { CollapsibleUserText } from "./CollapsibleUserText";
+import { CollapsibleMarkdownText, CollapsibleUserText } from "./CollapsibleUserText";
 
 
 
@@ -457,9 +457,17 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
                 <div>
                   <ContentMedia message={message} />
                   {messageText && (
-                    <CollapsibleUserText messageId={message.id}>
-                      {renderUserText(messageText)}
-                    </CollapsibleUserText>
+                    // 换行与 Markdown 走 Markdown 预览渲染（md-editor-rt 默认
+                    // breaks，单换行渲染为真实换行）；mention 消息优先保 chip
+                    // 展示，搜索命中时退回纯文本高亮（与助手消息路径一致：
+                    // Markdown 渲染后文本被打散，高亮无法定位）。
+                    hasMention(messageText) || (searchQuery && findTextOccurrences(messageText, searchQuery, caseSensitive).length > 0) ? (
+                      <CollapsibleUserText messageId={message.id}>
+                        {renderUserText(messageText)}
+                      </CollapsibleUserText>
+                    ) : (
+                      <CollapsibleMarkdownText messageId={message.id} text={messageText} />
+                    )
                   )}
                 </div>
               )}

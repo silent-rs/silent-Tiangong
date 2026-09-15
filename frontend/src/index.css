@@ -176,6 +176,24 @@
   position: static !important;
 }
 
+/* 用户消息气泡内的 Markdown 预览：字号对齐气泡正文尺度（md-editor
+   默认 16px），并压缩段落间距，避免短消息上下留白撑大气泡 */
+.user-bubble-md .md-editor-preview {
+  font-size: 0.875rem;
+}
+
+.user-bubble-md .md-editor-preview > :first-child {
+  margin-top: 0;
+}
+
+.user-bubble-md .md-editor-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.user-bubble-md .md-editor-preview p {
+  margin-block: 0.4em;
+}
+
 /* 代码块样式 */
 @layer components {
   .prose pre {
