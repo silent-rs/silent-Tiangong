@@ -108,7 +108,14 @@ fn sample_request() -> ProviderRequest {
 fn test_request_mapping_with_system_and_tools() {
     let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
     assert_eq!(mapped.model, "claude-3-7-sonnet");
-    assert_eq!(mapped.system.as_deref(), Some("你是测试助手"));
+    // system 块化携带断点：文本内容不变，尾块带 ephemeral 标记。
+    assert!(matches!(
+        mapped.system.as_ref(),
+        Some(tiangong_anthropic::types::SystemContent::Blocks(blocks))
+            if blocks.len() == 1
+                && blocks[0].text == "你是测试助手"
+                && blocks[0].cache_control.is_some()
+    ));
     assert_eq!(mapped.messages.len(), 3);
     assert_eq!(mapped.tools.as_ref().map(Vec::len), Some(1));
     assert!(matches!(
@@ -132,6 +139,56 @@ fn test_temperature_kept_when_thinking_disabled() {
     let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
     assert_eq!(mapped.temperature, Some(0.2));
     assert_eq!(mapped.thinking, None);
+}
+
+#[test]
+fn test_cache_breakpoints_layout() {
+    // 断点布局：仅最后一个工具、system 尾块、消息尾部两个块带标记。
+    let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
+    let tools = mapped.tools.expect("tools");
+    assert!(
+        tools[..tools.len() - 1]
+            .iter()
+            .all(|tool| tool.cache_control.is_none())
+    );
+    assert!(tools.last().unwrap().cache_control.is_some());
+
+    // sample_request 的可标记块（倒序）：tool 消息的 ToolResult、user 的 Text。
+    let marked: Vec<bool> = mapped
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .map(|block| match block {
+            tiangong_anthropic::types::ContentBlockParam::Text { cache_control, .. }
+            | tiangong_anthropic::types::ContentBlockParam::ToolResult { cache_control, .. } => {
+                cache_control.is_some()
+            }
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        vec![true, false, true],
+        "user Text 与 tool ToolResult 带断点，assistant ToolUse 不带"
+    );
+}
+
+#[test]
+fn test_cache_breakpoint_serialization_shape() {
+    use tiangong_anthropic::types::{CacheControl, ContentBlockParam};
+    let block = ContentBlockParam::Text {
+        text: "x".to_string(),
+        cache_control: Some(CacheControl::ephemeral()),
+    };
+    let json = serde_json::to_value(&block).unwrap();
+    assert_eq!(json["cache_control"]["type"], "ephemeral");
+
+    let plain = serde_json::to_value(ContentBlockParam::Text {
+        text: "x".to_string(),
+        cache_control: None,
+    })
+    .unwrap();
+    assert!(plain.get("cache_control").is_none());
 }
 
 #[test]

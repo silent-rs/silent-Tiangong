@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use tiangong_anthropic::types::{
-    ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
+    CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
     ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
-    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, ThinkingConfig,
-    Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
+    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, SystemContent, TextBlock,
+    ThinkingConfig, Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
@@ -19,27 +19,13 @@ use crate::usage::TokenUsageData;
 pub(super) fn to_anthropic_request(
     request: &ProviderRequest,
 ) -> Result<MessagesCreateRequest, LlmError> {
-    let messages = request
+    let mut messages = request
         .messages
         .iter()
         .filter_map(map_message)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let tools = if request.tools.is_empty() {
-        None
-    } else {
-        Some(
-            request
-                .tools
-                .iter()
-                .map(|tool| AnthropicTool {
-                    name: tool.name.clone(),
-                    description: Some(tool.description.clone()),
-                    input_schema: tool.input_schema.clone(),
-                })
-                .collect(),
-        )
-    };
+    let mut tools = build_tools(request);
 
     let tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
         ToolChoice::Auto => AnthropicToolChoice::Auto,
@@ -52,13 +38,31 @@ pub(super) fn to_anthropic_request(
     });
 
     let thinking = map_thinking_config(request);
+
+    // 提示缓存断点（官方每请求最多 4 个），按前缀失效层次放置：
+    // tools 尾、system 尾保住固定大头，消息尾两断点（倒数第二 + 最后）
+    // 让对话历史滚动进缓存——本轮的尾断点即下轮的倒数第二断点，
+    // 位置对齐保证每轮命中上一轮完整前缀，缓存读约 1 折。
+    let breakpoint = || Some(CacheControl::ephemeral());
+    if let Some(last_tool) = tools.as_mut().and_then(|tools| tools.last_mut()) {
+        last_tool.cache_control = breakpoint();
+    }
+    let system = request.system.as_ref().and_then(|system| {
+        let text = system.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(SystemContent::Blocks(vec![TextBlock {
+            text: system.clone(),
+            cache_control: breakpoint(),
+        }]))
+    });
+    mark_message_tail_breakpoints(&mut messages, breakpoint);
+
     Ok(MessagesCreateRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens,
-        system: request
-            .system
-            .clone()
-            .filter(|value| !value.trim().is_empty()),
+        system,
         messages,
         // 官方约束：开启思考时 temperature 只能为 1，省略字段走协议
         // 默认即满足；Claude Code 同款行为，兼容端点用各自默认采样。
@@ -72,6 +76,49 @@ pub(super) fn to_anthropic_request(
         stream: None,
         thinking,
     })
+}
+
+/// 在消息尾部的两个可标记内容块（Text/ToolResult）上放断点：倒数第二个
+/// 块对齐上一轮的尾断点位置，最后一个块覆盖本轮新增。从尾部向前找：
+/// 断点必须落在前缀真正结束的块上才有效。
+fn mark_message_tail_breakpoints(
+    messages: &mut [AnthropicMessage],
+    mut breakpoint: impl FnMut() -> Option<CacheControl>,
+) {
+    let mut placed = 0;
+    'outer: for message in messages.iter_mut().rev() {
+        for block in message.content.iter_mut().rev() {
+            match block {
+                ContentBlockParam::Text { cache_control, .. }
+                | ContentBlockParam::ToolResult { cache_control, .. } => {
+                    *cache_control = breakpoint();
+                    placed += 1;
+                    if placed == 2 {
+                        break 'outer;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn build_tools(request: &ProviderRequest) -> Option<Vec<AnthropicTool>> {
+    if request.tools.is_empty() {
+        return None;
+    }
+    Some(
+        request
+            .tools
+            .iter()
+            .map(|tool| AnthropicTool {
+                name: tool.name.clone(),
+                description: Some(tool.description.clone()),
+                input_schema: tool.input_schema.clone(),
+                cache_control: None,
+            })
+            .collect(),
+    )
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
@@ -104,7 +151,10 @@ fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmErro
 
 fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> {
     match content {
-        MessageContent::Text(text) => Ok(ContentBlockParam::Text { text: text.clone() }),
+        MessageContent::Text(text) => Ok(ContentBlockParam::Text {
+            text: text.clone(),
+            cache_control: None,
+        }),
         MessageContent::Thinking(thinking) => Ok(ContentBlockParam::Thinking {
             thinking: thinking.thinking.clone(),
             signature: thinking.signature.clone(),
@@ -124,6 +174,7 @@ fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> 
                 ToolResultContent::Json(value) => value.clone(),
             }),
             is_error: Some(tool_result.is_error),
+            cache_control: None,
         }),
         MessageContent::Image(image) => {
             let data = image
