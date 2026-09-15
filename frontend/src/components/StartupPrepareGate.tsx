@@ -8,11 +8,9 @@ import appLogo from '../../../src-tauri/icons/128x128.png';
 interface DegradedInfo {
   sandboxReason: string | null;
   pluginFailures: string[];
-  /** 沙箱仍在准备中：后台续查，就绪后横幅自动消失。 */
-  pending: boolean;
 }
 
-/** 组装降级信息；state 查询失败时保留启动结果中的原因。 */
+/** 组装降级信息；只收集终态失败，准备中不作为异常提示（设置页展示状态）。 */
 async function collectDegraded(result: StartupPrepareResult): Promise<DegradedInfo> {
   let sandboxReason = result.degraded_reason;
   const state: SandboxUpdateState | null = await api.getSandboxUpdateState().catch(() => null);
@@ -22,13 +20,13 @@ async function collectDegraded(result: StartupPrepareResult): Promise<DegradedIn
   return {
     sandboxReason,
     pluginFailures: result.plugin_failures,
-    pending: state?.status === 'preparing' && sandboxReason === null,
   };
 }
 
 /**
  * 运行环境与插件就绪后挂载主界面；启动准备失败不再阻断进入——
  * 对话不依赖插件与沙箱，降级只影响工具，以浮层横幅提示并在设置页可修复。
+ * 沙箱"准备中"属进行时状态：放行不提示，常驻展示位在设置页沙箱管理。
  */
 export function StartupPrepareGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
@@ -51,8 +49,8 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
         }) satisfies StartupPrepareResult,
     );
     if (current !== attempt.current) return;
-    // 状态机复检：以后端权威状态为准；沙箱准备超过短窗口即降级放行，
-    // 后台续查，就绪后横幅自动消失，不再让用户停在启动页等待。
+    // 状态机复检：以后端权威状态为准；沙箱仍准备中属进行时状态，
+    // 短暂等待后直接放行，不以横幅持续提示，状态由设置页展示。
     for (let round = 0; round < 10; round += 1) {
       const state = await api.getSandboxUpdateState();
       if (current !== attempt.current) return;
@@ -65,9 +63,6 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
     if (current !== attempt.current) return;
     const info = await collectDegraded(result);
     if (current !== attempt.current) return;
-    if (info.pending) {
-      info.sandboxReason = '沙箱程序仍在准备中，插件工具暂不可用';
-    }
     setDegraded(
       info.sandboxReason || info.pluginFailures.length > 0 ? info : null,
     );
@@ -80,33 +75,6 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
       attempt.current += 1;
     };
   }, [runPrepare]);
-
-  // 沙箱仍在准备时后台续查：就绪清除横幅，失败更新原因。
-  useEffect(() => {
-    if (!degraded?.pending) return;
-    const timer = setInterval(() => {
-      void api
-        .getSandboxUpdateState()
-        .then((state) => {
-          if (state.status === 'preparing') return;
-          setDegraded((current) => {
-            if (!current?.pending) return current;
-            if (state.status === 'ready') {
-              return current.pluginFailures.length > 0
-                ? { sandboxReason: null, pluginFailures: current.pluginFailures, pending: false }
-                : null;
-            }
-            return {
-              sandboxReason: state.failure ?? current.sandboxReason,
-              pluginFailures: current.pluginFailures,
-              pending: false,
-            };
-          });
-        })
-        .catch(() => undefined);
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [degraded?.pending]);
 
   // 横幅上的重试：后端命令自带失败插件重试，完成后刷新降级信息，
   // 不回启动页打断已进入的会话。
@@ -121,9 +89,6 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
         }) satisfies StartupPrepareResult,
       );
       const info = await collectDegraded(result);
-      if (info.pending) {
-        info.sandboxReason = '沙箱程序仍在准备中，插件工具暂不可用';
-      }
       setDegraded(
         info.sandboxReason || info.pluginFailures.length > 0 ? info : null,
       );
@@ -170,7 +135,7 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
             <div className="min-w-0 flex-1 space-y-1">
               {degraded.sandboxReason && (
                 <p className="break-words">
-                  沙箱程序不可用，插件工具暂不可用（对话不受影响）：{degraded.sandboxReason}
+                  沙箱程序无效，插件工具暂不可用（对话不受影响）：{degraded.sandboxReason}
                   {' '}可在 设置 → 沙箱管理 中检查并更新后自动恢复。
                 </p>
               )}
