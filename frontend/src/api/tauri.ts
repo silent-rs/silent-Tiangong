@@ -17,6 +17,10 @@ export interface SandboxUpdateState {
 
 export interface StartupPrepareResult {
   installed_version: string | null;
+  /** 沙箱不可用等降级原因：应用仍可进入，仅插件工具受限。 */
+  degraded_reason: string | null;
+  /** 启动失败的插件清单（各插件已标记异常，设置页可查详情）。 */
+  plugin_failures: string[];
 }
 
 /** 内置注入类环境变量屏蔽清单（管理 Modal 提示与保存去重用）。 */

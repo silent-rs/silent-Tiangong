@@ -6,6 +6,7 @@ import type {
   McpServer,
   Message,
   RawAttachment,
+  SandboxUpdateState,
   SessionStreamEvent,
   Session,
   InputCache,
@@ -947,11 +948,16 @@ export interface AppState {
 
   /** 用户"按需进程沙箱"开关（全局）：null 表示尚未从宿主加载。 */
   sandboxDisabled: boolean | null;
+  /** 沙箱程序状态（设置页 / 输入区指示 / 启动门闸共用）：null 表示尚未加载。 */
+  sandboxState: SandboxUpdateState | null;
   commandEnvBlocklist: string[] | null;
   loadSandboxDisabled: () => Promise<void>;
   loadCommandEnvBlocklist: () => Promise<void>;
   setCommandEnvBlocklist: (blocklist: string[]) => Promise<void>;
   setSandboxDisabled: (disabled: boolean) => Promise<void>;
+  /** force 时总是重新查询；否则仅在尚未加载时查询一次。 */
+  loadSandboxState: (force?: boolean) => Promise<void>;
+  setSandboxState: (state: SandboxUpdateState) => void;
 
   loadMcpServers: () => Promise<void>;
 
@@ -995,6 +1001,7 @@ export const useStore = create<AppState>((set, get) => ({
   pendingSettingsTab: null,
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   sandboxDisabled: null,
+  sandboxState: null,
   commandEnvBlocklist: null,
   reasoningEffort: 'medium',
   reasoningEffortPerSession: {},
@@ -1985,6 +1992,20 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('加载按需进程沙箱开关失败:', error);
     }
   },
+
+  // 加载沙箱程序状态（设置页、输入区指示与启动门闸共用）
+  loadSandboxState: async (force = false) => {
+    if (!force && get().sandboxState !== null) return;
+    try {
+      const state = await api.getSandboxUpdateState();
+      set({ sandboxState: state });
+    } catch (error) {
+      console.error('加载沙箱程序状态失败:', error);
+    }
+  },
+
+  // 启动门闸等已查询方直接写入，避免输入区重复请求
+  setSandboxState: (state) => set({ sandboxState: state }),
 
   // 命令环境变量屏蔽清单（宿主直跑路径的黑名单扩展）
   loadCommandEnvBlocklist: async () => {

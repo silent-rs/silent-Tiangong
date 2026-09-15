@@ -3,7 +3,7 @@ import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock } from 'lucide-react';
+import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -97,6 +97,8 @@ export function MessageInput({
   const setInputCacheAttachments = useStore((state) => state.setInputCacheAttachments);
   const sandboxDisabled = useStore((state) => state.sandboxDisabled);
   const loadSandboxDisabled = useStore((state) => state.loadSandboxDisabled);
+  const sandboxState = useStore((state) => state.sandboxState);
+  const loadSandboxState = useStore((state) => state.loadSandboxState);
   const setPendingSettingsTab = useStore((state) => state.setPendingSettingsTab);
   const sendMessage = useStore((state) => state.sendMessage);
   const appendMessage = useStore((state) => state.appendMessage);
@@ -201,6 +203,14 @@ export function MessageInput({
       void loadSandboxDisabled();
     }
   }, [sandboxDisabled, loadSandboxDisabled]);
+
+  // 沙箱程序状态：底部"沙箱无效"指示来源；启动门闸与设置页会写入共享
+  // 状态，此处兜底加载一次。
+  useEffect(() => {
+    if (sandboxState === null) {
+      void loadSandboxState();
+    }
+  }, [sandboxState, loadSandboxState]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
@@ -1294,6 +1304,20 @@ export function MessageInput({
                       </>
                     )}
                   </div>
+                )}
+                {sandboxState?.status === 'failed' && (
+                  <button
+                    onClick={() => setPendingSettingsTab('sandbox')}
+                    className="flex items-center gap-1 text-amber-500 transition-colors hover:text-amber-400"
+                    title={
+                      sandboxState.failure
+                        ? `沙箱程序无效：${sandboxState.failure}。插件工具暂不可用，点击前往设置修复`
+                        : '沙箱程序无效，插件工具暂不可用，点击前往设置修复'
+                    }
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    <span>沙箱无效</span>
+                  </button>
                 )}
                 {sandboxDisabled === true && (
                   <button

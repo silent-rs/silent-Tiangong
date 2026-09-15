@@ -18,7 +18,9 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
-    plugin_preload: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    plugin_preload: tokio::sync::watch::Sender<
+        Option<Result<tiangong_plugin_runtime::registry::StartupPluginReadiness, String>>,
+    >,
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     /// 子 Agent 的过程消息仅供桌面端视图展示，不能进入父 Session 权威状态。
     ///
@@ -178,7 +180,10 @@ impl TiangongApp {
             storage_root: storage_root.clone(),
         });
         Self {
-            plugin_preload: tokio::sync::watch::channel(Some(Ok(()))).0,
+            plugin_preload: tokio::sync::watch::channel(Some(Ok(
+                tiangong_plugin_runtime::registry::StartupPluginReadiness::default(),
+            )))
+            .0,
             state,
             agent_worker_views: Mutex::new(HashMap::new()),
             session_send_locks: Mutex::new(HashMap::new()),
@@ -206,14 +211,21 @@ impl TiangongApp {
         self.spawn_plugin_preload();
     }
 
+    /// 沙箱就绪后重试启动期失败的插件准备。failures 非空即触发：存在
+    /// 永久损坏插件时每次调用都会重跑全量验证与常驻预热，当前调用点
+    /// 仅启动与沙箱修复成功两处，频次可控；接入更频繁的调用点前需
+    /// 先加退避或按插件粒度重试。
     pub(crate) fn retry_failed_plugin_preload(&self) {
         if self.plugin_preload.send_if_modified(|result| {
-            if matches!(result, Some(Err(_))) {
+            let retry = match result {
+                Some(Err(_)) => true,
+                Some(Ok(readiness)) => !readiness.failures.is_empty(),
+                _ => false,
+            };
+            if retry {
                 *result = None;
-                true
-            } else {
-                false
             }
+            retry
         }) {
             self.spawn_plugin_preload();
         }
@@ -228,7 +240,6 @@ impl TiangongApp {
                 let _ = tiangong_plugin_runtime::launcher_update::launcher_status(&storage_root);
                 tracing::info!("启动沙箱检查结束，开始后台加载插件");
                 tiangong_plugin_runtime::registry::prepare_desktop_startup_plugins(&storage_root)
-                    .map(|_| ())
                     .map_err(|error| format!("{error:#}"))
             })
             .await
@@ -243,7 +254,9 @@ impl TiangongApp {
         });
     }
 
-    pub async fn wait_plugin_preload(&self) -> Result<(), String> {
+    pub async fn wait_plugin_preload(
+        &self,
+    ) -> Result<tiangong_plugin_runtime::registry::StartupPluginReadiness, String> {
         let mut completion = self.plugin_preload.subscribe();
         let result = completion
             .wait_for(|result| result.is_some())
@@ -1007,7 +1020,9 @@ mod tests {
         )
         .await
         .is_err());
-        app.plugin_preload.send_replace(Some(Ok(())));
+        app.plugin_preload.send_replace(Some(Ok(
+            tiangong_plugin_runtime::registry::StartupPluginReadiness::default(),
+        )));
         assert!(app.wait_plugin_preload().await.is_ok());
         app.plugin_preload
             .send_replace(Some(Err("preload failed".into())));
