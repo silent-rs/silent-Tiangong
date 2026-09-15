@@ -176,6 +176,79 @@
   position: static !important;
 }
 
+/* MdPreview 根元素自带纯白/纯黑底色（--md-bk-color），previewOnly 只去掉
+   边框不去底色，与消息容器背景（页面 background、用户气泡 primary/10）
+   不对齐形成异色块：底色透明化由所在容器透出，正文色对齐全局前景色 */
+.md-editor.md-editor-previewOnly {
+  background-color: transparent;
+  color: hsl(var(--foreground));
+}
+
+/* 用户消息气泡内的 Markdown 预览：字号对齐气泡正文尺度（md-editor
+   默认 16px），并压缩段落间距，避免短消息上下留白撑大气泡 */
+.user-bubble-md .md-editor-preview {
+  font-size: 0.875rem;
+}
+
+.user-bubble-md .md-editor-preview > :first-child {
+  margin-top: 0;
+}
+
+.user-bubble-md .md-editor-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.user-bubble-md .md-editor-preview p {
+  margin-block: 0.4em;
+}
+
+/* 本地文件链接（file:）高亮：与外链区分——指向本机文件，点击走嵌入浏览器。
+   主色描边 + 低透明度底色形成 chip 感；内部行内代码去掉自带底色与内边距，
+   避免与 chip 底色叠成双层色块。 */
+.md-editor-preview a.md-local-file-link {
+  color: hsl(var(--primary));
+  background-color: hsl(var(--primary) / 0.1);
+  border: 1px solid hsl(var(--primary) / 0.25);
+  border-radius: 0.375rem;
+  padding: 0.05em 0.35em;
+  text-decoration: none;
+  word-break: break-all;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.md-editor-preview a.md-local-file-link:hover {
+  background-color: hsl(var(--primary) / 0.18);
+  border-color: hsl(var(--primary) / 0.45);
+}
+
+.md-editor-preview a.md-local-file-link code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+}
+
+/* 不可打开的本地文件引用（源码/文档等）：保留 Markdown 文本结构，但不是
+   链接——弱化为等宽标记，鼠标不呈现可点击态。后续有能打开这些类型的插件
+   时，改为与 .md-local-file-link 同款高亮即可。 */
+.md-editor-preview span.md-local-file-ref {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  color: hsl(var(--muted-foreground));
+  background-color: hsl(var(--muted) / 0.5);
+  border-radius: 0.25rem;
+  padding: 0.05em 0.3em;
+  cursor: default;
+  word-break: break-all;
+}
+
+.md-editor-preview span.md-local-file-ref code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+}
+
 /* 代码块样式 */
 @layer components {
   .prose pre {
