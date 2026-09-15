@@ -228,6 +228,27 @@
   border: none;
 }
 
+/* 不可打开的本地文件引用（源码/文档等）：保留 Markdown 文本结构，但不是
+   链接——弱化为等宽标记，鼠标不呈现可点击态。后续有能打开这些类型的插件
+   时，改为与 .md-local-file-link 同款高亮即可。 */
+.md-editor-preview span.md-local-file-ref {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  color: hsl(var(--muted-foreground));
+  background-color: hsl(var(--muted) / 0.5);
+  border-radius: 0.25rem;
+  padding: 0.05em 0.3em;
+  cursor: default;
+  word-break: break-all;
+}
+
+.md-editor-preview span.md-local-file-ref code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+}
+
 /* 代码块样式 */
 @layer components {
   .prose pre {

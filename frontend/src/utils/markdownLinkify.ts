@@ -25,13 +25,15 @@ import {
  *    （?!.,:*_~'）做尾部剥离。https:/ftp: 是 http: 的别名，编译时共
  *    享同一校验函数，一并生效。
  *
- * 3. 本地文件链接按「浏览器可渲染后缀」在渲染层统一裁决：模型输出里
- *    显式 Markdown 链接（[相对路径:行号](/绝对/路径.ts)）与 file: 链接
- *    的来源不可控，改写层白名单管不到它们——markdown-it 默认黑名单只
- *    拒协议（file: 在列），裸绝对路径本就放行。这里在 validateLink 层
- *    统一裁决：本地路径形态（file:、POSIX 绝对、盘符、UNC）仅当后缀
- *    浏览器可渲染时放行，其余退化为纯文本；可渲染的链接在 link_open
- *    层补正 file:// 形态并加高亮类。远程链接与危险协议仍走默认实现。
+ * 3. 本地文件链接按「浏览器可渲染后缀」在渲染层裁决可点击性：模型输出
+ *    里显式 Markdown 链接（[相对路径:行号](/绝对/路径.ts)）与 file: 链接
+ *    的来源不可控，改写层白名单管不到它们。裁决**不能**放在
+ *    validateLink——校验失败时 markdown-it 会把整个 [文本](目标) 语法当
+ *    字面文本输出，正文结构被破坏。因此本地路径在 validateLink 一律放行，
+ *    在 link_open/link_close 层分流：后缀浏览器可渲染的补正 file:// 形态
+ *    并加高亮类，其余降级为不可点击的 <span>（链接文本照常按 Markdown
+ *    渲染，仅无点击行为；后续有能打开其他类型的插件时再放开）。远程链接
+ *    与危险协议仍走默认实现。
  *
  * 4. 本地文件链接高亮：file: 链接指向本机文件而非网页，行为与外链不同，
  *    link_open 渲染时追加 .md-local-file-link 类名，由样式做差异化高亮。
@@ -73,36 +75,54 @@ export function setupMarkdownLinkify() {
 
   config({
     markdownItConfig(md) {
-      // 本地文件链接的渲染层裁决（见头部注释 3）：只有浏览器可渲染的
-      // 后缀才放行成链接，其余本地目标（源码/文档/日志等）点击也无法
-      // 渲染，退化成纯文本。远程链接与危险协议走默认实现。
+      // 本地文件链接一律通过校验（见头部注释 3）：校验失败会让 markdown-it
+      // 把整个 [文本](目标) 语法当字面文本输出，正文结构被破坏。是否可点击
+      // 的裁决下移到 link_open/link_close 渲染层。远程链接与危险协议仍走
+      // 默认实现。
       const defaultValidateLink = md.validateLink.bind(md);
       md.validateLink = (url: string) => {
         const trimmed = url.trim();
-        const decoded = decodeLinkUrl(trimmed);
-        if (isLocalFileUrl(decoded)) {
-          return BROWSER_RENDERABLE_EXT_RE.test(decoded.split(/[?#]/)[0]);
-        }
+        if (isLocalFileUrl(decodeLinkUrl(trimmed))) return true;
         return defaultValidateLink(trimmed);
       };
 
       md.linkify.set({ fuzzyLink: false });
 
-      // 存活下来的本地文件链接统一补正 file:// 形态（裸绝对路径、盘符
-      // 误落主机位、反斜杠编码等）并打标记类名，供样式高亮区分于普通
-      // 外链（见 index.css 的 .md-local-file-link）。渲染规则按
-      // markdown-it 约定链式包装：保留既有 renderer 行为，只改 href 与
-      // class。
+      // 本地文件链接按「浏览器可渲染后缀」裁决可点击性：可渲染的补正
+      // file:// 形态（裸绝对路径、盘符误落主机位、反斜杠编码等）并打标记
+      // 类名供样式高亮（见 index.css 的 .md-local-file-link）；不可渲染的
+      // 降级为不可点击的 <span>——链接文本与内部行内代码照常按 Markdown
+      // 渲染，只是没有点击行为（后续有能打开其他类型的插件时再放开）。
+      // Markdown 链接不可嵌套，用 env 上的布尔栈把 link_close 与对应
+      // link_open 的裁决配对。
+      type LocalRefEnv = { __localFileRefStack?: boolean[] };
+      const refStack = (env: unknown): boolean[] => {
+        const holder = (env ?? {}) as LocalRefEnv;
+        holder.__localFileRefStack ??= [];
+        return holder.__localFileRefStack;
+      };
       const defaultLinkOpen = md.renderer.rules.link_open
         ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
         const href = tokens[idx].attrGet("href") ?? "";
         const decoded = decodeLinkUrl(href);
         if (href && isLocalFileUrl(decoded)) {
+          if (!BROWSER_RENDERABLE_EXT_RE.test(decoded.split(/[?#]/)[0])) {
+            refStack(env).push(true);
+            return '<span class="md-local-file-ref">';
+          }
           tokens[idx].attrSet("href", toFileUrl(decoded));
           tokens[idx].attrJoin("class", "md-local-file-link");
         }
+        refStack(env).push(false);
         return defaultLinkOpen(tokens, idx, options, env, self);
+      };
+
+      const defaultLinkClose = md.renderer.rules.link_close
+        ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+      md.renderer.rules.link_close = (tokens, idx, options, env, self) => {
+        if (refStack(env).pop() === true) return "</span>";
+        return defaultLinkClose(tokens, idx, options, env, self);
       };
 
       md.linkify.add("http:", {

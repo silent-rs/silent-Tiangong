@@ -104,14 +104,21 @@ describe('链接识别修正', () => {
     expect(container.textContent).not.toContain('](file://');
   });
 
-  it('本地文件链接按可渲染后缀裁决：不可渲染类型退化纯文本', async () => {
+  it('本地文件链接按可渲染后缀裁决：不可渲染类型不可点击但保留结构', async () => {
     // 模型 review 常见形态：显示文本为相对路径:行号，href 为绝对路径
     await renderMd('[frontend/src/utils/markdownLinkify.ts:55](/Users/hubertshelley/Documents/silent/tiangong/frontend/src/utils/markdownLinkify.ts) 包装默认 validateLink');
     expect(container.querySelector('a')).toBeNull();
-    expect(container.textContent).toContain('frontend/src/utils/markdownLinkify.ts:55');
+    const ref = container.querySelector('span.md-local-file-ref');
+    expect(ref).not.toBeNull();
+    expect(ref!.textContent).toBe('frontend/src/utils/markdownLinkify.ts:55');
+    // 链接语法不得作为字面文本泄漏
+    expect(container.textContent).not.toContain('](');
+    expect(container.textContent).not.toContain('/Users/hubertshelley');
 
     await renderMd('详见 [文档](file:///tmp/readme.md) 与 [入口](C:\\Users\\test\\main.rs)');
     expect(container.querySelector('a')).toBeNull();
+    expect(container.querySelectorAll('span.md-local-file-ref').length).toBe(2);
+    expect(container.textContent).not.toContain('](');
   });
 
   it('裸绝对路径的可渲染链接补正 file:// 并高亮', async () => {

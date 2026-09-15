@@ -128,7 +128,7 @@ function inlineLocalSvgLinks(md: string): string {
 
 /** 浏览器可直接打开渲染的文件后缀——只有这些类型的本地文件链接才有
  *  直接打开的意义；其余类型（源码、文档、日志等）点了也无法渲染。
- *  改写层与渲染层（validateLink 裁决）共用这一份白名单。 */
+ *  改写层与渲染层（link_open 的可点击性裁决）共用这一份白名单。 */
 export const BROWSER_RENDERABLE_EXT_RE = /\.(?:html?|xhtml|svg|png|jpe?g|gif|webp|bmp|ico|avif|pdf)$/i;
 
 /** 行内代码形态的本地绝对路径（`/…/x.png`、file://、盘符或 UNC）且后
