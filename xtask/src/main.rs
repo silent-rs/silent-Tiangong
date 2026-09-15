@@ -1878,17 +1878,36 @@ fn prepare_sandbox_release() -> io::Result<()> {
     let platform = launcher_platform_key(&target)?;
     let version = launcher_crate_version(&workspace_root)?;
     eprintln!("[xtask] 构建 Launcher 发布制品（{platform} {version}）...");
-    run_cargo(
-        &workspace_root,
-        &[
+    // Windows 制品必须静态链接 CRT：探针进程在 AppContainer 内加载
+    // VCRUNTIME140.dll，而长期使用的机器上该文件常被第三方安装器覆盖
+    // 并丢失“所有应用包”授权，探针会以 0xC0000022 拒绝启动。静态链接
+    // 后可写目录之外仅依赖受系统保护的 DLL。
+    let mut build_envs = Vec::new();
+    if target.contains("windows") {
+        let base = std::env::var("RUSTFLAGS").unwrap_or_default();
+        let flags = if base.trim().is_empty() {
+            "-C target-feature=+crt-static".to_string()
+        } else {
+            format!("{base} -C target-feature=+crt-static")
+        };
+        eprintln!("[xtask] Windows 制品启用 crt-static: {flags}");
+        build_envs.push(("RUSTFLAGS", std::ffi::OsString::from(flags)));
+    }
+    let status = Command::new(env_var_or("CARGO", "cargo"))
+        .current_dir(&workspace_root)
+        .envs(build_envs)
+        .args([
             "build",
             "-p",
             "tiangong-sandbox",
             "--release",
             "--target",
-            &target,
-        ],
-    )?;
+            target.as_str(),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("cargo build tiangong-sandbox 执行失败"));
+    }
 
     let executable_suffix = if target.contains("windows") {
         ".exe"
