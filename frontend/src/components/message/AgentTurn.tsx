@@ -79,7 +79,7 @@ function AgentTurnView({
     | { type: "thinking"; content: string; time?: string; elapsedMs?: number | null }
     | { type: "tool_group"; key: string; tools: MessageItem[] }
     | { type: "user"; msg: MessageItem }
-    | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
+    | { type: "assistant"; msg: MessageItem; isStreaming: boolean; summaryElevated?: boolean }
     | { type: "error_system"; msg: MessageItem }
     | { type: "retry_system"; msg: MessageItem }
     | { type: "context_management"; msg: MessageItem }
@@ -244,6 +244,22 @@ function AgentTurnView({
       }
     }
 
+    // 后端自「任务 15」起最终回复以 ReactText 事件流式下发（不再发起独立
+    // Summary 请求），前端内存态的消息 phase 因此停留在 react，完成态会落
+    // 入过程区按纯文本渲染；落盘时后端标记的 phase=summary，重载后又恢复
+    // Markdown——内存态与落盘态表现不一致。已完成轮次把最后一条助手回复
+    // 提级为总结渲染（活跃轮不提级：流式中的 react 文本本就走 Markdown）。
+    if (!isActive) {
+      for (let i = processFrags.length - 1; i >= 0; i--) {
+        const frag = processFrags[i];
+        if (frag.type === "assistant" && !frag.isStreaming) {
+          summaryFrags.push({ ...frag, summaryElevated: true });
+          processFrags.splice(i, 1);
+          break;
+        }
+      }
+    }
+
     // 同一轮的合计只挂在最后一个带操作栏的回复上。
     const usageAnchor = [...summaryFrags].reverse().find((frag) =>
       frag.type === "assistant" && !frag.isStreaming && displayTextContent(frag.msg) && !parseAgentReply(displayTextContent(frag.msg))
@@ -268,7 +284,7 @@ function AgentTurnView({
       usageAnchorId,
       lastToolGroupIndex,
     };
-  }, [messages, streamingMessageId, agents]);
+  }, [messages, streamingMessageId, agents, isActive]);
 
   const argsOfToolMessage = (msg: MessageItem): unknown =>
     msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
@@ -335,7 +351,8 @@ function AgentTurnView({
         if (frag.type === "assistant") {
           const { msg, isStreaming } = frag;
           const visibleText = displayTextContent(msg);
-          const isReactPhase = msg.phase === "react";
+          // 提级为总结的最终回复不再按过程文本纯渲染（见分组处的说明）
+          const isReactPhase = msg.phase === "react" && !frag.summaryElevated;
           // 流式输出无条件剥离状态标记（[DONE]/[NEED_MORE_WORK]），
           // 即使后端 phase 尚未传播到也兜底，避免标记泄漏到界面。
           const visibleStreamingContent = stripSummaryStatusMarker(streamingContent);
