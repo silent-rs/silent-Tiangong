@@ -741,7 +741,10 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
     // CI 对无 UI 插件会传空串占位，空值视为未设置。
     let prebuilt = non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
     // 无 package.json 的插件使用手写自包含入口，无前端构建链，直接拷贝。
-    let has_package_json = workspace_root.join(config.plugin_root).join("package.json").is_file();
+    let has_package_json = workspace_root
+        .join(config.plugin_root)
+        .join("package.json")
+        .is_file();
     if prebuilt.is_none() && has_package_json {
         let plugin_root = workspace_root.join(config.plugin_root);
         eprintln!("[xtask] 安装并构建 {} UI...", config.name);
