@@ -39,10 +39,13 @@ pub(super) fn to_anthropic_request(
 
     let thinking = map_thinking_config(request);
 
-    // 提示缓存断点（官方每请求最多 4 个），按前缀失效层次放置：
-    // tools 尾、system 尾保住固定大头，消息尾两断点（倒数第二 + 最后）
-    // 让对话历史滚动进缓存——本轮的尾断点即下轮的倒数第二断点，
-    // 位置对齐保证每轮命中上一轮完整前缀，缓存读约 1 折。
+    // 提示缓存断点（官方每请求最多 4 个）：断点标记缓存写入位置，命中由
+    // 服务端按前缀内容匹配（请求断点处及更早已缓存前缀均可命中，并不依赖
+    // 断点位置逐轮对齐——ReAct 循环每轮追加多条消息，上轮断点位置必然被
+    // 甩开）。布局：tools 尾、system 尾保住固定大头；消息尾两断点保证
+    // 尾部内容可写缓存。实测多轮对话命中率 97-100%，每轮未命中仅当轮
+    // 新增量（~33K 固定前缀+全量历史的旧形态为 42-79%）。缓存 5 分钟
+    // 不活动会被服务端驱逐，空闲后首轮 0 命中重建属预期行为。
     let breakpoint = || Some(CacheControl::ephemeral());
     if let Some(last_tool) = tools.as_mut().and_then(|tools| tools.last_mut()) {
         last_tool.cache_control = breakpoint();
@@ -93,9 +96,9 @@ pub(super) fn to_anthropic_request(
     })
 }
 
-/// 在消息尾部的两个可标记内容块（Text/ToolResult）上放断点：倒数第二个
-/// 块对齐上一轮的尾断点位置，最后一个块覆盖本轮新增。从尾部向前找：
-/// 断点必须落在前缀真正结束的块上才有效。
+/// 在消息尾部的两个可标记内容块（Text/ToolResult）上放断点，保证请求
+/// 前缀的尾部有断点可写缓存。从尾部向前找：断点必须落在前缀真正结束
+/// 的块上才有效。
 fn mark_message_tail_breakpoints(
     messages: &mut [AnthropicMessage],
     mut breakpoint: impl FnMut() -> Option<CacheControl>,

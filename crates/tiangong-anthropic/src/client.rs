@@ -243,6 +243,11 @@ impl AnthropicClient {
             return;
         }
         if request.max_tokens <= MIN_THINKING_BUDGET_TOKENS {
+            tracing::debug!(
+                model = %request.model,
+                max_tokens = request.max_tokens,
+                "thinking dropped: max_tokens cannot satisfy budget >= 1024 and < max_tokens"
+            );
             request.thinking = None;
             return;
         }
@@ -431,21 +436,6 @@ fn parse_sse_event(event_type: &str, data: &str) -> Result<StreamEvent, Anthropi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AnthropicConfig;
-    use std::time::Duration;
-
-    #[allow(dead_code)]
-    fn client_with_base_url(base_url: &str) -> AnthropicClient {
-        AnthropicClient::from_config(AnthropicConfig {
-            headers: Default::default(),
-            api_key: "test-key".to_string(),
-            base_url: base_url.to_string(),
-            timeout: Duration::from_secs(1),
-            api_version: "2023-06-01".to_string(),
-            beta: None,
-        })
-        .unwrap()
-    }
 
     fn request_with(max_tokens: u32, thinking: Option<ThinkingConfig>) -> MessagesCreateRequest {
         MessagesCreateRequest {

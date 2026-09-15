@@ -13,3 +13,4 @@ eventsource-stream = { workspace = true }
 bytes = "1"
 tokio = { workspace = true, features = ["time"] }
 futures-util = { workspace = true }
+tracing = { workspace = true }

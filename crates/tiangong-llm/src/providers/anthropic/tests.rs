@@ -183,6 +183,26 @@ fn test_cache_breakpoints_layout() {
         vec![true, false, true],
         "user Text 与 tool ToolResult 带断点，assistant ToolUse 不带"
     );
+
+    // 官方硬性契约：每请求断点总数不得超过 4，超出会被端点拒收。
+    // 布局为 tools 尾(1) + system 尾(1) + 消息尾(2)，零冗余——新增断点
+    // 前必须先削减现有布局，此断言用于钉住这条隐形契约。
+    let total = tools.iter().filter(|t| t.cache_control.is_some()).count()
+        + mapped
+            .system
+            .as_ref()
+            .map(|s| match s {
+                tiangong_anthropic::types::SystemContent::Blocks(blocks) => {
+                    blocks.iter().filter(|b| b.cache_control.is_some()).count()
+                }
+                _ => 0,
+            })
+            .unwrap_or(0)
+        + marked.iter().filter(|m| **m).count();
+    assert!(
+        total <= 4,
+        "cache breakpoints exceed official cap of 4: {total}"
+    );
 }
 
 #[test]
