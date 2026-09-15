@@ -12,8 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
+import { startWindowDrag } from '@/lib/windowDrag';
 import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession, SandboxUpdateState, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
@@ -23,8 +23,6 @@ import { PluginIframe } from './PluginIframe';
 import { PluginSandbox } from './PluginSandbox';
 import { PluginManagerSettings } from './PluginManagerSettings';
 import { type SlotContributionEntry } from '../api/tauri';
-
-const appWindow = getCurrentWindow();
 
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -123,12 +121,7 @@ export function SettingsDialog() {
           <header
             className="flex h-12 shrink-0 items-center border-b pr-4 select-none"
             style={{ paddingLeft: navigator.platform.includes('Mac') ? '80px' : '16px' }}
-            onMouseDown={(e) => {
-              const tag = (e.target as HTMLElement).tagName;
-              if (tag === 'INPUT' || tag === 'BUTTON') return;
-              if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
-              appWindow.startDragging();
-            }}
+            onMouseDown={startWindowDrag}
           >
             <span className="text-sm font-medium">设置</span>
             <span className={`ml-auto text-xs flex items-center transition-opacity ${saveStatus === 'idle' ? 'opacity-0' : 'opacity-100'} ${saveStatus === 'error' ? 'text-destructive' : 'text-muted-foreground'}`}>
