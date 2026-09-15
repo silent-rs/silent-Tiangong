@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 use tiangong_anthropic::types::{
-    ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
+    CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
     ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
-    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, ThinkingConfig,
-    Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
+    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, SystemContent, TextBlock,
+    ThinkingConfig, Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
@@ -19,27 +19,13 @@ use crate::usage::TokenUsageData;
 pub(super) fn to_anthropic_request(
     request: &ProviderRequest,
 ) -> Result<MessagesCreateRequest, LlmError> {
-    let messages = request
+    let mut messages = request
         .messages
         .iter()
         .filter_map(map_message)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let tools = if request.tools.is_empty() {
-        None
-    } else {
-        Some(
-            request
-                .tools
-                .iter()
-                .map(|tool| AnthropicTool {
-                    name: tool.name.clone(),
-                    description: Some(tool.description.clone()),
-                    input_schema: tool.input_schema.clone(),
-                })
-                .collect(),
-        )
-    };
+    let mut tools = build_tools(request);
 
     let tool_choice = request.tool_choice.as_ref().map(|choice| match choice {
         ToolChoice::Auto => AnthropicToolChoice::Auto,
@@ -51,29 +37,111 @@ pub(super) fn to_anthropic_request(
         ToolChoice::None => AnthropicToolChoice::None,
     });
 
+    let thinking = map_thinking_config(request);
+
+    // 提示缓存断点（官方每请求最多 4 个）：断点标记缓存写入位置，命中由
+    // 服务端按前缀内容匹配（请求断点处及更早已缓存前缀均可命中，并不依赖
+    // 断点位置逐轮对齐——ReAct 循环每轮追加多条消息，上轮断点位置必然被
+    // 甩开）。布局：tools 尾、system 尾保住固定大头；消息尾两断点保证
+    // 尾部内容可写缓存。实测多轮对话命中率 97-100%，每轮未命中仅当轮
+    // 新增量（~33K 固定前缀+全量历史的旧形态为 42-79%）。缓存 5 分钟
+    // 不活动会被服务端驱逐，空闲后首轮 0 命中重建属预期行为。
+    let breakpoint = || Some(CacheControl::ephemeral());
+    if let Some(last_tool) = tools.as_mut().and_then(|tools| tools.last_mut()) {
+        last_tool.cache_control = breakpoint();
+    }
+    let system = request.system.as_ref().and_then(|system| {
+        let text = system.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(SystemContent::Blocks(vec![TextBlock::new(
+            system.clone(),
+            breakpoint(),
+        )]))
+    });
+    mark_message_tail_breakpoints(&mut messages, breakpoint);
+
+    // 官方约束：开启思考时 temperature 只能为 1、top_p/top_k 不可自定义，
+    // 省略字段走协议默认即满足；Claude Code 同款行为，兼容端点用各自
+    // 默认采样。丢弃用户配置时留 debug 痕迹，便于排查"温度不生效"类困惑。
+    if thinking.is_some() {
+        if request.temperature.is_some() {
+            tracing::debug!(
+                model = %request.model,
+                "thinking enabled: temperature dropped per Anthropic constraint"
+            );
+        }
+        if request.top_p.is_some() {
+            tracing::debug!(
+                model = %request.model,
+                "thinking enabled: top_p dropped per Anthropic constraint"
+            );
+        }
+    }
     Ok(MessagesCreateRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens,
-        system: request
-            .system
-            .clone()
-            .filter(|value| !value.trim().is_empty()),
+        system,
         messages,
-        temperature: request.temperature,
+        temperature: request.temperature.filter(|_| thinking.is_none()),
         stop_sequences: (!request.stop_sequences.is_empty())
             .then(|| request.stop_sequences.clone()),
-        top_p: request.top_p,
+        top_p: request.top_p.filter(|_| thinking.is_none()),
         metadata: request.metadata.clone(),
         tools,
         tool_choice,
         stream: None,
-        thinking: map_thinking_config(request),
+        thinking,
     })
+}
+
+/// 在消息尾部的两个可标记内容块（Text/ToolResult）上放断点，保证请求
+/// 前缀的尾部有断点可写缓存。从尾部向前找：断点必须落在前缀真正结束
+/// 的块上才有效。
+fn mark_message_tail_breakpoints(
+    messages: &mut [AnthropicMessage],
+    mut breakpoint: impl FnMut() -> Option<CacheControl>,
+) {
+    let mut placed = 0;
+    'outer: for message in messages.iter_mut().rev() {
+        for block in message.content.iter_mut().rev() {
+            match block {
+                ContentBlockParam::Text { cache_control, .. }
+                | ContentBlockParam::ToolResult { cache_control, .. } => {
+                    *cache_control = breakpoint();
+                    placed += 1;
+                    if placed == 2 {
+                        break 'outer;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn build_tools(request: &ProviderRequest) -> Option<Vec<AnthropicTool>> {
+    if request.tools.is_empty() {
+        return None;
+    }
+    Some(
+        request
+            .tools
+            .iter()
+            .map(|tool| AnthropicTool {
+                name: tool.name.clone(),
+                description: Some(tool.description.clone()),
+                input_schema: tool.input_schema.clone(),
+                cache_control: None,
+            })
+            .collect(),
+    )
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
     // reasoning_effort 有值即开启思考；预算是 Anthropic 协议自身细节，
-    // 由 tiangong-anthropic 库的 ThinkingConfig 决定（默认不限制）。
+    // 省略时由 tiangong-anthropic 客户端在发送前统一填充默认值。
     request
         .reasoning_effort
         .is_thinking_enabled()
@@ -101,7 +169,10 @@ fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmErro
 
 fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> {
     match content {
-        MessageContent::Text(text) => Ok(ContentBlockParam::Text { text: text.clone() }),
+        MessageContent::Text(text) => Ok(ContentBlockParam::Text {
+            text: text.clone(),
+            cache_control: None,
+        }),
         MessageContent::Thinking(thinking) => Ok(ContentBlockParam::Thinking {
             thinking: thinking.thinking.clone(),
             signature: thinking.signature.clone(),
@@ -121,6 +192,7 @@ fn map_content(content: &MessageContent) -> Result<ContentBlockParam, LlmError> 
                 ToolResultContent::Json(value) => value.clone(),
             }),
             is_error: Some(tool_result.is_error),
+            cache_control: None,
         }),
         MessageContent::Image(image) => {
             let data = image

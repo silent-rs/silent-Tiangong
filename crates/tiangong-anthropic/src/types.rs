@@ -18,6 +18,51 @@ pub struct Usage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
+/// 提示缓存断点标记。官方限制每请求最多 4 个；标记所在的块（及之前的
+/// 完整前缀）写入缓存，后续请求前缀一致时按缓存读计费（约 1 折）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// system 参数的两种官方形态：纯字符串或文本块数组（块上可携带
+/// cache_control 断点）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SystemContent {
+    Text(String),
+    Blocks(Vec<TextBlock>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextBlock {
+    /// 块类型标签，官方协议要求必填，固定为 "text"。
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+impl TextBlock {
+    pub fn new(text: String, cache_control: Option<CacheControl>) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text,
+            cache_control,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
@@ -36,6 +81,8 @@ pub struct Message {
 pub enum ContentBlockParam {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         source: ImageSourceParam,
@@ -54,6 +101,8 @@ pub enum ContentBlockParam {
         content: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Thinking {
         thinking: String,
@@ -123,15 +172,17 @@ pub struct Tool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     Enabled {
-        /// 思考预算。Anthropic 官方端点要求必填且须小于 max_tokens；
-        /// DeepSeek/GLM 等兼容实现可省略——省略时思考量由上游决定，
-        /// 且该字段不会序列化进请求。
+        /// 思考预算（≥1024 且须小于 max_tokens，协议要求必填）。
+        /// 调用方可省略：发送前由 AnthropicClient 统一补默认预算，
+        /// 省略值不会序列化进请求。
         #[serde(skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u32>,
     },
@@ -139,8 +190,7 @@ pub enum ThinkingConfig {
 }
 
 impl ThinkingConfig {
-    /// 开启思考且不限制预算：兼容 DeepSeek/GLM 等 Anthropic 兼容实现。
-    /// 接入官方 Anthropic 端点时改用 [`ThinkingConfig::with_budget`]。
+    /// 开启思考，预算由客户端发送前统一填充。
     pub fn enabled() -> Self {
         Self::Enabled {
             budget_tokens: None,
@@ -160,7 +210,7 @@ pub struct MessagesCreateRequest {
     pub model: String,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<SystemContent>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
