@@ -104,6 +104,26 @@ describe('链接识别修正', () => {
     expect(container.textContent).not.toContain('](file://');
   });
 
+  it('本地文件链接按可渲染后缀裁决：不可渲染类型退化纯文本', async () => {
+    // 模型 review 常见形态：显示文本为相对路径:行号，href 为绝对路径
+    await renderMd('[frontend/src/utils/markdownLinkify.ts:55](/Users/hubertshelley/Documents/silent/tiangong/frontend/src/utils/markdownLinkify.ts) 包装默认 validateLink');
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.textContent).toContain('frontend/src/utils/markdownLinkify.ts:55');
+
+    await renderMd('详见 [文档](file:///tmp/readme.md) 与 [入口](C:\\Users\\test\\main.rs)');
+    expect(container.querySelector('a')).toBeNull();
+  });
+
+  it('裸绝对路径的可渲染链接补正 file:// 并高亮', async () => {
+    await renderMd('报告在 [这里](/Users/test/report.pdf) 与 [页面](/Users/test/intro.html)');
+    const links = [...container.querySelectorAll('a')];
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      'file:///Users/test/report.pdf',
+      'file:///Users/test/intro.html',
+    ]);
+    expect(links.every((l) => l.classList.contains('md-local-file-link'))).toBe(true);
+  });
+
   it('Windows 盘符与 UNC 的 file: 链接同样渲染', async () => {
     await renderMd([
       '[a](file:///C:/Users/test/b.htm)',

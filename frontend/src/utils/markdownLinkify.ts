@@ -1,5 +1,10 @@
 import { config } from "md-editor-rt";
 import type LinkifyIt from "linkify-it";
+import {
+  BROWSER_RENDERABLE_EXT_RE,
+  isLocalFileUrl,
+  toFileUrl,
+} from "@/components/message/utils";
 
 /**
  * 消息 Markdown 预览的链接识别修正（作用于全部 MdPreview 实例，须在
@@ -20,15 +25,13 @@ import type LinkifyIt from "linkify-it";
  *    （?!.,:*_~'）做尾部剥离。https:/ftp: 是 http: 的别名，编译时共
  *    享同一校验函数，一并生效。
  *
- * validate 复刻 linkify-it http: 默认实现（惰性编译 re.http 后取匹配长
- * 度），在返回长度前追加定界符截断与尾部剥离。
- *
- * 3. file: 链接被整段丢弃：markdown-it 默认 validateLink 把 file: 与
- *    javascript:/vbscript:/data: 一并列入黑名单，校验失败的链接不生成
- *    <a>，Markdown 语法原样退化成文本（本地 html 路径改写后显示成
- *    「[`/…/x.html`](file:///…/x.html)」）。这里只额外放行 file:，其余
- *    危险协议仍交给默认实现拒绝；渲染出的链接由消息列表的点击拦截接管，
- *    走嵌入浏览器打开，不会真正导航 webview。
+ * 3. 本地文件链接按「浏览器可渲染后缀」在渲染层统一裁决：模型输出里
+ *    显式 Markdown 链接（[相对路径:行号](/绝对/路径.ts)）与 file: 链接
+ *    的来源不可控，改写层白名单管不到它们——markdown-it 默认黑名单只
+ *    拒协议（file: 在列），裸绝对路径本就放行。这里在 validateLink 层
+ *    统一裁决：本地路径形态（file:、POSIX 绝对、盘符、UNC）仅当后缀
+ *    浏览器可渲染时放行，其余退化为纯文本；可渲染的链接在 link_open
+ *    层补正 file:// 形态并加高亮类。远程链接与危险协议仍走默认实现。
  *
  * 4. 本地文件链接高亮：file: 链接指向本机文件而非网页，行为与外链不同，
  *    link_open 渲染时追加 .md-local-file-link 类名，由样式做差异化高亮。
@@ -43,6 +46,17 @@ type LinkifyRuntimeRe = {
   src_path: string;
 };
 
+/** markdown-it 解析链接时会把 url 百分号归一化（Windows 反斜杠变
+ * %5C、中文变 %E4%xx…），本地路径判断与后缀裁决前先解码还原。
+ * 畸形 % 序列解码会抛 URIError，原样返回交由后续默认逻辑处理。 */
+function decodeLinkUrl(url: string): string {
+  try {
+    return decodeURI(url);
+  } catch {
+    return url;
+  }
+}
+
 let configured = false;
 
 export function setupMarkdownLinkify() {
@@ -51,24 +65,33 @@ export function setupMarkdownLinkify() {
 
   config({
     markdownItConfig(md) {
-      // 放行 file: 协议：默认 validateLink 与 javascript:/vbscript:/data:
-      // 一同拒绝它，导致本地文件链接退化成裸文本。其余协议仍走默认判断。
-      // POSIX（file:///Users/…）与 Windows（file:///C:/…、file://server/share/…）
-      // 形态一致，只按 scheme 判断即可。
+      // 本地文件链接的渲染层裁决（见头部注释 3）：只有浏览器可渲染的
+      // 后缀才放行成链接，其余本地目标（源码/文档/日志等）点击也无法
+      // 渲染，退化成纯文本。远程链接与危险协议走默认实现。
       const defaultValidateLink = md.validateLink.bind(md);
-      md.validateLink = (url: string) =>
-        /^file:/i.test(url.trim()) || defaultValidateLink(url);
+      md.validateLink = (url: string) => {
+        const trimmed = url.trim();
+        const decoded = decodeLinkUrl(trimmed);
+        if (isLocalFileUrl(decoded)) {
+          return BROWSER_RENDERABLE_EXT_RE.test(decoded.split(/[?#]/)[0]);
+        }
+        return defaultValidateLink(trimmed);
+      };
 
       md.linkify.set({ fuzzyLink: false });
 
-      // 本地文件链接打标记类名，供样式高亮区分于普通外链（见
-      // index.css 的 .md-local-file-link）。渲染规则按 markdown-it 约定
-      // 链式包装：保留既有 renderer 行为，只追加 class。
+      // 存活下来的本地文件链接统一补正 file:// 形态（裸绝对路径、盘符
+      // 误落主机位、反斜杠编码等）并打标记类名，供样式高亮区分于普通
+      // 外链（见 index.css 的 .md-local-file-link）。渲染规则按
+      // markdown-it 约定链式包装：保留既有 renderer 行为，只改 href 与
+      // class。
       const defaultLinkOpen = md.renderer.rules.link_open
         ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
         const href = tokens[idx].attrGet("href") ?? "";
-        if (/^file:/i.test(href.trim())) {
+        const decoded = decodeLinkUrl(href);
+        if (href && isLocalFileUrl(decoded)) {
+          tokens[idx].attrSet("href", toFileUrl(decoded));
           tokens[idx].attrJoin("class", "md-local-file-link");
         }
         return defaultLinkOpen(tokens, idx, options, env, self);

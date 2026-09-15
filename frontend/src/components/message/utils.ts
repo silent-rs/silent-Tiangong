@@ -104,7 +104,7 @@ export function resolveAssetUrl(url: string): string {
 }
 
 /** 判断链接目标是否本地路径形态（file://、POSIX 绝对路径、Windows 盘符或 UNC）。 */
-function isLocalFileUrl(url: string): boolean {
+export function isLocalFileUrl(url: string): boolean {
   return url.startsWith('file:')
     || url.startsWith('/')
     || /^[A-Za-z]:[\\/]/.test(url)
@@ -126,10 +126,10 @@ function inlineLocalSvgLinks(md: string): string {
   );
 }
 
-/** 浏览器可直接打开渲染的文件后缀——只有这些类型把行内代码路径改写
- *  成链接才有直接打开的意义；其余类型（源码、文档、日志等）点了也
- *  无法渲染，不做改写。 */
-const BROWSER_RENDERABLE_EXT_RE = /\.(?:html?|xhtml|svg|png|jpe?g|gif|webp|bmp|ico|avif|pdf)$/i;
+/** 浏览器可直接打开渲染的文件后缀——只有这些类型的本地文件链接才有
+ *  直接打开的意义；其余类型（源码、文档、日志等）点了也无法渲染。
+ *  改写层与渲染层（validateLink 裁决）共用这一份白名单。 */
+export const BROWSER_RENDERABLE_EXT_RE = /\.(?:html?|xhtml|svg|png|jpe?g|gif|webp|bmp|ico|avif|pdf)$/i;
 
 /** 行内代码形态的本地绝对路径（`/…/x.png`、file://、盘符或 UNC）且后
  *  缀浏览器可渲染。内容不含反引号与换行即可，允许空白——href 侧会编
@@ -145,7 +145,7 @@ const WINDOWS_LIKE_PATH_RE = /^(?:file:\/{2,3})?(?:[A-Za-z]:[\\/]|\\\\)/i;
  *  误落在主机位的 file://C:/… 补正为 file:///C:/…（WebView 会把 C: 当
  *  主机名，导致本地文件打不开）。空白与中文经 encodeURI 编码；括号与
  *  单引号 encodeURI 不编但会破坏 Markdown 链接语法，手工补编。 */
-function toFileUrl(path: string): string {
+export function toFileUrl(path: string): string {
   const normalized = WINDOWS_LIKE_PATH_RE.test(path) ? path.replace(/\\/g, '/') : path;
   let prefixed: string;
   if (/^file:/i.test(normalized)) {
