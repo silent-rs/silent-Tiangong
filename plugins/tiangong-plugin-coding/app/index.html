@@ -406,11 +406,19 @@
         state.workspace = workspace || null;
         if (changed) void load();
       };
-      const initial = typeof hostBridge.hostContext === 'function'
-        ? hostBridge.hostContext()
-        : null;
+      // Shadow 容器：hostContext（上下文对象）与 onHostContextChange（函数）是
+      // 宿主以脚本参数注入的自由变量，不在 bridge 对象上；iframe 容器则挂在
+      // 桥对象上（hostContext 为返回对象的函数）。
+      let initial = null;
+      if (typeof hostContext !== 'undefined' && hostContext) {
+        initial = typeof hostContext === 'function' ? hostContext() : hostContext;
+      } else if (typeof hostBridge.hostContext === 'function') {
+        initial = hostBridge.hostContext();
+      }
       if (initial) onContext(initial);
-      if (typeof hostBridge.onHostContextChange === 'function') {
+      if (typeof onHostContextChange === 'function') {
+        onHostContextChange(onContext);
+      } else if (typeof hostBridge.onHostContextChange === 'function') {
         hostBridge.onHostContextChange(onContext);
       }
       if (!initial) void load();
