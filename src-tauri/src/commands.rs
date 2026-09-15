@@ -1717,12 +1717,8 @@ pub async fn prepare_startup_resources(
             tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(Some(
                 reason.clone(),
             ));
-            // 放行后主界面监听此事件刷新全局沙箱状态并提示：启动门闸
-            // 在 preparing 阶段放行，终态失败必须补发通知。
-            let _ = app.emit(
-                "startup-prepare-failed",
-                serde_json::json!({ "reason": reason }),
-            );
+            // 失败原因经返回值同步交给前端提示：不放事件——主界面挂载
+            // 晚于此处的 emit，事件在首启场景必然丢失。
             // 沙箱不可用不阻断应用：对话不依赖沙箱，插件工具在调用时
             // 各自报错，可在设置页修复后自动重试。
             let readiness = state.wait_plugin_preload().await.unwrap_or_else(|error| {

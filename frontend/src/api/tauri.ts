@@ -986,9 +986,6 @@ export const api = {
   /** 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播（拓展区刷新数据源）。 */
   onPluginsChanged: (callback: () => void) =>
     listen('plugins_changed', () => callback()),
-  /** 沙箱启动准备落到终态失败（放行后补发）：刷新全局沙箱状态并提示。 */
-  onStartupPrepareFailed: (callback: (payload: { reason: string }) => void) =>
-    listen<{ reason: string }>('startup-prepare-failed', (event) => callback(event.payload)),
 
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),

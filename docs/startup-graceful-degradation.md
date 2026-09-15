@@ -72,11 +72,17 @@
 - 撤销顶部 fixed 横幅（遮挡顶栏与 macOS 红绿灯）：终态降级改为右上角
   消息（Toast）一次性提示，8 秒自动消失、**不带操作按钮**——修复入口
   由用户进入设置页或点击输入区底部"沙箱无效"指示；
-- 补齐 preparing→failed 终态跃迁通知：启动门闸在 preparing 阶段放行后，
-  沙箱安装失败由后端 emit `startup-prepare-failed`，主界面监听后刷新
-  全局状态（点亮输入区指示）并补一次消息提示；
 - 设置页沙箱区块改 selector 订阅：preparing 轮询每秒刷新 store 不再
   触发全量订阅组件重渲染。
+
+## Review 修复（第五轮）
+
+- 撤销 `startup-prepare-failed` 事件链：主界面挂载晚于后端 emit（被启动
+  门闸串行隔开），事件在首启场景必然丢失且与返回值提示重复。首启失败
+  提示由 `notifyDegraded`（同步消费 `degraded_reason`）覆盖；
+- 窄场景兜底：门闸在 preparing 阶段 5s 超时放行后，由门闸自身静默续查
+  （5s 间隔、无进行时提示），落到 failed 终态补一次消息并刷新全局状态
+  点亮输入区指示，落到 ready 仅刷新状态。
 
 ## 验证
 

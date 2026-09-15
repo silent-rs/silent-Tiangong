@@ -96,6 +96,37 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
     };
   }, [runPrepare]);
 
+  // 门闸在 preparing 阶段放行（5s 短窗口耗尽）后，沙箱准备可能稍后才
+  // 落到终态：静默续查（进行时不提示），终态失败补一次消息并刷新全局
+  // 状态点亮输入区指示，终态就绪只刷新状态。不走后端事件——主界面
+  // 挂载晚于 emit，事件在首启场景必然丢失。
+  useEffect(() => {
+    if (!ready) return;
+    if (useStore.getState().sandboxState?.status !== 'preparing') return;
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      void api
+        .getSandboxUpdateState()
+        .then((next) => {
+          if (stopped || next.status === 'preparing') return;
+          stopped = true;
+          window.clearInterval(timer);
+          useStore.getState().setSandboxState(next);
+          if (next.status === 'failed') {
+            notifyDegraded(
+              { sandboxReason: next.failure ?? '沙箱程序安装失败', pluginFailures: [] },
+              showWarning,
+            );
+          }
+        })
+        .catch(() => undefined);
+    }, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [ready, showWarning]);
+
   // 窗口为 macOS Overlay 标题栏，启动期间无系统拖动区；header 与主界面一致提供拖动。
   if (!ready) {
     return (
