@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, AlertTriangle, X, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
 import type { SandboxUpdateState, StartupPrepareResult } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
 import { startWindowDrag } from '@/lib/windowDrag';
 import appLogo from '../../../src-tauri/icons/128x128.png';
 
@@ -14,8 +15,12 @@ interface DegradedInfo {
 async function collectDegraded(result: StartupPrepareResult): Promise<DegradedInfo> {
   let sandboxReason = result.degraded_reason;
   const state: SandboxUpdateState | null = await api.getSandboxUpdateState().catch(() => null);
-  if (state?.status === 'failed' && state.failure) {
-    sandboxReason = state.failure;
+  if (state) {
+    // 已查询到的权威状态写入全局 store，输入区"沙箱无效"指示直接消费。
+    useStore.getState().setSandboxState(state);
+    if (state.status === 'failed' && state.failure) {
+      sandboxReason = state.failure;
+    }
   }
   return {
     sandboxReason,

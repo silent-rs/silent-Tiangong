@@ -14,7 +14,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { api } from '@/api/tauri';
 import { startWindowDrag } from '@/lib/windowDrag';
-import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession, SandboxUpdateState, SandboxPolicyView } from '@/api/tauri';
+import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession, SandboxPolicyView } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
@@ -375,17 +375,18 @@ const EMPTY_SANDBOX_POLICY: SandboxPolicyView = {
 };
 
 function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
-  const { sandboxDisabled, loadSandboxDisabled, setSandboxDisabled } = useStore();
+  const { sandboxDisabled, loadSandboxDisabled, setSandboxDisabled, sandboxState, loadSandboxState } = useStore();
   const [policy, setPolicy] = useState<SandboxPolicyView>(EMPTY_SANDBOX_POLICY);
   const [directoryInput, setDirectoryInput] = useState('');
   const [environmentInput, setEnvironmentInput] = useState('');
   const [confirmDisable, setConfirmDisable] = useState(false);
-  const [sandboxState, setSandboxState] = useState<SandboxUpdateState | null>(null);
   const [checking, setChecking] = useState(false);
   const { showSuccess, showError } = useToast();
   useEffect(() => { if (sandboxDisabled === null) void loadSandboxDisabled(); }, [sandboxDisabled, loadSandboxDisabled]);
+  useEffect(() => { if (sandboxState === null) void loadSandboxState(); }, [sandboxState, loadSandboxState]);
   useEffect(() => { void api.getSandboxPolicy().then(setPolicy).catch((e) => showError('加载失败', String(e))); }, [showError]);
-  const refresh = useCallback(() => { void api.getSandboxUpdateState().then(setSandboxState).catch(() => {}); }, []);
+  // 状态走全局 store：设置页修复成功后输入区"沙箱无效"指示同步消失。
+  const refresh = useCallback(() => { void loadSandboxState(true); }, [loadSandboxState]);
   useEffect(refresh, [refresh]);
   useEffect(() => {
     if (sandboxState?.status !== 'preparing') return;
