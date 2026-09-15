@@ -176,6 +176,14 @@
   position: static !important;
 }
 
+/* MdPreview 根元素自带纯白/纯黑底色（--md-bk-color），previewOnly 只去掉
+   边框不去底色，与消息容器背景（页面 background、用户气泡 primary/10）
+   不对齐形成异色块：底色透明化由所在容器透出，正文色对齐全局前景色 */
+.md-editor.md-editor-previewOnly {
+  background-color: transparent;
+  color: hsl(var(--foreground));
+}
+
 /* 用户消息气泡内的 Markdown 预览：字号对齐气泡正文尺度（md-editor
    默认 16px），并压缩段落间距，避免短消息上下留白撑大气泡 */
 .user-bubble-md .md-editor-preview {
