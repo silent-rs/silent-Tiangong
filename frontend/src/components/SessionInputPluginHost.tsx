@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type SlotContributionEntry } from '@/api/tauri';
+import { useStore } from '@/store/useStore';
 import { PluginSandbox } from './PluginSandbox';
 
 interface SessionInputPluginHostProps {
@@ -13,6 +14,10 @@ interface SessionInputPluginHostProps {
 /** 会话输入区 Slot 宿主：挂载已安装插件声明的输入辅助贡献。 */
 export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
   const [items, setItems] = useState<Array<SlotContributionEntry & { html: string }>>([]);
+  // 输入区贡献（如分支指示器）依赖当前会话工作区，与 extension.tab 宿主同源。
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const sessionCwd = useStore((s) => s.sessionCwd);
+  const workspaceDir = useStore((s) => s.workspaceDir);
 
   const refresh = useCallback(async () => {
     const contributions = await api.listSlotContributions(slot);
@@ -71,6 +76,8 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
           contributionId={item.contribution_id}
           sandbox={item.sandbox}
           html={item.html}
+          sessionId={activeSessionId ?? null}
+          workspace={sessionCwd || workspaceDir || null}
           className={
             slot === 'session.input-action'
               ? 'h-8 w-8 shrink-0 overflow-hidden'

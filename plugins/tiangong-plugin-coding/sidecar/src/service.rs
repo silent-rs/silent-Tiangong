@@ -1315,7 +1315,8 @@ fn branches(request: &BranchesRequest) -> std::result::Result<BranchesResponse, 
                 // 兼容行尾空白被剥离的形态（非当前分支行）。
                 None => (line.trim(), ""),
             };
-            if name.is_empty() || name.ends_with("/HEAD") {
+            // 过滤 HEAD 符号引用与不带分支段的裸远端引用（如残留的 refs/remotes/origin）。
+            if name.is_empty() || name.ends_with("/HEAD") || (is_remote && !name.contains('/')) {
                 continue;
             }
             response.branches.push(BranchInfo {
