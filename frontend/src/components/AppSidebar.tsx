@@ -9,7 +9,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from './ui/context-menu';
-import { Plus, Trash2, Folder, FilePlus2, FolderX } from 'lucide-react';
+import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import { useToast } from './Toast';
@@ -17,8 +17,10 @@ import type { Session } from '@/api/tauri';
 
 /** 默认分组 key：与全局 workspace 一致（或 cwd 为空）的会话归入此分组，平铺不显示分组头 */
 const DEFAULT_GROUP_KEY = '__default__';
-/** 收缩状态下每个分组最多显示的会话数 */
+/** 收缩状态下每个分组初始显示的会话数，也是"收起"回落的数量 */
 const COLLAPSED_LIMIT = 5;
+/** 点击"显示更多"每次追加的会话数 */
+const LOAD_MORE_STEP = 5;
 
 interface SessionGroup {
   /** 分组 key：默认分组为 __default__，其余为会话 cwd */
@@ -107,8 +109,10 @@ export function AppSidebar() {
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null);
   // 待删除的 workspace 分组（cwd + 显示名），null 表示无待删除
   const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<{ cwd: string; label: string; count: number } | null>(null);
-  // 每个分组的展开状态：默认收缩（只显示最近 COLLAPSED_LIMIT 个）；true=展开显示全部
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // 每个分组当前显示的会话数：未记录时为 COLLAPSED_LIMIT；"显示更多"每次 +LOAD_MORE_STEP，"收起"回落
+  const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
+  // 折叠的分组：true 时整组收起不显示任何会话（点击分组头切换），展开后恢复之前的显示数
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   // 仅展示有消息的会话或当前活跃会话
   const visibleSessions = useMemo(
@@ -123,8 +127,19 @@ export function AppSidebar() {
   // 是否存在非默认（workspace 分类）分组；没有时默认分组不收缩、全部平铺
   const hasWorkspaceGroups = groups.some((g) => !g.isDefault);
 
-  const toggleGroup = (key: string) => {
-    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+  const showMore = (key: string, total: number) => {
+    setVisibleCounts((prev) => {
+      const current = prev[key] ?? COLLAPSED_LIMIT;
+      return { ...prev, [key]: Math.min(current + LOAD_MORE_STEP, total) };
+    });
+  };
+
+  const collapseToList = (key: string) => {
+    setVisibleCounts((prev) => ({ ...prev, [key]: COLLAPSED_LIMIT }));
+  };
+
+  const toggleGroupCollapsed = (key: string) => {
+    setCollapsedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const handleDeleteSession = async () => {
@@ -191,13 +206,15 @@ export function AppSidebar() {
   };
 
   const renderGroup = (group: SessionGroup) => {
-    const isExpanded = expanded[group.key];
+    const isCollapsed = collapsedGroups[group.key];
     // 默认分组在无 workspace 分类分组时不收缩，全部平铺
     const allowCollapse = group.isDefault ? hasWorkspaceGroups : true;
-    // 收缩态：只显示最近 COLLAPSED_LIMIT 个 + "显示全部"；展开态：全部 + "收起"
-    const visibleItems = isExpanded || !allowCollapse
+    // 渐进显示：未记录时为 COLLAPSED_LIMIT，"显示更多"逐步追加直至全部
+    const visibleCount = Math.min(visibleCounts[group.key] ?? COLLAPSED_LIMIT, group.sessions.length);
+    const allShown = visibleCount >= group.sessions.length;
+    const visibleItems = !allowCollapse || allShown
       ? group.sessions
-      : group.sessions.slice(0, COLLAPSED_LIMIT);
+      : group.sessions.slice(0, visibleCount);
     const canCollapse = allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
     // workspace 下任一会话正在运行时，禁用批量删除。
     const groupHasRunning = group.sessions.some(
@@ -205,16 +222,18 @@ export function AppSidebar() {
     );
 
     if (group.isDefault) {
-      // 默认分组：无分组头，直接平铺
+      // 默认分组：无分组头也无折叠交互，直接平铺
       return (
         <div key={group.key} className="space-y-1">
           {visibleItems.map(renderSessionItem)}
           {canCollapse && (
             <button
               className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-              onClick={() => toggleGroup(group.key)}
+              onClick={() =>
+                allShown ? collapseToList(group.key) : showMore(group.key, group.sessions.length)
+              }
             >
-              {isExpanded ? '收起' : `显示全部 (${group.sessions.length})`}
+              {allShown ? '收起' : '显示更多'}
             </button>
           )}
         </div>
@@ -227,11 +246,15 @@ export function AppSidebar() {
         <ContextMenuTrigger asChild>
           <div className="space-y-1 select-none">
             <div className="flex items-center gap-1 group">
-              {/* 分组头为纯展示：点击不展开，展开仅通过下方"显示全部"按钮 */}
+              {/* 点击分组头折叠/展开整组；右侧新建按钮独立响应不受影响 */}
               <div
-                className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground min-w-0"
+                className="flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground min-w-0 cursor-pointer hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
                 title={group.fullPath}
+                onClick={() => toggleGroupCollapsed(group.key)}
               >
+                <ChevronRight
+                  className={`w-3 h-3 shrink-0 transition-transform ${isCollapsed ? '' : 'rotate-90'}`}
+                />
                 <Folder className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">{group.label}</span>
                 <span className="text-muted-foreground/70 shrink-0">{group.sessions.length}</span>
@@ -245,16 +268,22 @@ export function AppSidebar() {
                 <Plus className="w-3.5 h-3.5" />
               </button>
             </div>
-            <div className="space-y-1 pl-1">
-              {visibleItems.map(renderSessionItem)}
-            </div>
-            {canCollapse && (
-              <button
-                className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
-                onClick={() => toggleGroup(group.key)}
-              >
-                {isExpanded ? '收起' : `显示全部 (${group.sessions.length})`}
-              </button>
+            {!isCollapsed && (
+              <>
+                <div className="space-y-1 pl-1">
+                  {visibleItems.map(renderSessionItem)}
+                </div>
+                {canCollapse && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 rounded-md text-xs text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50 transition-colors"
+                    onClick={() =>
+                      allShown ? collapseToList(group.key) : showMore(group.key, group.sessions.length)
+                    }
+                  >
+                    {allShown ? '收起' : '显示更多'}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </ContextMenuTrigger>
