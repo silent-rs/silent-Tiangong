@@ -51,3 +51,36 @@ describe('resolveMarkdownImages', () => {
     );
   });
 });
+
+describe('本地 html 行内代码链接化', () => {
+  it('POSIX 绝对路径改写为 file:// 链接并保留反引号', () => {
+    expect(
+      resolveMarkdownImages('文件位置：`/Users/hubertshelley/Documents/organoid-intro.html`（单文件）'),
+    ).toBe('文件位置：[`/Users/hubertshelley/Documents/organoid-intro.html`](file:///Users/hubertshelley/Documents/organoid-intro.html)（单文件）');
+  });
+
+  it('file:// 前缀、Windows 盘符与 .htm 后缀同样改写', () => {
+    expect(resolveMarkdownImages('`file:///tmp/a.html`')).toBe(
+      '[`file:///tmp/a.html`](file:///tmp/a.html)',
+    );
+    expect(resolveMarkdownImages('`C:\\Users\\test\\b.htm`')).toBe(
+      '[`C:\\Users\\test\\b.htm`](file:///C:/Users/test/b.htm)',
+    );
+  });
+
+  it('含空白中文的路径编码后写入链接', () => {
+    expect(resolveMarkdownImages('`/Users/我的 文件/a.html`')).toBe(
+      '[`/Users/我的 文件/a.html`](file:///Users/%E6%88%91%E7%9A%84%20%E6%96%87%E4%BB%B6/a.html)',
+    );
+  });
+
+  it('相对路径与非 html 行内代码保持原样', () => {
+    expect(resolveMarkdownImages('`target/x.html`')).toBe('`target/x.html`');
+    expect(resolveMarkdownImages('`/tmp/readme.md`')).toBe('`/tmp/readme.md`');
+  });
+
+  it('代码块内的路径原样展示，不链接化', () => {
+    const md = '示例：\n```\n`/Users/demo/index.html`\n```';
+    expect(resolveMarkdownImages(md)).toBe(md);
+  });
+});

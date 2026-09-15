@@ -126,8 +126,53 @@ function inlineLocalSvgLinks(md: string): string {
   );
 }
 
+/** 行内代码形态的本地 html 绝对路径（`/…/x.html`、file://、盘符或 UNC）。
+ *  内容不含反引号与换行即可，允许空白——href 侧会编码。相对路径不处
+ *  理——缺基准目录，链接无意义。 */
+const LOCAL_HTML_INLINE_RE = /^(?:file:\/\/)?(?:[A-Za-z]:[\\/]|\\\\|\/)[^`]*\.html?$/i;
+
+/** 本地路径转 file:// URL：POSIX 补三斜杠、Windows 盘符正斜杠化补
+ *  file:///、UNC 的主机位自然落于 file://host。空白与中文经 encodeURI
+ *  编码；括号与单引号 encodeURI 不编但会破坏 Markdown 链接语法，手工
+ *  补编。 */
+function toFileUrl(path: string): string {
+  let prefixed: string;
+  if (/^file:\/\//i.test(path)) {
+    prefixed = path;
+  } else if (/^[A-Za-z]:[\\/]/.test(path)) {
+    prefixed = `file:///${path.replace(/\\/g, '/')}`;
+  } else if (path.startsWith('\\\\')) {
+    prefixed = `file:${path.replace(/\\/g, '/')}`;
+  } else {
+    prefixed = `file://${path}`;
+  }
+  return encodeURI(prefixed).replace(
+    /[()']/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`,
+  );
+}
+
+/** 行内代码里的本地 html 文件改写为链接（保留反引号，渲染为代码样式
+ *  的可点击链接）。模型交付单文件页面时常用反引号给绝对路径，原本
+ *  没有任何打开途径；改写后点击走嵌入浏览器（本地文件已支持）。
+ *  按围栏分段跳过代码块——块内路径是示例/输出，必须原样展示。 */
+function linkLocalHtmlPaths(md: string): string {
+  const inlineReplace = (segment: string) => segment.replace(
+    /`([^`\n]+)`/g,
+    (match, content: string) => (
+      LOCAL_HTML_INLINE_RE.test(content)
+        ? `[${match}](${toFileUrl(content)})`
+        : match
+    ),
+  );
+  return md
+    .split(/(```[\s\S]*?(?:```|$))/g)
+    .map((segment) => (segment.startsWith('```') ? segment : inlineReplace(segment)))
+    .join('');
+}
+
 export function resolveMarkdownImages(md: string): string {
-  return inlineLocalSvgLinks(md).replace(
+  return linkLocalHtmlPaths(inlineLocalSvgLinks(md)).replace(
     /(!\[[^\]]*\]\()([^\s)]+)(\))/g,
     (_, prefix, path, suffix) => prefix + resolveAssetUrl(path) + suffix,
   );

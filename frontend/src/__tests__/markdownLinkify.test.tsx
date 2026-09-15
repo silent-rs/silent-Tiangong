@@ -55,6 +55,23 @@ describe('链接识别修正', () => {
     expect(link!.textContent).not.toContain('_');
   });
 
+  it('星号后紧跟中文（无空格）时在星号处截断，加粗恢复', async () => {
+    await renderMd('PR 已建好：**https://github.com/silent-rs/silent-Tiangong/pull/543**（分支 feature/coding-plugin-upgrade）');
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('https://github.com/silent-rs/silent-Tiangong/pull/543');
+    expect(link!.textContent).not.toContain('*');
+    expect(link!.textContent).not.toContain('（分支');
+    expect(container.querySelector('strong')).not.toBeNull();
+  });
+
+  it('URL 路径中段的下划线不受截断影响', async () => {
+    await renderMd('见 https://example.com/my_page_name 末尾');
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('https://example.com/my_page_name');
+  });
+
   it('普通 URL 与邮箱识别不受影响', async () => {
     await renderMd('访问 https://example.com/path?x=1 联系 foo@example.com');
     const links = container.querySelectorAll('a');
