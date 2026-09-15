@@ -1,0 +1,95 @@
+# 启动准备失败降级放行
+
+- 日期：2026-09-15
+- 分支：`feature/startup-graceful-degradation`
+- 背景：用户设备上 plugin-creator 插件因目录权限异常（写入 ACL os error 5）启动失败，
+  旧版启动门闸以"运行环境准备失败"整页阻断进入应用，导致对话功能也不可用。
+
+## 需求
+
+1. 插件异常（验证失败、常驻进程启动失败等）时，将该插件标记为异常状态，
+   不得阻断进入应用；
+2. 沙箱程序不可用（安装失败、验签失败等）时同样允许进入应用，
+   仅插件工具不可用；
+3. 与 agent 的对话功能在任何启动准备失败下均可用（对话不依赖插件与沙箱）。
+
+## 行为设计
+
+| 场景 | 旧行为 | 新行为 |
+| --- | --- | --- |
+| 某插件验证/启动失败 | 整页阻断，仅重试/退出 | 正常进入；插件标记异常（设置页可见），工具调用时报各自原因 |
+| 沙箱程序安装/验证失败 | 整页阻断 | 正常进入；横幅提示，设置页"沙箱管理"可修复 |
+| 对话 | 进不去则不可用 | 始终可用 |
+
+安全边界不变：沙箱起不来时 sidecar 照样拒绝启动（fail-closed，不降级为
+无沙箱执行），只是影响范围从"整个应用"收缩到"该插件的功能"。
+
+## 实现要点
+
+- `registry::prepare_desktop_startup_plugins` 返回 `StartupPluginReadiness`
+  （`loaded` + `failures`），插件级失败逐个写入既有的 `runtime_error` /
+  无效插件登记后仅汇总返回，不再 `bail!` 整体报错；
+- `prepare_startup_resources`（Tauri 命令）沙箱安装失败改为返回
+  `degraded_reason`，插件预加载失败转为 `plugin_failures` 清单，均不抛错；
+- 前端 `StartupPrepareGate` 仅在"准备中"显示等待页；失败态放行进入主界面，
+  顶部可关闭横幅分别提示沙箱不可用与插件失败数量，指向设置页修复入口；
+- 修复自愈：启动时沙箱装好后重试失败插件（既有逻辑），设置页沙箱
+  "检查并更新"成功后新增 `retry_failed_plugin_preload()` 自动重试；
+- 设置页插件列表异常展示为既有能力（`last_error` + error/degraded 状态），未改动。
+
+## Review 修复（第一轮）
+
+- `plugin_dev.rs` 集成用例同步改写为 `readiness.failures` 断言（原 `unwrap_err()`
+  在新语义下必然 panic；本机因沙箱探测跳过未覆盖，CI Linux 真实执行）；
+- 降级横幅改为 `fixed` 浮层（z-[100]，Toast z-[110] 之下），不再作为 children
+  兄弟节点撑破 `h-screen` 视口；
+- 沙箱 preparing 轮询上限 30s → 5s：超时降级放行，后台每 2s
+  续查，就绪后横幅自动消失、失败则更新原因；
+- 横幅新增"重试"按钮：直接调 `prepare_startup_resources`（后端自带失败插件
+  重试）并刷新降级信息，不回启动页打断会话；
+- 注释补充：`wait_plugin_preload` 的 Err 仅剩关机/锁损坏语义、降级放行的影响；
+  `retry_failed_plugin_preload` failures 非空即全量重试的频次边界。
+
+## Review 修复（第二轮，用户裁定）
+
+- "沙箱仍在准备中"属进行时状态，不应以全局横幅持续提示：删除后台续查与
+  pending 逻辑，preparing 超时（5s）直接放行、不出横幅；
+- 全局横幅只保留终态失败：沙箱无效（安装/验证失败）与插件失败清单；
+- 沙箱状态的常驻展示位是设置页"沙箱管理"：failed 由"准备失败"改为
+  **"沙箱无效：{原因}"**（超长截断、悬浮显示全文），ready/preparing 文案不变。
+
+## Review 修复（第三轮，用户裁定）
+
+- 输入区底部新增常驻"沙箱无效"指示（MessageInput 底部状态行，"沙箱关"
+  指示旁）：amber 色警示图标 + 文字，悬浮显示失败原因，点击跳设置页
+  沙箱页签修复——横幅关闭后用户在对话入口仍有可见状态；
+- 沙箱程序状态提升为全局 store 共享（`sandboxState`）：启动门闸查询后
+  写入、设置页修复成功后强制刷新、输入区惰性兜底加载，三处一致联动
+  （修复后输入区指示自动消失）。
+
+## Review 修复（第四轮，用户裁定）
+
+- 撤销顶部 fixed 横幅（遮挡顶栏与 macOS 红绿灯）：终态降级改为右上角
+  消息（Toast）一次性提示，8 秒自动消失、**不带操作按钮**——修复入口
+  由用户进入设置页或点击输入区底部"沙箱无效"指示；
+- 设置页沙箱区块改 selector 订阅：preparing 轮询每秒刷新 store 不再
+  触发全量订阅组件重渲染。
+
+## Review 修复（第五轮）
+
+- 撤销 `startup-prepare-failed` 事件链：主界面挂载晚于后端 emit（被启动
+  门闸串行隔开），事件在首启场景必然丢失且与返回值提示重复。首启失败
+  提示由 `notifyDegraded`（同步消费 `degraded_reason`）覆盖；
+- 窄场景兜底：门闸在 preparing 阶段 5s 超时放行后，由门闸自身静默续查
+  （5s 间隔、无进行时提示），落到 failed 终态补一次消息并刷新全局状态
+  点亮输入区指示，落到 ready 仅刷新状态。
+
+## 验证
+
+- `cargo clippy -p tiangong-plugin-runtime -p tiangong-app --all-targets --tests`：无告警
+  （覆盖测试代码编译，plugin_dev 用例修复经此验证）；
+- `cargo test -p tiangong-plugin-runtime --lib -- --test-threads=1`：180 通过
+  （含改写的启动准备降级与恢复两用例）；
+- `cargo test -p tiangong-app --lib`：63 通过；
+- `yarn tsc --noEmit` / `yarn build`：通过；
+- GUI 实际降级路径（断网首装、损坏插件目录）待用户桌面实测。

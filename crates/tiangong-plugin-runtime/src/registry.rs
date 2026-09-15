@@ -537,18 +537,31 @@ fn restart_on_demand_sidecars_for_sandbox_switch() {
 
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
-    preload_installed_plugins_inner(storage_root, false).unwrap_or_else(|error| {
-        tracing::warn!(error = %format!("{error:#}"), "插件预加载失败");
-        0
-    })
+    preload_installed_plugins_inner(storage_root, false)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format!("{error:#}"), "插件预加载失败");
+            StartupPluginReadiness::default()
+        })
+        .loaded
+}
+
+/// 桌面启动准备结果：插件级失败只写入各插件异常状态并汇总在 failures，
+/// 不再阻断应用启动——对话不依赖插件，工具调用时会得到各自的失败原因。
+#[derive(Debug, Default, Clone)]
+pub struct StartupPluginReadiness {
+    pub loaded: usize,
+    pub failures: Vec<String>,
 }
 
 /// 桌面启动准备：全部验证与常驻进程准备完成后才返回，不把任务留给首次发送。
-pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> Result<usize> {
+pub fn prepare_desktop_startup_plugins(storage_root: &Path) -> Result<StartupPluginReadiness> {
     preload_installed_plugins_inner(storage_root, true)
 }
 
-fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) -> Result<usize> {
+fn preload_installed_plugins_inner(
+    storage_root: &Path,
+    wait_for_ready: bool,
+) -> Result<StartupPluginReadiness> {
     if sidecars_shutting_down() {
         bail!("应用正在退出，插件准备已取消");
     }
@@ -654,12 +667,14 @@ fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) ->
         if sidecars_shutting_down() {
             bail!("应用正在退出，插件准备已取消");
         }
-        if !failures.is_empty() {
-            failures.sort();
-            failures.dedup();
-            bail!("插件启动准备失败：\n{}", failures.join("\n"));
-        }
-        return Ok(installed_plugins.len());
+        // 插件级失败已逐个写入 runtime_error / invalid 登记，这里只汇总
+        // 供启动层提示，不再整体报错阻断应用进入。
+        failures.sort();
+        failures.dedup();
+        return Ok(StartupPluginReadiness {
+            loaded: installed_plugins.len(),
+            failures,
+        });
     }
     // 存量旧插件（升级前安装）可能没有验证记录：后台补做完整验证，
     // 不阻塞应用启动，也不在工具调用热路径同步执行。
@@ -667,7 +682,10 @@ fn preload_installed_plugins_inner(storage_root: &Path, wait_for_ready: bool) ->
     #[cfg(windows)]
     prewarm_resident_sidecars(storage_root);
 
-    Ok(installed_plugins.len())
+    Ok(StartupPluginReadiness {
+        loaded: installed_plugins.len(),
+        failures,
+    })
 }
 
 /// 若 `plugin_id` 是已登记的无效插件目录则删除它并返回 true。
@@ -1332,18 +1350,35 @@ mod tests {
             "wasm":{"binary":"broken.wasm"}});
         std::fs::write(directory.join("broken.wasm"), "invalid wasm").unwrap();
         std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
-        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
-        assert!(format!("{error:#}").contains(&id), "{error:#}");
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
+        assert!(
+            readiness
+                .failures
+                .iter()
+                .any(|failure| failure.contains(&id)),
+            "{readiness:?}"
+        );
         std::fs::write(directory.join(DISABLED_MARKER), "").unwrap();
-        prepare_desktop_startup_plugins(root.path()).expect("已禁用的失败插件不阻止启动");
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
+        assert!(
+            readiness.failures.is_empty(),
+            "已禁用的失败插件不计入失败：{readiness:?}"
+        );
         std::fs::remove_file(directory.join(DISABLED_MARKER)).unwrap();
         manifest["entrypoints"] = serde_json::json!(["cli"]);
         std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
-        prepare_desktop_startup_plugins(root.path()).expect("非 desktop 插件不阻止启动");
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
+        assert!(
+            readiness.failures.is_empty(),
+            "非 desktop 插件不计入失败：{readiness:?}"
+        );
         manifest.as_object_mut().unwrap().remove("wasm");
         manifest["entrypoints"] = serde_json::json!(["desktop"]);
         std::fs::write(directory.join(MANIFEST_FILE), manifest.to_string()).unwrap();
-        assert_eq!(prepare_desktop_startup_plugins(root.path()).unwrap(), 1);
+        assert_eq!(
+            prepare_desktop_startup_plugins(root.path()).unwrap().loaded,
+            1
+        );
         assert!(
             loaded_plugins()
                 .lock()
@@ -1397,9 +1432,21 @@ mod tests {
             "ui":[artifact("app/index.html")],"sidecar":artifact(&binary)});
         std::fs::write(directory.join("release.json"), release.to_string()).unwrap();
         crate::trust::sign_with_user_key(root.path(), &directory.join("release.json")).unwrap();
-        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("插件验证失败"), "{error:#}");
-        assert!(format!("{error:#}").contains(&id), "{error:#}");
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
+        assert!(
+            readiness
+                .failures
+                .iter()
+                .any(|failure| failure.contains("插件验证失败")),
+            "{readiness:?}"
+        );
+        assert!(
+            readiness
+                .failures
+                .iter()
+                .any(|failure| failure.contains(&id)),
+            "{readiness:?}"
+        );
         // 在同一入口中分别验证“验证记录可用但启动失败”和“失败后恢复”。
         let connection = Arc::new(RecoverableSidecar {
             failing: AtomicBool::new(true),
@@ -1425,13 +1472,18 @@ mod tests {
             verified_at: chrono::Local::now().naive_local().to_string(),
         };
         crate::verification::save_verification(&directory, &record).unwrap();
-        let error = prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
         assert!(
-            format!("{error:#}").contains("resident temporarily unavailable"),
-            "{error:#}"
+            readiness
+                .failures
+                .iter()
+                .any(|failure| failure.contains("resident temporarily unavailable")),
+            "{readiness:?}"
         );
         connection.failing.store(false, Ordering::SeqCst);
-        assert_eq!(prepare_desktop_startup_plugins(root.path()).unwrap(), 1);
+        let readiness = prepare_desktop_startup_plugins(root.path()).unwrap();
+        assert!(readiness.failures.is_empty(), "{readiness:?}");
+        assert_eq!(readiness.loaded, 1);
         assert_eq!(connection.starts.load(Ordering::SeqCst), 2);
         assert_eq!(loaded_runtime_error(&id), None);
         remove_sidecar_connection(&directory);
