@@ -94,4 +94,37 @@ describe('链接识别修正', () => {
     expect(link).not.toBeNull();
     expect(link!.getAttribute('href')).toBe('https://example.com/page');
   });
+
+  it('file: 链接正常渲染为可点击链接（不退化成裸文本）', async () => {
+    await renderMd('文件：[`/Users/test/a.html`](file:///Users/test/a.html)（41.8 KB）');
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('file:///Users/test/a.html');
+    expect(link!.querySelector('code')).not.toBeNull();
+    expect(container.textContent).not.toContain('](file://');
+  });
+
+  it('Windows 盘符与 UNC 的 file: 链接同样渲染', async () => {
+    await renderMd([
+      '[a](file:///C:/Users/test/b.htm)',
+      '[b](file://server/share/a.html)',
+    ].join('\n\n'));
+    const links = [...container.querySelectorAll('a')];
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      'file:///C:/Users/test/b.htm',
+      'file://server/share/a.html',
+    ]);
+  });
+
+  it('本地文件链接带高亮类名，外链不带', async () => {
+    await renderMd('[本地](file:///Users/test/a.html) 与 [外链](https://example.com/p)');
+    const links = [...container.querySelectorAll('a')];
+    expect(links[0].classList.contains('md-local-file-link')).toBe(true);
+    expect(links[1].classList.contains('md-local-file-link')).toBe(false);
+  });
+
+  it('javascript: 等危险协议仍被拒绝', async () => {
+    await renderMd('[点我](javascript:alert(1))');
+    expect(container.querySelector('a')).toBeNull();
+  });
 });

@@ -126,25 +126,36 @@ function inlineLocalSvgLinks(md: string): string {
   );
 }
 
-/** 行内代码形态的本地 html 绝对路径（`/…/x.html`、file://、盘符或 UNC）。
- *  内容不含反引号与换行即可，允许空白——href 侧会编码。相对路径不处
- *  理——缺基准目录，链接无意义。 */
-const LOCAL_HTML_INLINE_RE = /^(?:file:\/\/)?(?:[A-Za-z]:[\\/]|\\\\|\/)[^`]*\.html?$/i;
+/** 浏览器可直接打开渲染的文件后缀——只有这些类型把行内代码路径改写
+ *  成链接才有直接打开的意义；其余类型（源码、文档、日志等）点了也
+ *  无法渲染，不做改写。 */
+const BROWSER_RENDERABLE_EXT_RE = /\.(?:html?|xhtml|svg|png|jpe?g|gif|webp|bmp|ico|avif|pdf)$/i;
+
+/** 行内代码形态的本地绝对路径（`/…/x.png`、file://、盘符或 UNC）且后
+ *  缀浏览器可渲染。内容不含反引号与换行即可，允许空白——href 侧会编
+ *  码。相对路径不处理——缺基准目录，链接无意义。 */
+const LOCAL_RENDERABLE_INLINE_RE = /^(?:file:\/\/)?(?:[A-Za-z]:[\\/]|\\\\|\/)[^`]*$/i;
+
+/** 形似 Windows 的路径（盘符或 UNC，可带 file: 前缀）——仅这些形态做反斜杠
+ *  正斜杠化，避免 POSIX 文件名中合法的反斜杠被误改。 */
+const WINDOWS_LIKE_PATH_RE = /^(?:file:\/{2,3})?(?:[A-Za-z]:[\\/]|\\\\)/i;
 
 /** 本地路径转 file:// URL：POSIX 补三斜杠、Windows 盘符正斜杠化补
- *  file:///、UNC 的主机位自然落于 file://host。空白与中文经 encodeURI
- *  编码；括号与单引号 encodeURI 不编但会破坏 Markdown 链接语法，手工
- *  补编。 */
+ *  file:///、UNC 的主机位自然落于 file://host；已是 file: URL 时，盘符
+ *  误落在主机位的 file://C:/… 补正为 file:///C:/…（WebView 会把 C: 当
+ *  主机名，导致本地文件打不开）。空白与中文经 encodeURI 编码；括号与
+ *  单引号 encodeURI 不编但会破坏 Markdown 链接语法，手工补编。 */
 function toFileUrl(path: string): string {
+  const normalized = WINDOWS_LIKE_PATH_RE.test(path) ? path.replace(/\\/g, '/') : path;
   let prefixed: string;
-  if (/^file:\/\//i.test(path)) {
-    prefixed = path;
-  } else if (/^[A-Za-z]:[\\/]/.test(path)) {
-    prefixed = `file:///${path.replace(/\\/g, '/')}`;
-  } else if (path.startsWith('\\\\')) {
-    prefixed = `file:${path.replace(/\\/g, '/')}`;
+  if (/^file:/i.test(normalized)) {
+    prefixed = normalized.replace(/^file:\/\/(?=[A-Za-z]:\/)/i, 'file:///');
+  } else if (/^[A-Za-z]:\//.test(normalized)) {
+    prefixed = `file:///${normalized}`;
+  } else if (normalized.startsWith('//')) {
+    prefixed = `file:${normalized}`;
   } else {
-    prefixed = `file://${path}`;
+    prefixed = `file://${normalized}`;
   }
   return encodeURI(prefixed).replace(
     /[()']/g,
@@ -152,15 +163,16 @@ function toFileUrl(path: string): string {
   );
 }
 
-/** 行内代码里的本地 html 文件改写为链接（保留反引号，渲染为代码样式
- *  的可点击链接）。模型交付单文件页面时常用反引号给绝对路径，原本
- *  没有任何打开途径；改写后点击走嵌入浏览器（本地文件已支持）。
- *  按围栏分段跳过代码块——块内路径是示例/输出，必须原样展示。 */
-function linkLocalHtmlPaths(md: string): string {
+/** 行内代码里的本地可渲染文件改写为链接（保留反引号，渲染为代码样式
+ *  的可点击链接）。模型交付页面/图片等单文件时常用反引号给绝对路径，
+ *  原本没有任何打开途径；改写后点击走嵌入浏览器（本地文件已支持）。
+ *  只收浏览器可渲染的后缀，其余类型保持原样。按围栏分段跳过代码
+ *  块——块内路径是示例/输出，必须原样展示。 */
+function linkLocalRenderablePaths(md: string): string {
   const inlineReplace = (segment: string) => segment.replace(
     /`([^`\n]+)`/g,
     (match, content: string) => (
-      LOCAL_HTML_INLINE_RE.test(content)
+      LOCAL_RENDERABLE_INLINE_RE.test(content) && BROWSER_RENDERABLE_EXT_RE.test(content)
         ? `[${match}](${toFileUrl(content)})`
         : match
     ),
@@ -172,7 +184,7 @@ function linkLocalHtmlPaths(md: string): string {
 }
 
 export function resolveMarkdownImages(md: string): string {
-  return linkLocalHtmlPaths(inlineLocalSvgLinks(md)).replace(
+  return linkLocalRenderablePaths(inlineLocalSvgLinks(md)).replace(
     /(!\[[^\]]*\]\()([^\s)]+)(\))/g,
     (_, prefix, path, suffix) => prefix + resolveAssetUrl(path) + suffix,
   );

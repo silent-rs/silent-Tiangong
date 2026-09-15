@@ -202,6 +202,32 @@
   margin-block: 0.4em;
 }
 
+/* 本地文件链接（file:）高亮：与外链区分——指向本机文件，点击走嵌入浏览器。
+   主色描边 + 低透明度底色形成 chip 感；内部行内代码去掉自带底色与内边距，
+   避免与 chip 底色叠成双层色块。 */
+.md-editor-preview a.md-local-file-link {
+  color: hsl(var(--primary));
+  background-color: hsl(var(--primary) / 0.1);
+  border: 1px solid hsl(var(--primary) / 0.25);
+  border-radius: 0.375rem;
+  padding: 0.05em 0.35em;
+  text-decoration: none;
+  word-break: break-all;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.md-editor-preview a.md-local-file-link:hover {
+  background-color: hsl(var(--primary) / 0.18);
+  border-color: hsl(var(--primary) / 0.45);
+}
+
+.md-editor-preview a.md-local-file-link code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+}
+
 /* 代码块样式 */
 @layer components {
   .prose pre {
