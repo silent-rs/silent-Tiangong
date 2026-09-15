@@ -1590,6 +1590,8 @@ pub async fn upgrade_launcher(
         Ok(version) => {
             tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
             tiangong_plugin_runtime::registry::prewarm_resident_sidecars(&storage_root);
+            // 沙箱修复后自动重试启动期失败的插件验证与常驻进程。
+            state.retry_failed_plugin_preload();
             let _ = app.emit(
                 "startup-prepare-step",
                 serde_json::json!({ "step": "done", "version": version }),
@@ -1642,6 +1644,10 @@ pub async fn get_sandbox_update_state(
 #[derive(Debug, serde::Serialize)]
 pub struct StartupPrepareResult {
     pub installed_version: Option<String>,
+    /// 沙箱不可用等降级原因：应用仍可进入，仅插件工具受限。
+    pub degraded_reason: Option<String>,
+    /// 启动失败的插件清单（逐插件已标记异常状态，设置页可查）。
+    pub plugin_failures: Vec<String>,
 }
 
 #[tauri::command]
@@ -1663,9 +1669,15 @@ pub async fn prepare_startup_resources(
     .map_err(|error| error.to_string())?;
     if available {
         tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
-        state.wait_plugin_preload().await?;
+        // 插件级失败只随结果返回供前端提示，不阻断应用进入。
+        let readiness = state.wait_plugin_preload().await.unwrap_or_else(|error| {
+            tracing::warn!(error, "插件预加载失败，应用降级进入");
+            tiangong_plugin_runtime::registry::StartupPluginReadiness::default()
+        });
         return Ok(StartupPrepareResult {
             installed_version: None,
+            degraded_reason: None,
+            plugin_failures: readiness.failures,
         });
     }
     tiangong_plugin_runtime::launcher_update::mark_launcher_preparing(true);
@@ -1683,21 +1695,37 @@ pub async fn prepare_startup_resources(
             // 安装期间的旧准备可能因 Launcher 缺失失败；先等它结束，再重试失败结果。
             let _ = state.wait_plugin_preload().await;
             state.retry_failed_plugin_preload();
-            state.wait_plugin_preload().await?;
+            let readiness = state.wait_plugin_preload().await.unwrap_or_else(|error| {
+                tracing::warn!(error, "插件预加载失败，应用降级进入");
+                tiangong_plugin_runtime::registry::StartupPluginReadiness::default()
+            });
             let _ = app.emit(
                 "startup-prepare-step",
                 serde_json::json!({ "step": "done", "version": version }),
             );
             Ok(StartupPrepareResult {
                 installed_version: Some(version),
+                degraded_reason: None,
+                plugin_failures: readiness.failures,
             })
         }
         Err(error) => {
             let reason = format!("{error:#}");
+            tracing::warn!(reason, "沙箱程序安装失败，应用降级进入");
             tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(Some(
                 reason.clone(),
             ));
-            Err(reason)
+            // 沙箱不可用不阻断应用：对话不依赖沙箱，插件工具在调用时
+            // 各自报错，可在设置页修复后自动重试。
+            let readiness = state.wait_plugin_preload().await.unwrap_or_else(|error| {
+                tracing::warn!(error, "插件预加载失败，应用降级进入");
+                tiangong_plugin_runtime::registry::StartupPluginReadiness::default()
+            });
+            Ok(StartupPrepareResult {
+                installed_version: None,
+                degraded_reason: Some(reason),
+                plugin_failures: readiness.failures,
+            })
         }
     }
 }
