@@ -1,7 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "coding",
-  "version": "0.1.2",
+  "name": "Coding",
+  "version": "0.2.0",
   "wasm": {
     "binary": "tiangong_plugin_coding_wasm.wasm"
   },
@@ -10,11 +11,25 @@
     "transport_protocol": "0.1.0",
     "business_protocol": 2,
     "startup_timeout_ms": 15000,
-    "request_timeout_ms": 30000
+    "request_timeout_ms": 30000,
+    "lifecycle": "on_demand"
   },
   "permissions": [
-    "sidecar.invoke"
+    "sidecar.invoke",
+    "bridge.call"
   ],
+  "ui": {
+    "sandbox": "shadow",
+    "contributions": [
+      {
+        "slot": "session.input-status",
+        "id": "branch-switcher",
+        "title": "分支切换",
+        "entry": "app/index.html",
+        "context": ["session"]
+      }
+    ]
+  },
   "entrypoints": [
     "desktop",
     "cli",

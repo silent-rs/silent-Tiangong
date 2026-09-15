@@ -15,9 +15,10 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tiangong_plugin_coding_protocol::{
-    Checkpoint, CheckpointRequest, Preflight, PreflightRequest, ProjectContext,
-    ProjectContextResponse, Review, ReviewRequest, TOOL_CHECKPOINT, TOOL_PREFLIGHT,
-    TOOL_PROJECT_CONTEXT, TOOL_REVIEW, VerificationResult, WorkspaceRequest,
+    Branches, BranchesRequest, Checkpoint, CheckpointRequest, Preflight, PreflightRequest,
+    ProjectContext, ProjectContextResponse, Review, ReviewRequest, Switch, SwitchRequest,
+    TOOL_CHECKPOINT, TOOL_PREFLIGHT, TOOL_PROJECT_CONTEXT, TOOL_REVIEW, VerificationResult,
+    WorkspaceRequest,
 };
 
 mod descriptor {
@@ -123,7 +124,7 @@ impl Guest for Component {
                     "properties": {
                         "base_ref": {
                             "type": "string",
-                            "description": "可选 Git 基线引用；默认自动选择上游、远端默认分支或本地主分支"
+                            "description": "可选 Git 基线引用；默认自动选择上游分支，其次远端默认分支或本地主分支"
                         },
                         "allowed_paths": {
                             "type": "array",
@@ -192,17 +193,50 @@ impl UiGuest for Component {
     }
 
     fn open_view(_id: String) -> Result<ViewResponse, PluginError> {
-        Err(plugin_err("Coding 插件暂无设置页面"))
+        Err(plugin_err("Coding 插件界面由 plugin.json 声明"))
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {
-        Err(plugin_err("Coding 插件暂无页面资源"))
+        Err(plugin_err("Coding 插件无页面资源"))
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        Err(plugin_err("Coding 插件暂无页面消息"))
+        // UI 实例不经 set_workspace，工作区路径由 UI 从宿主上下文取出后放进 payload。
+        let payload = serde_json::from_str::<serde_json::Value>(&request.payload)
+            .map_err(|error| plugin_err(format!("消息参数无效: {error}")))?;
+        let workspace = payload
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .filter(|workspace| !workspace.trim().is_empty())
+            .ok_or_else(|| plugin_err("消息缺少工作区路径"))?;
+        let response = match request.method.as_str() {
+            "branches" => {
+                let response = sidecar_client::invoke::<Branches>(&BranchesRequest { workspace })
+                    .map_err(|error| plugin_err(format!("读取分支列表失败: {error}")))?;
+                serde_json::to_value(&response)
+                    .map_err(|error| plugin_err(format!("序列化分支列表失败: {error}")))?
+            }
+            "switchBranch" => {
+                let branch = payload
+                    .get("branch")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .filter(|branch| !branch.trim().is_empty())
+                    .ok_or_else(|| plugin_err("消息缺少目标分支"))?;
+                let response =
+                    sidecar_client::invoke::<Switch>(&SwitchRequest { workspace, branch })
+                        .map_err(|error| plugin_err(format!("切换分支失败: {error}")))?;
+                serde_json::to_value(&response)
+                    .map_err(|error| plugin_err(format!("序列化切换结果失败: {error}")))?
+            }
+            other => return Err(plugin_err(format!("未知的 Coding 消息: {other}"))),
+        };
+        Ok(ViewMessageResponse {
+            payload: response.to_string(),
+        })
     }
 }
 
@@ -353,23 +387,28 @@ fn verification_schema() -> serde_json::Value {
             "properties": {
                 "name": { "type": "string", "description": "实际执行的检查或验证" },
                 "passed": { "type": "boolean", "description": "是否通过" },
-                "details": { "type": "string", "description": "关键结果或失败原因" }
+                "details": { "type": "string", "description": "关键结果或失败原因" },
+                "evidence": {
+                    "type": "object",
+                    "description": "真实执行痕迹；声明通过但缺少有效证据（exit_code 为 0 且带命令行）时不计入验证完成",
+                    "properties": {
+                        "command": { "type": "string", "description": "实际执行的命令行" },
+                        "exit_code": { "type": "integer", "description": "命令退出码，通过应为 0" },
+                        "output_tail": { "type": "string", "description": "输出尾部摘录（可选）" }
+                    },
+                    "required": ["command", "exit_code"]
+                }
             },
             "required": ["name", "passed"]
         },
-        "description": "已实际执行的验证结果；未运行时保持为空"
+        "description": "已实际执行的验证结果；未运行时保持为空。声明通过必须附 evidence"
     })
 }
 
 fn coding_prompt() -> String {
-    let workspace = CONTEXT.with(|value| value.borrow().workspace.clone());
-    let full_trust = CONTEXT.with(|value| value.borrow().full_trust);
-    let mut prompt = String::from(CODING_WORKFLOW);
-    prompt.push_str("\n\n当前工作区：");
-    prompt.push_str(workspace.as_deref().unwrap_or("未设置"));
-    prompt.push_str("；信任模式：");
-    prompt.push_str(if full_trust { "完全信任" } else { "受限" });
-    prompt
+    // 工作区/信任模式等易变信息不进入 prompt：声明段落首读后冻结，
+    // 动态值会随会话切换过期，模型应从工具结果获取实时状态。
+    CODING_WORKFLOW.to_string()
 }
 
 const CODING_WORKFLOW: &str = r#"## Coding 工作模式
