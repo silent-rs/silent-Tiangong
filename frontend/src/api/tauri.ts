@@ -1316,6 +1316,7 @@ export interface PluginContributionEntry {
 export interface PluginStatus {
   id: string;
   name: string;
+  description?: string;
   manifest_version: string;
   loaded_version: string | null;
   state: 'loaded' | 'disabled' | 'degraded' | 'error' | 'invalid';

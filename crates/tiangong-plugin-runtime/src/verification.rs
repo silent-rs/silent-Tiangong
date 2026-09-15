@@ -394,6 +394,7 @@ mod tests {
             schema_version: 2,
             require_server: false,
             name: None,
+            description: None,
             id: id.into(),
             version: version.into(),
             wasm: None,
