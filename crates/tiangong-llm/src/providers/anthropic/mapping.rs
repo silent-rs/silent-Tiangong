@@ -52,10 +52,10 @@ pub(super) fn to_anthropic_request(
         if text.is_empty() {
             return None;
         }
-        Some(SystemContent::Blocks(vec![TextBlock {
-            text: system.clone(),
-            cache_control: breakpoint(),
-        }]))
+        Some(SystemContent::Blocks(vec![TextBlock::new(
+            system.clone(),
+            breakpoint(),
+        )]))
     });
     mark_message_tail_breakpoints(&mut messages, breakpoint);
 

@@ -45,9 +45,22 @@ pub enum SystemContent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TextBlock {
+    /// 块类型标签，官方协议要求必填，固定为 "text"。
+    #[serde(rename = "type")]
+    pub block_type: String,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+impl TextBlock {
+    pub fn new(text: String, cache_control: Option<CacheControl>) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text,
+            cache_control,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

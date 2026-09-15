@@ -193,6 +193,7 @@ fn test_cache_breakpoint_serialization_shape() {
         cache_control: Some(CacheControl::ephemeral()),
     };
     let json = serde_json::to_value(&block).unwrap();
+    assert_eq!(json["type"], "text");
     assert_eq!(json["cache_control"]["type"], "ephemeral");
 
     let plain = serde_json::to_value(ContentBlockParam::Text {
@@ -201,6 +202,14 @@ fn test_cache_breakpoint_serialization_shape() {
     })
     .unwrap();
     assert!(plain.get("cache_control").is_none());
+
+    // system 块数组形态：每块必须带 "type":"text"，缺字段会被严格校验的
+    // 端点（官方及 FastAPI 类兼容实现）拒收。
+    let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
+    let system_json = serde_json::to_value(&mapped.system).unwrap();
+    assert_eq!(system_json[0]["type"], "text");
+    assert_eq!(system_json[0]["text"], "你是测试助手");
+    assert_eq!(system_json[0]["cache_control"]["type"], "ephemeral");
 }
 
 #[test]
