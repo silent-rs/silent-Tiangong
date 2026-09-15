@@ -795,10 +795,11 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                     None
                 },
                 id: manifest.id.clone(),
-                name: loaded
-                    .descriptor
-                    .as_ref()
-                    .map(|value| value.name.clone())
+                // 展示名优先级：清单 name（静态声明）→ WASM descriptor → id 兜底。
+                name: manifest
+                    .name
+                    .clone()
+                    .or_else(|| loaded.descriptor.as_ref().map(|value| value.name.clone()))
                     .unwrap_or_else(|| manifest.id.clone()),
                 manifest_version: manifest.version.clone(),
                 loaded_version: loaded
@@ -1483,6 +1484,7 @@ mod tests {
         let manifest = PluginManifest {
             schema_version: 2,
             require_server: false,
+            name: None,
             id: "load-error-demo".into(),
             version: "0.1.0".into(),
             wasm: None,

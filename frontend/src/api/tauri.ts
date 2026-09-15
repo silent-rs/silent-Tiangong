@@ -492,6 +492,7 @@ export const SLOT_IDS = [
   'session.input-action',
   'session.before-input',
   'session.after-input',
+  'session.input-status',
   'session.interaction',
   'session.empty-state',
   'extension.tab',

@@ -3,7 +3,11 @@ import { api, type SlotContributionEntry } from '@/api/tauri';
 import { PluginSandbox } from './PluginSandbox';
 
 interface SessionInputPluginHostProps {
-  slot: 'session.input-action' | 'session.before-input' | 'session.after-input';
+  slot:
+    | 'session.input-action'
+    | 'session.before-input'
+    | 'session.after-input'
+    | 'session.input-status';
 }
 
 /** 会话输入区 Slot 宿主：挂载已安装插件声明的输入辅助贡献。 */
@@ -67,7 +71,13 @@ export function SessionInputPluginHost({ slot }: SessionInputPluginHostProps) {
           contributionId={item.contribution_id}
           sandbox={item.sandbox}
           html={item.html}
-          className={slot === 'session.input-action' ? 'h-8 w-8 shrink-0 overflow-hidden' : undefined}
+          className={
+            slot === 'session.input-action'
+              ? 'h-8 w-8 shrink-0 overflow-hidden'
+              : slot === 'session.input-status'
+                ? 'relative inline-flex h-5 shrink-0 items-center overflow-visible'
+                : undefined
+          }
         />
       ))}
     </>

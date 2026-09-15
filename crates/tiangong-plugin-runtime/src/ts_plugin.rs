@@ -566,6 +566,7 @@ mod tests {
         PluginManifest {
             schema_version: 2,
             require_server: false,
+            name: None,
             id: "demo".into(),
             version: "0.1.0".into(),
             wasm: None,
