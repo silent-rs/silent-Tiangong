@@ -919,15 +919,24 @@ await runSidecar({
             crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_none()
         );
         let verification_path = crate::verification::verification_path(&plugin_directory).unwrap();
-        // 握手成功但验证记录无法保存时，启动仍必须失败；恢复写入后同入口可重试。
+        // 握手成功但验证记录无法保存时，启动结果必须带出该失败；恢复写入后同入口可重试。
         std::fs::create_dir(&verification_path).unwrap();
-        let error = crate::registry::prepare_desktop_startup_plugins(root.path()).unwrap_err();
+        let readiness = crate::registry::prepare_desktop_startup_plugins(root.path())
+            .expect("插件级失败不再阻断启动");
         assert!(
-            format!("{error:#}").contains("保存 sidecar 验证记录失败"),
-            "{error:#}"
+            readiness
+                .failures
+                .iter()
+                .any(|failure| failure.contains("保存 sidecar 验证记录失败")),
+            "{readiness:?}"
         );
         std::fs::remove_dir(&verification_path).unwrap();
-        crate::registry::prepare_desktop_startup_plugins(root.path()).expect("启动重试应恢复记录");
+        let readiness = crate::registry::prepare_desktop_startup_plugins(root.path())
+            .expect("启动重试应恢复记录");
+        assert!(
+            readiness.failures.is_empty(),
+            "重试成功后不应残留插件失败：{readiness:?}"
+        );
         assert!(
             crate::verification::load_valid_capabilities(&plugin_directory, &manifest).is_some(),
             "重新验证后记录应恢复"

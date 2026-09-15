@@ -37,11 +37,25 @@
   "检查并更新"成功后新增 `retry_failed_plugin_preload()` 自动重试；
 - 设置页插件列表异常展示为既有能力（`last_error` + error/degraded 状态），未改动。
 
+## Review 修复（第一轮）
+
+- `plugin_dev.rs` 集成用例同步改写为 `readiness.failures` 断言（原 `unwrap_err()`
+  在新语义下必然 panic；本机因沙箱探测跳过未覆盖，CI Linux 真实执行）；
+- 降级横幅改为 `fixed` 浮层（z-[100]，Toast z-[110] 之下），不再作为 children
+  兄弟节点撑破 `h-screen` 视口；
+- 沙箱 preparing 轮询上限 30s → 5s：超时以"仍在准备中"降级放行，后台每 2s
+  续查，就绪后横幅自动消失、失败则更新原因；
+- 横幅新增"重试"按钮：直接调 `prepare_startup_resources`（后端自带失败插件
+  重试）并刷新降级信息，不回启动页打断会话；
+- 注释补充：`wait_plugin_preload` 的 Err 仅剩关机/锁损坏语义、降级放行的影响；
+  `retry_failed_plugin_preload` failures 非空即全量重试的频次边界。
+
 ## 验证
 
+- `cargo clippy -p tiangong-plugin-runtime -p tiangong-app --all-targets --tests`：无告警
+  （覆盖测试代码编译，plugin_dev 用例修复经此验证）；
 - `cargo test -p tiangong-plugin-runtime --lib -- --test-threads=1`：180 通过
   （含改写的启动准备降级与恢复两用例）；
 - `cargo test -p tiangong-app --lib`：63 通过；
-- `cargo clippy -p tiangong-plugin-runtime -p tiangong-app`：无告警；
-- `yarn build`：通过；
+- `yarn tsc --noEmit` / `yarn build`：通过；
 - GUI 实际降级路径（断网首装、损坏插件目录）待用户桌面实测。

@@ -1669,7 +1669,9 @@ pub async fn prepare_startup_resources(
     .map_err(|error| error.to_string())?;
     if available {
         tiangong_plugin_runtime::launcher_update::record_startup_prepare_failure(None);
-        // 插件级失败只随结果返回供前端提示，不阻断应用进入。
+        // 插件级失败只随结果返回供前端提示，不阻断应用进入。这里的 Err
+        // 仅剩"应用正在退出/加载锁损坏"两种语义：退出中无人消费结果，
+        // 锁损坏属内部状态异常，同样降级放行只留日志。
         let readiness = state.wait_plugin_preload().await.unwrap_or_else(|error| {
             tracing::warn!(error, "插件预加载失败，应用降级进入");
             tiangong_plugin_runtime::registry::StartupPluginReadiness::default()

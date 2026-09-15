@@ -211,6 +211,10 @@ impl TiangongApp {
         self.spawn_plugin_preload();
     }
 
+    /// 沙箱就绪后重试启动期失败的插件准备。failures 非空即触发：存在
+    /// 永久损坏插件时每次调用都会重跑全量验证与常驻预热，当前调用点
+    /// 仅启动与沙箱修复成功两处，频次可控；接入更频繁的调用点前需
+    /// 先加退避或按插件粒度重试。
     pub(crate) fn retry_failed_plugin_preload(&self) {
         if self.plugin_preload.send_if_modified(|result| {
             let retry = match result {

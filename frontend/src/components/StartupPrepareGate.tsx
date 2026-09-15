@@ -1,23 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, AlertTriangle, X } from 'lucide-react';
+import { Loader2, AlertTriangle, X, RefreshCw } from 'lucide-react';
 import { api } from '@/api/tauri';
-import type { StartupPrepareResult } from '@/api/tauri';
+import type { SandboxUpdateState, StartupPrepareResult } from '@/api/tauri';
 import { startWindowDrag } from '@/lib/windowDrag';
 import appLogo from '../../../src-tauri/icons/128x128.png';
 
 interface DegradedInfo {
   sandboxReason: string | null;
   pluginFailures: string[];
+  /** 沙箱仍在准备中：后台续查，就绪后横幅自动消失。 */
+  pending: boolean;
+}
+
+/** 组装降级信息；state 查询失败时保留启动结果中的原因。 */
+async function collectDegraded(result: StartupPrepareResult): Promise<DegradedInfo> {
+  let sandboxReason = result.degraded_reason;
+  const state: SandboxUpdateState | null = await api.getSandboxUpdateState().catch(() => null);
+  if (state?.status === 'failed' && state.failure) {
+    sandboxReason = state.failure;
+  }
+  return {
+    sandboxReason,
+    pluginFailures: result.plugin_failures,
+    pending: state?.status === 'preparing' && sandboxReason === null,
+  };
 }
 
 /**
  * 运行环境与插件就绪后挂载主界面；启动准备失败不再阻断进入——
- * 对话不依赖插件与沙箱，降级只影响工具，以横幅提示并在设置页可修复。
+ * 对话不依赖插件与沙箱，降级只影响工具，以浮层横幅提示并在设置页可修复。
  */
 export function StartupPrepareGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [degraded, setDegraded] = useState<DegradedInfo | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const attempt = useRef(0);
 
   const runPrepare = useCallback(async () => {
@@ -34,25 +51,26 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
         }) satisfies StartupPrepareResult,
     );
     if (current !== attempt.current) return;
-    let sandboxReason = result.degraded_reason;
-    // 状态机复检：以后端权威状态为准；preparing 期间短暂轮询等待。
-    for (let round = 0; round < 60; round += 1) {
+    // 状态机复检：以后端权威状态为准；沙箱准备超过短窗口即降级放行，
+    // 后台续查，就绪后横幅自动消失，不再让用户停在启动页等待。
+    for (let round = 0; round < 10; round += 1) {
       const state = await api.getSandboxUpdateState();
       if (current !== attempt.current) return;
       if (state.status === 'preparing') {
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
       }
-      if (state.status === 'failed' && state.failure) {
-        sandboxReason = state.failure;
-      }
       break;
     }
     if (current !== attempt.current) return;
-    const pluginFailures = result.plugin_failures;
-    if (sandboxReason || pluginFailures.length > 0) {
-      setDegraded({ sandboxReason, pluginFailures });
+    const info = await collectDegraded(result);
+    if (current !== attempt.current) return;
+    if (info.pending) {
+      info.sandboxReason = '沙箱程序仍在准备中，插件工具暂不可用';
     }
+    setDegraded(
+      info.sandboxReason || info.pluginFailures.length > 0 ? info : null,
+    );
     setReady(true);
   }, []);
 
@@ -62,6 +80,57 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
       attempt.current += 1;
     };
   }, [runPrepare]);
+
+  // 沙箱仍在准备时后台续查：就绪清除横幅，失败更新原因。
+  useEffect(() => {
+    if (!degraded?.pending) return;
+    const timer = setInterval(() => {
+      void api
+        .getSandboxUpdateState()
+        .then((state) => {
+          if (state.status === 'preparing') return;
+          setDegraded((current) => {
+            if (!current?.pending) return current;
+            if (state.status === 'ready') {
+              return current.pluginFailures.length > 0
+                ? { sandboxReason: null, pluginFailures: current.pluginFailures, pending: false }
+                : null;
+            }
+            return {
+              sandboxReason: state.failure ?? current.sandboxReason,
+              pluginFailures: current.pluginFailures,
+              pending: false,
+            };
+          });
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [degraded?.pending]);
+
+  // 横幅上的重试：后端命令自带失败插件重试，完成后刷新降级信息，
+  // 不回启动页打断已进入的会话。
+  const handleRetry = useCallback(async () => {
+    setRetrying(true);
+    try {
+      const result: StartupPrepareResult = await api.prepareStartupResources().catch(
+        (error: unknown) => ({
+          installed_version: null,
+          degraded_reason: String(error),
+          plugin_failures: [],
+        }) satisfies StartupPrepareResult,
+      );
+      const info = await collectDegraded(result);
+      if (info.pending) {
+        info.sandboxReason = '沙箱程序仍在准备中，插件工具暂不可用';
+      }
+      setDegraded(
+        info.sandboxReason || info.pluginFailures.length > 0 ? info : null,
+      );
+    } finally {
+      setRetrying(false);
+    }
+  }, []);
 
   // 窗口为 macOS Overlay 标题栏，启动期间无系统拖动区；header 与主界面一致提供拖动。
   if (!ready) {
@@ -92,7 +161,10 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
   return (
     <>
       {degraded && !dismissed && (
-        <div className="border-b border-amber-500/40 bg-amber-500/10" role="alert">
+        <div
+          className="fixed inset-x-0 top-0 z-[100] border-b border-amber-500/40 bg-amber-500/10 backdrop-blur-sm"
+          role="alert"
+        >
           <div className="mx-auto flex max-w-3xl items-start gap-2 px-4 py-2 text-xs leading-5 text-amber-900 dark:text-amber-200">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <div className="min-w-0 flex-1 space-y-1">
@@ -108,6 +180,20 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
                 </p>
               )}
             </div>
+            <button
+              type="button"
+              className="flex shrink-0 items-center gap-1 rounded border border-amber-500/40 px-1.5 py-0.5 hover:bg-amber-500/20 disabled:opacity-50"
+              aria-label="重试启动准备"
+              disabled={retrying}
+              onClick={() => void handleRetry()}
+            >
+              {retrying ? (
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+              ) : (
+                <RefreshCw className="h-3 w-3" aria-hidden="true" />
+              )}
+              重试
+            </button>
             <button
               type="button"
               className="rounded p-0.5 hover:bg-amber-500/20"
