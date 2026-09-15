@@ -63,6 +63,14 @@ describe('链接识别修正', () => {
     expect([...links].some((l) => l.getAttribute('href')?.includes('foo@example.com'))).toBe(true);
   });
 
+  it('http 前缀的 URL 正常识别为链接', async () => {
+    await renderMd('旧的入口 http://example.com/legacy 仍然有效');
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('http://example.com/legacy');
+    expect(link!.textContent).toBe('http://example.com/legacy');
+  });
+
   it('URL 尾部句号按既有语义剥离', async () => {
     await renderMd('见 https://example.com/page. 结束');
     const link = container.querySelector('a');
