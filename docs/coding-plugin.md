@@ -19,6 +19,7 @@
 
 - **基线选择顺序**：显式指定 → `@{upstream}` → `origin/HEAD` → `main/develop/master`。feature 分支的上游是任务对照基线，优先于字面量主分支，避免把已合入上游的改动误算成本次改动。
 - **验证凭据**：`VerificationResult.evidence { command, exit_code, output_tail }`；声明 `passed: true` 但无 evidence 或 `exit_code != 0` 的条目计入 `unverified_claims`，不计入 `verification_complete`。
+  - **边界（如实声明）**：evidence 字段仍由模型自填，插件只做形态校验（命令行非空、退出码为 0）——这提高的是伪造成本与复核可见性，**不是真正的执行核验**。完整闭环需要宿主回填实际执行记录（与 terminal/command 插件打通）或 sidecar 自行执行 `recommended_checks` 并比对，属后续方向，当前版本勿据此假定强保证。
 - **路径匹配**：`allowed_paths` 与改动路径双侧剥尾斜杠后做目录前缀匹配（`"src/"` 与 `"src"` 等价）。
 - **推荐检查来源优先级**：规则文件（`CLAUDE.md`/`AGENTS.md` 等中"命令程序开头+检查关键词"的行，`&&` 链拆分）→ Makefile/Justfile 目标 → 清单推断（package.json scripts 等）。
 

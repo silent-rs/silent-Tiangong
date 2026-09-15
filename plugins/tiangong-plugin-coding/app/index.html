@@ -117,7 +117,7 @@
     - 工作区路径取自宿主会话上下文（hostContext().session.workspace），
       会话切换时经 onHostContextChange 重新加载。
   -->
-  <div class="cs-root" id="cs-root">
+  <div class="cs-root" id="cs-root" style="display:none">
     <button class="cs-trigger" id="cs-trigger" type="button" title="切换分支" hidden>
       <svg class="cs-spin" id="cs-loading" viewBox="0 0 16 16" width="10" height="10" hidden></svg>
       <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -205,18 +205,36 @@
     }
 
     async function load() {
-      if (!state.workspace) return hideRoot();
+      // 显示策略：只有确认是 git 仓库才显示；非 git、无工作区、
+      // 以及未确认前的读取失败一律隐藏（避免加载期占位闪烁）。
+      if (!state.workspace) {
+        state.data = null;
+        state.open = false;
+        return hideRoot();
+      }
       state.loading = true;
       state.error = null;
       render();
       try {
         const data = await callPlugin('plugin.branches', { workspace: state.workspace });
-        state.data = data;
-        if (!data || !data.is_repo) return hideRoot();
-        showRoot();
+        if (data && data.is_repo) {
+          state.data = data;
+          showRoot();
+        } else {
+          state.data = null;
+          state.open = false;
+          hideRoot();
+        }
       } catch (error) {
-        state.error = error && error.message ? error.message : String(error);
-        showRoot();
+        state.error = (error && error.message) || String(error);
+        if (state.data && state.data.is_repo) {
+          // 已确认过是 git 仓库，保留显示供排查（如切换失败后的错误）。
+          showRoot();
+        } else {
+          state.data = null;
+          state.open = false;
+          hideRoot();
+        }
       } finally {
         state.loading = false;
         render();
@@ -296,21 +314,21 @@
     function render() {
       const trigger = $('cs-trigger');
       const data = state.data;
-      if (!state.workspace) { trigger.hidden = true; return; }
+      // 未确认是 git 仓库前不渲染任何可见元素（非 git 工作区零闪烁）。
+      if (!state.workspace || !data || !data.is_repo) {
+        trigger.hidden = true;
+        state.open = false;
+        return;
+      }
       trigger.hidden = false;
       $('cs-loading').hidden = !state.loading;
       trigger.disabled = Boolean(state.loading);
       const label = $('cs-name');
-      if (data && data.is_repo) {
-        label.textContent = data.current
-          || (data.detached && data.head_short ? 'HEAD ' + data.head_short : '分支');
-        label.title = data.current ? data.current : '分离头指针';
-        $('cs-dirty').hidden = !data.has_uncommitted_changes;
-        trigger.disabled = false;
-      } else {
-        label.textContent = state.loading ? '分支' : '分支';
-        $('cs-dirty').hidden = true;
-      }
+      label.textContent = data.current
+        || (data.detached && data.head_short ? 'HEAD ' + data.head_short : '分支');
+      label.title = data.current ? data.current : '分离头指针';
+      $('cs-dirty').hidden = !data.has_uncommitted_changes;
+      trigger.disabled = false;
       renderDrop();
     }
 
