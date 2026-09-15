@@ -12,6 +12,7 @@ import { BackgroundPluginHost, type BackgroundPluginInstance } from '@/component
 import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { FirstRunModelSetup } from '@/components/FirstRunModelSetup';
 import { SidebarProvider } from '@/components/ui/sidebar';
+import { useToast } from '@/components/Toast';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import {
   TabsContainer,
@@ -112,6 +113,7 @@ export function MainApp() {
   const activeSessionId = useStore((state) => state.activeSessionId);
   const newConversationId = useStore((state) => state.newConversationId);
   const currentSessionId = activeSessionId ?? newConversationId;
+  const { showWarning } = useToast();
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [interactionVisible, setInteractionVisible] = useState(false);
@@ -442,6 +444,19 @@ export function MainApp() {
         const sessionId = event.payload;
         if (sessionId) {
           useStore.getState().switchSession(sessionId).catch(console.error);
+        }
+      }));
+      guard();
+      // 沙箱启动准备落到终态失败（门闸在 preparing 阶段已放行）：刷新
+      // 全局状态点亮输入区"沙箱无效"指示，并补一次右上角消息提示。
+      track(await api.onStartupPrepareFailed((payload) => {
+        void useStore.getState().loadSandboxState(true);
+        if (payload?.reason) {
+          showWarning(
+            '沙箱程序无效，插件工具暂不可用',
+            `${payload.reason}。可在 设置 → 沙箱管理 修复，对话不受影响`,
+            8000,
+          );
         }
       }));
       guard();

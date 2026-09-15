@@ -67,6 +67,17 @@
   写入、设置页修复成功后强制刷新、输入区惰性兜底加载，三处一致联动
   （修复后输入区指示自动消失）。
 
+## Review 修复（第四轮，用户裁定）
+
+- 撤销顶部 fixed 横幅（遮挡顶栏与 macOS 红绿灯）：终态降级改为右上角
+  消息（Toast）一次性提示，8 秒自动消失、**不带操作按钮**——修复入口
+  由用户进入设置页或点击输入区底部"沙箱无效"指示；
+- 补齐 preparing→failed 终态跃迁通知：启动门闸在 preparing 阶段放行后，
+  沙箱安装失败由后端 emit `startup-prepare-failed`，主界面监听后刷新
+  全局状态（点亮输入区指示）并补一次消息提示；
+- 设置页沙箱区块改 selector 订阅：preparing 轮询每秒刷新 store 不再
+  触发全量订阅组件重渲染。
+
 ## 验证
 
 - `cargo clippy -p tiangong-plugin-runtime -p tiangong-app --all-targets --tests`：无告警

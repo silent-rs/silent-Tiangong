@@ -375,7 +375,12 @@ const EMPTY_SANDBOX_POLICY: SandboxPolicyView = {
 };
 
 function SandboxSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
-  const { sandboxDisabled, loadSandboxDisabled, setSandboxDisabled, sandboxState, loadSandboxState } = useStore();
+  // selector 订阅：preparing 轮询每秒刷新 store 时不触发其余字段订阅者重渲染。
+  const sandboxDisabled = useStore((state) => state.sandboxDisabled);
+  const loadSandboxDisabled = useStore((state) => state.loadSandboxDisabled);
+  const setSandboxDisabled = useStore((state) => state.setSandboxDisabled);
+  const sandboxState = useStore((state) => state.sandboxState);
+  const loadSandboxState = useStore((state) => state.loadSandboxState);
   const [policy, setPolicy] = useState<SandboxPolicyView>(EMPTY_SANDBOX_POLICY);
   const [directoryInput, setDirectoryInput] = useState('');
   const [environmentInput, setEnvironmentInput] = useState('');
