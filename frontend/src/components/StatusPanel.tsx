@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { startWindowDrag } from '@/lib/windowDrag';
 import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Grid3x3, ArrowUpCircle, Search, Puzzle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useSearchStore } from '@/store/useSearchStore';
@@ -15,8 +15,6 @@ import {
   BreadcrumbList,
   BreadcrumbPage,
 } from './ui/breadcrumb';
-
-const appWindow = getCurrentWindow();
 
 interface StatusPanelProps {
   /** 拓展区按钮高亮：当前会话存在任一已打开的 App tab。 */
@@ -139,15 +137,10 @@ export function StatusPanel({ extensionActive, extensionAgentActive, onToggleExt
   const titlePaddingLeft = navigator.platform.includes('Mac') ? '80px' : '16px';
 
   return (
-    <header
+      <header
       className="flex h-12 shrink-0 items-center gap-2 border-b pr-4 select-none"
       style={{ paddingLeft: titlePaddingLeft }}
-      onMouseDown={(e) => {
-        const tag = (e.target as HTMLElement).tagName;
-        if (tag === 'INPUT' || tag === 'BUTTON') return;
-        if ((e.target as HTMLElement).closest('[data-no-drag]')) return;
-        appWindow.startDragging();
-      }}
+      onMouseDown={startWindowDrag}
     >
       <div className="flex items-center gap-2">
         <Button

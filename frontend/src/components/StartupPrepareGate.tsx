@@ -3,6 +3,7 @@ import { Loader2, RefreshCw, LogOut } from 'lucide-react';
 import { Button } from './ui/button';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { startWindowDrag } from '@/lib/windowDrag';
 import appLogo from '../../../src-tauri/icons/128x128.png';
 
 /**
@@ -54,19 +55,12 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
   };
 
   // 窗口为 macOS Overlay 标题栏，启动期间无系统拖动区；header 与主界面一致提供拖动。
-  const handleHeaderMouseDown = (e: React.MouseEvent) => {
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'BUTTON') return;
-    if (target.closest('[data-no-drag]')) return;
-    void getCurrentWindow().startDragging();
-  };
-
   if (!checked) {
     return (
       <div className="flex h-screen w-full flex-col bg-background">
         <header
           className="flex h-12 shrink-0 border-b select-none"
-          onMouseDown={handleHeaderMouseDown}
+          onMouseDown={startWindowDrag}
         />
         <div className="flex min-h-0 w-full flex-1 items-center justify-center p-6">
           <div className="w-full max-w-sm space-y-6 text-center" role="status" aria-live="polite" aria-busy="true">
@@ -91,7 +85,7 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
       <div className="flex h-screen w-full flex-col bg-background">
         <header
           className="flex h-12 shrink-0 border-b select-none"
-          onMouseDown={handleHeaderMouseDown}
+          onMouseDown={startWindowDrag}
         />
         <div className="flex min-h-0 w-full flex-1 items-center justify-center p-6">
           <div className="w-full max-w-md space-y-6">
