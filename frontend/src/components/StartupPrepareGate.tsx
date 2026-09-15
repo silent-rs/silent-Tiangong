@@ -53,19 +53,33 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
     void getCurrentWindow().destroy();
   };
 
+  // 窗口为 macOS Overlay 标题栏，启动期间无系统拖动区；header 与主界面一致提供拖动。
+  const handleHeaderMouseDown = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'BUTTON') return;
+    if (target.closest('[data-no-drag]')) return;
+    void getCurrentWindow().startDragging();
+  };
+
   if (!checked) {
     return (
-      <div className="flex min-h-screen w-full items-center justify-center bg-background p-6">
-        <div className="w-full max-w-sm space-y-6 text-center" role="status" aria-live="polite" aria-busy="true">
-          <div className="relative mx-auto flex h-20 w-20 items-center justify-center">
-            <Loader2 className="absolute inset-0 h-20 w-20 animate-spin text-muted-foreground/40 motion-reduce:animate-none" strokeWidth={1} aria-hidden="true" />
-            <img src={appLogo} alt="" className="h-12 w-12 object-contain motion-safe:animate-pulse" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-xl font-semibold">天工</h1>
-            <p className="text-sm text-muted-foreground">
-              天工正在启动中
-            </p>
+      <div className="flex h-screen w-full flex-col bg-background">
+        <header
+          className="flex h-12 shrink-0 border-b select-none"
+          onMouseDown={handleHeaderMouseDown}
+        />
+        <div className="flex min-h-0 w-full flex-1 items-center justify-center p-6">
+          <div className="w-full max-w-sm space-y-6 text-center" role="status" aria-live="polite" aria-busy="true">
+            <div className="relative mx-auto flex h-20 w-20 items-center justify-center">
+              <Loader2 className="absolute inset-0 h-20 w-20 animate-spin text-muted-foreground/40 motion-reduce:animate-none" strokeWidth={1} aria-hidden="true" />
+              <img src={appLogo} alt="" className="h-12 w-12 object-contain motion-safe:animate-pulse" />
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-xl font-semibold">天工</h1>
+              <p className="text-sm text-muted-foreground">
+                天工正在启动中
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -74,36 +88,42 @@ export function StartupPrepareGate({ children }: { children: React.ReactNode }) 
 
   if (!ready) {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-background p-6">
-        <div className="w-full max-w-md space-y-6">
-          <div className="space-y-1.5">
-            <h1 className="flex items-center gap-2 text-lg font-semibold">
-              {!failed && <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />}
-              天工正在启动中
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              正在准备运行环境和插件，完成后自动进入应用。
-            </p>
-          </div>
-          {failed && (
-            <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-3">
-              <p className="text-xs leading-relaxed text-destructive">
-                运行环境准备失败：{failed}
-                <br />
-                请重试准备，或退出应用后重新启动。
+      <div className="flex h-screen w-full flex-col bg-background">
+        <header
+          className="flex h-12 shrink-0 border-b select-none"
+          onMouseDown={handleHeaderMouseDown}
+        />
+        <div className="flex min-h-0 w-full flex-1 items-center justify-center p-6">
+          <div className="w-full max-w-md space-y-6">
+            <div className="space-y-1.5">
+              <h1 className="flex items-center gap-2 text-lg font-semibold">
+                {!failed && <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />}
+                天工正在启动中
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                正在准备运行环境和插件，完成后自动进入应用。
               </p>
-              <div className="flex gap-2">
-                <Button size="sm" onClick={handleRetry}>
-                  <RefreshCw className="mr-1 h-3 w-3" />
-                  重试
-                </Button>
-                <Button size="sm" variant="outline" onClick={handleExit}>
-                  <LogOut className="mr-1 h-3 w-3" />
-                  退出应用
-                </Button>
-              </div>
             </div>
-          )}
+            {failed && (
+              <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+                <p className="text-xs leading-relaxed text-destructive">
+                  运行环境准备失败：{failed}
+                  <br />
+                  请重试准备，或退出应用后重新启动。
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={handleRetry}>
+                    <RefreshCw className="mr-1 h-3 w-3" />
+                    重试
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleExit}>
+                    <LogOut className="mr-1 h-3 w-3" />
+                    退出应用
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
