@@ -112,6 +112,9 @@ async fn read_complete_response(
         .map_err(|_| AnthropicError::Timeout(format!("{} ms", timeout.as_millis())))?
 }
 
+/// 协议要求的思考预算下限（官方拒绝小于 1024 的值）。
+const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
+
 #[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
@@ -141,7 +144,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<MessagesCreateResponse, AnthropicError> {
-        self.fill_default_thinking_budget(&mut request);
+        Self::fill_default_thinking_budget(&mut request);
         let response = self
             .request_builder("/v1/messages")
             .json(&request)
@@ -155,7 +158,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<EventStream, AnthropicError> {
-        self.fill_default_thinking_budget(&mut request);
+        Self::fill_default_thinking_budget(&mut request);
         request.stream = Some(true);
         // 建连与等待响应头受用户配置的请求超时约束，避免网关建连后
         // 不返回响应头导致永久等待；SSE 建流成功后不受总时限限制。
@@ -222,14 +225,15 @@ impl AnthropicClient {
 
     /// Anthropic 协议要求 thinking.enabled 必须携带 budget_tokens
     /// （≥1024 且严格小于 max_tokens），缺失会被官方端点直接拒收。
-    /// 与 Claude Code 同策略：不区分端点，一律下发官方形态请求，预算拉足
-    /// 到协议上限 max_tokens-1（opencode 的 max 档同款取值）。实测智谱
+    /// 与 Claude Code 同策略：不区分端点，一律下发官方形态请求。实测智谱
     /// GLM-4.6/5.3 的 Anthropic 兼容端点对 budget_tokens 接受但不执行
-    /// （小预算下思考照常超出运行），预算值对兼容端点无行为影响；
-    /// 官方端点思考用量由任务决定，预算仅为上限，拉足不挤占正文。
-    /// max_tokens ≤ 1024 时预算取 max_tokens-1，优先满足"严格小于
-    /// max_tokens"约束（此类请求实际不发生于主链路）。
-    fn fill_default_thinking_budget(&self, request: &mut MessagesCreateRequest) {
+    /// （小预算下思考照常超出运行），预算值对兼容端点无行为影响。
+    /// 官方端点思考用量由任务决定、预算仅为上限，按 max_tokens 的 1/5
+    /// （至少 1024）为正文保留空间——压缩链路 max_tokens 仅数千，
+    /// 预算拉满会把摘要正文挤没（thinking+text 共享 max_tokens 总额）。
+    /// max_tokens ≤ 1024 时无法满足协议下限与"严格小于"约束，降级为
+    /// 不下发 thinking（此类请求仅轻量任务，本无思考需求）。
+    fn fill_default_thinking_budget(request: &mut MessagesCreateRequest) {
         if !matches!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
@@ -238,7 +242,16 @@ impl AnthropicClient {
         ) {
             return;
         }
-        let budget = request.max_tokens.saturating_sub(1);
+        if request.max_tokens <= MIN_THINKING_BUDGET_TOKENS {
+            request.thinking = None;
+            return;
+        }
+        let reserve = (request.max_tokens / 5).max(MIN_THINKING_BUDGET_TOKENS);
+        let budget = request
+            .max_tokens
+            .saturating_sub(reserve)
+            .max(MIN_THINKING_BUDGET_TOKENS)
+            .min(request.max_tokens.saturating_sub(1));
         request.thinking = Some(ThinkingConfig::Enabled {
             budget_tokens: Some(budget),
         });
@@ -421,6 +434,7 @@ mod tests {
     use crate::config::AnthropicConfig;
     use std::time::Duration;
 
+    #[allow(dead_code)]
     fn client_with_base_url(base_url: &str) -> AnthropicClient {
         AnthropicClient::from_config(AnthropicConfig {
             headers: Default::default(),
@@ -451,31 +465,32 @@ mod tests {
     }
 
     #[test]
-    fn any_endpoint_fills_default_budget() {
-        // 与 Claude Code 同策略：官方直连、自建中转、厂商兼容端点一律补预算。
-        for base_url in [
-            "https://api.anthropic.com",
-            "https://tools.tisshue.com",
-            "https://open.bigmodel.cn/api/anthropic",
-            "http://127.0.0.1:3456/v1",
-        ] {
-            let client = client_with_base_url(base_url);
-            let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
-            client.fill_default_thinking_budget(&mut request);
-            assert_eq!(
-                request.thinking,
-                Some(ThinkingConfig::Enabled {
-                    budget_tokens: Some(32_767)
-                })
-            );
-        }
+    fn fills_default_budget_with_text_reserve() {
+        // 与 Claude Code 同策略：不区分端点一律补预算；按 1/5（至少 1024）
+        // 为正文保留空间——thinking+text 共享 max_tokens 总额。
+        let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+        AnthropicClient::fill_default_thinking_budget(&mut request);
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: Some(26_215)
+            })
+        );
+        // 压缩链路：max_tokens 数千时仍有足量正文空间。
+        let mut request = request_with(6_400, Some(ThinkingConfig::enabled()));
+        AnthropicClient::fill_default_thinking_budget(&mut request);
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::Enabled {
+                budget_tokens: Some(5_120)
+            })
+        );
     }
 
     #[test]
     fn explicit_budget_is_kept() {
-        let client = client_with_base_url("https://api.anthropic.com");
         let mut request = request_with(32_768, Some(ThinkingConfig::with_budget(2_048)));
-        client.fill_default_thinking_budget(&mut request);
+        AnthropicClient::fill_default_thinking_budget(&mut request);
         assert_eq!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
@@ -486,24 +501,31 @@ mod tests {
 
     #[test]
     fn small_max_tokens_clamps_budget() {
-        let client = client_with_base_url("https://api.anthropic.com");
-        // 预算拉足到 max_tokens-1：max_tokens ≤ 1024 时优先满足
-        // "严格小于 max_tokens"约束（低于协议下限 1024，此类请求不发生于主链路）。
+        // max_tokens=1500：预留 max(300,1024)=1024，预算钳到协议下限 1024
+        //（仍满足"严格小于 max_tokens"）。
         let mut request = request_with(1_500, Some(ThinkingConfig::enabled()));
-        client.fill_default_thinking_budget(&mut request);
+        AnthropicClient::fill_default_thinking_budget(&mut request);
         assert_eq!(
             request.thinking,
             Some(ThinkingConfig::Enabled {
-                budget_tokens: Some(1_499)
+                budget_tokens: Some(1_024)
             })
         );
     }
 
     #[test]
+    fn tiny_max_tokens_disables_thinking() {
+        // max_tokens ≤ 1024 无法同时满足"预算 ≥1024"与"严格小于 max_tokens"，
+        // 降级不下发思考（发必被官方拒收的请求没有意义）。
+        let mut request = request_with(800, Some(ThinkingConfig::enabled()));
+        AnthropicClient::fill_default_thinking_budget(&mut request);
+        assert_eq!(request.thinking, None);
+    }
+
+    #[test]
     fn disabled_thinking_is_untouched() {
-        let client = client_with_base_url("https://api.anthropic.com");
         let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
-        client.fill_default_thinking_budget(&mut request);
+        AnthropicClient::fill_default_thinking_budget(&mut request);
         assert_eq!(request.thinking, Some(ThinkingConfig::Disabled));
     }
 

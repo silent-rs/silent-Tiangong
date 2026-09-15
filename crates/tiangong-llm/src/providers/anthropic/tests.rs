@@ -142,6 +142,18 @@ fn test_temperature_kept_when_thinking_disabled() {
 }
 
 #[test]
+fn test_top_p_dropped_when_thinking_enabled() {
+    // 与 temperature 同款官方约束：开思考时 top_p 不可自定义。
+    let mut request = sample_request();
+    request.top_p = Some(0.9);
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(mapped.top_p, None);
+    request.reasoning_effort = ReasoningEffort::None;
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(mapped.top_p, Some(0.9));
+}
+
+#[test]
 fn test_cache_breakpoints_layout() {
     // 断点布局：仅最后一个工具、system 尾块、消息尾部两个块带标记。
     let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");

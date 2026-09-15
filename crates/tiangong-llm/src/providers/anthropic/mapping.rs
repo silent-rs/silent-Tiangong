@@ -59,17 +59,32 @@ pub(super) fn to_anthropic_request(
     });
     mark_message_tail_breakpoints(&mut messages, breakpoint);
 
+    // 官方约束：开启思考时 temperature 只能为 1、top_p/top_k 不可自定义，
+    // 省略字段走协议默认即满足；Claude Code 同款行为，兼容端点用各自
+    // 默认采样。丢弃用户配置时留 debug 痕迹，便于排查"温度不生效"类困惑。
+    if thinking.is_some() {
+        if request.temperature.is_some() {
+            tracing::debug!(
+                model = %request.model,
+                "thinking enabled: temperature dropped per Anthropic constraint"
+            );
+        }
+        if request.top_p.is_some() {
+            tracing::debug!(
+                model = %request.model,
+                "thinking enabled: top_p dropped per Anthropic constraint"
+            );
+        }
+    }
     Ok(MessagesCreateRequest {
         model: request.model.clone(),
         max_tokens: request.max_tokens,
         system,
         messages,
-        // 官方约束：开启思考时 temperature 只能为 1，省略字段走协议
-        // 默认即满足；Claude Code 同款行为，兼容端点用各自默认采样。
         temperature: request.temperature.filter(|_| thinking.is_none()),
         stop_sequences: (!request.stop_sequences.is_empty())
             .then(|| request.stop_sequences.clone()),
-        top_p: request.top_p,
+        top_p: request.top_p.filter(|_| thinking.is_none()),
         metadata: request.metadata.clone(),
         tools,
         tool_choice,
