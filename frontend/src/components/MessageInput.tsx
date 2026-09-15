@@ -1046,6 +1046,7 @@ export function MessageInput({
                 )}
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                <SessionInputPluginHost slot="session.input-status" />
                 <Brain className="w-3 h-3" />
                 <select
                   value={reasoningEffort}

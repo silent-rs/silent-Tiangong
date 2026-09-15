@@ -394,6 +394,8 @@ fn plugin_ui_entries(config: &PluginConfig) -> &'static [&'static str] {
     match config.id {
         "screenshot-input" | "interaction" | "browser" | "terminal" | "plugin-creator"
         | "subagent" => &["dist/index.html"],
+        // 手写自包含单文件 UI（无前端构建链）。
+        "coding" => &["app/index.html"],
         _ => &[],
     }
 }
@@ -738,12 +740,17 @@ fn stage_plugin_ui(workspace_root: &Path, staging: &Path, config: &PluginConfig)
 
     // CI 对无 UI 插件会传空串占位，空值视为未设置。
     let prebuilt = non_empty_env_os("TIANGONG_PLUGIN_PREBUILT_UI").map(PathBuf::from);
-    if prebuilt.is_none() {
+    // 无 package.json 的插件使用手写自包含入口，无前端构建链，直接拷贝。
+    let has_package_json = workspace_root
+        .join(config.plugin_root)
+        .join("package.json")
+        .is_file();
+    if prebuilt.is_none() && has_package_json {
         let plugin_root = workspace_root.join(config.plugin_root);
         eprintln!("[xtask] 安装并构建 {} UI...", config.name);
         run_yarn(&plugin_root, &["install", "--frozen-lockfile"])?;
         run_yarn(&plugin_root, &["build"])?;
-    } else if entries.len() != 1 {
+    } else if entries.len() != 1 && prebuilt.is_some() {
         return Err(invalid_input(
             "TIANGONG_PLUGIN_PREBUILT_UI 仅支持单入口 UI 插件",
         ));

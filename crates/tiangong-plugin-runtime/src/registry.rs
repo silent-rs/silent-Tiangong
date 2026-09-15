@@ -388,6 +388,9 @@ struct LoadedPlugin {
 pub struct PluginStatus {
     pub id: String,
     pub name: String,
+    /// 插件描述（manifest.description）；None 表示未声明。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub manifest_version: String,
     pub loaded_version: Option<String>,
     pub state: String,
@@ -813,11 +816,13 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
                     None
                 },
                 id: manifest.id.clone(),
-                name: loaded
-                    .descriptor
-                    .as_ref()
-                    .map(|value| value.name.clone())
+                // 展示名优先级：清单 name（静态声明）→ WASM descriptor → id 兜底。
+                name: manifest
+                    .name
+                    .clone()
+                    .or_else(|| loaded.descriptor.as_ref().map(|value| value.name.clone()))
                     .unwrap_or_else(|| manifest.id.clone()),
+                description: manifest.description.clone(),
                 manifest_version: manifest.version.clone(),
                 loaded_version: loaded
                     .descriptor
@@ -842,6 +847,7 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
             statuses.push(PluginStatus {
                 id: entry.id.clone(),
                 name: entry.name.clone(),
+                description: None,
                 manifest_version: entry.manifest_version.clone().unwrap_or_default(),
                 loaded_version: None,
                 state: "invalid".to_string(),
@@ -1535,6 +1541,8 @@ mod tests {
         let manifest = PluginManifest {
             schema_version: 2,
             require_server: false,
+            name: None,
+            description: None,
             id: "load-error-demo".into(),
             version: "0.1.0".into(),
             wasm: None,
@@ -2519,6 +2527,7 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
             .as_ref()
             .map(|value| value.name.clone())
             .unwrap_or_else(|| manifest.id.clone()),
+        description: manifest.description.clone(),
         manifest_version: manifest.version.clone(),
         loaded_version: descriptor.map(|value| value.version),
         state: state.to_string(),

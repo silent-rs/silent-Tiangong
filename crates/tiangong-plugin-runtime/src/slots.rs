@@ -96,6 +96,12 @@ pub const BUILTIN_SLOTS: &[SlotDescriptor] = &[
         description: "输入框下方（附加输入辅助区）",
     },
     SlotDescriptor {
+        id: "session.input-status",
+        instances: SlotInstances::Multiple,
+        context: &[SlotContextKey::Session],
+        description: "输入区状态行内嵌组件（如分支指示器，随会话上下文变化）",
+    },
+    SlotDescriptor {
         id: "session.interaction",
         instances: SlotInstances::Singleton,
         context: &[SlotContextKey::Session],
@@ -346,6 +352,7 @@ mod tests {
                 "session.before-input",
                 "session.empty-state",
                 "session.input-action",
+                "session.input-status",
                 "session.interaction",
                 "session.message-action",
                 "session.message-item",
