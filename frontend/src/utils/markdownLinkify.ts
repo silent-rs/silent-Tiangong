@@ -35,6 +35,14 @@ import {
  *
  * 4. 本地文件链接高亮：file: 链接指向本机文件而非网页，行为与外链不同，
  *    link_open 渲染时追加 .md-local-file-link 类名，由样式做差异化高亮。
+ *
+ * 5. 裸 <a> 标签塌陷：html:true 下模型讨论渲染问题时输出的字面 <a>（无
+ *    属性、常无闭合）被当作真实 HTML 开标签，HTML 解析把后续标题、列
+ *    表等块级内容整个吞进一个大链接。在 html_inline 渲染层拦截裸开标
+ *    签输出为字面文本——判定发生在 markdown-it 内部，代码段划分天然
+ *    正确（预处理方案不可行：反引号转义嵌套会让预处理与引擎的代码段
+ *    划分不一致）。带属性的真实 <a> 与孤立 </a>（HTML 解析忽略）不受
+ *    影响。
  */
 
 /** linkify-it 的 re 在类型上只暴露 RegExp 索引，src_* 模板串与惰性
@@ -110,7 +118,7 @@ export function setupMarkdownLinkify() {
           const matched = tail.match(re.http);
           if (!matched) return 0;
           // 星号等定界符后常紧跟中文（「…\*\*（分支…」），仅尾部剥离会因
-          // 末尾是中文字符而整段失效：这类符号不存在于真实 URL，在首个
+          // 末尾是中文字符整段失效：这类符号不存在于真实 URL，在首个
           // 出现处直接截断；下划线在 URL 中段常见，仅做尾部剥离。
           const mdStop = matched[0].search(/[*~`]/);
           const url = mdStop >= 0 ? matched[0].slice(0, mdStop) : matched[0];
@@ -118,6 +126,19 @@ export function setupMarkdownLinkify() {
           return url.replace(/[?!.,:*_~']+$/, "").length;
         },
       });
+
+      // 裸 <a> 开标签输出为字面文本（见头部注释 5）：阻止未闭合的开标签
+      // 在 HTML 解析时吞掉后续块级内容。链式包装保留其余 html_inline
+      // 标签的原有渲染。
+      const defaultHtmlInline = md.renderer.rules.html_inline;
+      md.renderer.rules.html_inline = (tokens, idx, options, env, self) => {
+        if (/^<a>$/i.test(tokens[idx].content)) {
+          return "&lt;a&gt;";
+        }
+        return defaultHtmlInline
+          ? defaultHtmlInline(tokens, idx, options, env, self)
+          : self.renderToken(tokens, idx, options);
+      };
     },
   });
 }
