@@ -655,19 +655,20 @@ impl RecordingTool {
     }
 }
 
-impl crate::tool_override::ToolOverrideHandler for RecordingTool {
+impl crate::tools::extension::ToolOverrideHandler for RecordingTool {
     fn handle(
         &self,
         call: &tiangong_llm::tool::ToolCall,
         _session: &mut Session,
         _actor_id: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<crate::tools::result::ToolResult>> + Send>,
+    > {
         self.invocations.lock().unwrap().push(call.clone());
         let ok = self.ok;
         let name = self.name;
         Box::pin(async move {
-            Some(crate::tool::ToolResult {
+            Some(crate::tools::result::ToolResult {
                 ok,
                 summary: format!("{name} 已执行"),
                 stdout: "done".to_string(),
@@ -685,7 +686,7 @@ pub struct ToolPlugin {
     pub tool: Arc<RecordingTool>,
 }
 
-impl crate::tool_override::ToolSpecProvider for ToolPlugin {
+impl crate::tools::extension::ToolSpecProvider for ToolPlugin {
     fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
         vec![tiangong_llm::tool::ToolSpec {
             name: self.tool.name.to_string(),
@@ -695,20 +696,21 @@ impl crate::tool_override::ToolSpecProvider for ToolPlugin {
     }
 }
 
-impl crate::tool_override::ToolOverrideHandler for ToolPlugin {
+impl crate::tools::extension::ToolOverrideHandler for ToolPlugin {
     fn handle(
         &self,
         call: &tiangong_llm::tool::ToolCall,
         session: &mut Session,
         actor_id: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<crate::tools::result::ToolResult>> + Send>,
+    > {
         self.tool.handle(call, session, actor_id)
     }
 }
 
-impl crate::tool_override::PromptSectionProvider for ToolPlugin {}
-impl crate::tool_override::MentionCandidateProvider for ToolPlugin {}
+impl crate::tools::extension::PromptSectionProvider for ToolPlugin {}
+impl crate::tools::extension::MentionCandidateProvider for ToolPlugin {}
 impl crate::core::plugin::Plugin for ToolPlugin {
     fn id(&self) -> &str {
         self.id

@@ -14,10 +14,10 @@ use crate::observe::Observer;
 use crate::permission::TrustMode;
 use crate::prompt::SystemPromptConfig;
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use crate::tool::ToolResult;
-use crate::tool_override::{
+use crate::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use std::collections::HashMap;
 use std::future::Future;
@@ -2416,10 +2416,10 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
     .await;
 
     struct StallingFinishPlugin;
-    impl crate::tool_override::ToolSpecProvider for StallingFinishPlugin {}
-    impl crate::tool_override::ToolOverrideHandler for StallingFinishPlugin {}
-    impl crate::tool_override::PromptSectionProvider for StallingFinishPlugin {}
-    impl crate::tool_override::MentionCandidateProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::ToolSpecProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::ToolOverrideHandler for StallingFinishPlugin {}
+    impl crate::tools::extension::PromptSectionProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::MentionCandidateProvider for StallingFinishPlugin {}
     impl Plugin for StallingFinishPlugin {
         fn id(&self) -> &str {
             "stalling-finish"

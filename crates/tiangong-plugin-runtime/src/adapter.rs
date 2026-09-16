@@ -17,10 +17,10 @@ use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
-use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
-use tiangong_core::tool_override::{
+use tiangong_core::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use tiangong_core::tools::result::{ToolExecutionRecord, ToolResult};
 use tiangong_llm::tool::{ToolCall, ToolSpec};
 use tokio::task;
 

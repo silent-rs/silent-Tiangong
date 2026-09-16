@@ -584,10 +584,10 @@ mod shared_runtime_tests {
         values: Vec<crate::MentionCandidate>,
     }
 
-    impl crate::tool_override::ToolSpecProvider for MentionPlugin {}
-    impl crate::tool_override::ToolOverrideHandler for MentionPlugin {}
-    impl crate::tool_override::PromptSectionProvider for MentionPlugin {}
-    impl crate::tool_override::MentionCandidateProvider for MentionPlugin {
+    impl crate::tools::extension::ToolSpecProvider for MentionPlugin {}
+    impl crate::tools::extension::ToolOverrideHandler for MentionPlugin {}
+    impl crate::tools::extension::PromptSectionProvider for MentionPlugin {}
+    impl crate::tools::extension::MentionCandidateProvider for MentionPlugin {
         fn mention_candidates(&self) -> Vec<crate::MentionCandidate> {
             self.values.clone()
         }

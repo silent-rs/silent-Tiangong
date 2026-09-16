@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::tool::ToolResult;
+use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use tiangong_llm::tool::ToolCall;
 

@@ -51,7 +51,7 @@ pub(super) struct RunningToolCall {
 
 /// 工具任务输出。
 pub(super) struct ToolTaskOutput {
-    pub(super) result: crate::tool::ToolResult,
+    pub(super) result: crate::tools::result::ToolResult,
     pub(super) duration_ms: u64,
 }
 
@@ -163,7 +163,7 @@ pub(super) async fn execute_tool_batch(
                 (
                     task_id,
                     ToolTaskOutput {
-                        result: crate::tool::ToolResult {
+                        result: crate::tools::result::ToolResult {
                             ok: false,
                             summary: message.clone(),
                             stdout: String::new(),

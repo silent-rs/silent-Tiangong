@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::tool::ToolResult;
+use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::ToolCall;
 use tiangong_types::StreamEvent;
 

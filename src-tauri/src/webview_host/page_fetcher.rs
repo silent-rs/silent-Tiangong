@@ -421,7 +421,10 @@ impl BrowserToolOverride {
         fetch_lock: &Arc<tokio::sync::Mutex<()>>,
         call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let mode = call
             .arguments
@@ -452,7 +455,7 @@ impl BrowserToolOverride {
             let result = match fetcher.fetch_page(&url, max_chars).await {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器获取页面失败".to_string(),
                         stdout: String::new(),
@@ -463,7 +466,7 @@ impl BrowserToolOverride {
                 }
             };
             if !result.ok {
-                return Some(tiangong_core::tool::ToolResult {
+                return Some(tiangong_core::tools::result::ToolResult {
                     ok: false,
                     summary: format!(
                         "浏览器获取失败：{}",
@@ -497,7 +500,7 @@ impl BrowserToolOverride {
             } else {
                 format!("标题：{}\nURL：{}\n\n{}", title, url_out, text)
             };
-            Some(tiangong_core::tool::ToolResult {
+            Some(tiangong_core::tools::result::ToolResult {
                 ok: true,
                 summary: format!("浏览器已打开：{}", title),
                 stdout,
@@ -511,14 +514,17 @@ impl BrowserToolOverride {
     fn handle_web_form_extract(
         fetcher: &Arc<dyn PageFetcher>,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let fetcher = fetcher.clone();
         Box::pin(async move {
             let result = match fetcher.form_extract().await {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器未打开，无法提取表单".to_string(),
                         stdout: String::new(),
@@ -583,7 +589,7 @@ impl BrowserToolOverride {
             }
             let human_summary = lines.join("\n");
 
-            Some(tiangong_core::tool::ToolResult {
+            Some(tiangong_core::tools::result::ToolResult {
                 ok: true,
                 summary: format!(
                     "提取到 {} 个表单，共 {} 个字段，{} 个按钮",
@@ -603,7 +609,10 @@ impl BrowserToolOverride {
         fetcher: &Arc<dyn PageFetcher>,
         call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let selector = call
             .arguments
@@ -636,7 +645,7 @@ impl BrowserToolOverride {
             {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器未打开，无法填写字段".to_string(),
                         stdout: String::new(),
@@ -659,7 +668,7 @@ impl BrowserToolOverride {
                     Some(d) if !d.is_empty() => format!("\n{d}"),
                     _ => String::new(),
                 };
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: true,
                     summary: format!("字段填写成功（策略：{strategy_used}）{wait_info}{diff_info}"),
                     stdout: format!(
@@ -670,7 +679,7 @@ impl BrowserToolOverride {
                     execution: None,
                 })
             } else {
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: false,
                     summary: "字段填写失败".to_string(),
                     stdout: String::new(),
@@ -686,7 +695,10 @@ impl BrowserToolOverride {
         fetcher: &Arc<dyn PageFetcher>,
         call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let selector = call
             .arguments
@@ -704,7 +716,7 @@ impl BrowserToolOverride {
             let result = match fetcher.click_element(&selector, wait_for.as_deref()).await {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器未打开，无法点击元素".to_string(),
                         stdout: String::new(),
@@ -726,7 +738,7 @@ impl BrowserToolOverride {
                     Some(d) if !d.is_empty() => format!("\n{d}"),
                     _ => String::new(),
                 };
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: true,
                     summary: format!("已点击元素 {selector}{wait_info}{diff_info}"),
                     stdout: diff_info,
@@ -745,7 +757,7 @@ impl BrowserToolOverride {
                         .collect();
                     format!("。可能的目标：{}", cands.join("、"))
                 };
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: false,
                     summary: "点击元素失败".to_string(),
                     stdout: String::new(),
@@ -761,7 +773,10 @@ impl BrowserToolOverride {
         fetcher: &Arc<dyn PageFetcher>,
         call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let selector = call
             .arguments
@@ -779,7 +794,7 @@ impl BrowserToolOverride {
             let result = match fetcher.query_dom(&selector, max_results).await {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器未打开，无法查询 DOM".to_string(),
                         stdout: String::new(),
@@ -790,7 +805,7 @@ impl BrowserToolOverride {
                 }
             };
             if result.elements.is_empty() {
-                return Some(tiangong_core::tool::ToolResult {
+                return Some(tiangong_core::tools::result::ToolResult {
                     ok: true,
                     summary: format!("选择器 \"{}\" 无匹配元素（共 0 个）", result.selector),
                     stdout: format!("选择器 \"{}\" 未匹配到任何元素", result.selector),
@@ -825,7 +840,7 @@ impl BrowserToolOverride {
             let human_output = lines.join("\n");
             let json_output = serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|_| "序列化结果失败".to_string());
-            Some(tiangong_core::tool::ToolResult {
+            Some(tiangong_core::tools::result::ToolResult {
                 ok: true,
                 summary: format!(
                     "选择器 \"{}\"：共 {} 个匹配（返回 {} 个）",
@@ -843,7 +858,10 @@ impl BrowserToolOverride {
         fetcher: &Arc<dyn PageFetcher>,
         call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         let query = call
             .arguments
@@ -856,7 +874,7 @@ impl BrowserToolOverride {
             let result = match fetcher.locate_element(&query).await {
                 Some(r) => r,
                 None => {
-                    return Some(tiangong_core::tool::ToolResult {
+                    return Some(tiangong_core::tools::result::ToolResult {
                         ok: false,
                         summary: "浏览器未打开，无法定位元素".to_string(),
                         stdout: String::new(),
@@ -878,7 +896,7 @@ impl BrowserToolOverride {
                     stdout.push('\n');
                     stdout.push_str(&candidates);
                 }
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: true,
                     summary: "元素定位成功".to_string(),
                     stdout,
@@ -894,7 +912,7 @@ impl BrowserToolOverride {
                     stdout.push('\n');
                     stdout.push_str(&candidates);
                 }
-                Some(tiangong_core::tool::ToolResult {
+                Some(tiangong_core::tools::result::ToolResult {
                     ok: true,
                     summary: "未找到匹配元素".to_string(),
                     stdout,
@@ -907,14 +925,17 @@ impl BrowserToolOverride {
     }
 }
 
-impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
+impl tiangong_core::tools::extension::ToolOverrideHandler for BrowserToolOverride {
     fn handle(
         &self,
         call: &tiangong_llm::tool::ToolCall,
         _session: &mut tiangong_core::session::Session,
         _actor_id: &str,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Option<tiangong_core::tools::result::ToolResult>>
+                + Send,
+        >,
     > {
         match call.name.as_str() {
             "web_fetch" => Self::handle_web_fetch(&self.fetcher, &self.fetch_lock, call),

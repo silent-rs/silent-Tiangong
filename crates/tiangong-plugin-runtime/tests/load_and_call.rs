@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
-use tiangong_core::tool_override::{
+use tiangong_core::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolSpecProvider,
 };
 use tiangong_plugin_runtime::{
@@ -293,12 +293,14 @@ fn handle_unknown_tool_returns_error() {
         arguments: serde_json::json!({}),
     };
     let result = runtime
-        .block_on(tiangong_core::tool_override::ToolOverrideHandler::handle(
-            &adapter,
-            &call,
-            &mut test_session(),
-            "test",
-        ))
+        .block_on(
+            tiangong_core::tools::extension::ToolOverrideHandler::handle(
+                &adapter,
+                &call,
+                &mut test_session(),
+                "test",
+            ),
+        )
         .expect("插件执行错误不得变成 None");
     assert!(!result.ok);
     assert!(result.stderr.contains("nonexistent_tool"));

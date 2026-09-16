@@ -1886,12 +1886,14 @@ await runSidecar({
         // 每步先触发轮次开始钩子重置去重标记，确保真实走 sidecar 链路。）
         adapter.on_turn_started(&mut session, 0);
         let baseline = runtime
-            .block_on(tiangong_core::tool_override::ToolOverrideHandler::handle(
-                &adapter,
-                &recall("基线查询"),
-                &mut session,
-                "test",
-            ))
+            .block_on(
+                tiangong_core::tools::extension::ToolOverrideHandler::handle(
+                    &adapter,
+                    &recall("基线查询"),
+                    &mut session,
+                    "test",
+                ),
+            )
             .expect("基线调用不得返回 None");
         assert!(baseline.ok, "基线响应: {}", baseline.summary);
 
@@ -1903,12 +1905,14 @@ await runSidecar({
         //（无自动恢复时旧引用恒报「已停止」，memory 工具降级为不可用）。
         adapter.on_turn_started(&mut session, 0);
         let recovered = runtime
-            .block_on(tiangong_core::tool_override::ToolOverrideHandler::handle(
-                &adapter,
-                &recall("恢复后查询"),
-                &mut session,
-                "test",
-            ))
+            .block_on(
+                tiangong_core::tools::extension::ToolOverrideHandler::handle(
+                    &adapter,
+                    &recall("恢复后查询"),
+                    &mut session,
+                    "test",
+                ),
+            )
             .expect("恢复调用不得返回 None");
         assert!(
             recovered.ok,
@@ -1920,7 +1924,7 @@ await runSidecar({
         //（打旧引用是 no-op，sidecar 日志不会出现 cancel-reached）。
         let log = installed.directory.join("logs").join("sidecar.log");
         adapter.on_turn_started(&mut session, 0);
-        let future = tiangong_core::tool_override::ToolOverrideHandler::handle(
+        let future = tiangong_core::tools::extension::ToolOverrideHandler::handle(
             &adapter,
             &recall("挂起 __hang__"),
             &mut session,

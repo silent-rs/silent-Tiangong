@@ -1,5 +1,5 @@
 use crate::runtime::LlmOutputRecord;
-use crate::tool::{ToolExecutionRecord, ToolResult};
+use crate::tools::result::{ToolExecutionRecord, ToolResult};
 
 pub(crate) fn format_llm_output_message(output: &LlmOutputRecord) -> String {
     let mut lines = vec![format!("LLM 输出 [{}]", output.stage)];

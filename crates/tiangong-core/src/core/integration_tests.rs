@@ -169,7 +169,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
 async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
     use crate::config::core::{CoreConfig, CoreConfigProvider};
     use crate::core::plugin::Plugin;
-    use crate::tool_override::{
+    use crate::tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

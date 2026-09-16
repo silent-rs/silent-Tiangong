@@ -14,7 +14,7 @@ use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::prompt::sections::build_full_system_prompt;
 use tiangong_core::runtime::RuntimeEngine;
 use tiangong_core::session::Session;
-use tiangong_core::tool_override::PromptSectionProvider;
+use tiangong_core::tools::extension::PromptSectionProvider;
 use tiangong_llm::SingleProviderClient;
 
 // ── 测试用 PromptSectionProvider ─────────────────────────────

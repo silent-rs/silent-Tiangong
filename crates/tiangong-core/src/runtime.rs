@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::agent::AgentConfig;
 use crate::config::models::ModelsConfig;
-use crate::tool_override::ToolOverrideHandler;
+use crate::tools::extension::ToolOverrideHandler;
 use tiangong_llm::{ModelClient, SingleProviderClient};
 use tiangong_types::TokenUsage;
 
@@ -28,9 +28,10 @@ pub struct RuntimeEngine {
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的工具规格提供者
-    tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
+    tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tools::extension::ToolSpecProvider>>>>,
     /// Plugin 注册的 Prompt 段落提供者
-    prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
+    prompt_section_providers:
+        Arc<Mutex<Vec<Arc<dyn crate::tools::extension::PromptSectionProvider>>>>,
 }
 
 impl std::fmt::Debug for RuntimeEngine {
@@ -159,7 +160,7 @@ impl RuntimeEngine {
     /// 注册 Plugin 工具规格提供者
     pub fn register_tool_spec_provider(
         &self,
-        provider: Arc<dyn crate::tool_override::ToolSpecProvider>,
+        provider: Arc<dyn crate::tools::extension::ToolSpecProvider>,
     ) {
         if let Ok(mut guard) = self.tool_spec_providers.lock() {
             guard.push(provider);
@@ -167,7 +168,7 @@ impl RuntimeEngine {
     }
 
     /// 获取所有已注册的工具规格提供者（用于 runtime 重建时保留）
-    pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tool_override::ToolSpecProvider>> {
+    pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tools::extension::ToolSpecProvider>> {
         self.tool_spec_providers
             .lock()
             .map(|g| g.clone())
@@ -177,7 +178,7 @@ impl RuntimeEngine {
     /// 注册 Plugin Prompt 段落提供者
     pub fn register_prompt_section_provider(
         &self,
-        provider: Arc<dyn crate::tool_override::PromptSectionProvider>,
+        provider: Arc<dyn crate::tools::extension::PromptSectionProvider>,
     ) {
         if let Ok(mut guard) = self.prompt_section_providers.lock() {
             guard.push(provider);
@@ -196,7 +197,7 @@ impl RuntimeEngine {
     /// 获取所有已注册的 Prompt 段落提供者（用于 runtime 重建时保留）
     pub fn prompt_section_providers(
         &self,
-    ) -> Vec<Arc<dyn crate::tool_override::PromptSectionProvider>> {
+    ) -> Vec<Arc<dyn crate::tools::extension::PromptSectionProvider>> {
         self.prompt_section_providers
             .lock()
             .map(|g| g.clone())

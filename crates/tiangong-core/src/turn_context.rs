@@ -13,7 +13,7 @@ use std::sync::mpsc::Sender;
 use crate::config::agent::AgentConfig;
 use crate::core::plugin::Plugin;
 use crate::session::Session;
-use crate::tool_override::ToolOverrideHandler;
+use crate::tools::extension::ToolOverrideHandler;
 use tiangong_llm::SingleProviderClient;
 use tiangong_llm::tool::ToolSpec;
 use tiangong_types::StreamEvent;

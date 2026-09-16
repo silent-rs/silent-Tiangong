@@ -18,7 +18,7 @@ use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessagePhase, MessageRole};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-use crate::tool::ToolResult;
+use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
 use tiangong_llm::{InvalidToolCall, ModelRequest, ModelResponse};

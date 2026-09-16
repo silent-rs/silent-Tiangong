@@ -80,7 +80,7 @@ mod tests {
 
     use super::super::Plugin;
     use crate::session::Session;
-    use crate::tool_override::{
+    use crate::tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
 

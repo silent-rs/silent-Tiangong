@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::core::plugin::feedback::PluginFeedbackTx;
 use crate::permission::TrustMode;
-use crate::tool_override::{
+use crate::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
 

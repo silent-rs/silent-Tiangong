@@ -15,10 +15,10 @@ use tiangong_core::{
     core::{Plugin, TiangongCore},
     permission::TrustMode,
     session::Session,
-    tool::ToolResult,
-    tool_override::{
+    tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     },
+    tools::result::ToolResult,
 };
 use tiangong_llm::tool::{ToolCall, ToolSpec};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};

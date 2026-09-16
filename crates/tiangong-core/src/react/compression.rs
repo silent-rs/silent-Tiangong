@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn compression_keeps_current_declarations_and_survives_persist_failure() {
         use crate::core::plugin::Plugin;
-        use crate::tool_override::{
+        use crate::tools::extension::{
             MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
         };
 
