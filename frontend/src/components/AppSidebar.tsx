@@ -10,7 +10,7 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu';
 import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
 import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
@@ -102,7 +102,7 @@ export function AppSidebar() {
   } = useStore();
   const isSending = useStore(selectCurrentIsSending);
 
-  const { open } = useSidebar();
+  const { open, isMobile, openMobile, setOpenMobile } = useSidebar();
   const { showWarning, showError } = useToast();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // 待删除的会话 ID（点击删除按钮时记录，确认后按此 ID 删除）。
@@ -126,6 +126,16 @@ export function AppSidebar() {
   );
   // 是否存在非默认（workspace 分类）分组；没有时默认分组不收缩、全部平铺
   const hasWorkspaceGroups = groups.some((g) => !g.isDefault);
+
+  // 浮出态（窄窗口）下切换/新建会话后收起侧边栏，避免持续遮挡内容
+  const conversationKey = isNewConversation ? 'new' : activeSessionId;
+  useEffect(() => {
+    if (isMobile && openMobile) {
+      setOpenMobile(false);
+    }
+    // 仅在会话切换时触发；isMobile/openMobile 不入依赖（否则打开浮层会被立即收起）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationKey]);
 
   const showMore = (key: string, total: number) => {
     setVisibleCounts((prev) => {

@@ -31,14 +31,8 @@ const MIN_BROWSER_WIDTH = 200;
 /** 对话面板最小宽度 */
 const MIN_CHAT_WIDTH = 400;
 
-/** 侧边栏自动隐藏/恢复阈值 */
+/** 侧边栏自动隐藏/恢复阈值：窄于此窗口时侧边栏转为浮层展示 */
 const SIDEBAR_RESTORE_THRESHOLD = 656;
-
-/** 侧边栏宽度：与 CSS 变量 --sidebar-width 的 16rem 对齐 */
-const SIDEBAR_WIDTH = 256;
-
-/** 主内容在打开侧边栏后保留的最小可用宽度 */
-const MIN_CONTENT_WIDTH_WITH_SIDEBAR = 400;
 
 /** 屏幕工作区四周保留的边距，避免初始窗口贴边 */
 const SCREEN_EDGE_MARGIN = 32;
@@ -156,25 +150,8 @@ export function MainApp() {
 
   const handleSidebarChange = useCallback(async (open: boolean) => {
     preferredSidebarOpenRef.current = open;
-    if (open) {
-      const appWindow = getCurrentWindow();
-      const innerSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor();
-      const logicalW = innerSize.width / scaleFactor;
-      if (logicalW <= SIDEBAR_RESTORE_THRESHOLD) {
-        const logicalH = innerSize.height / scaleFactor;
-        const newW = Math.max(
-          logicalW + SIDEBAR_WIDTH,
-          SIDEBAR_RESTORE_THRESHOLD + SIDEBAR_WIDTH,
-          SIDEBAR_WIDTH + MIN_CONTENT_WIDTH_WITH_SIDEBAR,
-        );
-        lockResize();
-        await appWindow.setSize(new LogicalSize(newW, logicalH));
-        unlockResize();
-      }
-    }
     setSidebarOpen(open);
-  }, [lockResize, unlockResize]);
+  }, []);
 
   /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出
   /// 空间。窗口窄到放不下「聊天栏 + 拓展区」两个最小宽度时禁止展开（返回
