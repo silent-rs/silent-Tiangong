@@ -12,6 +12,7 @@
 
 pub mod ensure;
 pub mod registry;
+mod title;
 
 pub use self::registry::{CoreRegistry, CoreRegistryGuard};
 

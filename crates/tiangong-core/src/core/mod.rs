@@ -35,8 +35,9 @@ pub use storage_location::CoreStorageLocation;
 
 /// 判断标题是否仍是默认值（"新对话"/"会话 X"）。
 ///
-/// 用于 lite 自动生成标题写回时，避免覆盖用户已手动改过的标题。
-pub(crate) fn is_default_title(title: &str) -> bool {
+/// 用于标题自动生成（现由 core-manager 经 [`crate::TiangongCore::set_title`]
+/// 驱动）预检与写回校验，避免覆盖用户已手动改过的标题。
+pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
 }
 
@@ -155,8 +156,8 @@ impl TiangongCore {
     ///   turn 结束 run_turn 统一落盘（避免与 turn 对 session 的读写竞争）。
     /// - Core 空闲：Core 是 session 权威持有者且无并发 turn，直接 load+改+persist。
     ///
-    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（用于 lite 自动生成，
-    /// 但那条路径直接走 `shared_runtime::send_command`，不经过此方法）；用户手动编辑传 false。
+    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（标题自动生成
+    /// 由 core-manager 在投递用户消息时驱动，经此方法写回）；用户手动编辑传 false。
     pub fn set_title(&self, title: String, only_if_default: bool) -> Result<(), CoreError> {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -250,21 +251,14 @@ impl TiangongCore {
                 });
             });
         #[cfg(test)]
-        let (client, lite_client) = if let Some(test_client) = self.test_client.clone() {
-            let test_client = test_client.with_on_retry(on_retry.clone());
-            let lite_client = config.llm.lite.as_ref().map(|_| test_client.clone());
-            (test_client, lite_client)
+        let client = if let Some(test_client) = self.test_client.clone() {
+            test_client.with_on_retry(on_retry.clone())
         } else {
-            (
-                SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
-                config.llm.lite.clone().map(SingleProviderClient::new),
-            )
+            SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
         let client =
             SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone());
-        #[cfg(not(test))]
-        let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let plugins = self
             .plugins
             .lock()
@@ -275,7 +269,6 @@ impl TiangongCore {
 
         Ok(TurnContext::builder()
             .client(client)
-            .lite_client(lite_client)
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
