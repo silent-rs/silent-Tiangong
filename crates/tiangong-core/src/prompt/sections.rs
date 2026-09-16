@@ -58,11 +58,12 @@ fn collect_environment_parts(session: &Session) -> Vec<String> {
     let mut parts = Vec::new();
     let workspace = session_working_directory(session);
     parts.push(format!("当前工作目录：{}", workspace));
-    // 允许文件操作目录：工作空间 + 应用存储根（由 toolkit 硬编码为始终允许）。
+    // 允许文件操作目录：工作空间 + 应用存储根（由 platform 硬编码为始终允许，
+    // 与 toolkit 写边界校验的双份同步约定见 platform 模块文档）。
     parts.push(format!(
         "允许文件操作目录：{}；{}",
         workspace,
-        tiangong_toolkit::app_storage_root().display()
+        crate::platform::app_storage_root().display()
     ));
     parts
 }
