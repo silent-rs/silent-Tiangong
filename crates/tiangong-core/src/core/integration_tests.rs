@@ -194,12 +194,12 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
         }
     }
     impl ToolSpecProvider for OrderedPlugin {
-        fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
+        fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
             // tools 顺序由插件自身保证稳定（core 不代为排序）。
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.names
                 .iter()
-                .map(|name| crate::model::ToolSpec {
+                .map(|name| tiangong_llm::tool::ToolSpec {
                     name: (*name).into(),
                     description: self.id.into(),
                     input_schema: serde_json::json!({"type":"object","properties":{}}),

@@ -628,7 +628,7 @@ pub async fn chat_request_at(server: &MockServer, idx: usize) -> RequestBody {
 /// 记录调用并返回固定结果的测试工具（经插件注册进 Core）。
 pub struct RecordingTool {
     pub name: &'static str,
-    pub invocations: Mutex<Vec<crate::model::ToolCall>>,
+    pub invocations: Mutex<Vec<tiangong_llm::tool::ToolCall>>,
     pub ok: bool,
 }
 
@@ -658,7 +658,7 @@ impl RecordingTool {
 impl crate::tool_override::ToolOverrideHandler for RecordingTool {
     fn handle(
         &self,
-        call: &crate::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
         _session: &mut Session,
         _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
@@ -686,8 +686,8 @@ pub struct ToolPlugin {
 }
 
 impl crate::tool_override::ToolSpecProvider for ToolPlugin {
-    fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
-        vec![crate::model::ToolSpec {
+    fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
+        vec![tiangong_llm::tool::ToolSpec {
             name: self.tool.name.to_string(),
             description: "测试工具".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {}}),
@@ -698,7 +698,7 @@ impl crate::tool_override::ToolSpecProvider for ToolPlugin {
 impl crate::tool_override::ToolOverrideHandler for ToolPlugin {
     fn handle(
         &self,
-        call: &crate::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
         session: &mut Session,
         actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
@@ -1137,7 +1137,7 @@ pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, Even
 pub fn core_for_client(
     env: &TestEnv,
     sid: &str,
-    client: crate::model::SingleProviderClient,
+    client: tiangong_llm::SingleProviderClient,
 ) -> (TiangongCore, EventLog) {
     let mut session = Session::new("集成测试会话".to_string());
     session.id = sid.to_string();

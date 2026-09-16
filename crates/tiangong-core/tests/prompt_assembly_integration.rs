@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use tiangong_core::config::agent::AgentConfig;
 use tiangong_core::config::core::ModelEndpoint;
-use tiangong_core::model::SingleProviderClient;
 use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::prompt::sections::build_full_system_prompt;
 use tiangong_core::runtime::RuntimeEngine;
 use tiangong_core::session::Session;
 use tiangong_core::tool_override::PromptSectionProvider;
+use tiangong_llm::SingleProviderClient;
 
 // ── 测试用 PromptSectionProvider ─────────────────────────────
 

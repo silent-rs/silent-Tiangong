@@ -7,7 +7,7 @@
 use anyhow::{Result, anyhow};
 
 use tiangong_config::{generate_token, load_server_config, save_server_config};
-use tiangong_core::model::ProviderProtocol;
+use tiangong_llm::ProviderProtocol;
 use tiangong_llm::models_config::{ModelCapability, ModelsConfig, RoutingSlot};
 
 use crate::interactive as ui;

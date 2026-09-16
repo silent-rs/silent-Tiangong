@@ -11,10 +11,10 @@ use std::sync::mpsc::Sender;
 use typed_builder::TypedBuilder;
 
 use crate::config::core::{CoreConfig, CoreConfigProvider};
-use crate::model::SingleProviderClient;
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::SingleProviderClient;
 use tiangong_types::StreamEvent;
 
 pub mod command;
@@ -126,7 +126,7 @@ impl TiangongCore {
     /// 设置会话思考强度。
     ///
     /// 已经发出的模型请求不变；活跃 turn 会在下一次构建模型请求时使用新值。
-    pub fn set_reasoning_effort(&self, effort: crate::model::ReasoningEffort) {
+    pub fn set_reasoning_effort(&self, effort: tiangong_llm::ReasoningEffort) {
         self.config
             .update(|config| config.reasoning_effort = effort);
         if self.is_busy() {
@@ -242,7 +242,7 @@ impl TiangongCore {
         let config = self.config.snapshot();
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
-        let on_retry: crate::model::OnRetryCallback =
+        let on_retry: tiangong_llm::OnRetryCallback =
             Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
                 let _ = retry_tx.send(StreamEvent::Retry {
                     message: error_text.to_string(),

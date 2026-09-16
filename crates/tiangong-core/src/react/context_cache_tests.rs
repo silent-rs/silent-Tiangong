@@ -16,7 +16,7 @@ async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort()
             HashMap::new(),
             Vec::new(),
         );
-        harness.ctx.agent_config.reasoning_effort = crate::model::ReasoningEffort::High;
+        harness.ctx.agent_config.reasoning_effort = tiangong_llm::ReasoningEffort::High;
         harness.ctx.session.messages.push(Message::with_reasoning(
             MessageRole::Assistant,
             "先前结论",
@@ -65,7 +65,7 @@ async fn compression_request_preserves_full_prefix_and_tools_with_lower_effort()
         assert_eq!(update.summary_up_to, 2);
         assert_eq!(
             harness.ctx.agent_config.reasoning_effort,
-            crate::model::ReasoningEffort::High
+            tiangong_llm::ReasoningEffort::High
         );
         assert_eq!(
             serde_json::to_vec(&harness.ctx.session).unwrap(),
@@ -130,7 +130,7 @@ async fn compression_rejects_unexpected_tool_calls() {
         harness.ctx.session.clone(),
         harness.ctx.client.clone(),
         harness.ctx.tools.clone(),
-        crate::model::ReasoningEffort::High,
+        tiangong_llm::ReasoningEffort::High,
     )
     .compress(1, 4096)
     .await;
@@ -150,7 +150,7 @@ async fn compression_empty_output_keeps_usage_and_original_session() {
         harness.ctx.session.clone(),
         harness.ctx.client.clone(),
         harness.ctx.tools.clone(),
-        crate::model::ReasoningEffort::High,
+        tiangong_llm::ReasoningEffort::High,
     )
     .compress(1, 4096)
     .await;
@@ -600,10 +600,10 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
-    use crate::model::{ModelResponse, ModelStreamChunk};
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose, StreamTiming};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
+    use tiangong_llm::{ModelFunctionResponse, ModelResponse, ModelStreamChunk};
 
     let server = MockServer::builder().start().await;
     let mut harness = TestHarness::new_with_protocol(

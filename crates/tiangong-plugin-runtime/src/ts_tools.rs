@@ -11,8 +11,8 @@ use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use tiangong_core::model::ToolCall;
 use tiangong_core::tool::ToolResult;
+use tiangong_llm::tool::ToolCall;
 
 const MAX_RESULT_FIELD_BYTES: usize = 2_000_000;
 

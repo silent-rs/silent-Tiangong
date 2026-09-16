@@ -3,9 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::model::ToolCall;
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
+use tiangong_llm::tool::ToolCall;
 
 /// 根据本轮工具覆盖表启动一个工具调用。
 pub(super) fn start_tool_call(

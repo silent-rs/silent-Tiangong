@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::config::core::CoreConfig;
-use crate::model::ToolSpec;
 use crate::permission::TrustMode;
 use crate::session::Session;
 use crate::tool_override::ToolOverrideHandler;
+use tiangong_llm::tool::ToolSpec;
 
 use super::{Plugin, injection_tool_spec};
 

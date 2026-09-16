@@ -13,7 +13,6 @@ use tiangong_core::{
     agent_input::{AgentInput, AgentInputKind},
     config::core::{CoreConfig, CoreConfigProvider},
     core::{Plugin, TiangongCore},
-    model::{ToolCall, ToolSpec},
     permission::TrustMode,
     session::Session,
     tool::ToolResult,
@@ -21,6 +20,7 @@ use tiangong_core::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     },
 };
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 struct PluginState {
     available: AtomicBool,

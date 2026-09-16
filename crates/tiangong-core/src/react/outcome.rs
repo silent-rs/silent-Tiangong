@@ -1,6 +1,6 @@
 //! 单轮 Agent Loop 的执行结果。
 
-use crate::model::TokenUsage;
+use tiangong_types::TokenUsage;
 use tiangong_types::{StreamEvent, TurnStatus};
 
 #[derive(Debug)]

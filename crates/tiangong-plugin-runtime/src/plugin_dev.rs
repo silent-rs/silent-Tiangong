@@ -1876,7 +1876,7 @@ await runSidecar({
         let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
         let mut session = tiangong_core::session::Session::new("stale-ref-session");
         session.cwd = root.path().to_string_lossy().into_owned();
-        let recall = |query: &str| tiangong_core::model::ToolCall {
+        let recall = |query: &str| tiangong_llm::tool::ToolCall {
             id: scru128::new().to_string(),
             name: "recall_memory".into(),
             arguments: serde_json::json!({ "query": query }),

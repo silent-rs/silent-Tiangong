@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::agent::AgentConfig;
 use crate::config::models::ModelsConfig;
-use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
 use crate::tool_override::ToolOverrideHandler;
+use tiangong_llm::{ModelClient, SingleProviderClient};
+use tiangong_types::TokenUsage;
 
 #[derive(Debug, Clone)]
 pub struct LlmOutputRecord {

@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::model::{ToolCall, ToolSpec};
 use crate::session::Session;
 use crate::tool::ToolResult;
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 
 /// 工具覆盖处理器。
 ///

@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use tiangong_core::model::ProviderProtocol;
+use tiangong_llm::ProviderProtocol;
 use tiangong_plugin_mcp_protocol::config::McpTransportMode;
 
 #[derive(Debug, Parser)]

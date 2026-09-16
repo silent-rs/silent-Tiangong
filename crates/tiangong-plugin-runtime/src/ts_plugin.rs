@@ -9,12 +9,12 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tiangong_core::core::Plugin;
-use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 
 use crate::manifest::{PluginManifest, TsToolDecl};
 

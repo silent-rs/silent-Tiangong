@@ -5,8 +5,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::TokenUsage;
 use crate::permission::TrustMode;
+use tiangong_types::TokenUsage;
 
 pub use tiangong_types::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
@@ -95,9 +95,9 @@ pub struct Session {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::model::deserialize_reasoning_effort_option_flexible"
+        deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_option_flexible"
     )]
-    pub reasoning_effort: Option<crate::model::ReasoningEffort>,
+    pub reasoning_effort: Option<tiangong_llm::ReasoningEffort>,
     /// 早期对话的滚动摘要（用于无限上下文压缩）
     ///
     /// 当对话历史超过模型上下文阈值时，早期消息被 LLM 压缩为摘要存储在此。

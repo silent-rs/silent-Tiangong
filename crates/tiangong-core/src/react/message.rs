@@ -67,7 +67,7 @@ pub(crate) fn append_assistant_tool_call_message(
     text: &str,
     reasoning_content: &str,
     reasoning_signature: Option<String>,
-    calls: &[&crate::model::ToolCall],
+    calls: &[&tiangong_llm::tool::ToolCall],
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
 ) {

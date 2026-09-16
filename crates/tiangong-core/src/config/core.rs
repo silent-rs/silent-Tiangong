@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::models::ModelsConfig;
-use crate::model::ProviderProtocol;
 use crate::permission::TrustMode;
+use tiangong_llm::ProviderProtocol;
 
 /// 模型端点配置（定义已迁移至 `tiangong-llm`，此处仅做 re-export 保持外部路径稳定）。
 pub use tiangong_llm::ModelEndpoint;
@@ -85,8 +85,8 @@ pub struct CoreConfig {
     pub custom_system_prompt: String,
     /// 思考强度设置
     #[serde(default = "default_reasoning_effort")]
-    #[serde(deserialize_with = "crate::model::deserialize_reasoning_effort_flexible")]
-    pub reasoning_effort: crate::model::ReasoningEffort,
+    #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
+    pub reasoning_effort: tiangong_llm::ReasoningEffort,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
 }
@@ -98,7 +98,7 @@ impl Default for CoreConfig {
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
-            reasoning_effort: crate::model::ReasoningEffort::Medium,
+            reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
             context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
@@ -220,8 +220,8 @@ impl std::fmt::Debug for CoreConfigProvider {
     }
 }
 
-fn default_reasoning_effort() -> crate::model::ReasoningEffort {
-    crate::model::ReasoningEffort::Medium
+fn default_reasoning_effort() -> tiangong_llm::ReasoningEffort {
+    tiangong_llm::ReasoningEffort::Medium
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::model::ToolCall;
 use tiangong_core::tool::ToolResult;
+use tiangong_llm::tool::ToolCall;
 use tiangong_types::StreamEvent;
 
 const RUNNING: u8 = 0;

@@ -15,13 +15,13 @@ use crate::sidecar::SidecarConnection;
 use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
 use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
 use tiangong_core::tool_override::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 use tokio::task;
 
 use crate::config::PluginRuntimeConfig;

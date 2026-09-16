@@ -13,8 +13,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
-use crate::model::TokenUsage;
 use crate::turn_context::TurnContext;
+use tiangong_types::TokenUsage;
 
 use super::command::Deferred;
 use super::compression::{CompressionInterrupt, ContextCompression};

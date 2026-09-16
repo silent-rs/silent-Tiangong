@@ -17,10 +17,10 @@ pub struct AgentConfig {
     pub custom_system_prompt: String,
     /// 思考强度设置：None 关闭思考，默认 Medium
     #[serde(default = "default_reasoning_effort")]
-    #[serde(deserialize_with = "crate::model::deserialize_reasoning_effort_flexible")]
-    pub reasoning_effort: crate::model::ReasoningEffort,
+    #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
+    pub reasoning_effort: tiangong_llm::ReasoningEffort,
 }
 
-fn default_reasoning_effort() -> crate::model::ReasoningEffort {
-    crate::model::ReasoningEffort::Medium
+fn default_reasoning_effort() -> tiangong_llm::ReasoningEffort {
+    tiangong_llm::ReasoningEffort::Medium
 }

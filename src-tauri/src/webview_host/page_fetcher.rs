@@ -419,7 +419,7 @@ impl BrowserToolOverride {
     fn handle_web_fetch(
         fetcher: &Arc<dyn PageFetcher>,
         fetch_lock: &Arc<tokio::sync::Mutex<()>>,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
@@ -601,7 +601,7 @@ impl BrowserToolOverride {
 
     fn handle_web_form_fill(
         fetcher: &Arc<dyn PageFetcher>,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
@@ -684,7 +684,7 @@ impl BrowserToolOverride {
 
     fn handle_web_click(
         fetcher: &Arc<dyn PageFetcher>,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
@@ -759,7 +759,7 @@ impl BrowserToolOverride {
 
     fn handle_web_query_dom(
         fetcher: &Arc<dyn PageFetcher>,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
@@ -841,7 +841,7 @@ impl BrowserToolOverride {
 
     fn handle_web_locate_element(
         fetcher: &Arc<dyn PageFetcher>,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
@@ -910,7 +910,7 @@ impl BrowserToolOverride {
 impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
     fn handle(
         &self,
-        call: &tiangong_core::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
         _session: &mut tiangong_core::session::Session,
         _actor_id: &str,
     ) -> std::pin::Pin<

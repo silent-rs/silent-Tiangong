@@ -287,7 +287,7 @@ fn handle_unknown_tool_returns_error() {
     // 插件已接管调用后产生的错误必须穿过适配器，不能退成未注册。
     let adapter = WasmPluginAdapter::new(plugin, config);
     let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
-    let call = tiangong_core::model::ToolCall {
+    let call = tiangong_llm::tool::ToolCall {
         id: "call_2".into(),
         name: "nonexistent_tool".into(),
         arguments: serde_json::json!({}),

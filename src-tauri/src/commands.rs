@@ -4054,9 +4054,9 @@ pub async fn fetch_provider_models(
     protocol: Option<String>,
     headers: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<String>, String> {
-    use tiangong_core::model::{ProviderProtocol, SingleProviderClient};
     use tiangong_llm::models_config::ModelsConfig;
     use tiangong_llm::ModelEndpoint;
+    use tiangong_llm::{ProviderProtocol, SingleProviderClient};
 
     let resolved_key = ModelsConfig::resolve_api_key(&api_key);
     let endpoint = ModelEndpoint {
@@ -4103,8 +4103,8 @@ pub async fn probe_embedding_dimension(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<usize, String> {
-    use tiangong_core::model::ProviderProtocol;
     use tiangong_llm::models_config::ModelsConfig;
+    use tiangong_llm::ProviderProtocol;
 
     let protocol = protocol
         .as_deref()
