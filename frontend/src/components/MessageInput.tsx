@@ -1152,32 +1152,50 @@ export function MessageInput({
               )}
 
               {attachments.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
                   {attachments.map(item => (
-                    <span
-                      key={(item.original_name ?? '') + item.source.slice(0, 40)}
-                      className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
-                      title={item.original_name ?? item.source}
-                    >
-                      {item.kind === 'image' ? (
+                    item.kind === 'image' ? (
+                      <span
+                        key={(item.original_name ?? '') + item.source.slice(0, 40)}
+                        className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border bg-muted/40"
+                        title={item.original_name ?? item.source}
+                      >
                         <img
                           src={resolveAttachmentUrl(item.source)}
                           alt={item.original_name ?? '附件'}
-                          className="h-6 w-6 shrink-0 rounded object-cover"
+                          className="h-10 w-10 rounded object-cover"
                         />
-                      ) : (
-                        <Paperclip className="h-3 w-3 shrink-0" />
-                      )}
-                      <span className="truncate">{item.original_name ?? item.source}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeAttachment(item.source)}
-                        className="ml-1 text-muted-foreground hover:text-foreground"
-                        title="移除附件"
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(item.source)}
+                          className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border bg-background text-muted-foreground hover:text-foreground"
+                          title="移除附件"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </span>
+                    ) : (
+                      <span
+                        key={(item.original_name ?? '') + item.source.slice(0, 40)}
+                        className="relative inline-flex h-11 shrink-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 text-xs"
+                        title={item.original_name ?? item.source}
                       >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
+                        <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">
+                          {(item.original_name ?? item.source).length > 3
+                            ? (item.original_name ?? item.source).slice(0, 3) + '…'
+                            : (item.original_name ?? item.source)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(item.source)}
+                          className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border bg-background text-muted-foreground hover:text-foreground"
+                          title="移除附件"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </span>
+                    )
                   ))}
                 </div>
               )}
