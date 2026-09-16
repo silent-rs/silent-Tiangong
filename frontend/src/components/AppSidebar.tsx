@@ -11,6 +11,7 @@ import {
 } from './ui/context-menu';
 import { Plus, Trash2, Folder, FilePlus2, FolderX, ChevronRight } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 import { SettingsDialog } from './SettingsDialog';
 import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
@@ -403,14 +404,39 @@ export function AppSidebar() {
     </div>
   );
 
+  const sidebarBody = (
+    <>
+      {content}
+      {deleteConfirm}
+      {deleteWorkspaceConfirm}
+    </>
+  );
+
+  // 窄窗口（浮层断点内）：Sheet 浮出展示，不挤压内容、不扩窗；
+  // 遮罩/ESC 关闭由 Sheet 自带，切换会话后由上方 effect 自动收起。
+  if (isMobile) {
+    return (
+      <Sheet open={openMobile} onOpenChange={setOpenMobile}>
+        <SheetContent
+          side="left"
+          className="flex w-[var(--sidebar-width,16rem)] flex-col gap-0 overflow-hidden border-r bg-sidebar p-0 text-sidebar-foreground [&>button]:hidden"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>会话列表</SheetTitle>
+            <SheetDescription>切换会话侧边栏</SheetDescription>
+          </SheetHeader>
+          {sidebarBody}
+        </SheetContent>
+      </Sheet>
+    );
+  }
+
   return (
     <aside
       className="shrink-0 min-h-0 border-r bg-sidebar text-sidebar-foreground flex flex-col overflow-hidden transition-[width] duration-200 ease-linear"
       style={{ width: open ? 'var(--sidebar-width, 16rem)' : '0px' }}
     >
-      {content}
-      {deleteConfirm}
-      {deleteWorkspaceConfirm}
+      {sidebarBody}
     </aside>
   );
 }
