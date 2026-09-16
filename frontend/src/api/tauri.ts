@@ -126,14 +126,6 @@ export interface TokenStats {
   agent_token_usage: Record<string, TokenUsage>;
 }
 
-export interface CostSummary {
-  total_prompt_tokens: number;
-  total_completion_tokens: number;
-  total_tokens: number;
-  call_count: number;
-  tool_call_count: number;
-}
-
 export interface BalanceInfo {
   currency: string;
   total_balance: string;
@@ -144,12 +136,6 @@ export interface BalanceInfo {
 export interface ProviderBalance {
   is_available: boolean;
   balance_infos: BalanceInfo[];
-}
-
-export interface RequestCost {
-  request_id: string;
-  usage: TokenUsage;
-  timestamp: string;
 }
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
@@ -207,18 +193,6 @@ export interface AttachmentDataUrl {
   mime_type: string;
   title: string;
   base64_size: number;
-}
-
-export interface TaskCost {
-  task_id: string;
-  requests: RequestCost[];
-  summary: CostSummary;
-}
-
-export interface SessionCost {
-  session_id: string;
-  tasks: TaskCost[];
-  summary: CostSummary;
 }
 
 export interface Message {
@@ -1081,9 +1055,6 @@ export const api = {
   stopAudio: (): Promise<void> =>
     api.bridgeCall('text-to-speech', 'plugin.stop', '{}')
       .then(() => undefined),
-
-  getSessionCost: (sessionId?: string): Promise<SessionCost> =>
-    invoke('get_session_cost', { sessionId }),
 
   hasTtsCapability: (): Promise<boolean> =>
     api.listPlugins().then((plugins) =>

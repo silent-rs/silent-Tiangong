@@ -1978,33 +1978,6 @@ pub async fn get_provider_balance(
         .map_err(|e| format!("解析余额响应失败: {e}"))
 }
 
-/// 获取会话成本统计
-#[tauri::command]
-pub async fn get_session_cost(
-    session_id: Option<String>,
-    state: State<'_, TiangongApp>,
-) -> Result<serde_json::Value, String> {
-    // task_records 是完整 Session 字段，session 真相源归磁盘（issue #245），
-    // 经 CoreManager 从磁盘加载，不在 app-state 的内存镜像里读。
-    let sid = state
-        .with_state_read(|core_state| {
-            Ok::<String, anyhow::Error>(
-                session_id
-                    .as_deref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| core_state.active_session_id.as_str().to_string()),
-            )
-        })
-        .await?;
-    match state.inner().core_manager.load_session(&sid) {
-        Ok(session) => {
-            let cost = tiangong_core::observe::build_session_cost(sid, &session.task_records);
-            Ok(serde_json::to_value(cost).unwrap_or_default())
-        }
-        Err(_) => Ok(serde_json::json!({})),
-    }
-}
-
 /// 获取当前活跃的 Worker 列表
 #[tauri::command]
 pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_json::Value>, String> {

@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -6,23 +5,6 @@ use crate::config::agent::AgentConfig;
 use crate::config::models::ModelsConfig;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
 use crate::tool_override::ToolOverrideHandler;
-
-pub use tiangong_types::RunStatus;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunSnapshot {
-    pub status: RunStatus,
-    pub summary: String,
-    pub last_session_id: Option<String>,
-    pub last_task_id: Option<String>,
-    pub last_duration_ms: Option<u64>,
-    pub last_result: Option<String>,
-    pub last_plan: Option<String>,
-    pub last_tool_result: Option<String>,
-    pub last_error: Option<String>,
-    pub last_usage: Option<TokenUsage>,
-    pub updated_at: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct LlmOutputRecord {
@@ -232,69 +214,4 @@ impl RuntimeEngine {
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
-}
-
-/// 清理 LLM 响应中混入的工具执行 trace 文本
-#[allow(dead_code)]
-pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut in_trace_block = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("工具执行") && trimmed.contains('[') && trimmed.contains(']') {
-            in_trace_block = true;
-            continue;
-        }
-
-        if in_trace_block {
-            if trimmed.starts_with("命令:")
-                || trimmed.starts_with("ok=")
-                || trimmed.starts_with("summary:")
-                || trimmed.starts_with("tool=")
-                || trimmed.starts_with("stdout:")
-                || trimmed.starts_with("stderr:")
-                || trimmed.starts_with("duration_ms=")
-                || trimmed.starts_with("exit_code=")
-                || (trimmed.contains("ok=") && trimmed.contains("exit_code="))
-            {
-                continue;
-            }
-            if trimmed.is_empty() {
-                continue;
-            }
-            in_trace_block = false;
-            result.push_str(line);
-            result.push('\n');
-            continue;
-        }
-
-        if trimmed.contains("工具执行")
-            && trimmed.contains('[')
-            && (trimmed.contains("ok=") || trimmed.contains("exit_code="))
-        {
-            continue;
-        }
-
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    let mut cleaned = String::with_capacity(result.len());
-    let mut prev_empty = false;
-    for line in result.lines() {
-        if line.trim().is_empty() {
-            if !prev_empty {
-                cleaned.push('\n');
-            }
-            prev_empty = true;
-        } else {
-            cleaned.push_str(line);
-            cleaned.push('\n');
-            prev_empty = false;
-        }
-    }
-
-    cleaned.trim().to_string()
 }

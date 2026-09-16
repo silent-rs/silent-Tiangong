@@ -872,7 +872,6 @@ fn run_gui() {
             tiangong_app::commands::get_reasoning_effort,
             tiangong_app::commands::set_reasoning_effort,
             tiangong_app::commands::get_provider_balance,
-            tiangong_app::commands::get_session_cost,
             tiangong_app::commands::list_workers,
             tiangong_app::commands::has_model_capability,
             tiangong_app::commands::has_tts_capability,

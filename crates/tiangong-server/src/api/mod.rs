@@ -106,7 +106,6 @@ pub fn build_routes(
             Route::new("sessions").get(sessions::list_sessions).append(
                 Route::new("<id>")
                     .get(sessions::get_session)
-                    .append(Route::new("cost").get(sessions::get_session_cost))
                     .append(Route::new("cancel").post(sessions::cancel_session_turn))
                     .delete(sessions::delete_session),
             ),

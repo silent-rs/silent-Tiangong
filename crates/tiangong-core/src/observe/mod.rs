@@ -3,12 +3,6 @@
 //! [`Observer`] 持有 storage_root,在 turn 开始时注入 TurnContext。
 //! 审计日志写入 `{storage_root}/audit.jsonl`。
 
-pub mod cost;
-
-pub use cost::{
-    CostSummary, RequestCost, SessionCost, TaskCost, build_session_cost, calculate_session_cost,
-};
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
