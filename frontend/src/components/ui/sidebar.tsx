@@ -74,6 +74,12 @@ const SidebarProvider = React.forwardRef<
     const isMobile = useIsMobile()
     const [openMobile, setOpenMobile] = React.useState(false)
 
+    // 断点切换时复位浮层开关：避免浮层开着拉宽窗口后（Sheet 卸载但状态
+    // 残留）再缩回断点内时浮层无故重现。
+    React.useEffect(() => {
+      if (!isMobile) setOpenMobile(false)
+    }, [isMobile])
+
     // This is the internal state of the sidebar.
     // We use openProp and setOpenProp for control from outside the component.
     const [_open, _setOpen] = React.useState(defaultOpen)
@@ -94,9 +100,10 @@ const SidebarProvider = React.forwardRef<
     )
 
     // Helper to toggle the sidebar.
+    // 浮层态（窄窗口）切换 openMobile（Sheet 浮出），桌面态切换 open（挤压布局）。
     const toggleSidebar = React.useCallback(() => {
-      return setOpen((open) => !open)
-    }, [setOpen])
+      return isMobile ? setOpenMobile((open) => !open) : setOpen((open) => !open)
+    }, [isMobile, setOpen, setOpenMobile])
 
     // Adds a keyboard shortcut to toggle the sidebar.
     React.useEffect(() => {

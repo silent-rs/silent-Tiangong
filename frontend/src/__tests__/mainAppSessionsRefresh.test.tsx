@@ -96,6 +96,10 @@ vi.mock('@/components/TabsContainer', () => ({ TabsContainer: () => null }));
 vi.mock('@/components/ui/sidebar', () => ({
   SidebarProvider: ({ children }: { children: ReactNode }) => children,
 }));
+// Toast 桩：MainApp 直渲染无 ToastProvider，仅提供窄窗口提示所需的方法
+vi.mock('@/components/Toast', () => ({
+  useToast: () => ({ showWarning: vi.fn() }),
+}));
 vi.mock('@/hooks/useUpdateCheck', () => ({ useUpdateCheck: () => undefined }));
 vi.mock('@/utils/desktopNotification', () => ({
   ensureDesktopNotificationPermission: vi.fn(() => Promise.resolve()),
