@@ -66,7 +66,6 @@ export interface LoadedSession {
   id: string;
   messages: Message[];
   token_stats: TokenStats;
-  current_plan?: TaskPlan;
   last_duration_ms?: number;
   last_usage?: TokenUsage;
   cwd: string;
@@ -315,30 +314,6 @@ export function hasMediaBlocks(msg: Message): boolean {
   return content.some((b) =>
     b.type === 'media' || b.type === 'asset_reference' || b.type === 'image'
   );
-}
-
-export interface TaskPlan {
-  id: string;
-  objective: string;
-  summary: string;
-  items: PlanItem[];
-  risks: string[];
-  skill_hints: string[];
-  mcp_hints: string[];
-}
-
-export interface PlanItem {
-  id: string;
-  description: string;
-  status: string;
-  steps: PlanStep[];
-}
-
-export interface PlanStep {
-  id: string;
-  description: string;
-  status: string;
-  source: string;
 }
 
 export interface McpServer {

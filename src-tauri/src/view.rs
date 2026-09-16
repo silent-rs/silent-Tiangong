@@ -46,7 +46,6 @@ pub struct LoadedSessionView {
     pub id: String,
     pub messages: Vec<tiangong_types::Message>,
     pub token_stats: TokenStatsView,
-    pub current_plan: Option<TaskPlan>,
     pub last_duration_ms: Option<u64>,
     pub last_usage: Option<tiangong_types::TokenUsage>,
     pub cwd: String,
@@ -64,10 +63,6 @@ impl LoadedSessionView {
             id: session.id.clone(),
             messages: session.messages.clone(),
             token_stats: TokenStatsView::from_session(session, context_limit_tokens),
-            current_plan: session
-                .task_plans
-                .first()
-                .map(TaskPlan::from_session_task_plan),
             last_duration_ms: session
                 .messages
                 .iter()
@@ -125,61 +120,6 @@ impl SessionListItem {
             cwd: metadata.cwd.clone(),
         }
     }
-}
-
-/// 任务计划（前端使用的扁平视图）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskPlan {
-    pub id: String,
-    pub objective: String,
-    pub summary: String,
-    pub items: Vec<PlanItem>,
-    pub risks: Vec<String>,
-    pub capability_hints: Vec<String>,
-}
-
-impl TaskPlan {
-    pub fn from_session_task_plan(session_plan: &tiangong_core::session::SessionTaskPlan) -> Self {
-        Self {
-            id: session_plan.id.clone(),
-            objective: session_plan.name.clone(),
-            summary: session_plan.description.clone(),
-            items: session_plan
-                .execution_steps
-                .iter()
-                .map(PlanItem::from_session_step)
-                .collect(),
-            risks: vec![],
-            capability_hints: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanItem {
-    pub id: String,
-    pub description: String,
-    pub status: String,
-    pub steps: Vec<PlanStep>,
-}
-
-impl PlanItem {
-    pub fn from_session_step(step: &tiangong_core::session::SessionPlanExecutionStep) -> Self {
-        Self {
-            id: step.id.clone(),
-            description: step.description.clone(),
-            status: format!("{:?}", step.status),
-            steps: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStep {
-    pub id: String,
-    pub description: String,
-    pub status: String,
-    pub source: String,
 }
 
 /// MCP 服务器配置

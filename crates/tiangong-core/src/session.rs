@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::TokenUsage;
 use crate::permission::TrustMode;
-use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
@@ -85,8 +84,6 @@ pub struct Session {
     pub agent_token_usage: HashMap<String, TokenUsage>,
     #[serde(default)]
     pub task_records: Vec<SessionTaskRecord>,
-    #[serde(default)]
-    pub task_plans: Vec<SessionTaskPlan>,
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
@@ -218,33 +215,6 @@ pub struct LlmCallRecord {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionPlanExecutionStep {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub status: PlanStepStatus,
-    #[serde(default)]
-    pub source: PlanStepSource,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionTaskPlan {
-    pub id: String,
-    pub task_id: String,
-    pub name: String,
-    pub description: String,
-    pub status: PlanStepStatus,
-    #[serde(default)]
-    pub execution_summary: Option<String>,
-    #[serde(default)]
-    pub execution_steps: Vec<SessionPlanExecutionStep>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 impl Session {
     pub fn has_user_messages(&self) -> bool {
         self.messages.iter().any(|m| m.role == MessageRole::User)
@@ -265,7 +235,6 @@ impl Session {
             agent_current_tokens: HashMap::new(),
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
-            task_plans: Vec::new(),
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
@@ -301,7 +270,6 @@ impl Session {
             agent_current_tokens: HashMap::new(),
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
-            task_plans: Vec::new(),
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),
@@ -797,129 +765,6 @@ impl Session {
         };
         record.assistant_message_id = assistant_message_id;
         record.updated_at = now_text();
-    }
-
-    pub fn sync_task_plans(&mut self, task_id: &str, plans: &[PlanItem]) {
-        for plan in plans {
-            let now = now_text();
-            if let Some(position) = self
-                .task_plans
-                .iter()
-                .position(|item| item.id == plan.id && item.task_id == task_id)
-            {
-                let target = &mut self.task_plans[position];
-                target.name = plan.name.clone();
-                target.description = plan.description.clone();
-                target.status = plan.status;
-                target.execution_summary = plan.execution_summary.clone();
-                target.updated_at = now.clone();
-
-                let existing_steps = target.execution_steps.clone();
-                let mut merged_steps = Vec::new();
-                for step in &plan.execution_steps {
-                    if let Some(found) = existing_steps.iter().find(|item| item.id == step.id) {
-                        let mut step_record = found.clone();
-                        step_record.name = step.name.clone();
-                        step_record.description = step.description.clone();
-                        step_record.status = step.status;
-                        step_record.source = step.source;
-                        step_record.updated_at = now.clone();
-                        merged_steps.push(step_record);
-                    } else {
-                        merged_steps.push(SessionPlanExecutionStep {
-                            id: step.id.clone(),
-                            name: step.name.clone(),
-                            description: step.description.clone(),
-                            status: step.status,
-                            source: step.source,
-                            created_at: now.clone(),
-                            updated_at: now.clone(),
-                        });
-                    }
-                }
-                target.execution_steps = merged_steps;
-            } else {
-                let mut target = SessionTaskPlan {
-                    id: plan.id.clone(),
-                    task_id: task_id.to_string(),
-                    name: plan.name.clone(),
-                    description: plan.description.clone(),
-                    status: plan.status,
-                    execution_summary: plan.execution_summary.clone(),
-                    execution_steps: plan
-                        .execution_steps
-                        .iter()
-                        .map(|step| SessionPlanExecutionStep {
-                            id: step.id.clone(),
-                            name: step.name.clone(),
-                            description: step.description.clone(),
-                            status: step.status,
-                            source: step.source,
-                            created_at: now.clone(),
-                            updated_at: now.clone(),
-                        })
-                        .collect(),
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                };
-                target.updated_at = now.clone();
-                self.task_plans.push(target);
-            }
-        }
-    }
-
-    pub fn delete_pending_task_plan(&mut self, pending_index: usize) -> bool {
-        let Some(pos) = self
-            .pending_task_plan_positions()
-            .get(pending_index)
-            .copied()
-        else {
-            return false;
-        };
-        self.task_plans.remove(pos);
-        true
-    }
-
-    pub fn move_pending_task_plan(&mut self, from_idx: usize, to_idx: usize) -> bool {
-        let pending_positions = self.pending_task_plan_positions();
-        if pending_positions.is_empty()
-            || from_idx >= pending_positions.len()
-            || to_idx >= pending_positions.len()
-            || from_idx == to_idx
-        {
-            return false;
-        }
-
-        let mut pending = pending_positions
-            .iter()
-            .map(|idx| self.task_plans[*idx].clone())
-            .collect::<Vec<_>>();
-        let item = pending.remove(from_idx);
-        pending.insert(to_idx, item);
-
-        for (slot, item) in pending_positions.iter().zip(pending) {
-            self.task_plans[*slot] = item;
-        }
-        true
-    }
-
-    fn pending_task_plan_positions(&self) -> Vec<usize> {
-        self.task_plans
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, plan)| (plan.status == PlanStepStatus::Pending).then_some(idx))
-            .collect()
-    }
-
-    #[allow(dead_code)]
-    pub fn complete_task(
-        &mut self,
-        task_id: &str,
-        plan_snapshot: Option<String>,
-        tool_result: Option<String>,
-        duration_ms: u64,
-    ) {
-        self.complete_task_with_usage(task_id, plan_snapshot, tool_result, duration_ms, None);
     }
 
     pub fn complete_task_with_usage(

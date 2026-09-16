@@ -14,7 +14,6 @@ pub mod model;
 pub mod models_config;
 pub mod observe;
 pub mod permission;
-pub mod planner;
 pub mod prompt;
 pub mod react;
 pub mod runtime;

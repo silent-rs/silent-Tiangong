@@ -5,8 +5,6 @@ use std::sync::{Arc, Mutex};
 use crate::agent_config::AgentConfig;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
 use crate::models_config::ModelsConfig;
-use crate::planner::TaskPlan;
-use crate::tool::ToolExecutionRecord;
 use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
@@ -33,38 +31,6 @@ pub struct LlmOutputRecord {
     pub reasoning_content: String,
     pub tool_calls: Vec<String>,
     pub usage: TokenUsage,
-}
-
-/// 单条验证命令的执行结果记录。
-///
-/// 由 ReAct 执行链路在需要时收集（如运行测试、构建等验证命令），用于
-/// 上下文呈现与结果汇总。历史定义位于 `agents::response_agent`，随旧
-/// 流水线退场而收敛到 `runtime` 作为通用数据类型。
-#[derive(Debug, Clone)]
-pub struct VerifyExecutionRecord {
-    pub command: String,
-    pub ok: bool,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub summary: String,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TurnExecution {
-    pub assistant_message: String,
-    pub assistant_reasoning_content: String,
-    pub system_prompt: String,
-    pub plan: TaskPlan,
-    pub tool_result_summary: Option<String>,
-    pub tool_execution: Option<ToolExecutionRecord>,
-    pub verify_records: Vec<VerifyExecutionRecord>,
-    pub output_mode: String,
-    pub output_chunk_count: usize,
-    pub usage: TokenUsage,
-    /// 开发阶段：所有 LLM 调用的完整记录
-    pub llm_calls: Vec<crate::session::LlmCallRecord>,
 }
 
 #[derive(Clone)]
