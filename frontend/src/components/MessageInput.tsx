@@ -29,6 +29,19 @@ import { InputQueueBar } from './InputQueueBar';
 
 const MOD_KEY_LABEL = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd+Enter' : 'Ctrl+Enter';
 
+/** token 数值紧凑显示（如 12345 -> 12.3k、1959320123 -> 1.9b），向下取整不进位；精确值由 title 提示展示。 */
+const TOKEN_UNITS: Array<[divisor: number, unit: string]> = [
+  [1_000_000_000, 'b'],
+  [1_000_000, 'm'],
+  [1_000, 'k'],
+];
+
+function formatTokenCount(value: number): string {
+  if (value < 1000) return String(value);
+  const [divisor, unit] = TOKEN_UNITS.find(([d]) => value >= d) ?? [1_000, 'k'];
+  return `${Math.floor(value / (divisor / 10)) / 10}${unit}`;
+}
+
 interface MentionCandidate {
   value: string;
   label: string;
@@ -1298,7 +1311,7 @@ export function MessageInput({
                 {(displayTokens > 0 || totalTokens > 0) && (
                   <div
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
-                    title={`当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`}
+                    title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
                   >
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
@@ -1317,9 +1330,9 @@ export function MessageInput({
                     {!compact && (
                       <>
                         <span>
-                          {displayTokens.toLocaleString()}
+                          {formatTokenCount(displayTokens)}
                         </span>
-                        <span>总计 {totalTokens.toLocaleString()}</span>
+                        <span>总计 {formatTokenCount(totalTokens)}</span>
                       </>
                     )}
                   </div>
