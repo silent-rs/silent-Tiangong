@@ -1177,18 +1177,22 @@ export function MessageInput({
                     ) : (
                       <span
                         key={(item.original_name ?? '') + item.source.slice(0, 40)}
-                        className="inline-flex h-7 max-w-[200px] shrink-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-[11px]"
+                        className="relative inline-flex h-11 shrink-0 items-center gap-1.5 rounded-md border bg-muted/40 px-2.5 text-xs"
                         title={item.original_name ?? item.source}
                       >
-                        <Paperclip className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{item.original_name ?? item.source}</span>
+                        <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">
+                          {(item.original_name ?? item.source).length > 3
+                            ? (item.original_name ?? item.source).slice(0, 3) + '…'
+                            : (item.original_name ?? item.source)}
+                        </span>
                         <button
                           type="button"
                           onClick={() => removeAttachment(item.source)}
-                          className="ml-1 text-muted-foreground hover:text-foreground"
+                          className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full border bg-background text-muted-foreground hover:text-foreground"
                           title="移除附件"
                         >
-                          <X className="h-3 w-3" />
+                          <X className="h-2.5 w-2.5" />
                         </button>
                       </span>
                     )
