@@ -24,13 +24,7 @@ import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize, currentMonitor } from '@tauri-apps/api/window';
 
-/** 根据窗口逻辑高度计算 4:3 浏览器宽度 */
-function calcBrowserWidth(logicalHeight: number): number {
-  const available = logicalHeight - 40 - 44;
-  return Math.max(200, Math.floor(available * 4 / 3));
-}
-
-/** 浏览器面板最小宽度，低于此值自动关闭 */
+/** 拓展区面板最小宽度，低于此值自动关闭 */
 const MIN_BROWSER_WIDTH = 200;
 
 /** 对话面板最小宽度 */
@@ -87,20 +81,6 @@ async function fitWindowToScreen(
   }
 }
 
-/** 扩展窗口以容纳浏览器面板：对话区缩至最小宽度 + 浏览器面板宽度 */
-async function expandWindowForBrowser(lock?: () => void, unlock?: () => void) {
-  const appWindow = getCurrentWindow();
-  const innerSize = await appWindow.innerSize();
-  const scaleFactor = await appWindow.scaleFactor();
-  const logicalH = innerSize.height / scaleFactor;
-  const browserW = calcBrowserWidth(logicalH);
-  const targetW = MIN_CHAT_WIDTH + browserW;
-  lock?.();
-  await appWindow.setSize(new LogicalSize(targetW, logicalH));
-  unlock?.();
-  return { browserW, logicalH };
-}
-
 function browserPluginSessionId(sessionId?: string | null): string {
   if (!sessionId) return '';
   const prefix = 'webview:browser:';
@@ -148,8 +128,6 @@ export function MainApp() {
   const sessionsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionsRefreshInFlightRef = useRef(false);
   const sessionsRefreshDirtyRef = useRef(false);
-  const savedWindowWidthRef = useRef<number | null>(null);
-  const workspaceExpandedForBrowserRef = useRef(false);
   const preferredSidebarOpenRef = useRef(true);
   const programmaticResizeRef = useRef(false);
   const resizeLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -196,23 +174,29 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  /// 展开拓展区面板（记录原窗口宽度、扩窗、压聊天栏）。矩阵态与 App 态共用。
+  /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出空间。
+  /// 矩阵态与 App 态共用；面板已展开时不改变现有分栏宽度。
   const ensureWorkspacePanelExpanded = useCallback(async () => {
-    if (!showWorkspacePanelRef.current) {
-      const appWindow = getCurrentWindow();
-      const innerSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor();
-      savedWindowWidthRef.current = innerSize.width / scaleFactor;
-    }
+    const wasOpen = showWorkspacePanelRef.current;
     showWorkspacePanelRef.current = true;
     setWorkspacePanelMounted(true);
     setShowWorkspacePanel(true);
-
-    await expandWindowForBrowser(lockResize, unlockResize);
-    workspaceExpandedForBrowserRef.current = true;
-    chatPanelWidthRef.current = MIN_CHAT_WIDTH;
-    setChatPanelWidth(MIN_CHAT_WIDTH);
-  }, [lockResize, unlockResize]);
+    if (wasOpen) return;
+    // 首次展开：按当前窗口宽度压缩聊天栏，为拓展区保留最小可用宽度。
+    // 侧边栏已由调用方先行收起，可用宽度即窗口宽度。
+    try {
+      const appWindow = getCurrentWindow();
+      const innerSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor();
+      const logicalW = innerSize.width / scaleFactor;
+      const maxChat = Math.max(MIN_BROWSER_WIDTH, logicalW - MIN_BROWSER_WIDTH);
+      const clamped = Math.min(chatPanelWidthRef.current, maxChat);
+      chatPanelWidthRef.current = clamped;
+      setChatPanelWidth(clamped);
+    } catch (error) {
+      console.warn('计算拓展区聊天栏宽度失败:', error);
+    }
+  }, []);
 
   const openWorkspacePanel = useCallback(async (kind: TabKind) => {
     const requestId = workspaceOpenRequestIdRef.current + 1;
@@ -227,31 +211,28 @@ export function MainApp() {
     if (workspaceOpenRequestIdRef.current !== requestId) return;
   }, [ensureWorkspacePanelExpanded, setSidebarOpenByLayout]);
 
-  const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
+  const closeWorkspacePanel = useCallback(async () => {
     if (!showWorkspacePanelRef.current) return;
     workspaceOpenRequestIdRef.current += 1;
-    const restoreW = savedWindowWidthRef.current;
-    savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
-    if (restoreSize && workspaceExpandedForBrowserRef.current) {
+    // 窗口宽度足够时按用户偏好恢复侧边栏；宽度不足时保持收起，避免挤压主内容。
+    try {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
       const scaleFactor = await appWindow.scaleFactor();
-      const logicalH = innerSize.height / scaleFactor;
-      const targetW = restoreW ?? (innerSize.width / scaleFactor - calcBrowserWidth(logicalH));
-      lockResize();
-      await appWindow.setSize(new LogicalSize(targetW, logicalH));
-      unlockResize();
-      if (targetW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
+      const logicalW = innerSize.width / scaleFactor;
+      if (logicalW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
         setSidebarOpenByLayout(true);
       }
-    } else if (preferredSidebarOpenRef.current) {
-      setSidebarOpenByLayout(true);
+    } catch (error) {
+      // 拿不到窗口尺寸时按用户偏好降级恢复
+      if (preferredSidebarOpenRef.current) {
+        setSidebarOpenByLayout(true);
+      }
     }
-    workspaceExpandedForBrowserRef.current = false;
     // 面板关闭后 tab 仍保存在 TabsContainer 内存中，仅隐藏。
-  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+  }, [setSidebarOpenByLayout]);
 
   /// 拓展区按钮（三态切换，设计文档 6.7.2）：
   /// 面板展开 → 收起；面板收起且有已打开 tab → 回到上次 App 态；否则进入矩阵态。
@@ -315,7 +296,7 @@ export function MainApp() {
       // 拖到右侧剩余宽度小于面板最小宽度时，关闭工作区面板。
       if (rect.width - next < MIN_BROWSER_WIDTH) {
         cleanup();
-        void closeWorkspacePanel(false);
+        void closeWorkspacePanel();
         return;
       }
       const clamped = Math.max(MIN_CHAT_WIDTH, next);
@@ -628,7 +609,7 @@ export function MainApp() {
           const sidebarW = mainEl ? mainEl.offsetLeft : 0;
           const browserSpace = logicalW - sidebarW - chatPanelWidthRef.current;
           if (browserSpace < MIN_BROWSER_WIDTH) {
-            await closeWorkspacePanel(false);
+            await closeWorkspacePanel();
           }
         }
 
