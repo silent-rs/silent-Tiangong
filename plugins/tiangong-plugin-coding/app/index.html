@@ -1,0 +1,428 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>分支切换</title>
+  <style>
+    * { box-sizing: border-box; }
+    :host, .cs-root { all: initial; }
+    .cs-root {
+      display: inline-flex;
+      position: relative;
+      align-items: center;
+      font-family: inherit;
+      font-size: 12px;
+      line-height: 20px;
+      height: 20px;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+    }
+    .cs-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 20px;
+      padding: 0 4px;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+      max-width: 200px;
+      white-space: nowrap;
+    }
+    .cs-trigger:hover { color: hsl(var(--foreground, 222.2 47.4% 11.2%)); background: hsl(var(--accent, 210 40% 96.1%)); }
+    .cs-trigger:disabled { cursor: default; opacity: .6; }
+    .cs-name { overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+    .cs-dirty {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: hsl(var(--yellow, 45 93% 47%));
+      flex: none;
+    }
+    .cs-caret { flex: none; opacity: .7; }
+    .cs-drop {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 6px);
+      z-index: 2147483000;
+      width: 260px;
+      max-height: 320px;
+      overflow-y: auto;
+      padding: 4px;
+      border: 1px solid hsl(var(--border, 214.3 31.8% 91.4%));
+      border-radius: var(--radius, 8px);
+      background: hsl(var(--popover, 0 0% 100%));
+      color: hsl(var(--popover-foreground, 222.2 47.4% 11.2%));
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+      font-family: inherit;
+      font-size: 12px;
+    }
+    .cs-error {
+      margin-bottom: 4px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: hsl(var(--destructive, 0 84.2% 60.2%) / .12);
+      color: hsl(var(--destructive, 0 84.2% 60.2%));
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .cs-head {
+      padding: 6px 8px 2px;
+      font-size: 10px;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      user-select: none;
+    }
+    .cs-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .cs-item:hover { background: hsl(var(--accent, 210 40% 96.1%)); }
+    .cs-item.is-current { color: hsl(var(--primary, 222.2 47.4% 11.2%)); font-weight: 500; }
+    .cs-item.is-remote { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%)); }
+    .cs-item.is-switching { opacity: .5; pointer-events: none; }
+    .cs-item-name { overflow: hidden; text-overflow: ellipsis; }
+    .cs-check { flex: none; margin-left: auto; visibility: hidden; }
+    .cs-item.is-current .cs-check { visibility: visible; }
+    .cs-hint {
+      padding: 8px;
+      font-size: 11px;
+      color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      text-align: center;
+    }
+    .cs-spin {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border: 1.5px solid hsl(var(--muted-foreground, 215.4 16.3% 46.9%) / .35);
+      border-top-color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%));
+      border-radius: 50%;
+      animation: cs-rotate .7s linear infinite;
+      flex: none;
+    }
+    @keyframes cs-rotate { to { transform: rotate(360deg); } }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <!--
+    Coding 插件 · 分支切换器（session.input-status 挂载点）
+    宿主只提供通用插槽；本文件是插件自带的自包含 UI：
+    - 数据/切换经 bridge.call('plugin.branches' / 'plugin.switchBranch') 走
+      WASM handle-view-message → sidecar（on_demand，沙箱可写域随会话工作区）。
+    - 工作区路径取自宿主会话上下文（hostContext().session.workspace），
+      会话切换时经 onHostContextChange 重新加载。
+  -->
+  <div class="cs-root" id="cs-root" style="display:none">
+    <button class="cs-trigger" id="cs-trigger" type="button" title="切换分支" hidden>
+      <svg class="cs-spin" id="cs-loading" viewBox="0 0 16 16" width="10" height="10" hidden></svg>
+      <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="4" cy="3.5" r="1.75" />
+        <circle cx="4" cy="12.5" r="1.75" />
+        <circle cx="12" cy="6" r="1.75" />
+        <path d="M4 5.25v5.5M5.75 6h2.75a1.5 1.5 0 0 1 1.5 1.5v0c0 1.75-2.25 1.75-2.25 3.5" />
+      </svg>
+      <span class="cs-name" id="cs-name">分支</span>
+      <span class="cs-dirty" id="cs-dirty" hidden title="有未提交改动"></span>
+      <svg class="cs-caret" viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+        <path d="M4 10l4-4 4 4" />
+      </svg>
+    </button>
+    <div class="cs-drop" id="cs-drop" hidden></div>
+  </div>
+
+  <script>
+    const uiRoot = typeof pluginRoot !== 'undefined' && pluginRoot ? pluginRoot : document;
+    const $ = (id) => uiRoot.getElementById(id);
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+
+    // ── 天工插件桥接（Shadow 容器注入 bridge；iframe 容器走 postMessage 协议）──
+    function detectBridge() {
+      if (typeof bridge !== 'undefined' && bridge) return Promise.resolve(bridge);
+      if (window.parent !== window) return createIframeBridge();
+      return Promise.reject(new Error('未检测到天工容器'));
+    }
+
+    function createIframeBridge() {
+      let channel = null;
+      let context = null;
+      const contextHandlers = [];
+      let callId = 0;
+      const pending = new Map();
+      window.addEventListener('message', (event) => {
+        const data = event.data;
+        if (!data) return;
+        if (data.type === 'tiangong_host_context') {
+          channel = data.channel;
+          context = data;
+          contextHandlers.forEach((handler) => handler(data));
+          return;
+        }
+        if (data.id && pending.has(data.id)) {
+          const waiter = pending.get(data.id);
+          pending.delete(data.id);
+          data.error ? waiter.reject(new Error(data.error)) : waiter.resolve(data.result);
+        }
+      });
+      return Promise.resolve({
+        call(method, payload) {
+          return new Promise((resolve, reject) => {
+            if (!channel) return reject(new Error('宿主通道未就绪'));
+            const id = 'cs-' + (++callId);
+            pending.set(id, { resolve, reject });
+            window.parent.postMessage({ type: 'plugin_call', channel, id, method, payload }, '*');
+          });
+        },
+        hostContext() { return context; },
+        onHostContextChange(handler) {
+          contextHandlers.push(handler);
+          if (context) handler(context);
+        },
+      });
+    }
+
+    // ── 状态 ──
+    const state = {
+      workspace: null,
+      data: null,        // BranchesResponse
+      loading: false,
+      switching: null,   // 切换中的分支名
+      error: null,
+      open: false,
+    };
+    let hostBridge = null;
+
+    function hideRoot() { $('cs-root').style.display = 'none'; }
+    function showRoot() { $('cs-root').style.display = ''; }
+
+    async function callPlugin(method, payload) {
+      const raw = await hostBridge.call(method, JSON.stringify(payload));
+      return JSON.parse(raw);
+    }
+
+    async function load() {
+      // 显示策略：只有确认是 git 仓库才显示；非 git、无工作区、
+      // 以及未确认前的读取失败一律隐藏（避免加载期占位闪烁）。
+      if (!state.workspace) {
+        state.data = null;
+        state.open = false;
+        return hideRoot();
+      }
+      state.loading = true;
+      state.error = null;
+      render();
+      try {
+        const data = await callPlugin('plugin.branches', { workspace: state.workspace });
+        if (data && data.is_repo) {
+          state.data = data;
+          showRoot();
+        } else {
+          state.data = null;
+          state.open = false;
+          hideRoot();
+        }
+      } catch (error) {
+        state.error = (error && error.message) || String(error);
+        if (state.data && state.data.is_repo) {
+          // 已确认过是 git 仓库，保留显示供排查（如切换失败后的错误）。
+          showRoot();
+        } else {
+          state.data = null;
+          state.open = false;
+          hideRoot();
+        }
+      } finally {
+        state.loading = false;
+        render();
+      }
+    }
+
+    async function switchTo(branch) {
+      if (state.switching || !state.workspace) return;
+      state.switching = branch;
+      state.error = null;
+      render();
+      try {
+        await callPlugin('plugin.switchBranch', {
+          workspace: state.workspace,
+          branch,
+        });
+        await load();
+      } catch (error) {
+        state.error = (error && error.message) || String(error);
+        render();
+      } finally {
+        state.switching = null;
+        render();
+      }
+    }
+
+    // ── 渲染 ──
+    function icon(name) {
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 16 16');
+      svg.setAttribute('width', '10');
+      svg.setAttribute('height', '10');
+      svg.setAttribute('fill', 'none');
+      svg.setAttribute('stroke', 'currentColor');
+      svg.setAttribute('stroke-width', '1.6');
+      svg.setAttribute('stroke-linecap', 'round');
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', name === 'check' ? 'M3.5 8.5l3 3 6-7' : 'M4 10l4-4 4 4');
+      svg.appendChild(path);
+      return svg;
+    }
+
+    function item(branch) {
+      const row = document.createElement('div');
+      const isCurrent = branch.is_current || branch.name === state.data.current;
+      row.className = 'cs-item'
+        + (isCurrent && !branch.is_remote ? ' is-current' : '')
+        + (branch.is_remote ? ' is-remote' : '')
+        + (state.switching === branch.name ? ' is-switching' : '');
+      if (state.switching === branch.name) {
+        const spin = document.createElementNS(SVG_NS, 'svg');
+        spin.setAttribute('class', 'cs-spin');
+        spin.setAttribute('viewBox', '0 0 16 16');
+        spin.setAttribute('width', '10');
+        spin.setAttribute('height', '10');
+        row.appendChild(spin);
+      }
+      const name = document.createElement('span');
+      name.className = 'cs-item-name';
+      name.textContent = branch.name;
+      name.title = branch.is_remote ? '远端分支，切换时自动创建本地跟踪分支' : branch.name;
+      row.appendChild(name);
+      const check = icon('check');
+      check.setAttribute('class', 'cs-check');
+      row.appendChild(check);
+      if (!isCurrent) {
+        row.addEventListener('click', (event) => {
+          event.stopPropagation();
+          switchTo(branch.name);
+        });
+      } else {
+        row.addEventListener('click', (event) => event.stopPropagation());
+      }
+      return row;
+    }
+
+    function render() {
+      const trigger = $('cs-trigger');
+      const data = state.data;
+      // 未确认是 git 仓库前不渲染任何可见元素（非 git 工作区零闪烁）。
+      if (!state.workspace || !data || !data.is_repo) {
+        trigger.hidden = true;
+        state.open = false;
+        return;
+      }
+      trigger.hidden = false;
+      $('cs-loading').hidden = !state.loading;
+      trigger.disabled = Boolean(state.loading);
+      const label = $('cs-name');
+      label.textContent = data.current
+        || (data.detached && data.head_short ? 'HEAD ' + data.head_short : '分支');
+      label.title = data.current ? data.current : '分离头指针';
+      $('cs-dirty').hidden = !data.has_uncommitted_changes;
+      trigger.disabled = false;
+      renderDrop();
+    }
+
+    function renderDrop() {
+      const drop = $('cs-drop');
+      drop.hidden = !state.open;
+      if (!state.open) return;
+      drop.textContent = '';
+      if (state.error) {
+        const box = document.createElement('div');
+        box.className = 'cs-error';
+        box.textContent = state.error;
+        drop.appendChild(box);
+      }
+      const data = state.data;
+      if (!data || !data.is_repo) {
+        const hint = document.createElement('div');
+        hint.className = 'cs-hint';
+        hint.textContent = state.loading ? '加载中…' : '无法读取分支';
+        drop.appendChild(hint);
+        return;
+      }
+      const locals = (data.branches || []).filter((b) => !b.is_remote);
+      const remotes = (data.branches || []).filter((b) => b.is_remote);
+      const group = (title, list) => {
+        if (!list.length) return;
+        const head = document.createElement('div');
+        head.className = 'cs-head';
+        head.textContent = title;
+        drop.appendChild(head);
+        list.forEach((branch) => drop.appendChild(item(branch)));
+      };
+      group('本地分支', locals);
+      group('远端分支', remotes);
+      if (!locals.length && !remotes.length) {
+        const hint = document.createElement('div');
+        hint.className = 'cs-hint';
+        hint.textContent = '没有可用分支';
+        drop.appendChild(hint);
+      }
+    }
+
+    // ── 交互 ──
+    $('cs-trigger').addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.open = !state.open;
+      if (state.open) void load();
+      render();
+    });
+    document.addEventListener('click', (event) => {
+      if (!state.open) return;
+      const path = event.composedPath ? event.composedPath() : [];
+      if (!path.includes($('cs-root'))) {
+        state.open = false;
+        render();
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.open) {
+        state.open = false;
+        render();
+      }
+    });
+
+    // ── 启动 ──
+    (async () => {
+      try {
+        hostBridge = await detectBridge();
+      } catch {
+        return hideRoot();
+      }
+      const onContext = (context) => {
+        const workspace = context && context.session && context.session.workspace;
+        const changed = workspace !== state.workspace;
+        state.workspace = workspace || null;
+        if (changed) void load();
+      };
+      // Shadow 容器：hostContext（上下文对象）与 onHostContextChange（函数）是
+      // 宿主以脚本参数注入的自由变量，不在 bridge 对象上；iframe 容器则挂在
+      // 桥对象上（hostContext 为返回对象的函数）。
+      let initial = null;
+      if (typeof hostContext !== 'undefined' && hostContext) {
+        initial = typeof hostContext === 'function' ? hostContext() : hostContext;
+      } else if (typeof hostBridge.hostContext === 'function') {
+        initial = hostBridge.hostContext();
+      }
+      if (initial) onContext(initial);
+      if (typeof onHostContextChange === 'function') {
+        onHostContextChange(onContext);
+      } else if (typeof hostBridge.onHostContextChange === 'function') {
+        hostBridge.onHostContextChange(onContext);
+      }
+      if (!initial) void load();
+    })();
+  </script>
+</body>
+</html>

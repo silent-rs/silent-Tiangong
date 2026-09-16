@@ -185,8 +185,23 @@ jobs:
             fi
             manifest_has_ui="$(jq -r '.ui != null' "$manifest")"
             if [[ "$manifest_has_ui" != "$has_ui" ]]; then
-              echo "Plugin $id UI manifest and package.json do not match" >&2
-              exit 1
+              # 零构建链形态：manifest 声明 UI 但无 package.json（手写自包含入口），
+              # 要求声明的 entry 文件已在源码目录就位；其余不一致仍报错。
+              zero_build_ui=false
+              if [[ "$manifest_has_ui" == "true" && "$has_ui" == "false" ]]; then
+                zero_build_ui=true
+                while IFS= read -r entry; do
+                  [[ -z "$entry" ]] && continue
+                  if [[ ! -f "$root/$entry" ]]; then
+                    echo "Plugin $id declares UI entry $entry but the file is missing" >&2
+                    exit 1
+                  fi
+                done < <(jq -er '.ui.contributions[].entry' "$manifest")
+              fi
+              if [[ "$zero_build_ui" != "true" ]]; then
+                echo "Plugin $id UI manifest and package.json do not match" >&2
+                exit 1
+              fi
             fi
             if [[ "$has_protocol" != "true" && "$has_ui" != "true" ]]; then
               echo "Plugin $id has no checkable WASM or UI" >&2

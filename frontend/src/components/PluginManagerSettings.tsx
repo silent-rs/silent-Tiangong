@@ -605,6 +605,15 @@ function InstalledPluginRow({
             )}
           </div>
 
+          {plugin.description && (
+            <p
+              className="mt-1 truncate text-xs leading-5 text-muted-foreground"
+              title={plugin.description}
+            >
+              {plugin.description}
+            </p>
+          )}
+
           {plugin.last_error && (
             <p className="mt-1 break-words text-xs leading-5 text-destructive">{plugin.last_error}</p>
           )}

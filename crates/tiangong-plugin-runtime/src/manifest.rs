@@ -18,6 +18,13 @@ pub const MANIFEST_SCHEMA_VERSION_V2: u32 = 2;
 pub struct PluginManifest {
     pub schema_version: u32,
     pub id: String,
+    /// 展示名。缺省时前端以 id 兜底显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 插件描述：一句话短描述 + 可选的完整说明（换行分隔）。
+    /// 前端列表截断显示首行，悬停展示全文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub version: String,
     /// 声明插件运行依赖本机 Server（如 subagent 的消息总线回调）。
     /// 宿主据此在关闭 Server 时提示受影响插件；Server 不可用时插件
@@ -966,7 +973,13 @@ mod tests {
 
     #[test]
     fn v2_清单解析出完整贡献() {
-        let manifest = parse(&v2_json()).expect("v2 应解析通过");
+        let manifest = parse(&v2_json().replace(
+            "\"id\": \"com.example.board\",",
+            "\"id\": \"com.example.board\",\n            \"name\": \"看板助手\",\n            \"description\": \"轻量任务看板。\",",
+        ))
+        .expect("v2 应解析通过");
+        assert_eq!(manifest.name.as_deref(), Some("看板助手"));
+        assert_eq!(manifest.description.as_deref(), Some("轻量任务看板。"));
         let capabilities = manifest.capabilities.as_ref().unwrap();
         assert!(capabilities.tools);
         assert_eq!(capabilities.events, vec!["session.*", "tool.*"]);
