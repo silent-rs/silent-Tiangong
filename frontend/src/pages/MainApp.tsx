@@ -19,6 +19,7 @@ import {
 } from '@/components/TabsContainer';
 import { ExtensionMatrix } from '@/components/ExtensionMatrix';
 import { InteractionPluginHost } from '@/components/InteractionPluginHost';
+import { useToast } from '@/components/Toast';
 import { ensureDesktopNotificationPermission } from '@/utils/desktopNotification';
 import { useUpdateCheck } from '@/hooks/useUpdateCheck';
 import type { UnlistenFn } from '@tauri-apps/api/event';
@@ -89,6 +90,7 @@ function browserPluginSessionId(sessionId?: string | null): string {
 
 export function MainApp() {
   const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
+  const { showWarning } = useToast();
   const activeSessionId = useStore((state) => state.activeSessionId);
   const newConversationId = useStore((state) => state.newConversationId);
   const currentSessionId = activeSessionId ?? newConversationId;
@@ -174,38 +176,29 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出空间；
-  /// 仅当窗口窄到放不下「聊天栏 + 拓展区」两个最小宽度时，才扩窗到刚好可用。
-  /// 矩阵态与 App 态共用；面板已展开时不改变现有分栏宽度。
-  const ensureWorkspacePanelExpanded = useCallback(async () => {
+  /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出
+  /// 空间。窗口窄到放不下「聊天栏 + 拓展区」两个最小宽度时禁止展开（返回
+  /// false），仅隐藏挂载保活，插件 App 实例照常使用。矩阵态与 App 态共用；
+  /// 面板已展开时不改变现有分栏宽度。
+  const ensureWorkspacePanelExpanded = useCallback((): boolean => {
+    if (window.innerWidth < MIN_CHAT_WIDTH + MIN_BROWSER_WIDTH) {
+      setWorkspacePanelMounted(true);
+      return false;
+    }
     const wasOpen = showWorkspacePanelRef.current;
     showWorkspacePanelRef.current = true;
+    setSidebarOpenByLayout(false);
     if (!wasOpen) {
-      // 侧边栏已由调用方先行收起，可用宽度即窗口宽度。
-      try {
-        const appWindow = getCurrentWindow();
-        const innerSize = await appWindow.innerSize();
-        const scaleFactor = await appWindow.scaleFactor();
-        let logicalW = innerSize.width / scaleFactor;
-        const minWindowW = MIN_CHAT_WIDTH + MIN_BROWSER_WIDTH;
-        if (logicalW < minWindowW) {
-          const logicalH = innerSize.height / scaleFactor;
-          logicalW = minWindowW;
-          lockResize();
-          await appWindow.setSize(new LogicalSize(logicalW, logicalH));
-          unlockResize();
-        }
-        // 聊天栏收敛到用户偏好宽度；扩窗兜底保证下限不低于 MIN_CHAT_WIDTH
-        const clamped = Math.min(chatPanelWidthRef.current, logicalW - MIN_BROWSER_WIDTH);
-        chatPanelWidthRef.current = clamped;
-        setChatPanelWidth(clamped);
-      } catch (error) {
-        console.warn('计算拓展区聊天栏宽度失败:', error);
-      }
+      // 首次展开：按当前窗口宽度收敛聊天栏（侧边栏已收，可用宽度即窗口宽度），
+      // 为拓展区保留最小可用宽度
+      const clamped = Math.min(chatPanelWidthRef.current, window.innerWidth - MIN_BROWSER_WIDTH);
+      chatPanelWidthRef.current = clamped;
+      setChatPanelWidth(clamped);
     }
     setWorkspacePanelMounted(true);
     setShowWorkspacePanel(true);
-  }, [lockResize, unlockResize]);
+    return true;
+  }, [setSidebarOpenByLayout]);
 
   const openWorkspacePanel = useCallback(async (kind: TabKind) => {
     const requestId = workspaceOpenRequestIdRef.current + 1;
@@ -214,11 +207,9 @@ export function MainApp() {
     setWorkspaceTabKind(kind);
     setWorkspaceMode('app');
     setWorkspaceOpenRequestVersion((version) => version + 1);
-    setSidebarOpenByLayout(false);
-
-    await ensureWorkspacePanelExpanded();
-    if (workspaceOpenRequestIdRef.current !== requestId) return;
-  }, [ensureWorkspacePanelExpanded, setSidebarOpenByLayout]);
+    // 窗口过窄时 ensure 返回 false：标签照常建立、实例隐藏挂载保活，仅不展开面板
+    ensureWorkspacePanelExpanded();
+  }, [ensureWorkspacePanelExpanded]);
 
   const closeWorkspacePanel = useCallback(async () => {
     if (!showWorkspacePanelRef.current) return;
@@ -226,19 +217,8 @@ export function MainApp() {
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
     // 窗口宽度足够时按用户偏好恢复侧边栏；宽度不足时保持收起，避免挤压主内容。
-    try {
-      const appWindow = getCurrentWindow();
-      const innerSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor();
-      const logicalW = innerSize.width / scaleFactor;
-      if (logicalW > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
-        setSidebarOpenByLayout(true);
-      }
-    } catch (error) {
-      // 拿不到窗口尺寸时按用户偏好降级恢复
-      if (preferredSidebarOpenRef.current) {
-        setSidebarOpenByLayout(true);
-      }
+    if (window.innerWidth > SIDEBAR_RESTORE_THRESHOLD && preferredSidebarOpenRef.current) {
+      setSidebarOpenByLayout(true);
     }
     // 面板关闭后 tab 仍保存在 TabsContainer 内存中，仅隐藏。
   }, [setSidebarOpenByLayout]);
@@ -250,19 +230,27 @@ export function MainApp() {
       void closeWorkspacePanel();
       return;
     }
+    // 窗口过窄：禁止展开面板（窗口宽度与布局均保持不变），已打开的 App
+    // 实例仍在后台保活可用，拉宽窗口后即可正常展开。
+    if (window.innerWidth < MIN_CHAT_WIDTH + MIN_BROWSER_WIDTH) {
+      showWarning(
+        '窗口宽度不足，无法展开拓展区',
+        `至少需要 ${MIN_CHAT_WIDTH + MIN_BROWSER_WIDTH}px。已打开的应用仍在后台保持可用。`,
+      );
+      return;
+    }
     if (runningPluginApps.length > 0) {
       void openWorkspacePanel(workspaceTabKindRef.current);
       return;
     }
     setWorkspaceMode('matrix');
-    setSidebarOpenByLayout(false);
-    void ensureWorkspacePanelExpanded();
+    ensureWorkspacePanelExpanded();
   }, [
     closeWorkspacePanel,
     ensureWorkspacePanelExpanded,
     openWorkspacePanel,
     runningPluginApps.length,
-    setSidebarOpenByLayout,
+    showWarning,
   ]);
 
   /// 启动台按钮：App 态切回矩阵态（面板保持展开，App 实例隐藏保活）。
