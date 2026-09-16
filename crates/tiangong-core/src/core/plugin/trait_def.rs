@@ -129,7 +129,7 @@ pub trait Plugin:
     /// worker_loop 在首次 build engine 以及 config generation 变化导致 engine rebuild 时
     /// 调用（在收集 tool_specs 之前）。插件可按需读取模型配置、memory 配置等，执行
     /// 热更新或初始化（如 reconfigure memory actor、启动后台调度器）。默认实现为空。
-    fn on_config_updated(&self, _config: &crate::core_config::CoreConfig) {}
+    fn on_config_updated(&self, _config: &crate::config::core::CoreConfig) {}
 
     // ── 生命周期钩子 ──
     //

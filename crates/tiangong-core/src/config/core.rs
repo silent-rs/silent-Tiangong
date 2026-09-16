@@ -13,8 +13,8 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::models::ModelsConfig;
 use crate::model::ProviderProtocol;
-use crate::models_config::ModelsConfig;
 use crate::permission::TrustMode;
 
 /// 模型端点配置（定义已迁移至 `tiangong-llm`，此处仅做 re-export 保持外部路径稳定）。
@@ -45,7 +45,7 @@ pub struct LlmConfig {
 impl LlmConfig {
     /// 从 ModelsConfig 解析出 core 运行所需的 chat + lite 端点。
     pub fn from_models_config(models: &ModelsConfig) -> Self {
-        use crate::models_config::RoutingSlot;
+        use crate::config::models::RoutingSlot;
 
         let resolve = |slot: RoutingSlot| -> Option<ModelEndpoint> {
             let resolved = models.resolve_slot(slot)?;
@@ -227,7 +227,7 @@ fn default_reasoning_effort() -> crate::model::ReasoningEffort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models_config::ModelCapability;
+    use crate::config::models::ModelCapability;
 
     #[test]
     fn provider_snapshot_and_generation() {
@@ -278,12 +278,12 @@ mod tests {
 
     #[test]
     fn llm_config_from_models_config_preserves_protocol() {
-        use crate::models_config::RoutingSlot;
+        use crate::config::models::RoutingSlot;
 
         let mut models = ModelsConfig::default();
         models.providers.insert(
             "anthropic".to_string(),
-            crate::models_config::ProviderConfig {
+            crate::config::models::ProviderConfig {
                 headers: Default::default(),
                 base_url: "https://api.anthropic.com".into(),
                 api_key: "sk-ant".into(),
@@ -293,7 +293,7 @@ mod tests {
         );
         models.routing.insert(
             RoutingSlot::Chat,
-            crate::models_config::ModelEntry {
+            crate::config::models::ModelEntry {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-4".into(),
                 capabilities: vec![ModelCapability::Chat],

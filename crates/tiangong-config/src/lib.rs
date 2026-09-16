@@ -30,4 +30,4 @@ pub use config::{
 pub use loader::{default_tiangong_dir, load_tiangong_config, load_tiangong_config_from_dir};
 
 // re-export core config types for convenience
-pub use tiangong_core::core_config::{CoreConfig, CoreConfigBuilder, CoreConfigProvider};
+pub use tiangong_core::config::core::{CoreConfig, CoreConfigBuilder, CoreConfigProvider};

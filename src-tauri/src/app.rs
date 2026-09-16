@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 use tiangong_core::agent_input::AgentInputKind;
-use tiangong_core::core_config::CoreConfigProvider;
+use tiangong_core::config::core::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
@@ -1035,7 +1035,7 @@ mod tests {
     #[tokio::test]
     async fn same_session_core_creation_uses_one_serial_boundary() {
         // CoreManager.creation_lock 替代了原 CoreCreationLocks(issue #245)。
-        use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+        use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
         let manager = tiangong_core_manager::CoreManager::new(
             CoreConfigProvider::new(CoreConfig::default()),
             std::path::PathBuf::from("/tmp"),
@@ -1073,7 +1073,7 @@ mod tests {
     #[tokio::test]
     async fn has_live_core_tracks_core_instance_presence() {
         use std::sync::mpsc;
-        use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+        use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
 
         let app = TiangongApp::new();
         let session_id = "session-lifecycle-test";

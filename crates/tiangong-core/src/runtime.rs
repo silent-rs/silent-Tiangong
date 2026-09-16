@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agent_config::AgentConfig;
+use crate::config::agent::AgentConfig;
+use crate::config::models::ModelsConfig;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
-use crate::models_config::ModelsConfig;
 use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
@@ -43,7 +43,7 @@ pub struct RuntimeEngine {
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
-    core_config: Option<crate::core_config::CoreConfig>,
+    core_config: Option<crate::config::core::CoreConfig>,
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的工具规格提供者
@@ -120,13 +120,13 @@ impl RuntimeEngine {
         self
     }
 
-    pub fn with_core_config(mut self, config: crate::core_config::CoreConfig) -> Self {
+    pub fn with_core_config(mut self, config: crate::config::core::CoreConfig) -> Self {
         self.core_config = Some(config);
         self
     }
 
     /// 获取 LlmConfig 引用（优先从 core_config 取）
-    pub fn llm_config(&self) -> Option<&crate::core_config::LlmConfig> {
+    pub fn llm_config(&self) -> Option<&crate::config::core::LlmConfig> {
         self.core_config.as_ref().map(|c| &c.llm)
     }
 

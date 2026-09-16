@@ -7,7 +7,7 @@
 
 use super::super::outcome::{TurnExecutionOutcome, TurnExecutionResult};
 use super::execute_turn;
-use crate::agent_config::AgentConfig;
+use crate::config::agent::AgentConfig;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::model::SingleProviderClient;

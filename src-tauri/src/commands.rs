@@ -288,7 +288,7 @@ pub async fn load_session(
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
     let context_limit = if config.context_limit == 0 {
-        tiangong_core::core_config::default_context_limit()
+        tiangong_core::config::core::default_context_limit()
     } else {
         config.context_limit
     };

@@ -1141,8 +1141,8 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
+    use tiangong_core::config::core::CoreConfig;
     use tiangong_core::core::Plugin;
-    use tiangong_core::core_config::CoreConfig;
     use tiangong_types::ContentBlock;
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};

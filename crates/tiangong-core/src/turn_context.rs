@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use crate::agent_config::AgentConfig;
+use crate::config::agent::AgentConfig;
 use crate::core::plugin::Plugin;
 use crate::model::{SingleProviderClient, ToolSpec};
 use crate::session::Session;

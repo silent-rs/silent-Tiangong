@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
-use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
 use tiangong_core::tool_override::{
     MentionCandidateProvider, PromptSectionProvider, ToolSpecProvider,

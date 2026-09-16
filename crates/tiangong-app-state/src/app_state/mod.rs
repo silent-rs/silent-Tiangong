@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tiangong_core::agent_config::AgentConfig;
+use tiangong_core::config::agent::AgentConfig;
 
 mod store;
 
@@ -26,7 +26,7 @@ impl TiangongState {
         let config = tiangong_config::registry::init();
         let core_config = config.to_core_config();
         let core_manager = CoreManager::new(
-            tiangong_core::core_config::CoreConfigProvider::new(core_config.clone()),
+            tiangong_core::config::core::CoreConfigProvider::new(core_config.clone()),
             config.storage_root.clone(),
         );
         let agent_config = AgentConfig {

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
 use tiangong_core::core::{Plugin, TiangongCore};
-use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_types::StreamEvent;
 
 use crate::CoreManager;

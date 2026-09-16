@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use tiangong_core::agent_config::AgentConfig;
-use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::config::agent::AgentConfig;
+use tiangong_core::config::core::ModelEndpoint;
 use tiangong_core::model::SingleProviderClient;
 use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::prompt::sections::build_full_system_prompt;

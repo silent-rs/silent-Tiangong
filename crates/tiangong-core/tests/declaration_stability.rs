@@ -11,8 +11,8 @@ use std::sync::{
 };
 use tiangong_core::{
     agent_input::{AgentInput, AgentInputKind},
+    config::core::{CoreConfig, CoreConfigProvider},
     core::{Plugin, TiangongCore},
-    core_config::{CoreConfig, CoreConfigProvider},
     model::{ToolCall, ToolSpec},
     permission::TrustMode,
     session::Session,

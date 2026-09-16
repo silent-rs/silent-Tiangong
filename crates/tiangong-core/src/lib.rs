@@ -3,15 +3,13 @@ pub use tiangong_types::MentionCandidate;
 /// @提及候选分组（见 [`tiangong_types::MentionGroup`]）。
 pub use tiangong_types::MentionGroup;
 
-pub mod agent_config;
 pub mod agent_input;
+pub mod config;
 pub mod context;
 pub mod core;
-pub mod core_config;
 pub(crate) mod formatting;
 pub mod media;
 pub mod model;
-pub mod models_config;
 pub mod observe;
 pub mod permission;
 pub mod prompt;

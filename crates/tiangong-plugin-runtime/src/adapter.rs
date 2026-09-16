@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::sidecar::SidecarConnection;
+use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;

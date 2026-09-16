@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core_config::CoreConfig;
+use crate::config::core::CoreConfig;
 use crate::model::ToolSpec;
 use crate::permission::TrustMode;
 use crate::session::Session;

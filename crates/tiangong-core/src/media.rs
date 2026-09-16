@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::models_config::{ModelCapability, ModelsConfig, ResolvedModel};
+use crate::config::models::{ModelCapability, ModelsConfig, ResolvedModel};
 
 pub struct MediaCallOutput<T> {
     pub resolved: ResolvedModel,

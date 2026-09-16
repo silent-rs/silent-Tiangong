@@ -17,7 +17,7 @@ use crate::session::MessageRole;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_balanced() {
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
     use crate::session::Session;
     use serde_json::{Value, json};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -167,8 +167,8 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
     use crate::core::plugin::Plugin;
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
     use crate::tool_override::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };

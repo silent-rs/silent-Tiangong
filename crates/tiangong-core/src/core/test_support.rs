@@ -17,8 +17,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use crate::agent_input::{AgentInput, AgentInputKind};
+use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::core::TiangongCore;
-use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::permission::TrustMode;
 use crate::session::Session;
 

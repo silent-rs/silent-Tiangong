@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use tauri::AppHandle;
+use tiangong_core::config::core::CoreConfigProvider;
 use tiangong_core::core::Plugin;
-use tiangong_core::core_config::CoreConfigProvider;
 
 /// 桌面端 Core 构造依赖。
 ///

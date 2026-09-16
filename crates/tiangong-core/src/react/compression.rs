@@ -586,7 +586,7 @@ fn notify_session_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_config::AgentConfig;
+    use crate::config::agent::AgentConfig;
     use crate::model::SingleProviderClient;
     use crate::observe::Observer;
     use crate::permission::TrustMode;

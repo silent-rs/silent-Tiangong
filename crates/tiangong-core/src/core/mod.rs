@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use typed_builder::TypedBuilder;
 
-use crate::core_config::{CoreConfig, CoreConfigProvider};
+use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
 use crate::react::turn::run_turn;
 use crate::session::Session;
@@ -280,7 +280,7 @@ impl TiangongCore {
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
             .context_limit(config.context_limit)
-            .agent_config(crate::agent_config::AgentConfig {
+            .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
                 custom_system_prompt: config.custom_system_prompt.clone(),
@@ -584,7 +584,7 @@ impl Drop for TiangongCore {
 #[cfg(test)]
 mod shared_runtime_tests {
     use super::*;
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
 
     struct MentionPlugin {
         id: &'static str,

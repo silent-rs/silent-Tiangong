@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
 use tiangong_core::core::TiangongCore;
-use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::Session;
 use tiangong_types::StreamEvent;
 
