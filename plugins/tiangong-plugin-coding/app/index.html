@@ -191,6 +191,7 @@
       workspace: null,
       data: null,        // BranchesResponse
       checkError: null,  // git 不可用等探测失败说明（置灰占位显示）
+      plainNonGit: false, // 确认非 git 工作区（置灰占位显示）
       loading: false,
       switching: null,   // 切换中的分支名
       error: null,
@@ -213,6 +214,7 @@
       if (!state.workspace) {
         state.data = null;
         state.checkError = null;
+        state.plainNonGit = false;
         state.open = false;
         state.loading = false;
         renderPlaceholder('当前会话未绑定 git 工作区');
@@ -226,18 +228,22 @@
         if (data && data.is_repo) {
           state.data = data;
           state.checkError = null;
+          state.plainNonGit = false;
           showRoot();
         } else if (data && data.check_error) {
           // git 不可用/超时：如实占位显示原因，不再无声消失。
           state.data = null;
           state.checkError = data.check_error;
+          state.plainNonGit = false;
           state.open = false;
           showRoot();
         } else {
+          // 确认非 git 工作区：置灰占位（可见且明确原因），不再隐藏。
           state.data = null;
           state.checkError = null;
           state.open = false;
-          hideRoot();
+          state.plainNonGit = true;
+          showRoot();
         }
       } catch (error) {
         state.error = (error && error.message) || String(error);
@@ -247,6 +253,7 @@
         } else {
           state.data = null;
           state.checkError = state.error;
+          state.plainNonGit = false;
           state.open = false;
           showRoot();
         }
@@ -352,6 +359,10 @@
       }
       if (state.checkError && !(data && data.is_repo)) {
         renderPlaceholder(state.checkError);
+        return;
+      }
+      if (state.plainNonGit) {
+        renderPlaceholder('当前工作区不是 git 仓库');
         return;
       }
       // 未确认是 git 仓库前不渲染任何可见元素（加载期零闪烁；确认非 git 隐藏）。

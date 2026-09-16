@@ -3,7 +3,7 @@
   "id": "coding",
   "name": "Coding",
   "description": "开发工作流：项目上下文发现、开发前检查、任务进度记录、交付审查，输入框提供分支切换。",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "wasm": {
     "binary": "tiangong_plugin_coding_wasm.wasm"
   },
