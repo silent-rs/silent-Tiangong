@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-generate-video-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Generate-Video 独立 sidecar（读取模型配置、调用视频生成、轮询任务）"
@@ -14,10 +14,9 @@ path = "src/main.rs"
 tiangong-plugin-generate-video-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
-tiangong-core = { workspace = true }
+tiangong-media = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }
-tiangong-media = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -89,7 +89,7 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
 
     let resolved =
         tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::ImageGeneration)?;
-    let output = tiangong_core::media::generate_image_with(
+    let output = tiangong_media::service::generate_image_with(
         &resolved,
         req.prompt,
         req.width.unwrap_or(0),

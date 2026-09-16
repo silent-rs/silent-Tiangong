@@ -8,7 +8,6 @@ pub mod config;
 pub mod context;
 pub mod core;
 pub(crate) mod formatting;
-pub mod media;
 pub mod model;
 pub mod observe;
 pub mod permission;

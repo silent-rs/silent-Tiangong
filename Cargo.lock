@@ -10856,7 +10856,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-llm",
- "tiangong-media",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10957,6 +10956,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tiangong-llm",
  "tokio",
  "tracing",
 ]
@@ -11281,7 +11281,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-protocol"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -11289,15 +11289,15 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
+ "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-generate-image-protocol",
  "tiangong-plugin-runtime",
@@ -11319,7 +11319,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video-protocol"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -11327,14 +11327,13 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
  "tiangong-media",
  "tiangong-plugin-generate-video-protocol",
@@ -11661,7 +11660,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text-protocol"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -11669,7 +11668,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11679,8 +11678,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
+ "tiangong-media",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
  "tiangong-plugin-speech-to-text-protocol",
@@ -11762,7 +11761,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech-protocol"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -11770,7 +11769,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11778,8 +11777,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
+ "tiangong-media",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
  "tiangong-plugin-text-to-speech-protocol",

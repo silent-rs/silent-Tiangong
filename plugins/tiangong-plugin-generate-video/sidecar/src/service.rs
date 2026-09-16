@@ -82,7 +82,7 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
 
     let resolved =
         tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::VideoGeneration)?;
-    let output = tiangong_core::media::generate_video_with(
+    let output = tiangong_media::service::generate_video_with(
         &resolved,
         req.prompt,
         req.duration,

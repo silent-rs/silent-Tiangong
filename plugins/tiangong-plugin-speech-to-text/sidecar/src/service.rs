@@ -131,7 +131,7 @@ async fn transcribe(req: TranscribeRequest) -> Result<TranscribeResponse> {
 
     // 解析 STT 端点。
     let resolved = tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::Stt)?;
-    let output = tiangong_core::media::transcribe_audio_with(
+    let output = tiangong_media::service::transcribe_audio_with(
         &resolved,
         audio_data,
         mime_type.to_string(),

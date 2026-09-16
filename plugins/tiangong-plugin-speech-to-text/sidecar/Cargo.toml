@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-speech-to-text-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Speech-To-Text 独立 sidecar（读取模型配置、读取音频、调用 STT 供应商）"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 tiangong-plugin-speech-to-text-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
-tiangong-core = { workspace = true }
+tiangong-media = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }
 anyhow = { workspace = true }
