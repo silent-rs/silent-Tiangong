@@ -102,8 +102,10 @@ export function ExtensionMatrix({
     };
   }, []);
 
+  // 列数随容器宽度自适应：每列最小 80px 不够则换列，避免压缩时固定列数
+  // 导致卡片溢出轨道相互重叠（lg 视口断点与容器宽度脱钩，不适用）。
   return (
-    <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-6 place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3 lg:grid-cols-8">
+    <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(80px,1fr))] place-content-start gap-x-1.5 gap-y-2 overflow-y-auto p-3">
       {apps.map((app) => {
         const Icon = appIcon(app);
         const appKey = `${app.plugin_id}:${app.contribution_id}`;
