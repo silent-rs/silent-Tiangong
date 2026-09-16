@@ -174,29 +174,38 @@ export function MainApp() {
     setSidebarOpen(open);
   }, [lockResize, unlockResize]);
 
-  /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出空间。
+  /// 展开拓展区面板：窗口宽度保持不变，在现有宽度内压缩聊天栏为拓展区腾出空间；
+  /// 仅当窗口窄到放不下「聊天栏 + 拓展区」两个最小宽度时，才扩窗到刚好可用。
   /// 矩阵态与 App 态共用；面板已展开时不改变现有分栏宽度。
   const ensureWorkspacePanelExpanded = useCallback(async () => {
     const wasOpen = showWorkspacePanelRef.current;
     showWorkspacePanelRef.current = true;
+    if (!wasOpen) {
+      // 侧边栏已由调用方先行收起，可用宽度即窗口宽度。
+      try {
+        const appWindow = getCurrentWindow();
+        const innerSize = await appWindow.innerSize();
+        const scaleFactor = await appWindow.scaleFactor();
+        let logicalW = innerSize.width / scaleFactor;
+        const minWindowW = MIN_CHAT_WIDTH + MIN_BROWSER_WIDTH;
+        if (logicalW < minWindowW) {
+          const logicalH = innerSize.height / scaleFactor;
+          logicalW = minWindowW;
+          lockResize();
+          await appWindow.setSize(new LogicalSize(logicalW, logicalH));
+          unlockResize();
+        }
+        // 聊天栏收敛到用户偏好宽度；扩窗兜底保证下限不低于 MIN_CHAT_WIDTH
+        const clamped = Math.min(chatPanelWidthRef.current, logicalW - MIN_BROWSER_WIDTH);
+        chatPanelWidthRef.current = clamped;
+        setChatPanelWidth(clamped);
+      } catch (error) {
+        console.warn('计算拓展区聊天栏宽度失败:', error);
+      }
+    }
     setWorkspacePanelMounted(true);
     setShowWorkspacePanel(true);
-    if (wasOpen) return;
-    // 首次展开：按当前窗口宽度压缩聊天栏，为拓展区保留最小可用宽度。
-    // 侧边栏已由调用方先行收起，可用宽度即窗口宽度。
-    try {
-      const appWindow = getCurrentWindow();
-      const innerSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor();
-      const logicalW = innerSize.width / scaleFactor;
-      const maxChat = Math.max(MIN_BROWSER_WIDTH, logicalW - MIN_BROWSER_WIDTH);
-      const clamped = Math.min(chatPanelWidthRef.current, maxChat);
-      chatPanelWidthRef.current = clamped;
-      setChatPanelWidth(clamped);
-    } catch (error) {
-      console.warn('计算拓展区聊天栏宽度失败:', error);
-    }
-  }, []);
+  }, [lockResize, unlockResize]);
 
   const openWorkspacePanel = useCallback(async (kind: TabKind) => {
     const requestId = workspaceOpenRequestIdRef.current + 1;
