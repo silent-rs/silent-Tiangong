@@ -29,11 +29,16 @@ import { InputQueueBar } from './InputQueueBar';
 
 const MOD_KEY_LABEL = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd+Enter' : 'Ctrl+Enter';
 
-/** token 数值紧凑显示（如 12345 -> 12.3k），向下取整不进位；精确值由 title 提示展示。 */
+/** token 数值紧凑显示（如 12345 -> 12.3k、1959320123 -> 1.9b），向下取整不进位；精确值由 title 提示展示。 */
+const TOKEN_UNITS: Array<[divisor: number, unit: string]> = [
+  [1_000_000_000, 'b'],
+  [1_000_000, 'm'],
+  [1_000, 'k'],
+];
+
 function formatTokenCount(value: number): string {
   if (value < 1000) return String(value);
-  const divisor = value >= 1_000_000 ? 1_000_000 : 1_000;
-  const unit = divisor === 1_000_000 ? 'm' : 'k';
+  const [divisor, unit] = TOKEN_UNITS.find(([d]) => value >= d) ?? [1_000, 'k'];
   return `${Math.floor(value / (divisor / 10)) / 10}${unit}`;
 }
 
