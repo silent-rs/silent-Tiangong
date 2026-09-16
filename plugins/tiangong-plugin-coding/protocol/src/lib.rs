@@ -259,6 +259,10 @@ pub struct BranchInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BranchesResponse {
     pub is_repo: bool,
+    /// git 探测不可用（命令无法执行/超预算）的说明；与 is_repo=false
+    /// （确认非 git 仓库）区分，界面据此显示错误占位而非隐藏。
+    #[serde(default)]
+    pub check_error: Option<String>,
     /// 当前分支名；分离头指针时为 None。
     pub current: Option<String>,
     pub detached: bool,
