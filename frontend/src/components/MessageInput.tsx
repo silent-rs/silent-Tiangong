@@ -1311,7 +1311,7 @@ export function MessageInput({
                 {(displayTokens > 0 || totalTokens > 0) && (
                   <div
                     className="flex items-center gap-2 text-muted-foreground/60 tabular-nums"
-                    title={`当前 ${displayTokens.toLocaleString()} tokens / 压缩阈值 ${compressionThreshold.toLocaleString()} tokens / 总计 ${totalTokens.toLocaleString()} tokens`}
+                    title={`当前 ${displayTokens.toLocaleString()} tokens\n压缩阈值 ${compressionThreshold.toLocaleString()} tokens\n总计 ${totalTokens.toLocaleString()} tokens`}
                   >
                     {compressionThreshold > 0 && (
                       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
