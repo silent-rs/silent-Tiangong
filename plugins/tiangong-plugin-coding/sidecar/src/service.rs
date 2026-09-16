@@ -1254,9 +1254,17 @@ fn branches(request: &BranchesRequest) -> std::result::Result<BranchesResponse, 
         deadline,
     ) {
         CommandOutput::Success(output) => String::from_utf8_lossy(&output).trim() == "true",
-        _ => {
+        CommandOutput::ExitFailure { .. } => false,
+        CommandOutput::Unavailable => {
+            // git 不可执行/超预算：如实上报并留日志，不再伪装成"非 git 仓库"
+            //（伪装会让界面无声消失且无诊断线索）。
+            tracing::warn!(
+                workspace = %workspace.display(),
+                "分支列表探测失败：git 不可用或调用超时"
+            );
             return Ok(BranchesResponse {
                 is_repo: false,
+                check_error: Some("git 不可用或调用超时，无法检测仓库状态".to_string()),
                 ..BranchesResponse::default()
             });
         }
@@ -1281,6 +1289,7 @@ fn branches(request: &BranchesRequest) -> std::result::Result<BranchesResponse, 
 
     let mut response = BranchesResponse {
         is_repo: true,
+        check_error: None,
         current: current.clone(),
         detached,
         head_short,
@@ -2094,6 +2103,19 @@ mod tests {
         );
         assert_eq!(response.uncommitted_files, vec!["dirty.rs".to_string()]);
         assert_eq!(response.uncommitted_files_total, 1);
+    }
+
+    #[test]
+    fn branches_reports_plain_non_git_without_check_error() {
+        let workspace = tempfile::tempdir().expect("创建临时目录");
+        let response = branches(&BranchesRequest {
+            workspace: workspace.path().display().to_string(),
+        })
+        .expect("读取非 git 目录");
+        // 确认非 git：is_repo=false 且不带 check_error（与 git 不可用区分）。
+        assert!(!response.is_repo);
+        assert!(response.check_error.is_none());
+        assert!(response.branches.is_empty());
     }
 
     #[test]

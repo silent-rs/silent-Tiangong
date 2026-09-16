@@ -11047,7 +11047,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -11055,7 +11055,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-sidecar"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11075,7 +11075,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-wasm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",

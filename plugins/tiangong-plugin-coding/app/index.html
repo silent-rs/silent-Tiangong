@@ -33,6 +33,7 @@
     }
     .cs-trigger:hover { color: hsl(var(--foreground, 222.2 47.4% 11.2%)); background: hsl(var(--accent, 210 40% 96.1%)); }
     .cs-trigger:disabled { cursor: default; opacity: .6; }
+    .cs-trigger.is-disabled { color: hsl(var(--muted-foreground, 215.4 16.3% 46.9%) / .55); pointer-events: none; }
     .cs-name { overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
     .cs-dirty {
       width: 6px; height: 6px; border-radius: 50%;
@@ -189,6 +190,7 @@
     const state = {
       workspace: null,
       data: null,        // BranchesResponse
+      checkError: null,  // git 不可用等探测失败说明（置灰占位显示）
       loading: false,
       switching: null,   // 切换中的分支名
       error: null,
@@ -205,12 +207,16 @@
     }
 
     async function load() {
-      // 显示策略：只有确认是 git 仓库才显示；非 git、无工作区、
-      // 以及未确认前的读取失败一律隐藏（避免加载期占位闪烁）。
+      // 显示策略：确认是 git 仓库 → 正常显示；确认非 git（无 check_error）
+      // → 隐藏；无工作区 / git 不可用（check_error）/ 未确认前的读取失败
+      // → 置灰占位（可见但明确不可用）；加载期间隐藏（零闪烁）。
       if (!state.workspace) {
         state.data = null;
+        state.checkError = null;
         state.open = false;
-        return hideRoot();
+        state.loading = false;
+        renderPlaceholder('当前会话未绑定 git 工作区');
+        return;
       }
       state.loading = true;
       state.error = null;
@@ -219,9 +225,17 @@
         const data = await callPlugin('plugin.branches', { workspace: state.workspace });
         if (data && data.is_repo) {
           state.data = data;
+          state.checkError = null;
+          showRoot();
+        } else if (data && data.check_error) {
+          // git 不可用/超时：如实占位显示原因，不再无声消失。
+          state.data = null;
+          state.checkError = data.check_error;
+          state.open = false;
           showRoot();
         } else {
           state.data = null;
+          state.checkError = null;
           state.open = false;
           hideRoot();
         }
@@ -232,8 +246,9 @@
           showRoot();
         } else {
           state.data = null;
+          state.checkError = state.error;
           state.open = false;
-          hideRoot();
+          showRoot();
         }
       } finally {
         state.loading = false;
@@ -311,16 +326,44 @@
       return row;
     }
 
+    // 置灰占位：可见但明确不可用（悬停显示原因），不再无声消失。
+    function renderPlaceholder(reason) {
+      const trigger = $('cs-trigger');
+      showRoot();
+      trigger.hidden = false;
+      trigger.classList.add('is-disabled');
+      trigger.disabled = true;
+      trigger.title = reason;
+      $('cs-loading').hidden = true;
+      $('cs-name').textContent = '分支';
+      $('cs-name').title = reason;
+      $('cs-dirty').hidden = true;
+      state.open = false;
+      renderDrop();
+    }
+
     function render() {
       const trigger = $('cs-trigger');
       const data = state.data;
-      // 未确认是 git 仓库前不渲染任何可见元素（非 git 工作区零闪烁）。
-      if (!state.workspace || !data || !data.is_repo) {
+      // 置灰占位态（无工作区 / git 不可用 / 未确认前的失败终态）。
+      if (!state.workspace) {
+        renderPlaceholder('当前会话未绑定 git 工作区');
+        return;
+      }
+      if (state.checkError && !(data && data.is_repo)) {
+        renderPlaceholder(state.checkError);
+        return;
+      }
+      // 未确认是 git 仓库前不渲染任何可见元素（加载期零闪烁；确认非 git 隐藏）。
+      if (!data || !data.is_repo) {
         trigger.hidden = true;
         state.open = false;
         return;
       }
       trigger.hidden = false;
+      trigger.classList.remove('is-disabled');
+      trigger.disabled = false;
+      trigger.title = '切换分支';
       $('cs-loading').hidden = !state.loading;
       trigger.disabled = Boolean(state.loading);
       const label = $('cs-name');
@@ -374,6 +417,8 @@
     // ── 交互 ──
     $('cs-trigger').addEventListener('click', (event) => {
       event.stopPropagation();
+      const trigger = $('cs-trigger');
+      if (trigger.disabled || trigger.classList.contains('is-disabled')) return;
       state.open = !state.open;
       if (state.open) void load();
       render();
