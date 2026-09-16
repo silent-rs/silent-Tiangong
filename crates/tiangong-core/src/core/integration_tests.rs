@@ -304,7 +304,9 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 ]
             );
             let system = payload["messages"][0]["content"].as_str().unwrap();
-            assert!(system.starts_with("插件提示:prompt\n\n插件提示:alpha\n\n插件提示:zeta\n\n"));
+            // 环境段已退出 system prompt：插件段之后直接是后续内容（无 cwd 行）
+            assert!(system.starts_with("插件提示:prompt\n\n插件提示:alpha\n\n插件提示:zeta"));
+            assert!(!system.contains("当前工作目录"));
             if let Some(previous) = &previous {
                 assert_eq!(previous["tools"], payload["tools"]);
                 let old = previous["messages"].as_array().unwrap();

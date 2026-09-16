@@ -113,17 +113,17 @@ fn product_copy_precedes_capability_sections() {
     let session = Session::new("首位测试");
     let text = build_prompt_text(&engine, &session);
 
-    // 产品身份段应出现在 prompt 最前面的区域（在环境段之前）
+    // 产品身份段应出现在 prompt 最前面（排在能力段与摘要段之前）
     let id_idx = text.find("【产品身份】").expect("应包含产品身份段");
-    let env_idx = text.find("当前工作目录").expect("应包含环境段");
+    let cap_idx = text.find("【能力】终端交互").expect("应包含能力段");
     assert!(
-        id_idx < env_idx,
-        "产品身份段应排在环境段之前（保证在 prompt 开头）"
+        id_idx < cap_idx,
+        "产品身份段应排在能力段之前（保证在 prompt 开头）"
     );
 }
 
 #[test]
-fn environment_and_summary_sections_appended_after_plugins() {
+fn summary_section_appended_after_plugins() {
     let engine = test_engine();
     engine.register_prompt_section_provider(Arc::new(ProductCopyProvider));
 
@@ -133,16 +133,20 @@ fn environment_and_summary_sections_appended_after_plugins() {
 
     let text = build_prompt_text(&engine, &session);
 
-    // 顺序：插件段 → 环境段 → 摘要段
+    // 顺序：插件段 → 摘要段（环境信息已退出 system prompt，经 fs 工具结果回显）
     let plugin_idx = text.find("【产品身份】").unwrap();
-    let env_idx = text.find("当前工作目录").unwrap();
     let summary_idx = text.find("此前对话摘要").unwrap();
 
-    assert!(plugin_idx < env_idx, "插件段应在环境段前");
-    assert!(env_idx < summary_idx, "环境段应在摘要段前");
+    assert!(plugin_idx < summary_idx, "插件段应在摘要段前");
     assert!(text.contains("此前讨论了文件操作"), "应包含摘要内容");
-    assert!(text.contains("当前工作目录"), "应包含工作目录");
-    assert!(text.contains("允许文件操作目录"), "应包含文件根");
+    assert!(
+        !text.contains("当前工作目录"),
+        "工作目录不应进入 system prompt（经 fs 工具结果回显）"
+    );
+    assert!(
+        !text.contains("允许文件操作目录"),
+        "允许目录不应进入 system prompt"
+    );
 }
 
 #[test]
@@ -169,19 +173,17 @@ fn empty_plugins_still_produces_valid_prompt() {
     let session = Session::new("空插件测试");
     let text = build_prompt_text(&engine, &session);
 
-    // 无插件段时，prompt 仍应包含环境段，是合法的非空 system prompt；
-    // 标题不进入 system prompt（保持 KV cache 前缀稳定）。
-    assert!(text.contains("当前工作目录"));
+    // 环境信息已退出 system prompt：无插件段且无摘要时内容允许为空，
+    // 非空内容由插件段兜底；标题不进入 system prompt（保持前缀稳定）。
     assert!(
         !text.contains("空插件测试"),
         "会话标题不应进入 system prompt"
     );
-    assert!(!text.trim().is_empty(), "空插件时 prompt 不应为空");
 }
 
 #[test]
-fn plugin_sections_appear_between_identity_and_environment() {
-    // 综合验证：产品文案（最前）→ 能力插件 → 环境段 → 摘要段
+fn plugin_sections_appear_between_identity_and_summary() {
+    // 综合验证：产品文案（最前）→ 能力插件 → 摘要段
     let engine = test_engine();
     engine.register_prompt_section_provider(Arc::new(ProductCopyProvider));
     engine.register_prompt_section_provider(Arc::new(CapabilityProvider {
@@ -195,12 +197,11 @@ fn plugin_sections_appear_between_identity_and_environment() {
     let text = build_prompt_text(&engine, &session);
 
     // 完整顺序断言
-    let positions: [usize; 6] = [
+    let positions: [usize; 5] = [
         "【产品身份】",
         "【通用规则】",
         "【能力】技能摘要",
         "有效段",
-        "当前工作目录",
         "此前对话摘要",
     ]
     .iter()

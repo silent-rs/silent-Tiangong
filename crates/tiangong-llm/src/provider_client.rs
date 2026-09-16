@@ -745,11 +745,14 @@ fn build_deepseek_provider_from_config(
 
 fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessage>)> {
     let mut messages = Vec::new();
-    // System prompt 必须由 core 显式注入（session.system_prompt_message）。
-    // 这里不再保留 fallback 常量：context 缺 System 视为调用方错误，fail-fast。
+    // System prompt 必须由 core 显式注入（session.system_prompt_message）：
+    // context 缺 System 角色消息视为调用方错误，fail-fast。文本允许为空
+    //（core 不再生产 prompt 内容，无插件段落且无摘要时为空，请求即不带 system）。
     let mut system_texts: Vec<String> = Vec::new();
+    let mut has_system_message = false;
     for msg in &req.context {
         if msg.role == MessageRole::System {
+            has_system_message = true;
             let text = msg.text_content().trim().to_string();
             if !text.is_empty() {
                 system_texts.push(text);
@@ -761,7 +764,7 @@ fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessag
         }
     }
 
-    if system_texts.is_empty() {
+    if !has_system_message {
         anyhow::bail!(
             "build_provider_messages: context 缺少 System 消息。system prompt 应由 core 显式注入（session.system_prompt_message）。"
         );
