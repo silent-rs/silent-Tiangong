@@ -231,8 +231,16 @@ impl StdioSidecarConnection {
             // 覆盖清理尽力而为：旧进程已断流，残留不阻塞新代次启动。
             let _ = terminate_process_tree(&process, &mut child);
         }
-        let process = Arc::new(self.spawn(sandbox_workspace)?);
+        let process = self.spawn_ready(sandbox_workspace)?;
         state.process = Some(Arc::clone(&process));
+        Ok(process)
+    }
+
+    /// 启动私有进程并完成就绪握手（写入进程自身的 readiness 缓存）。
+    /// 不触碰共享 state——并发调用各自的进程互不误杀；是否登记
+    /// state.process（全局终止/换代语义用）由调用方决定。
+    fn spawn_ready(&self, sandbox_workspace: Option<&Path>) -> Result<Arc<StdioProcess>> {
+        let process = Arc::new(self.spawn(sandbox_workspace)?);
         match self.handshake_exchange(&process) {
             Ok(handshake) => {
                 *process
@@ -241,7 +249,6 @@ impl StdioSidecarConnection {
                     .map_err(|_| anyhow!("stdio sidecar 就绪状态锁已损坏"))? = Some(handshake);
             }
             Err(error) => {
-                state.process = None;
                 let cleanup = process
                     .child
                     .lock()
@@ -280,16 +287,15 @@ impl StdioSidecarConnection {
             invocation_workspace(invocation.as_ref(), invocation_context.as_ref())
                 .map(validate_invocation_workspace)
                 .transpose()?;
-        let process = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-            if self.stopped.load(Ordering::Acquire) {
-                bail!("stdio sidecar 已停止");
-            }
-            self.start_fresh(&mut state, sandbox_workspace.as_deref())?
-        };
+        if self.stopped.load(Ordering::Acquire) {
+            bail!("stdio sidecar 已停止");
+        }
+        // 按需调用进程完全私有，不登记共享 state.process：并发调用
+        //（如 UI 消息与工具调用同时到达）各自 spawn/握手/清理，先启动
+        // 方的进程不会被后启动方经单槽登记误杀；state.process 仅供
+        // stop 等全局终止语义使用（与 ensure_running_checked 的临时
+        // 校验进程同一原则）。
+        let process = self.spawn_ready(sandbox_workspace.as_deref())?;
         let result = self.round_trip(
             &process,
             operation,
@@ -301,21 +307,8 @@ impl StdioSidecarConnection {
         );
         if let Ok(mut child) = process.child.lock() {
             // 业务结果优先：收尾清理尽力而为，失败仅告警（进程可能残留，
-            // 下一次调用不受影响——新代次使用新 token）。
+            // 下一次调用不受影响——私有进程不与任何登记交互）。
             let _ = terminate_process_tree(&process, &mut child);
-        }
-        // 先清理进程，再获取 state 锁；读线程在发送关闭错误时可能短暂持有
-        // pending 锁，反向持锁会让请求收尾与取消互相等待。
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("stdio sidecar 状态锁已损坏"))?;
-        if state
-            .process
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &process))
-        {
-            state.process = None;
         }
         result
     }
@@ -2018,6 +2011,45 @@ mod invocation_workspace_tests {
 #[cfg(test)]
 mod cancel_order_tests {
     use super::*;
+
+    #[test]
+    fn on_demand_processes_stay_private_and_never_share_the_state_slot() {
+        // 回归：按需调用的进程完全私有，不登记共享 state.process。
+        // 修复前 start_fresh 经单槽登记并清杀旧登记——并发调用（如 UI
+        // 消息与工具调用同时到达）后启动方会误杀先启动方的进程。
+        if cfg!(target_os = "windows") {
+            // 依赖 POSIX sleep（无参数即退出、永不完成握手），Windows 跳过。
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let config = SidecarConfig::new(
+            "spawn-privacy-test",
+            "0.0.0",
+            PathBuf::from("/bin/sleep"),
+            root.path().join("endpoint.json"),
+            root.path().join("sidecar.log"),
+            root.path().join("data"),
+            root.path(),
+        )
+        .with_timeouts(Duration::from_millis(800), Duration::from_millis(800));
+        let connection = std::sync::Arc::new(StdioSidecarConnection::new(config));
+        let first = std::sync::Arc::clone(&connection);
+        let second = std::sync::Arc::clone(&connection);
+        let left = std::thread::spawn(move || first.spawn_ready(None).is_err());
+        let right = std::thread::spawn(move || second.spawn_ready(None).is_err());
+        // sleep 无参数直接退出，握手必然失败；两个私有进程各自失败返回。
+        assert!(left.join().expect("并发 spawn 线程 panic"));
+        assert!(right.join().expect("并发 spawn 线程 panic"));
+        // 核心不变量：按需进程从不进入共享槽，并发互杀的结构性根源已消除。
+        assert!(
+            connection
+                .state
+                .lock()
+                .expect("状态锁可用")
+                .process
+                .is_none()
+        );
+    }
 
     #[test]
     fn cancel_notifies_waiter_before_ignoring_write_failure() {
