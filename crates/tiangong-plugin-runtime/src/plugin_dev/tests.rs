@@ -161,7 +161,14 @@ fn install_完整链_暂存确认导入与注册表() {
         "注册表应可见已装插件"
     );
     // @提及候选实时聚合：安装后立即可见（不依赖会话 Core 快照）。
-    let mentions = crate::registry::collect_mention_candidates();
+    let mentions = crate::registry::mention_plugins()
+        .into_iter()
+        .flat_map(|plugin| {
+            plugin
+                .query_mentions(&tiangong_types::MentionQuery::default())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
     assert!(
         mentions
             .iter()

@@ -266,19 +266,6 @@ impl TiangongCore {
         }
     }
 
-    /// 收集当前 Core 全部插件贡献的 @提及候选（native + WASM 统一经此聚合）。
-    ///
-    /// 调用时实时遍历 `self.plugins`（lazy 收集，不预存）：native 插件直接调
-    /// `MentionCandidateProvider::mention_candidates`，WASM 插件经 adapter 桥接到
-    /// 同一 trait。宿主（src-tauri 的 `get_mention_candidates` 命令）经 CoreManager
-    /// 调用本方法，不再硬编码 skill/mcp。
-    pub fn get_mentions(&self) -> Vec<crate::MentionCandidate> {
-        self.plugin_instances()
-            .iter()
-            .flat_map(|plugin| plugin.mention_candidates())
-            .collect()
-    }
-
     /// 更新会话标题。
     ///
     /// - turn 进行中：投 `Command::SetTitle`，由 turn 在命令分支写入 `ctx.session`，
@@ -1030,64 +1017,6 @@ mod model_endpoint_tests {
 mod shared_runtime_tests {
     use super::*;
     use crate::config::core::{CoreConfig, CoreConfigProvider};
-
-    struct MentionPlugin {
-        id: &'static str,
-        values: Vec<crate::MentionCandidate>,
-    }
-
-    impl crate::tools::extension::ToolSpecProvider for MentionPlugin {}
-    impl crate::tools::extension::ToolOverrideHandler for MentionPlugin {}
-    impl crate::tools::extension::PromptSectionProvider for MentionPlugin {}
-    impl crate::tools::extension::MentionCandidateProvider for MentionPlugin {
-        fn mention_candidates(&self) -> Vec<crate::MentionCandidate> {
-            self.values.clone()
-        }
-    }
-    impl Plugin for MentionPlugin {
-        fn id(&self) -> &str {
-            self.id
-        }
-    }
-
-    #[test]
-    fn get_mentions_aggregates_all_plugin_candidates() {
-        let root = tempfile::tempdir().unwrap();
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
-        let candidate = |value: &str| crate::MentionCandidate {
-            value: value.to_string(),
-            label: value.to_string(),
-            kind: "test".to_string(),
-            hint: String::new(),
-            mark: String::new(),
-        };
-        let core = TiangongCore::builder()
-            .session_id("mention-test")
-            .config(CoreConfigProvider::new(CoreConfig::default()))
-            .trust_mode(crate::permission::TrustMode::FullTrust)
-            .storage_root(root.path())
-            .workspace_dir(root.path().to_string_lossy())
-            .stream_tx(event_tx)
-            .plugins(vec![
-                Arc::new(MentionPlugin {
-                    id: "one",
-                    values: vec![candidate("@one")],
-                }),
-                Arc::new(MentionPlugin {
-                    id: "two",
-                    values: vec![candidate("@two")],
-                }),
-            ])
-            .model_endpoint(crate::core::test_support::test_model("http://test.invalid"))
-            .build();
-
-        let values = core
-            .get_mentions()
-            .into_iter()
-            .map(|item| item.value)
-            .collect::<Vec<_>>();
-        assert_eq!(values, vec!["@one", "@two"]);
-    }
 
     /// 多个未启动活动的 Core 不创建 driver 任务，且可正常关闭。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

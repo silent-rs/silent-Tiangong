@@ -9,6 +9,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, textContent } from '@/api/tauri';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
+import { useMentionGroups } from '@/hooks/useMentionGroups';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
@@ -23,7 +24,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
-import { registerMentionMarks, mentionMarkFor } from '@/utils/mentionMarks';
+import { mentionMarkFor } from '@/utils/mentionMarks';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -50,12 +51,6 @@ interface MentionCandidate {
   hint: string;
   /** 标记字符（chip 角标），由插件提供；为空时按 kind 回退默认。 */
   mark?: string;
-}
-
-interface MentionGroup {
-  kind: string;
-  label: string;
-  candidates: MentionCandidate[];
 }
 
 /** mention 分组标题（后端 label 缺省是 kind 原文，这里映射为展示名）。 */
@@ -146,7 +141,6 @@ export function MessageInput({
 
   // @提及补全状态
   const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionGroups, setMentionGroups] = useState<MentionGroup[]>([]);
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
@@ -395,51 +389,14 @@ export function MessageInput({
   // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====
-  const loadCandidates = useCallback(async () => {
-    try {
-      // 接口定义每组候选上限为 1000（防止单个插件撑爆传输与渲染）；后端
-      // 截断发生在前端搜索之前，超过上限的候选不可搜。搜索在全量已收候选
-      // 上进行，渲染时每组再截断展示。
-      const groups = await api.getMentionGroups(undefined, 1000);
-      setMentionGroups(groups);
-      // 注册插件提供的标记字符：编辑器 chip 与消息气泡从 token 重建时查表。
-      registerMentionMarks(groups.flatMap(group => group.candidates));
-    } catch (e) {
-      console.error('加载提及候选失败:', e);
-    }
-  }, []);
-
-  const filteredGroups = (() => {
-    if (completionMode === 'slash') {
-      return [];
-    }
-
-    // 插件 mention 候选由已安装插件统一提供。
-    const groups: MentionGroup[] = mentionGroups;
-
-    const filtered = mentionFilter
-      ? (() => {
-          const lower = mentionFilter.toLowerCase();
-          return groups
-            .map(group => ({
-              ...group,
-              candidates: group.candidates.filter(c =>
-                c.label.toLowerCase().includes(lower)
-                || c.value.toLowerCase().includes(lower)
-                || c.hint.toLowerCase().includes(lower)
-              ),
-            }))
-            .filter(group => group.candidates.length > 0);
-        })()
-      : groups;
-
-    // 渲染层截断：搜索在全量候选上进行，每组最多展示 50 条防大列表撑爆 UI。
-    // 键盘导航的平铺数组基于截断后的结果，保证索引与可见项对齐。
-    return filtered.map(group => ({
-      ...group,
-      candidates: group.candidates.slice(0, 50),
-    }));
-  })();
+  const mentionGroups = useMentionGroups(
+    !isNewConversation && activeSessionId
+      ? { kind: 'session', session_id: activeSessionId }
+      : sessionCwd ? { kind: 'draft', workspace: sessionCwd } : { kind: 'global' },
+    mentionOpen && completionMode === 'mention' ? mentionFilter : '',
+    mentionOpen && completionMode === 'mention',
+  );
+  const filteredGroups = completionMode === 'slash' ? [] : mentionGroups;
 
   // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
   const filteredCandidates = completionMode === 'slash'
@@ -456,12 +413,6 @@ export function MessageInput({
       block: 'nearest',
     });
   }, [mentionIndex, mentionOpen, filteredCandidates.length]);
-
-  // 挂载即预热候选：消息气泡与编辑器从 token 重建 chip 时需要查插件提供
-  // 的标记字符，注册表不能等到 @ 菜单第一次打开才填充。
-  useEffect(() => {
-    loadCandidates();
-  }, [loadCandidates]);
 
   const executeSlashCommand = useCallback(async (command: string) => {
     const trimmed = command.trim();
@@ -528,7 +479,7 @@ export function MessageInput({
       setMentionFilter(filter);
       setMentionIndex(0);
       setCompletionMode('mention');
-      if (!mentionOpen) { loadCandidates(); setMentionOpen(true); }
+      if (!mentionOpen) setMentionOpen(true);
     } else {
       setMentionOpen(false);
     }

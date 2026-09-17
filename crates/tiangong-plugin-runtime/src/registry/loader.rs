@@ -355,117 +355,88 @@ pub fn invoke_sidecar_with_workspace(
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
-/// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
-/// 实时聚合全部已加载插件（WASM 与 TS）的 @提及候选。
-///
-/// 不依赖会话 Core 的插件快照——Core 的插件列表在会话创建时定档，运行中
-/// 新装插件的适配器不会进入已有 Core；经注册表聚合则安装/卸载/启停立即
-/// 反映（与 `get_mentions` 对各 Core 的遍历结果一致，因为 adapter 同源）。
-pub fn collect_mention_candidates() -> Vec<tiangong_core::MentionCandidate> {
-    collect_mention_groups(&[], usize::MAX)
-        .into_iter()
-        .flat_map(|group| group.candidates)
+/// 宿主注入 CoreManager 的通用查询句柄，不借用会话执行适配器。
+pub fn mention_plugins() -> Vec<Arc<dyn Plugin>> {
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return Vec::new();
+    };
+    let mut ids: Vec<_> = plugins
+        .iter()
+        .filter(|(_, plugin)| plugin.enabled)
+        .map(|(id, _)| id.clone())
+        .collect();
+    ids.sort();
+    ids.into_iter()
+        .map(|id| Arc::new(MentionPlugin { id }) as Arc<dyn Plugin>)
         .collect()
 }
 
-/// 实时聚合全部已加载插件（WASM 与 TS）的 @提及候选，并按 `kind` 分组。
-///
-/// App 层统一对插件提供的候选做分组、白名单过滤与每组数量截断，前端只负责
-/// 按组渲染与组内搜索。插件侧只负责「提供候选」，不实现分组/过滤策略。
-///
-/// 分组规则：
-/// - 按 `kind` 字段分组（skill/mcp/agent/index/tts/stt 等）；
-/// - 按 `kind` 白名单过滤（`allowed_kinds` 为空时不过滤，全部保留）；
-/// - 每组最多 `max_per_group` 个候选（防止 index 文件候选等大列表撑爆 UI）。
-pub fn collect_mention_groups(
-    allowed_kinds: &[String],
-    max_per_group: usize,
-) -> Vec<tiangong_core::MentionGroup> {
-    use std::collections::HashSet;
-    use tiangong_core::tools::extension::MentionCandidateProvider;
-
-    // 锁内仅取快照（适配器 Arc 与清单克隆），锁外再调用插件——WASM 的
-    // 候选收集是跨调用（可能耗时），不得持注册表锁进行。
-    let (adapters, manifests) = {
-        let Ok(plugins) = loaded_plugins().lock() else {
-            return Vec::new();
-        };
-        let adapters: Vec<Arc<WasmPluginAdapter>> = plugins
-            .values()
-            .filter(|loaded| loaded.enabled)
-            .flat_map(|loaded| loaded.instances.iter().filter_map(std::sync::Weak::upgrade))
-            .collect();
-        let manifests: Vec<PluginManifest> = plugins
-            .values()
-            .filter(|loaded| loaded.enabled)
-            .map(|loaded| loaded.manifest.clone())
-            .collect();
-        (adapters, manifests)
-    };
-    let mut out = Vec::new();
-    // WASM 插件：候选经适配器动态收集（wasm 导出，如 skill/mcp 列表）。
-    for adapter in adapters {
-        out.extend(adapter.mention_candidates());
-    }
-    // TS 插件：mention 是纯清单数据，静态生成——适配器弱引用由会话
-    // Core 构建时填充，安装后不可达；静态生成让安装即进候选。
-    for manifest in manifests {
-        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&manifest) {
-            out.push(candidate);
-        }
-    }
-    // 多会话/多适配器合并去重：同一插件的适配器可能被多个会话的 Core
-    // 持有（instances 逐次追加），按 (kind, value) 保留首个。
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    out.retain(|candidate| seen.insert((candidate.kind.clone(), candidate.value.clone())));
-
-    group_mention_candidates(out, allowed_kinds, max_per_group)
+struct MentionPlugin {
+    id: String,
 }
-
-/// 对候选做「kind 白名单过滤 + 按 kind 分组 + 每组数量截断」的纯函数。
-///
-/// 抽成独立函数便于单元测试；`collect_mention_groups` 只负责从插件收集候选，
-/// 本函数负责展示策略（分组/过滤/截断）。
-pub(super) fn group_mention_candidates(
-    candidates: Vec<tiangong_core::MentionCandidate>,
-    allowed_kinds: &[String],
-    max_per_group: usize,
-) -> Vec<tiangong_core::MentionGroup> {
-    use std::collections::HashSet;
-
-    let mut out = candidates;
-    // kind 白名单过滤。
-    if !allowed_kinds.is_empty() {
-        let allowed: HashSet<&str> = allowed_kinds.iter().map(String::as_str).collect();
-        out.retain(|candidate| allowed.contains(candidate.kind.as_str()));
+impl tiangong_core::tools::extension::ToolSpecProvider for MentionPlugin {}
+impl tiangong_core::tools::extension::ToolOverrideHandler for MentionPlugin {}
+impl tiangong_core::tools::extension::PromptSectionProvider for MentionPlugin {}
+impl Plugin for MentionPlugin {
+    fn id(&self) -> &str {
+        &self.id
     }
-
-    // 按 kind 分组，保持首次出现顺序；每组按数量上限截断。
-    let mut groups: Vec<tiangong_core::MentionGroup> = Vec::new();
-    let mut index_by_kind: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for candidate in out {
-        let group_index = match index_by_kind.get(&candidate.kind) {
-            Some(&index) => index,
-            None => {
-                let index = groups.len();
-                groups.push(tiangong_core::MentionGroup {
-                    kind: candidate.kind.clone(),
-                    label: candidate.kind.clone(),
-                    candidates: Vec::new(),
-                });
-                index_by_kind.insert(candidate.kind.clone(), index);
-                index
+}
+impl tiangong_core::tools::extension::MentionCandidateProvider for MentionPlugin {
+    fn query_mentions(
+        &self,
+        query: &tiangong_types::MentionQuery,
+    ) -> Result<Vec<tiangong_types::MentionCandidate>, String> {
+        let snapshot = {
+            let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
+            plugins
+                .get(&self.id)
+                .filter(|p| p.enabled)
+                .map(|p| (p.ui_plugin.clone(), p.manifest.clone(), p.generation))
+        };
+        let Some((instance, manifest, generation)) = snapshot else {
+            return Ok(Vec::new());
+        };
+        let mut candidates = Vec::new();
+        if let Some(instance) = &instance {
+            let result = crate::execution::run_outside_tokio(|| {
+                let Ok(mut plugin) = instance.try_lock() else {
+                    return Ok(Vec::new());
+                };
+                plugin.query_mentions(query)
+            });
+            match result {
+                Ok(values) => candidates.extend(values.into_iter().map(|c| {
+                    tiangong_types::MentionCandidate {
+                        value: c.value,
+                        label: c.label,
+                        kind: c.kind,
+                        hint: c.hint,
+                        mark: c.mark,
+                    }
+                })),
+                Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
             }
-        };
-        let group = &mut groups[group_index];
-        if group.candidates.len() < max_per_group {
-            group.candidates.push(candidate);
         }
+        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&manifest) {
+            candidates.push(candidate);
+        }
+        let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;
+        let current = plugins.get(&self.id).filter(|p| {
+            p.enabled && p.generation == generation && p.manifest.version == manifest.version
+        });
+        let valid = current.is_some_and(|p| match (&instance, &p.ui_plugin) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (None, None) => {
+                serde_json::to_value(&p.manifest).ok() == serde_json::to_value(&manifest).ok()
+            }
+            _ => false,
+        });
+        Ok(if valid { candidates } else { Vec::new() })
     }
-    groups
 }
 
+/// 取已启用插件的安装目录（供桥接层访问插件私有数据）。
 pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
     let plugins = loaded_plugins().lock().ok()?;
     let loaded = plugins.get(plugin_id)?;

@@ -1,9 +1,4 @@
-//! @提及候选数据结构。
-//!
-//! 供 Core（`MentionCandidateProvider`）与 UI 输入补全共享。Core 在
-//! `get_mentions()` 中遍历插件收集，src-tauri 的 `get_mention_candidates`
-//! 命令经 Core 取回后返回前端。
-
+//! @提及请求与候选：Core 定义插件契约，CoreManager 负责上下文与收集。
 use serde::{Deserialize, Serialize};
 
 /// @提及候选项。
@@ -35,4 +30,54 @@ pub struct MentionGroup {
     pub kind: String,
     pub label: String,
     pub candidates: Vec<MentionCandidate>,
+}
+
+/// 输入目标不隐式回退：无效会话不能借用其他工作区。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MentionTarget {
+    #[default]
+    Global,
+    Session {
+        session_id: String,
+    },
+    Draft {
+        workspace: String,
+    },
+}
+
+/// 宿主解析后的本次查询上下文；不改变插件的会话执行状态。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MentionContext {
+    pub session_id: Option<String>,
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct MentionRequest {
+    pub target: MentionTarget,
+    pub query: String,
+    pub allowed_kinds: Vec<String>,
+    pub max_per_group: usize,
+}
+
+impl Default for MentionRequest {
+    fn default() -> Self {
+        Self {
+            target: MentionTarget::Global,
+            query: String::new(),
+            allowed_kinds: Vec::new(),
+            max_per_group: 50,
+        }
+    }
+}
+
+/// 传给插件的只读查询，query 匹配必须发生在数量截断之前。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MentionQuery {
+    pub context: MentionContext,
+    pub query: String,
+    pub allowed_kinds: Vec<String>,
+    pub max_per_group: usize,
 }

@@ -58,14 +58,20 @@ pub trait PromptSectionProvider: Send + Sync + 'static {
     }
 }
 
-/// @提及候选提供者。
-///
-/// Plugin 通过此机制向 UI 输入框贡献 @补全候选（如 skill 列表、mcp server 列表）。
-/// Core 在 [`get_mentions`](crate::core::TiangongCore::get_mentions) 中遍历全部插件
-/// 收集；native 插件直接实现本 trait，WASM 插件经 WIT mention interface 由
-/// `WasmPluginAdapter` 桥接到本 trait。默认返回空，不贡献 mention 的插件无需覆写。
+/// @提及候选提供者，由 CoreManager 遍历宿主注册的通用 Plugin 收集。
+/// 具体实现负责协议转换，不依赖会话 Core 已创建。
 pub trait MentionCandidateProvider: Send + Sync + 'static {
+    /// 兼容已有无上下文插件。
     fn mention_candidates(&self) -> Vec<crate::MentionCandidate> {
         Vec::new()
+    }
+
+    /// 请求级上下文；不得通过 set_workspace 改写共享实例的执行状态。
+    /// 默认委托旧接口，宿主仍会在匹配后做最终限额。
+    fn query_mentions(
+        &self,
+        _query: &tiangong_types::MentionQuery,
+    ) -> Result<Vec<crate::MentionCandidate>, String> {
+        Ok(self.mention_candidates())
     }
 }

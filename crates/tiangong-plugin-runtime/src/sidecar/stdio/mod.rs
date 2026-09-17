@@ -922,6 +922,18 @@ impl StdioSidecarConnection {
         wait: ResponseWait,
         on_progress: &mut dyn FnMut(String),
     ) -> Result<Value> {
+        // 显式查询 deadline 才限制等待；普通 Agent Handler 的 None 仍无限等待到取消。
+        let wait = invocation_context
+            .as_ref()
+            .and_then(|ctx| ctx.deadline_ms)
+            .map(|deadline| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                ResponseWait::Bounded(Duration::from_millis(deadline.saturating_sub(now)))
+            })
+            .unwrap_or(wait);
         let bounded_deadline = match wait {
             ResponseWait::Bounded(timeout) => Some(std::time::Instant::now() + timeout),
             ResponseWait::UntilCancelled => None,
@@ -984,6 +996,8 @@ impl StdioSidecarConnection {
                         && std::time::Instant::now() >= deadline
                     {
                         remove_pending(process, &request_id);
+                        // 只取消本次查询，不取消同会话其他工具，也不停止常驻进程。
+                        let _ = self.cancel_request(process, &request_id);
                         return Err(SidecarInvokeError::Timeout)
                             .with_context(|| format!("stdio sidecar 请求超时: {operation}"));
                     }

@@ -2227,32 +2227,51 @@ pub async fn get_available_capabilities(
         .await
 }
 
-/// 获取 @提及补全候选列表。
-///
-/// 经插件注册表实时聚合（WASM 与 TS 插件的 mention 候选）。原取活跃 Core
-/// 的插件快照——会话创建后新装插件的适配器不进已有 Core，@ 候选看不到；
-/// 注册表聚合让安装/卸载/启停立即反映。原硬编码的 skill/mcp 调用早已迁入
-/// 各插件的 mention-candidates 导出。
-#[tauri::command]
-pub async fn get_mention_candidates() -> Result<Vec<MentionCandidate>, String> {
-    Ok(tiangong_plugin_runtime::registry::collect_mention_candidates())
+/// App 装配通用插件，Manager 解析上下文并收集；不创建会话 Core。
+async fn query_mention_groups(
+    state: &TiangongApp,
+    request: tiangong_types::MentionRequest,
+) -> Result<Vec<MentionGroup>, String> {
+    state.wait_plugin_preload().await?;
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        // 查询入口刷新句柄，覆盖安装工具/后台升级等非 GUI 变更来源。
+        manager.set_mention_plugins(tiangong_plugin_runtime::registry::mention_plugins());
+        manager.query_mentions(request)
+    })
+    .await
+    .map_err(|e| format!("mention 查询任务失败: {e}"))?
 }
 
-/// 获取按 kind 分组的 @提及候选（App 层统一分组/过滤/截断）。
-///
-/// `allowed_kinds` 为空时不过滤（全部保留）；`max_per_group` 为每组候选数量上限。
-/// 前端按组渲染（组标题 + 组内候选），并做组内搜索。
+/// 兼容平铺入口；缺省仅查询全局候选。
+#[tauri::command]
+pub async fn get_mention_candidates(
+    state: State<'_, TiangongApp>,
+    request: Option<tiangong_types::MentionRequest>,
+) -> Result<Vec<MentionCandidate>, String> {
+    Ok(query_mention_groups(&state, request.unwrap_or_default())
+        .await?
+        .into_iter()
+        .flat_map(|group| group.candidates)
+        .collect())
+}
+
+/// 按会话上下文查询并分组；保留旧参数，搜索发生在截断前。
 #[tauri::command]
 pub async fn get_mention_groups(
+    state: State<'_, TiangongApp>,
+    request: Option<tiangong_types::MentionRequest>,
     allowed_kinds: Option<Vec<String>>,
     max_per_group: Option<usize>,
 ) -> Result<Vec<MentionGroup>, String> {
-    let allowed_kinds = allowed_kinds.unwrap_or_default();
-    let max_per_group = max_per_group.unwrap_or(50);
-    Ok(tiangong_plugin_runtime::registry::collect_mention_groups(
-        &allowed_kinds,
-        max_per_group,
-    ))
+    let mut request = request.unwrap_or_default();
+    if let Some(kinds) = allowed_kinds {
+        request.allowed_kinds = kinds;
+    }
+    if let Some(limit) = max_per_group {
+        request.max_per_group = limit;
+    }
+    query_mention_groups(&state, request).await
 }
 
 /// 获取输入框缓存。

@@ -11,6 +11,7 @@
 //! （不同 host 的 plugin 构造差异大，不能在共享层硬编码）。
 
 pub mod ensure;
+mod mentions;
 pub mod registry;
 mod title;
 
@@ -41,6 +42,8 @@ pub struct EnsuredCore {
 #[derive(Clone)]
 pub struct CoreManager {
     cores: Arc<Mutex<HashMap<String, TiangongCore>>>,
+    /// 宿主注入的实时查询句柄，与 Core 的执行插件快照分离。
+    mention_plugins: Arc<Mutex<Vec<Arc<dyn tiangong_core::core::Plugin>>>>,
     /// 每会话的创建互斥锁：覆盖同一会话从「检查 Core 是否存在」到「插入新 Core」
     /// 的完整创建区间，防止两路并发为同一 session 各建一份 Core。
     ///
@@ -62,6 +65,7 @@ impl CoreManager {
     ) -> Self {
         Self {
             cores: Arc::new(Mutex::new(HashMap::new())),
+            mention_plugins: Arc::new(Mutex::new(Vec::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
             config,
             storage_root: storage_root.into(),
