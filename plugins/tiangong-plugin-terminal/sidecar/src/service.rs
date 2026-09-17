@@ -135,6 +135,9 @@ struct PtySession {
     /// 回到空闲时清空；交互中与未就绪（收尾中）保留——查询时能看到
     /// 终端里跑的是什么程序对排查有直接价值。
     running_command: Option<String>,
+    /// 本次执行为交互模式且命令已写入 PTY（程序真正启动）。取消据此
+    /// 区分「程序已在前台须保留转交互」与「尚未启动只须释放预留」。
+    interactive_started: bool,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -775,6 +778,7 @@ impl TerminalService {
                 exited_code: None,
                 pending_ready_marker: None,
                 running_command: None,
+                interactive_started: false,
                 logger,
             },
         );
@@ -1270,6 +1274,7 @@ impl TerminalService {
             }
             session.phase = SessionPhase::Running;
             session.running_command = Some(command.clone());
+            session.interactive_started = false;
             Ok(())
         })?;
 
@@ -1541,12 +1546,42 @@ impl TerminalService {
             let raw = self.raw_output_since(session_id, start_offset)?;
             let parsed = parse_command_output(&raw, markers);
             if parsed.completed || Instant::now() >= grace_deadline {
+                let confirmed = parsed.completed;
                 let mut response = parsed.into_response(true);
                 response.exit_code = -1;
                 response.stderr = "命令执行超时".to_string();
+                if !confirmed {
+                    // 宽限耗尽不等于命令结束（前台可能忽略 SIGINT 仍在跑）：
+                    // 置回空闲会让状态查询错报空闲、命令信息丢失，下一条
+                    // 命令还会撞上仍在跑的前台命令。标记不可复用并遗留
+                    // 就绪探针，命令收尾后经恢复检测自动回池。
+                    self.mark_unresponsive_with_probe(session_id);
+                }
                 return Ok(response);
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    /// 超时未确认收尾：终端保持存活但移出自动复用池，并往输入缓冲写入
+    /// 一条就绪探针——前台命令收尾后 shell 会执行它并回显 marker，
+    /// 下次选终端时据此把终端恢复回池（复用就绪确认超时的自愈机制）。
+    fn mark_unresponsive_with_probe(&self, session_id: &str) {
+        let marker = format!("__TIANGONG_READY_{}__", scru128::new());
+        let marked = self.with_session(session_id, |session| {
+            let probe = shell_ready_probe(session.shell, &marker);
+            session.writer.write_all(probe.as_bytes()).ok();
+            session.writer.flush().ok();
+            session.phase = SessionPhase::Unresponsive;
+            session.shell_ready = false;
+            session.pending_ready_marker = Some(marker);
+            Ok(())
+        });
+        match marked {
+            Ok(()) => tracing::warn!(session_id, "命令超时未确认收尾，终端暂不自动复用"),
+            Err(error) => {
+                tracing::debug!(session_id, %error, "标记未收尾终端时会话已不可用")
+            }
         }
     }
 
@@ -1562,7 +1597,10 @@ impl TerminalService {
                 .writer
                 .write_all(format!("{}\r", command.trim_end()).as_bytes())
                 .context("写入交互命令失败")?;
-            session.writer.flush().context("刷新交互命令失败")
+            session.writer.flush().context("刷新交互命令失败")?;
+            // 程序已真正进入前台：此后取消须保留终端并转交互状态。
+            session.interactive_started = true;
+            Ok(())
         })?;
 
         let deadline = Instant::now() + Duration::from_secs(wait_secs.unwrap_or(3).max(1));
@@ -2849,17 +2887,20 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 }
             };
         let _guard = exec_lock.lock().await;
-        // 交互终端（vi/ssh 等前台交互程序）对用户可见且正被操作：取消只
-        // 放弃本次工具等待，不发中断确认流——就绪探针进不了交互程序，
-        // 超时路径会把用户正在使用的终端整个误杀。保持交互状态，由用户
-        // 在标签内自行收尾。
+        // 按取消时刻的执行进度收尾，不能只凭请求的 interactive 参数：
         //
-        // 执行期间 phase 是 Running，只有返回结果后才置 Interactive，因此
-        // 必须同时看本次调用的 interactive 入参：调用自己拉起的 vi/ssh 被
-        // 取消时 phase 还停在 Running，只查 phase 会漏掉这一主场景。
-        let phase = self.with_session(&terminal_id, |session| Ok(session.phase));
-        let interactive_terminal = match phase {
-            Ok(phase) => active.interactive || phase == SessionPhase::Interactive,
+        // - Reserved：命令尚未写入 PTY（前端附着等待等阶段），终端干净，
+        //   直接放回空闲池，无需中断确认——否则预留永远挂着不被复用；
+        // - 交互程序已写入（interactive_started）：程序在前台且对用户
+        //   可见，保留终端并转交互状态（探针进不了交互程序，确认流只会
+        //   误杀）；由用户在标签内自行收尾；
+        // - 更早进入的 Interactive：同上保持不动；
+        // - 其余（命令执行中、交互调用的握手阶段）：走中断确认流。
+        let state = self.with_session(&terminal_id, |session| {
+            Ok((session.phase, session.interactive_started))
+        });
+        let (phase, interactive_started) = match state {
+            Ok(state) => state,
             Err(error) => {
                 // 拿到 exec_lock 后终端才被回收：无需中断，登记已清除。
                 tracing::debug!(
@@ -2871,13 +2912,41 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                 return Ok(());
             }
         };
-        if interactive_terminal {
-            tracing::info!(
-                request_id,
-                terminal = %terminal_id,
-                "取消交互调用：保留交互终端，不做中断确认"
-            );
-            return Ok(());
+        match phase {
+            SessionPhase::Reserved => {
+                let _ = self.with_session(&terminal_id, |session| {
+                    session.phase = SessionPhase::Idle;
+                    session.running_command = None;
+                    Ok(())
+                });
+                tracing::info!(
+                    request_id,
+                    terminal = %terminal_id,
+                    "取消发生在命令启动前，终端直接回到空闲"
+                );
+                return Ok(());
+            }
+            SessionPhase::Interactive => {
+                tracing::info!(
+                    request_id,
+                    terminal = %terminal_id,
+                    "取消交互调用：保留交互终端，不做中断确认"
+                );
+                return Ok(());
+            }
+            _ if active.interactive && interactive_started => {
+                let _ = self.with_session(&terminal_id, |session| {
+                    session.phase = SessionPhase::Interactive;
+                    Ok(())
+                });
+                tracing::info!(
+                    request_id,
+                    terminal = %terminal_id,
+                    "取消交互调用：程序保留在前台，终端转入交互状态"
+                );
+                return Ok(());
+            }
+            _ => {}
         }
         let interrupted = self.with_session(&terminal_id, |session| {
             session
@@ -4543,6 +4612,20 @@ mod tests {
             service.with_session(&terminal, |_| Ok(())).is_ok(),
             "交互终端必须保留给用户继续使用"
         );
+        // 程序已启动（cat 在前台）：取消后状态必须收尾为交互中且命令
+        // 保留，不得滞留 Running（收尾 future 已丢弃，不会再有人置态）。
+        let (phase, command) = service
+            .with_session(&terminal, |session| {
+                Ok((session.phase, session.running_command.clone()))
+            })
+            .expect("终端应存活");
+        assert_eq!(phase, SessionPhase::Interactive, "取消后应转交互状态");
+        assert!(
+            command
+                .as_deref()
+                .is_some_and(|command| command.contains("cat")),
+            "交互中的终端应保留命令供 terminal_status 查询: {command:?}"
+        );
         // 不发 Ctrl+C、不发探针：取消后终端不应因中断确认流产生新输出。
         let after = service
             .with_session(&terminal, |session| Ok(session.raw_bytes_total))
@@ -4559,6 +4642,183 @@ mod tests {
 
         // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
         // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
+    }
+
+    /// 取消发生在命令启动前（前端附着等待阶段）：终端尚未收到任何输入，
+    /// 取消必须直接释放预留回到空闲——否则预留永远挂着，终端不再被复用。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 取消发生在命令启动前时终端回到空闲() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = std::sync::Arc::new(TerminalService::new());
+        let request = tool_request(
+            "run_shell",
+            serde_json::json!({ "script": "echo never-runs", "interactive": true }),
+            Some(("session-a", workspace.as_str())),
+        );
+        let task_service = std::sync::Arc::clone(&service);
+        let task_request = request.clone();
+        let running = tokio::spawn(async move {
+            task_service.dispatch_test(task_request).await;
+        });
+        // 登记发生在前端附着等待之前：拿到终端编号时它必处于 Reserved
+        // （命令尚未写入 PTY），立即取消即命中「启动前取消」窗口。
+        let terminal = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(active) = service.active_tools.lock()
+                    && let Some((_, active)) = active.iter().next()
+                {
+                    break active.terminal_id.clone();
+                }
+                assert!(Instant::now() < deadline, "调用应登记为活动工具");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        running.abort();
+        let aborted = running.await.expect_err("执行任务应被取消");
+        assert!(aborted.is_cancelled());
+        service
+            .cancel(&request.request)
+            .await
+            .expect("取消钩子不应失败");
+
+        let phase = service
+            .with_session(&terminal, |session| Ok(session.phase))
+            .expect("终端应存活");
+        assert_eq!(phase, SessionPhase::Idle, "启动前取消必须释放预留回到空闲");
+
+        // 后续命令应能复用该终端（它干净且空闲）。
+        let after = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["reused"], "timeout": 10}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(after["ok"], true, "{after}");
+        assert_eq!(after["stdout"], "reused");
+        assert!(
+            after["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("复用空闲终端"),
+            "应复用被释放的终端: {}",
+            after["summary"]
+        );
+
+        // 先收集再循环：避免 for 头部锁守卫跨循环体重入自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
+    }
+
+    /// 命令超时但忽略 SIGINT 仍在前台运行：超时返回后终端必须标记为
+    /// 不可自动复用并保留命令（状态查询不得错报空闲、丢命令），下一条
+    /// 命令换新终端执行；前台收尾后遗留探针回显，终端自动恢复回池。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 超时未收尾的终端不得错报空闲() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+
+        let timed = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({
+                        "cmd": "bash",
+                        "args": ["-c", "trap '' INT; echo RUNNING; sleep 6"],
+                        "timeout": 2,
+                    }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(timed["ok"], false, "超时命令应返回失败: {timed}");
+
+        // 超时返回时命令仍在跑：状态必须是不可复用且命令可见。
+        let status = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_status",
+                    serde_json::json!({}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        let overview: serde_json::Value =
+            serde_json::from_str(status["stdout"].as_str().expect("概要应有 stdout"))
+                .expect("概要应为 JSON");
+        let stale = overview["terminals"]
+            .as_array()
+            .expect("概要应为数组")
+            .iter()
+            .find(|terminal| terminal["status"] == "unresponsive")
+            .expect("未收尾终端应标记为不可复用")
+            .clone();
+        let stale_id = stale["terminal_id"].as_str().expect("应有编号").to_string();
+        assert!(
+            stale["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("sleep 6")),
+            "未收尾终端应保留命令: {stale}"
+        );
+
+        // 下一条命令换新终端正常执行，不撞仍在跑的前台命令。
+        let next = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["fresh"], "timeout": 10}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(next["ok"], true, "应换新终端执行: {next}");
+        assert_eq!(next["stdout"], "fresh");
+        assert!(
+            !next["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&stale_id),
+            "未收尾终端不得被复用: {}",
+            next["summary"]
+        );
+
+        // 前台命令自行收尾（sleep 6 结束）后，遗留探针被 shell 执行回显；
+        // 恢复检测在选终端时进行，经 acquire 轮询驱动。
+        let recovered_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let acquired = service.acquire_session(AcquireRequest {
+                scope_id: "session-a".to_string(),
+            });
+            if let Some(selected) = acquired.session_id {
+                let recovered = selected == stale_id;
+                let _ = service.release_session(SessionIdRequest {
+                    session_id: selected,
+                });
+                if recovered {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < recovered_deadline,
+                "前台收尾后终端应自动恢复回池"
+            );
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        // 先收集再循环：避免 for 头部锁守卫跨循环体重入自死锁。
         let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
         for session_id in session_ids {
             let _ = service.kill_session(SessionIdRequest { session_id });
