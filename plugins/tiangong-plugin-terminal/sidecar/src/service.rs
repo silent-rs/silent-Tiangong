@@ -131,6 +131,10 @@ struct PtySession {
     /// 收尾后 shell 会把它执行掉并回显；选终端时据此判断 Unresponsive
     /// 终端是否已自行恢复，避免长任务结束后终端永久退出复用池。
     pending_ready_marker: Option<String>,
+    /// 正在执行的命令文本（进入执行态时记录，供 terminal_status 查询）。
+    /// 回到空闲时清空；交互中与未就绪（收尾中）保留——查询时能看到
+    /// 终端里跑的是什么程序对排查有直接价值。
+    running_command: Option<String>,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -770,6 +774,7 @@ impl TerminalService {
                 screen_updates: 0,
                 exited_code: None,
                 pending_ready_marker: None,
+                running_command: None,
                 logger,
             },
         );
@@ -1127,6 +1132,7 @@ impl TerminalService {
                 session.phase = SessionPhase::Idle;
                 session.shell_ready = true;
                 session.pending_ready_marker = None;
+                session.running_command = None;
                 tracing::info!(session_id, "终端前台命令已收尾，提示符恢复，重新加入复用池");
             }
         }
@@ -1263,6 +1269,7 @@ impl TerminalService {
                 bail!("终端正在运行交互程序");
             }
             session.phase = SessionPhase::Running;
+            session.running_command = Some(command.clone());
             Ok(())
         })?;
 
@@ -1292,6 +1299,11 @@ impl TerminalService {
             // 调用又会撞在同一个未回到提示符的 shell 上。
             if session.phase != SessionPhase::Unresponsive {
                 session.phase = next_phase;
+                // 回到空闲的命令已结束；交互中的程序名对查询仍有价值，
+                // 与 Unresponsive（收尾中的命令）一并保留。
+                if next_phase == SessionPhase::Idle {
+                    session.running_command = None;
+                }
             }
             Ok(())
         });
@@ -2690,6 +2702,7 @@ impl TerminalService {
                     serde_json::json!({
                         "terminal_id": id,
                         "status": label,
+                        "command": session.running_command,
                         "exited_code": session.exited_code,
                     })
                 })
@@ -2725,13 +2738,19 @@ impl TerminalService {
         let visible = String::from_utf8_lossy(&session.display_history).to_string();
         let reversed_tail = visible.chars().rev().take(2000).collect::<String>();
         let recent_output = reversed_tail.chars().rev().collect::<String>();
+        let running_command = session.running_command.clone();
+        let summary = match &running_command {
+            Some(command) => format!("终端 {target} 状态：{}（{command}）", phase_label_cn(label)),
+            None => format!("终端 {target} 状态：{}", phase_label_cn(label)),
+        };
         ToolOutcome {
             ok: true,
-            summary: format!("终端 {target} 状态：{}", phase_label_cn(label)),
+            summary,
             stdout: Some(
                 serde_json::to_string(&serde_json::json!({
                     "terminal_id": target,
                     "status": label,
+                    "command": running_command,
                     "exited_code": session.exited_code,
                     "recent_output": recent_output,
                 }))
@@ -2885,6 +2904,7 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
             Ok(()) => {
                 let _ = self.with_session(&terminal_id, |session| {
                     session.phase = SessionPhase::Idle;
+                    session.running_command = None;
                     Ok(())
                 });
                 tracing::info!(
@@ -4812,10 +4832,11 @@ mod tests {
         service
             .spawn_session(spawn("status-dead", "session-a"))
             .unwrap();
-        // 覆盖状态映射：交互中与已退出（待回收）。
+        // 覆盖状态映射：交互中（带命令）与已退出（待回收）。
         service
             .with_session("status-busy", |session| {
                 session.phase = SessionPhase::Interactive;
+                session.running_command = Some("vi notes.txt".to_string());
                 Ok(())
             })
             .unwrap();
@@ -4859,6 +4880,24 @@ mod tests {
         assert_eq!(status_of("status-idle"), "idle");
         assert_eq!(status_of("status-busy"), "interactive");
         assert_eq!(status_of("status-dead"), "exited");
+        let command_of = |id: &str| {
+            terminals
+                .iter()
+                .find(|terminal| terminal["terminal_id"] == id)
+                .and_then(|terminal| terminal["command"].as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(
+            command_of("status-busy"),
+            "vi notes.txt",
+            "执行中/交互中的终端应带正在执行的命令"
+        );
+        assert_eq!(
+            command_of("status-idle"),
+            "",
+            "空闲终端不应残留命令（null 序列化为空断言兜底）"
+        );
         assert_eq!(
             terminals
                 .iter()
