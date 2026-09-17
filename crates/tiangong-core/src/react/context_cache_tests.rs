@@ -603,7 +603,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose, StreamTiming};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-    use tiangong_llm::{ModelFunctionResponse, ModelResponse, ModelStreamChunk};
+    use tiangong_llm::{ModelResponse, ModelStreamChunk};
 
     let server = MockServer::builder().start().await;
     let mut harness = TestHarness::new_with_protocol(
