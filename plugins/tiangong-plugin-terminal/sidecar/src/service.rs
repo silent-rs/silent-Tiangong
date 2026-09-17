@@ -20,14 +20,15 @@ pub const CHANNEL_OUTPUT: &str = "terminal.output";
 /// 通知通道：会话退出（负载 JSON 见 `ExitNotification`）。
 pub const CHANNEL_EXIT: &str = "terminal.exit";
 
-/// 就绪握手失败的标记错误：探针超时后终端已被关闭，调用方可据此
-/// 自动新建终端重试（新终端走不发 Ctrl+C 的干净握手路径）。
+/// 就绪握手失败的标记错误：探针超时后终端被标记为不可自动复用（但保持
+/// 存活——里面可能有 `&` / `nohup` 起的长期作业和用户正在看的输出），
+/// 调用方可据此换一个新终端重试（新终端走不发 Ctrl+C 的干净握手路径）。
 #[derive(Debug)]
 struct ShellNotReady;
 
 impl std::fmt::Display for ShellNotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("等待 Shell 就绪超时，已关闭失效终端")
+        f.write_str("等待 Shell 就绪超时，终端已保留但不再自动复用")
     }
 }
 
@@ -60,7 +61,17 @@ pub struct TerminalService {
     spawn_lock: Mutex<()>,
     /// 进行中或等待正式取消处理的 Agent 工具调用（sidecar request_id → 执行终端）。
     /// 执行 future 可以先被丢弃，本表必须保留到正常完成或 cancel() 主动清除。
-    active_tools: Arc<Mutex<HashMap<String, String>>>,
+    active_tools: Arc<Mutex<HashMap<String, ActiveTool>>>,
+}
+
+/// 活动工具调用的取消所需信息。
+#[derive(Debug, Clone)]
+struct ActiveTool {
+    terminal_id: String,
+    /// 本次调用请求了交互模式（vi/ssh 等）。执行期间 phase 仍是 Running，
+    /// 只有返回结果后才置 Interactive，因此取消时不能只看 phase：调用自己
+    /// 拉起的交互程序必须靠本标志识别，否则会被中断确认流误杀。
+    interactive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +80,11 @@ enum SessionPhase {
     Reserved,
     Running,
     Interactive,
+    /// 就绪确认失败：Ctrl+C 之后 shell 没在预算内回到提示符（前台进程树
+    /// 仍在收尾、前台程序吃掉了探针等）。终端**保持存活**——用户用 `&`
+    /// 或 `nohup` 起的后台作业、可见输出和可继续输入的会话都不受影响，
+    /// 只是不再被自动复用；由用户自行继续使用或关闭。
+    Unresponsive,
 }
 
 /// 会话相对死亡/回收的三态，见 [`TerminalService::session_end_state`]。
@@ -111,6 +127,10 @@ struct PtySession {
     /// 立即出表：执行中的命令仍需读取输出与退出码正常收尾；出表由命令
     /// 收尾或下次选终端时完成。
     exited_code: Option<i32>,
+    /// 就绪确认超时时遗留在 shell 输入缓冲里的探针 marker。前台进程树
+    /// 收尾后 shell 会把它执行掉并回显；选终端时据此判断 Unresponsive
+    /// 终端是否已自行恢复，避免长任务结束后终端永久退出复用池。
+    pending_ready_marker: Option<String>,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -287,13 +307,27 @@ fn login_shell_args(shell: &str) -> Vec<&'static str> {
     }
 }
 
+/// 就绪探针命令：各 Shell 都以「拼接」形式书写，探针文本本身绝不含
+/// 完整 marker。PTY 回显开启时写进去的字节会原样回流，若探针里带完整
+/// marker，未就绪终端（残留前台进程占用 stdin）的纯回显也会命中匹配，
+/// 就绪判定退化成恒真——`cancel()` 的中断确认将失去意义。
 fn shell_ready_probe(shell: ShellKind, marker: &str) -> String {
     let suffix = marker.strip_prefix(MARKER_PREFIX).unwrap_or(marker);
     match shell {
         ShellKind::Cmd => format!("echo {MARKER_PREFIX}^{suffix}\r"),
         ShellKind::PowerShell => format!("Write-Output ('{MARKER_PREFIX}' + '{suffix}')\r"),
-        ShellKind::Posix => format!("echo '{marker}'\r"),
+        // 相邻引用串在 POSIX shell 中天然拼接：执行后输出完整 marker，
+        // 回显的命令行则被 `'` 断开，不构成完整 marker。
+        ShellKind::Posix => format!("echo '{MARKER_PREFIX}''{suffix}'\r"),
     }
+}
+
+/// 就绪判定：marker 含随机 scru128，整体子串命中即视为 shell 已执行探针。
+/// 富提示符（starship）与 shell 插件（zsh xtrace/autosuggest）会在输出中
+/// 叠加前缀或与探针交错，严格行相等匹配会漏判；子串匹配的安全性由
+/// [`shell_ready_probe`] 的拼接写法保证（回显不含完整 marker）。
+fn shell_ready_probe_completed(raw: &str, marker: &str) -> bool {
+    raw.contains(marker)
 }
 
 fn default_cols() -> u16 {
@@ -462,11 +496,19 @@ impl TerminalService {
 
     /// 登记一次执行中的工具调用。正常完成时显式清除；future 被丢弃时
     /// 保留映射，供随后到达的正式取消处理定位 PTY。
-    fn track_active_tool(&self, request_id: &str, terminal_id: &str) -> ActiveToolRegistration {
-        self.active_tools
-            .lock()
-            .expect("活动工具表锁损坏")
-            .insert(request_id.to_string(), terminal_id.to_string());
+    fn track_active_tool(
+        &self,
+        request_id: &str,
+        terminal_id: &str,
+        interactive: bool,
+    ) -> ActiveToolRegistration {
+        self.active_tools.lock().expect("活动工具表锁损坏").insert(
+            request_id.to_string(),
+            ActiveTool {
+                terminal_id: terminal_id.to_string(),
+                interactive,
+            },
+        );
         ActiveToolRegistration {
             active_tools: Arc::clone(&self.active_tools),
             request_id: request_id.to_string(),
@@ -727,6 +769,7 @@ impl TerminalService {
                 screen_snapshot: String::new(),
                 screen_updates: 0,
                 exited_code: None,
+                pending_ready_marker: None,
                 logger,
             },
         );
@@ -1015,7 +1058,7 @@ impl TerminalService {
             self.active_tools
                 .lock()
                 .expect("活动工具表锁损坏")
-                .retain(|_, terminal_id| !removed_ids.contains(terminal_id));
+                .retain(|_, active| !removed_ids.contains(&active.terminal_id));
         }
         for (session_id, mut session) in removed {
             let _ = session.killer.kill();
@@ -1056,6 +1099,35 @@ impl TerminalService {
             let mut attached = self.frontend_attached.lock().expect("前端附着表锁损坏");
             for session_id in &ended_ids {
                 attached.remove(session_id);
+            }
+        }
+        // 曾就绪确认超时的终端自行恢复后重新可用：遗留在 shell 输入缓冲
+        // 里的探针会在前台进程树收尾后被执行并回显 marker。长任务跑完
+        // （或后台作业转入后台）后终端就该回到复用池，而不是永久闲置。
+        let recovered: Vec<String> = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.phase == SessionPhase::Unresponsive
+                    && session.exited_code.is_none()
+                    && session.scope_id.as_deref() == Some(request.scope_id.as_str())
+                    && session
+                        .pending_ready_marker
+                        .as_deref()
+                        .is_some_and(|marker| {
+                            shell_ready_probe_completed(
+                                &String::from_utf8_lossy(&session.raw_history),
+                                marker,
+                            )
+                        })
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in recovered {
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.phase = SessionPhase::Idle;
+                session.shell_ready = true;
+                session.pending_ready_marker = None;
+                tracing::info!(session_id, "终端前台命令已收尾，提示符恢复，重新加入复用池");
             }
         }
         let selected = sessions
@@ -1215,7 +1287,12 @@ impl TerminalService {
             SessionPhase::Idle
         };
         let _ = self.with_session(&request.session_id, |session| {
-            session.phase = next_phase;
+            // 就绪确认失败的终端保持 Unresponsive：终端仍存活可用（后台
+            // 作业、用户输入都在），但不得被选终端自动复用，否则下一次
+            // 调用又会撞在同一个未回到提示符的 shell 上。
+            if session.phase != SessionPhase::Unresponsive {
+                session.phase = next_phase;
+            }
             Ok(())
         });
         result
@@ -1276,13 +1353,12 @@ impl TerminalService {
         let probe_deadline = Instant::now() + Duration::from_secs(SHELL_READY_TIMEOUT_SECS);
         loop {
             let raw = self.raw_output_since(session_id, probe_offset)?;
-            // marker 含随机 scru128，整体子串命中即视为就绪。富提示符
-            // （starship）与 shell 插件（zsh xtrace/autosuggest）会在回显
-            // 行上叠加前缀或与探针交错，严格行相等匹配会漏判。
-            let probe_completed = String::from_utf8_lossy(&raw).contains(&marker);
+            let probe_completed =
+                shell_ready_probe_completed(&String::from_utf8_lossy(&raw), &marker);
             if probe_completed {
                 self.with_session(session_id, |session| {
                     session.shell_ready = true;
+                    session.pending_ready_marker = None;
                     Ok(())
                 })?;
                 return Ok(());
@@ -1291,14 +1367,25 @@ impl TerminalService {
                 let output = String::from_utf8_lossy(&raw);
                 let reversed_tail = output.chars().rev().take(2048).collect::<String>();
                 let output_tail = reversed_tail.chars().rev().collect::<String>();
+                // 终端**不关闭**：前台进程树可能仍在收尾，用户也可能用
+                // `&` / `nohup` 起了要长期运行的作业，或终端里就是一个
+                // 用户正在看的程序。杀 PTY 会给整个进程组发 SIGHUP，
+                // 把这些作业和输出一起带走。改为标记不可自动复用：
+                // 终端保持存活可见可输入，只是不再被选终端选中。
+                let _ = self.with_session(session_id, |session| {
+                    session.phase = SessionPhase::Unresponsive;
+                    // shell 是否还认账已不确定，下次使用重新走完整握手。
+                    session.shell_ready = false;
+                    // 探针还躺在 shell 的输入缓冲里：前台进程树收尾后
+                    // shell 会执行它并回显 marker，选终端据此判断恢复。
+                    session.pending_ready_marker = Some(marker.clone());
+                    Ok(())
+                });
                 tracing::warn!(
                     session_id,
                     probe_output = ?output_tail,
-                    "等待 Shell 就绪超时，关闭失效终端会话"
+                    "等待 Shell 就绪超时，终端保留但不再自动复用"
                 );
-                let _ = self.kill_session(SessionIdRequest {
-                    session_id: session_id.to_string(),
-                });
                 return Err(anyhow::Error::new(ShellNotReady));
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
@@ -2106,7 +2193,7 @@ struct ToolScope {
 /// 活动工具登记。正常执行结束时由 `complete` 清除；dispatch future 先被
 /// 丢弃时有意保留映射，随后到达的 `cancel()` 仍能定位并中断 PTY。
 struct ActiveToolRegistration {
-    active_tools: Arc<Mutex<HashMap<String, String>>>,
+    active_tools: Arc<Mutex<HashMap<String, ActiveTool>>>,
     request_id: String,
 }
 
@@ -2300,13 +2387,16 @@ impl TerminalService {
         // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
         // 重复调用幂等聚焦同一标签。精确页面通过 terminalFind 完成事件
         // 订阅和附着后才开始输出；后台会话没有前台标签时有限等待后继续。
-        // 复用终端的就绪握手失败（终端已在超时路径关闭）时自动新建终端
-        // 重试一次：新终端走不发 Ctrl+C 的干净握手路径，对上层透明。
+        // 复用终端的就绪握手失败时自动新建终端重试一次：新终端走不发
+        // Ctrl+C 的干净握手路径，对上层透明。旧终端不被关闭，只是标记为
+        // 不可自动复用（里面可能有 `&` / `nohup` 起的长期作业），用户仍
+        // 可在标签里继续查看和操作。
         let mut retried_after_handshake = false;
+        let mut handed_off_terminal = None;
         let executed = loop {
             // 从首次异步等待开始登记取消目标。执行 future 若先被丢弃，
             // 登记对象虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
-            let active = self.track_active_tool(&scope.request_id, &session_id);
+            let active = self.track_active_tool(&scope.request_id, &session_id, interactive);
             request_host_app_open(&scope.session_id, &session_id, false).await;
             if !self.wait_for_frontend_attach(&session_id).await {
                 tracing::debug!(
@@ -2347,9 +2437,10 @@ impl TerminalService {
                     tracing::warn!(
                         request_id = %scope.request_id,
                         terminal = %session_id,
-                        "复用终端就绪握手失败，自动新建终端重试一次"
+                        "复用终端就绪握手失败，保留原终端并新建终端重试一次"
                     );
                     retried_after_handshake = true;
+                    handed_off_terminal = Some(session_id.clone());
                     match self.spawn_session(SpawnRequest {
                         session_id: None,
                         cmd: String::new(),
@@ -2393,8 +2484,10 @@ impl TerminalService {
         } else {
             "当前会话没有可用终端"
         };
-        let selection = if retried_after_handshake {
-            format!("新终端 {session_id}（复用终端就绪失败已自动更换）")
+        let selection = if let Some(previous) = handed_off_terminal.as_deref() {
+            format!(
+                "新终端 {session_id}（终端 {previous} 未在预算内回到提示符，已保留其内容与后台作业，改用新终端）"
+            )
         } else if created_new {
             format!("新终端 {session_id}（{reason}，没有写入旧终端）")
         } else {
@@ -2590,16 +2683,17 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
     /// 握手，探针进入残留进程的 stdin，marker 永不回显）。
     async fn cancel(&self, request: &Request) -> Result<()> {
         let request_id = request.request_id.as_str();
-        let terminal_id = self
+        let active = self
             .active_tools
             .lock()
             .expect("活动工具表锁损坏")
             .remove(request_id);
-        let Some(terminal_id) = terminal_id else {
+        let Some(active) = active else {
             // 非执行型调用（send 的画面等待等）：等待 future 已被 runner
             // 丢弃，无 PTY 资源需要释放。
             return Ok(());
         };
+        let terminal_id = active.terminal_id;
         // 与可能仍在丢弃收尾中的执行 future 串行化，避免写交错；future
         // 被 runner 丢弃后锁即释放，不会久等。
         let exec_lock =
@@ -2621,9 +2715,25 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
         // 放弃本次工具等待，不发中断确认流——就绪探针进不了交互程序，
         // 超时路径会把用户正在使用的终端整个误杀。保持交互状态，由用户
         // 在标签内自行收尾。
-        if self.with_session(&terminal_id, |session| Ok(session.phase))?
-            == SessionPhase::Interactive
-        {
+        //
+        // 执行期间 phase 是 Running，只有返回结果后才置 Interactive，因此
+        // 必须同时看本次调用的 interactive 入参：调用自己拉起的 vi/ssh 被
+        // 取消时 phase 还停在 Running，只查 phase 会漏掉这一主场景。
+        let phase = self.with_session(&terminal_id, |session| Ok(session.phase));
+        let interactive_terminal = match phase {
+            Ok(phase) => active.interactive || phase == SessionPhase::Interactive,
+            Err(error) => {
+                // 拿到 exec_lock 后终端才被回收：无需中断，登记已清除。
+                tracing::debug!(
+                    request_id,
+                    terminal = %terminal_id,
+                    %error,
+                    "取消时终端已不可用"
+                );
+                return Ok(());
+            }
+        };
+        if interactive_terminal {
             tracing::info!(
                 request_id,
                 terminal = %terminal_id,
@@ -2649,8 +2759,9 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
             return Ok(());
         }
         // 就绪握手复用命令前置路径：shell_ready 终端会再发一次 Ctrl+C
-        // 清理残留输入并用探针确认提示符已恢复；超时路径内部已
-        // kill_session，不放回复用池。
+        // 清理残留输入并用探针确认提示符已恢复。确认成功才放回复用池；
+        // 失败时超时路径已把终端标记为 Unresponsive（终端仍存活，后台
+        // 作业和用户输入不受影响），不放回池即可。
         match self.prepare_shell_for_command(&terminal_id).await {
             Ok(()) => {
                 let _ = self.with_session(&terminal_id, |session| {
@@ -2668,7 +2779,7 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
                     request_id,
                     terminal = %terminal_id,
                     %error,
-                    "取消后确认 Shell 就绪失败，已关闭失效终端"
+                    "取消后 Shell 未在预算内回到提示符，终端保留但不再自动复用"
                 );
             }
         }
@@ -2858,6 +2969,60 @@ mod tests {
         assert_eq!(
             shell_ready_probe(ShellKind::Cmd, "__TIANGONG_READY_test__"),
             "echo __TIANGONG_^READY_test__\r"
+        );
+    }
+
+    /// 探针文本本身绝不能含完整 marker：PTY 回显会把写入的字节原样回流，
+    /// 若探针里带完整 marker，未就绪终端（残留前台进程占着 stdin、一个字节
+    /// 都没执行）的纯回显也会命中子串匹配，就绪判定退化成恒真。
+    #[test]
+    fn shell_ready_probe_文本不含完整_marker() {
+        let marker = "__TIANGONG_READY_abc__";
+        for shell in [ShellKind::Posix, ShellKind::Cmd, ShellKind::PowerShell] {
+            let probe = shell_ready_probe(shell, marker);
+            assert!(
+                !probe.contains(marker),
+                "{shell:?} 探针回显会被误判为就绪: {probe}"
+            );
+        }
+        assert_eq!(
+            shell_ready_probe(ShellKind::Posix, marker),
+            "echo '__TIANGONG_''READY_abc__'\r",
+            "POSIX 探针须用相邻引用串拼接，执行后才输出完整 marker"
+        );
+    }
+
+    #[test]
+    fn 就绪判定_未执行的纯回显不算就绪() {
+        let marker = "__TIANGONG_READY_abc__";
+        // 残留前台进程占用 stdin：探针整行被 tty 回显，但无人执行。
+        let echo_only = format!(
+            "\u{1b}[?2004h{}\r\n",
+            shell_ready_probe(ShellKind::Posix, marker).trim_end_matches('\r')
+        );
+        assert!(
+            !shell_ready_probe_completed(&echo_only, marker),
+            "纯回显必须判为未就绪: {echo_only:?}"
+        );
+    }
+
+    #[test]
+    fn 就绪判定_命中富提示符与_xtrace_噪声中的_marker() {
+        let marker = "__TIANGONG_READY_abc__";
+        // starship 右提示符 + OSC 颜色查询 + zsh xtrace/autosuggest 前缀：
+        // marker 不独占整行，严格行相等匹配会漏判，子串匹配必须命中。
+        let noisy = format!(
+            "\u{1b}]11;rgb:1e1e/1e1e/2e2e\u{1b}\\\r\n\
+             _zsh_autosuggest_bind_widgets:18> echo {marker}\r\n\
+             \u{1b}[1;32m❯\u{1b}[0m {marker}\u{1b}[K\r\n"
+        );
+        assert!(
+            shell_ready_probe_completed(&noisy, marker),
+            "富提示符与 xtrace 噪声中的 marker 必须判为就绪"
+        );
+        assert!(
+            !shell_ready_probe_completed(&noisy, "__TIANGONG_READY_other__"),
+            "不同随机 marker 不得互相命中"
         );
     }
 
@@ -3836,9 +4001,9 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 if let Ok(active) = service_for_task.active_tools.lock()
-                    && let Some((_, terminal)) = active.iter().next()
+                    && let Some((_, active)) = active.iter().next()
                 {
-                    break terminal.clone();
+                    break active.terminal_id.clone();
                 }
                 assert!(Instant::now() < deadline, "长命令应登记为活动工具调用");
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3877,8 +4042,9 @@ mod tests {
                 .active_tools
                 .lock()
                 .expect("活动工具表锁损坏")
-                .get(&request_id),
-            Some(&terminal),
+                .get(&request_id)
+                .map(|active| active.terminal_id.clone()),
+            Some(terminal.clone()),
             "执行 future 销毁后必须保留取消目标"
         );
 
@@ -3925,6 +4091,332 @@ mod tests {
                 session_id: terminal,
             })
             .expect("清理测试终端失败");
+    }
+
+    /// 测试辅助：起一条长命令并在其真正进入 PTY 后模拟 runner 丢弃
+    /// dispatch future，返回（服务, 执行终端编号, 原请求）。
+    #[cfg(unix)]
+    async fn 取消执行中的调用(
+        payload: serde_json::Value,
+        operation: &str,
+        workspace: &str,
+    ) -> (std::sync::Arc<TerminalService>, String, ScopedRequest) {
+        let service = std::sync::Arc::new(TerminalService::new());
+        let request = tool_request(operation, payload, Some(("session-a", workspace)));
+        let task_service = std::sync::Arc::clone(&service);
+        let task_request = request.clone();
+        let running = tokio::spawn(async move {
+            task_service.dispatch_test(task_request).await;
+        });
+        let terminal = {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(active) = service.active_tools.lock()
+                    && let Some((_, active)) = active.iter().next()
+                {
+                    break active.terminal_id.clone();
+                }
+                assert!(Instant::now() < deadline, "长命令应登记为活动工具调用");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        // 等到命令真正进入 PTY（交互命令没有 start marker，退而求其次等
+        // 到 phase 进入执行态且有输出产生）。
+        let started_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let started = service
+                .with_session(&terminal, |session| {
+                    let raw = String::from_utf8_lossy(&session.raw_history).to_string();
+                    Ok(session.phase == SessionPhase::Running
+                        && (raw.contains("__TIANGONG_START_") || raw.contains("READY_TO_CANCEL")))
+                })
+                .unwrap_or(false);
+            if started {
+                break;
+            }
+            assert!(
+                Instant::now() < started_deadline,
+                "长命令应在取消前进入 PTY"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        running.abort();
+        let aborted = running.await.expect_err("执行任务应被取消");
+        assert!(aborted.is_cancelled(), "执行任务应先于 cancel 钩子终止");
+        (service, terminal, request)
+    }
+
+    /// issue #552 主场景：被取消的命令带子进程树，SIGINT 送达后收尾需要
+    /// 时间。cancel 必须确认 shell 真正回到提示符才放回复用池，否则下一条
+    /// 命令会在未收尾的终端上握手、探针进入残留进程 stdin 而永不回显。
+    ///
+    /// 这里用 trap 让 SIGINT 后仍占用前台若干秒，精确复现「账面空闲、实际
+    /// 仍忙」的窗口；验收点是下一条命令必须正常执行，而不是超时失败。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 取消收尾缓慢的命令后下一条命令仍能正常执行() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        // SIGINT 后还要占用前台 4 秒（> SHELL_READY_TIMEOUT_SECS），
+        // 模拟 cargo nextest 之类带子进程树的长任务收尾。
+        let (service, terminal, request) = 取消执行中的调用(
+            serde_json::json!({
+                "script": "trap 'sleep 4; exit 130' INT; echo READY_TO_CANCEL; sleep 60",
+            }),
+            "run_shell",
+            &workspace,
+        )
+        .await;
+
+        service
+            .cancel(&request.request)
+            .await
+            .expect("取消钩子不应失败");
+
+        // 未就绪终端绝不能以 Idle 放回池——那正是 issue 的根因。
+        let phase = service
+            .with_session(&terminal, |session| Ok(session.phase))
+            .expect("终端应保留");
+        assert_ne!(
+            phase,
+            SessionPhase::Idle,
+            "shell 未确认回到提示符时不得放回复用池"
+        );
+
+        // 下一条命令必须成功：要么复用已确认就绪的终端，要么自动换新终端。
+        let after = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["recovered"], "timeout": 10}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(after["ok"], true, "取消后下一条命令必须可执行: {after}");
+        assert_eq!(after["stdout"], "recovered", "结果: {after}");
+
+        // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
+        // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
+    }
+
+    /// 取消不得杀终端：`&` / `nohup` 起的后台作业必须活下来。
+    ///
+    /// 终端被 kill 会给整个进程组发 SIGHUP，用户特意放到后台长期运行的
+    /// 进程会被一起带走。就绪确认失败只允许把终端移出复用池，PTY 本身
+    /// 必须保留（用户仍可查看输出、继续输入）。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 取消不得杀死终端或其后台作业() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let flag = cwd.path().join("nohup-alive.txt");
+        let flag_path = flag.to_string_lossy().to_string();
+        // 后台作业：持续写标记文件；前台故意忽略 SIGINT 撑过就绪预算，
+        // 逼出「确认失败」这条最危险的分支。
+        let script = format!(
+            "nohup sh -c 'while true; do echo alive >> {flag_path}; sleep 0.2; done' \
+             >/dev/null 2>&1 &\n\
+             trap '' INT\n\
+             echo READY_TO_CANCEL\n\
+             sleep 60\n"
+        );
+        let (service, terminal, request) = 取消执行中的调用(
+            serde_json::json!({ "script": script }),
+            "run_shell",
+            &workspace,
+        )
+        .await;
+
+        service
+            .cancel(&request.request)
+            .await
+            .expect("取消钩子不应失败");
+
+        // 终端必须存活：这是后台作业与用户可见输出的载体。
+        assert!(
+            service.with_session(&terminal, |_| Ok(())).is_ok(),
+            "就绪确认失败不得关闭终端（会连带 SIGHUP 杀掉 nohup/& 后台作业）"
+        );
+        assert!(
+            service
+                .with_session(&terminal, |session| Ok(session.exited_code))
+                .expect("终端应保留")
+                .is_none(),
+            "终端 shell 不应被终止"
+        );
+
+        // 后台作业仍在持续写入：取消只放弃本次工具等待，不影响长期进程。
+        let before = std::fs::metadata(&flag).map(|meta| meta.len()).unwrap_or(0);
+        assert!(before > 0, "后台作业应已开始写入标记文件");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let after = std::fs::metadata(&flag).map(|meta| meta.len()).unwrap_or(0);
+        assert!(
+            after > before,
+            "nohup 后台作业必须在取消后继续运行: before={before} after={after}"
+        );
+
+        // 但该终端不再被自动复用，下一条命令换用新终端并正常返回。
+        let next = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["fresh"], "timeout": 10}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(next["ok"], true, "应换用新终端执行: {next}");
+        assert_eq!(next["stdout"], "fresh");
+        assert!(
+            !next["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&terminal),
+            "未回到提示符的终端不得被复用: {}",
+            next["summary"]
+        );
+
+        // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
+        // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
+    }
+
+    /// 前台长任务收尾后，终端应自行回到复用池，而不是永久闲置。
+    ///
+    /// 就绪确认超时时遗留在输入缓冲里的探针会在前台进程退出后被 shell
+    /// 执行并回显，选终端据此识别恢复。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 收尾完成的终端重新回到复用池() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        // SIGINT 后占用前台 5 秒（超过就绪预算）。trap 内不得 exit——那会
+        // 退出登录 shell 本身，shell 死后无人执行排队的探针，恢复检测
+        // 永不命中；只睡眠，收尾后 shell 回提示符执行遗留探针。
+        let (service, terminal, request) = 取消执行中的调用(
+            serde_json::json!({
+                "script": "trap 'sleep 5' INT; echo READY_TO_CANCEL; sleep 60",
+            }),
+            "run_shell",
+            &workspace,
+        )
+        .await;
+        service
+            .cancel(&request.request)
+            .await
+            .expect("取消钩子不应失败");
+        assert_eq!(
+            service
+                .with_session(&terminal, |session| Ok(session.phase))
+                .expect("终端应保留"),
+            SessionPhase::Unresponsive,
+            "确认失败的终端应标记为不可自动复用"
+        );
+
+        // 等待前台命令自行收尾，遗留探针被 shell 执行。
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let acquired = service.acquire_session(AcquireRequest {
+                scope_id: "session-a".to_string(),
+            });
+            if acquired.session_id.as_deref() == Some(terminal.as_str()) {
+                break;
+            }
+            // 未选中则把预留状态还原，避免影响下一轮判断。
+            if let Some(session_id) = acquired.session_id {
+                let _ = service.release_session(SessionIdRequest { session_id });
+            }
+            assert!(
+                Instant::now() < deadline,
+                "前台命令收尾后终端应重新进入复用池"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let _ = service.release_session(SessionIdRequest {
+            session_id: terminal.clone(),
+        });
+        let after = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "run_command",
+                    serde_json::json!({"cmd": "echo", "args": ["reusable"], "timeout": 10}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(after["ok"], true, "恢复后的终端应能正常执行: {after}");
+        assert_eq!(after["stdout"], "reusable");
+
+        // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
+        // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
+    }
+
+    /// 取消交互调用（vi/ssh）不得动用户的终端。
+    ///
+    /// 执行期间 phase 还是 Running（只有返回结果后才置 Interactive），
+    /// 所以取消判据必须带上本次调用的 interactive 入参，否则调用自己
+    /// 拉起的交互程序会走中断确认流：探针进不了 vi，超时后整个终端被
+    /// 处置，用户正在编辑的内容随之丢失。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 取消交互调用保留用户终端且不发中断() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let (service, terminal, request) = 取消执行中的调用(
+            serde_json::json!({
+                "script": "echo READY_TO_CANCEL; cat",
+                "interactive": true,
+            }),
+            "run_shell",
+            &workspace,
+        )
+        .await;
+
+        let before = service
+            .with_session(&terminal, |session| Ok(session.raw_bytes_total))
+            .expect("终端应存活");
+        service
+            .cancel(&request.request)
+            .await
+            .expect("取消钩子不应失败");
+
+        assert!(
+            service.with_session(&terminal, |_| Ok(())).is_ok(),
+            "交互终端必须保留给用户继续使用"
+        );
+        // 不发 Ctrl+C、不发探针：取消后终端不应因中断确认流产生新输出。
+        let after = service
+            .with_session(&terminal, |session| Ok(session.raw_bytes_total))
+            .expect("终端应存活");
+        assert_eq!(
+            before,
+            after,
+            "取消交互调用不应向终端写入中断或探针（新增输出 {} 字节）",
+            after.saturating_sub(before)
+        );
+        // before == after 已覆盖「不发 Ctrl+C、不发探针」：任一写入都会
+        // 产生新回显字节。不再检查整段历史——首次命令前的就绪握手
+        // 合法地发过一次探针，其回显留在历史里属预期。
+
+        // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束，
+        // 循环体内的 kill_session 将重入同一把非重入锁，自死锁。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4256,11 +4748,13 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        service
-            .active_tools
-            .lock()
-            .unwrap()
-            .insert("request-a".to_string(), "terminal-closed".to_string());
+        service.active_tools.lock().unwrap().insert(
+            "request-a".to_string(),
+            ActiveTool {
+                terminal_id: "terminal-closed".to_string(),
+                interactive: false,
+            },
+        );
 
         let response = service
             .dispatch(Request::new(
