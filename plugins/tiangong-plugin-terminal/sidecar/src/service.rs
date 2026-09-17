@@ -20,6 +20,19 @@ pub const CHANNEL_OUTPUT: &str = "terminal.output";
 /// 通知通道：会话退出（负载 JSON 见 `ExitNotification`）。
 pub const CHANNEL_EXIT: &str = "terminal.exit";
 
+/// 就绪握手失败的标记错误：探针超时后终端已被关闭，调用方可据此
+/// 自动新建终端重试（新终端走不发 Ctrl+C 的干净握手路径）。
+#[derive(Debug)]
+struct ShellNotReady;
+
+impl std::fmt::Display for ShellNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("等待 Shell 就绪超时，已关闭失效终端")
+    }
+}
+
+impl std::error::Error for ShellNotReady {}
+
 /// PTY 输出节流：读取线程按此间隔批量推送（约 60fps 上限）。
 const OUTPUT_FLUSH_INTERVAL_MS: u64 = 16;
 /// 会话最近输出环形缓冲上限（字节）：UI 重新附着时重放历史（含控制序列原样字节）。
@@ -1263,17 +1276,10 @@ impl TerminalService {
         let probe_deadline = Instant::now() + Duration::from_secs(SHELL_READY_TIMEOUT_SECS);
         loop {
             let raw = self.raw_output_since(session_id, probe_offset)?;
-            let mut processor = persist::TerminalLineProcessor::new();
-            let mut lines = processor.process(&String::from_utf8_lossy(&raw));
-            let current = processor.current_line();
-            if !current.trim().is_empty() {
-                lines.push(current);
-            }
-            let probe_completed = if cfg!(windows) {
-                String::from_utf8_lossy(&raw).contains(&marker)
-            } else {
-                lines.iter().any(|line| line.trim() == marker)
-            };
+            // marker 含随机 scru128，整体子串命中即视为就绪。富提示符
+            // （starship）与 shell 插件（zsh xtrace/autosuggest）会在回显
+            // 行上叠加前缀或与探针交错，严格行相等匹配会漏判。
+            let probe_completed = String::from_utf8_lossy(&raw).contains(&marker);
             if probe_completed {
                 self.with_session(session_id, |session| {
                     session.shell_ready = true;
@@ -1293,7 +1299,7 @@ impl TerminalService {
                 let _ = self.kill_session(SessionIdRequest {
                     session_id: session_id.to_string(),
                 });
-                bail!("等待 Shell 就绪超时，已关闭失效终端");
+                return Err(anyhow::Error::new(ShellNotReady));
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
@@ -2258,7 +2264,7 @@ impl TerminalService {
             scope_id: scope.session_id.clone(),
         });
         let mut session_id = acquired.session_id;
-        let created_new = session_id.is_none();
+        let mut created_new = session_id.is_none();
         // cwd 优先级：Agent 显式指定 > 宿主权威会话工作目录。
         let workspace = cwd_arg
             .as_deref()
@@ -2286,55 +2292,94 @@ impl TerminalService {
                 Err(error) => return ToolOutcome::fail(format!("终端会话创建失败：{error:#}")),
             }
         }
-        let session_id = match session_id {
+        let mut session_id = match session_id {
             Some(session_id) => session_id,
             None => return ToolOutcome::fail("终端会话创建失败".to_string()),
         };
 
-        // 从首次异步等待开始登记取消目标。执行 future 若先被丢弃，登记对象
-        // 虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
-        let active = self.track_active_tool(&scope.request_id, &session_id);
-
         // 命令执行静默建立前台标签（不弹面板）：终端对用户可见可关，
         // 重复调用幂等聚焦同一标签。精确页面通过 terminalFind 完成事件
         // 订阅和附着后才开始输出；后台会话没有前台标签时有限等待后继续。
-        request_host_app_open(&scope.session_id, &session_id, false).await;
-        if !self.wait_for_frontend_attach(&session_id).await {
-            tracing::debug!(
-                terminal_id = session_id,
-                scope_id = scope.session_id,
-                "未等待到前端终端附着，按无前台页面的后台会话继续执行"
-            );
-        }
-
-        let executed = self
-            .exec_in_session(ExecRequest {
-                session_id: session_id.clone(),
-                cmd: if is_shell {
-                    String::new()
-                } else {
-                    command.clone()
-                },
-                args: if is_shell { Vec::new() } else { args.clone() },
-                script: if is_shell {
-                    Some(command.clone())
-                } else {
-                    None
-                },
-                timeout,
-                interactive,
-                cwd: workspace.filter(|value| !value.is_empty()),
-            })
-            .await;
-        active.complete();
-        let executed = match executed {
-            Ok(executed) => executed,
-            Err(error) => {
-                // 执行失败时释放预留（幂等；会话已退出则忽略）。
-                let _ = self.release_session(SessionIdRequest {
+        // 复用终端的就绪握手失败（终端已在超时路径关闭）时自动新建终端
+        // 重试一次：新终端走不发 Ctrl+C 的干净握手路径，对上层透明。
+        let mut retried_after_handshake = false;
+        let executed = loop {
+            // 从首次异步等待开始登记取消目标。执行 future 若先被丢弃，
+            // 登记对象虽随 future 销毁，映射仍保留给随后到达的 cancel() 使用。
+            let active = self.track_active_tool(&scope.request_id, &session_id);
+            request_host_app_open(&scope.session_id, &session_id, false).await;
+            if !self.wait_for_frontend_attach(&session_id).await {
+                tracing::debug!(
+                    terminal_id = session_id,
+                    scope_id = scope.session_id,
+                    "未等待到前端终端附着，按无前台页面的后台会话继续执行"
+                );
+            }
+            let executed = self
+                .exec_in_session(ExecRequest {
                     session_id: session_id.clone(),
-                });
-                return ToolOutcome::fail(format!("终端执行失败：{error:#}"));
+                    cmd: if is_shell {
+                        String::new()
+                    } else {
+                        command.clone()
+                    },
+                    args: if is_shell { Vec::new() } else { args.clone() },
+                    script: if is_shell {
+                        Some(command.clone())
+                    } else {
+                        None
+                    },
+                    timeout,
+                    interactive,
+                    cwd: workspace.clone().filter(|value| !value.is_empty()),
+                })
+                .await;
+            active.complete();
+            match executed {
+                Ok(executed) => break executed,
+                Err(error)
+                    if !created_new
+                        && !retried_after_handshake
+                        && error.downcast_ref::<ShellNotReady>().is_some() =>
+                {
+                    // 首次新建仍握手失败说明 shell 环境异常，重试无益，
+                    // 只对复用场景兜底一次。
+                    tracing::warn!(
+                        request_id = %scope.request_id,
+                        terminal = %session_id,
+                        "复用终端就绪握手失败，自动新建终端重试一次"
+                    );
+                    retried_after_handshake = true;
+                    match self.spawn_session(SpawnRequest {
+                        session_id: None,
+                        cmd: String::new(),
+                        args: Vec::new(),
+                        script: None,
+                        cwd: workspace.clone(),
+                        scope_id: Some(scope.session_id.clone()),
+                        reserve: true,
+                        cols: default_cols(),
+                        rows: default_rows(),
+                    }) {
+                        Ok(spawned) => {
+                            session_id = spawned.session_id;
+                            created_new = true;
+                            continue;
+                        }
+                        Err(error) => {
+                            return ToolOutcome::fail(format!(
+                                "自动重试创建终端会话失败：{error:#}"
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    // 执行失败时释放预留（幂等；会话已退出则忽略）。
+                    let _ = self.release_session(SessionIdRequest {
+                        session_id: session_id.clone(),
+                    });
+                    return ToolOutcome::fail(format!("终端执行失败：{error:#}"));
+                }
             }
         };
         let exit_code = executed.exit_code;
@@ -2348,7 +2393,9 @@ impl TerminalService {
         } else {
             "当前会话没有可用终端"
         };
-        let selection = if created_new {
+        let selection = if retried_after_handshake {
+            format!("新终端 {session_id}（复用终端就绪失败已自动更换）")
+        } else if created_new {
             format!("新终端 {session_id}（{reason}，没有写入旧终端）")
         } else {
             format!("终端 {session_id}（复用空闲终端）")
@@ -2537,7 +2584,10 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
 
     /// 请求级取消：宿主工具超时或会话取消经 Cancel 帧到达（stdio runner
     /// 已丢弃执行 future），从独立保留的映射定位具体 PTY，发送 Ctrl+C
-    /// 中断正在执行的命令并复位执行状态。
+    /// 中断正在执行的命令；经就绪探针确认登录 shell 重新接管后才放回
+    /// 空闲池，确认失败直接关闭不放回（Ctrl+C 只送达信号，带子进程树的
+    /// 长任务收尾需要时间，立即置 Idle 会让下一次调用在未收尾的终端上
+    /// 握手，探针进入残留进程的 stdin，marker 永不回显）。
     async fn cancel(&self, request: &Request) -> Result<()> {
         let request_id = request.request_id.as_str();
         let terminal_id = self
@@ -2550,30 +2600,75 @@ impl tiangong_plugin_sidecar::SidecarService for TerminalService {
             // 丢弃，无 PTY 资源需要释放。
             return Ok(());
         };
+        // 与可能仍在丢弃收尾中的执行 future 串行化，避免写交错；future
+        // 被 runner 丢弃后锁即释放，不会久等。
+        let exec_lock =
+            match self.with_session(&terminal_id, |session| Ok(Arc::clone(&session.exec_lock))) {
+                Ok(exec_lock) => exec_lock,
+                Err(error) => {
+                    // 终端已退出（会话结束）等场景：无需中断，登记已清除。
+                    tracing::debug!(
+                        request_id,
+                        terminal = %terminal_id,
+                        %error,
+                        "取消时终端已不可写"
+                    );
+                    return Ok(());
+                }
+            };
+        let _guard = exec_lock.lock().await;
+        // 交互终端（vi/ssh 等前台交互程序）对用户可见且正被操作：取消只
+        // 放弃本次工具等待，不发中断确认流——就绪探针进不了交互程序，
+        // 超时路径会把用户正在使用的终端整个误杀。保持交互状态，由用户
+        // 在标签内自行收尾。
+        if self.with_session(&terminal_id, |session| Ok(session.phase))?
+            == SessionPhase::Interactive
+        {
+            tracing::info!(
+                request_id,
+                terminal = %terminal_id,
+                "取消交互调用：保留交互终端，不做中断确认"
+            );
+            return Ok(());
+        }
         let interrupted = self.with_session(&terminal_id, |session| {
             session
                 .writer
                 .write_all(b"\x03")
                 .context("取消写入中断输入失败")?;
-            session.writer.flush().context("取消刷新中断输入失败")?;
-            // 等待 future 已被丢弃，phase 恢复逻辑不会执行；此处复位，
-            // 终端回到空闲池可被后续调用复用。
-            session.phase = SessionPhase::Idle;
-            Ok(())
+            session.writer.flush().context("取消刷新中断输入失败")
         });
-        match interrupted {
-            Ok(()) => tracing::info!(
+        if let Err(error) = interrupted {
+            // 终端已退出（会话结束）等场景：无需中断，登记已清除。
+            tracing::debug!(
                 request_id,
                 terminal = %terminal_id,
-                "已按取消请求中断终端命令"
-            ),
+                %error,
+                "取消时终端已不可写"
+            );
+            return Ok(());
+        }
+        // 就绪握手复用命令前置路径：shell_ready 终端会再发一次 Ctrl+C
+        // 清理残留输入并用探针确认提示符已恢复；超时路径内部已
+        // kill_session，不放回复用池。
+        match self.prepare_shell_for_command(&terminal_id).await {
+            Ok(()) => {
+                let _ = self.with_session(&terminal_id, |session| {
+                    session.phase = SessionPhase::Idle;
+                    Ok(())
+                });
+                tracing::info!(
+                    request_id,
+                    terminal = %terminal_id,
+                    "已按取消请求中断终端命令并确认 Shell 就绪"
+                );
+            }
             Err(error) => {
-                // 终端已退出（会话结束）等场景：无需中断，登记已清除。
-                tracing::debug!(
+                tracing::warn!(
                     request_id,
                     terminal = %terminal_id,
                     %error,
-                    "取消时终端已不可写"
+                    "取消后确认 Shell 就绪失败，已关闭失效终端"
                 );
             }
         }
