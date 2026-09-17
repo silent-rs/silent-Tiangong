@@ -79,7 +79,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
             .with_chat(&server.uri(), "test", "glm-5.3-flash")
             .with_trust_mode(TrustMode::FullTrust)
             .build();
-        config.llm.chat.protocol = ProviderProtocol::Anthropic;
+        config.llm.protocol = ProviderProtocol::Anthropic;
         let (tx, _rx) = std::sync::mpsc::channel();
         super::TiangongCore::builder()
             .session_id(sid.clone())

@@ -34,7 +34,7 @@ impl CoreManager {
         let endpoint = tiangong_config::io::load_models_config_at(&self.storage_root)
             .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
             .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or_else(|| self.config.snapshot().llm.chat.clone());
+            .unwrap_or_else(|| self.config.snapshot().llm.clone());
         let manager = self.clone();
         let sid = session_id.to_string();
         let input = text.to_string();

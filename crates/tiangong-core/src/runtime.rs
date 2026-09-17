@@ -99,11 +99,6 @@ impl RuntimeEngine {
         self
     }
 
-    /// 获取 LlmConfig 引用（优先从 core_config 取）
-    pub fn llm_config(&self) -> Option<&crate::config::core::LlmConfig> {
-        self.core_config.as_ref().map(|c| &c.llm)
-    }
-
     /// 获取模型客户端引用
     pub fn client(&self) -> &SingleProviderClient {
         &self.client

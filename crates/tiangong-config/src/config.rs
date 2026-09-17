@@ -192,7 +192,11 @@ impl TiangongConfig {
             })
             .unwrap_or_else(tiangong_core::config::core::default_context_limit);
         CoreConfig {
-            llm: tiangong_core::config::core::LlmConfig::from_models_config(&self.models),
+            llm: self
+                .models
+                .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+                .map(tiangong_llm::ModelEndpoint::from_resolved)
+                .unwrap_or_default(),
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),

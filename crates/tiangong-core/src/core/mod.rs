@@ -254,11 +254,10 @@ impl TiangongCore {
         let client = if let Some(test_client) = self.test_client.clone() {
             test_client.with_on_retry(on_retry.clone())
         } else {
-            SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone())
+            SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
-        let client =
-            SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone());
+        let client = SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone());
         let plugins = self
             .plugins
             .lock()

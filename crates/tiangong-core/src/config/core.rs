@@ -13,7 +13,6 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::models::ModelsConfig;
 use crate::permission::TrustMode;
 use tiangong_llm::ProviderProtocol;
 
@@ -30,39 +29,15 @@ pub fn default_context_limit() -> usize {
 
 /// LLM 配置 — TiangongCore 运行所需的模型端点
 ///
-/// Core 直接消费的模型端点配置（仅主 Chat 端点）；其他能力（lite、
-/// image/video/tts/stt/multimodal 等）由消费方自行从 `ModelsConfig`
-/// 路由解析，不经此配置中转（lite 的现行消费者是 core-manager 的标题生成）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LlmConfig {
-    /// 主 Chat 端点（必须）
-    pub chat: ModelEndpoint,
-}
-
-impl LlmConfig {
-    /// 从 ModelsConfig 解析出 core 运行所需的 chat 端点。
-    pub fn from_models_config(models: &ModelsConfig) -> Self {
-        use crate::config::models::RoutingSlot;
-
-        Self {
-            chat: models
-                .resolve_slot(RoutingSlot::Chat)
-                .map(ModelEndpoint::from_resolved)
-                .unwrap_or_default(),
-        }
-    }
-
-    /// 检查是否有有效的 Chat 端点
-    pub fn is_valid(&self) -> bool {
-        !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
-    }
-}
-
 /// TiangongCore 运行所需的最小配置
+///
+/// 直接消费的端点仅主 Chat（[`ModelEndpoint`]）；lite、image/video/tts 等
+/// 其他能力由消费方自行从 `ModelsConfig` 路由解析，不经此配置中转
+/// （lite 的现行消费者是 core-manager 的标题生成）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// LLM 模型端点配置
-    pub llm: LlmConfig,
+    /// 主 Chat 模型端点
+    pub llm: ModelEndpoint,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -80,7 +55,7 @@ pub struct CoreConfig {
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            llm: LlmConfig::default(),
+            llm: ModelEndpoint::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
@@ -106,7 +81,7 @@ pub struct CoreConfigBuilder {
 impl CoreConfigBuilder {
     /// 设置 Chat 端点（最常用的快捷方式）
     pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
-        self.config.llm.chat = ModelEndpoint {
+        self.config.llm = ModelEndpoint {
             headers: Default::default(),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
@@ -118,8 +93,8 @@ impl CoreConfigBuilder {
         self
     }
 
-    /// 设置完整的 LlmConfig
-    pub fn with_llm_config(mut self, llm: LlmConfig) -> Self {
+    /// 设置完整的 LLM 端点
+    pub fn with_llm_config(mut self, llm: ModelEndpoint) -> Self {
         self.config.llm = llm;
         self
     }
@@ -213,7 +188,6 @@ fn default_reasoning_effort() -> tiangong_llm::ReasoningEffort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::models::ModelCapability;
 
     #[test]
     fn provider_snapshot_and_generation() {
@@ -255,40 +229,10 @@ mod tests {
             .with_context_limit(65536)
             .build();
 
-        assert_eq!(config.llm.chat.base_url, "https://api.example.com/v1");
-        assert_eq!(config.llm.chat.model, "gpt-4o");
-        assert!(config.llm.is_valid());
+        assert_eq!(config.llm.base_url, "https://api.example.com/v1");
+        assert_eq!(config.llm.model, "gpt-4o");
+        assert!(!config.llm.base_url.is_empty());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.context_limit, 65536);
-    }
-
-    #[test]
-    fn llm_config_from_models_config_preserves_protocol() {
-        use crate::config::models::RoutingSlot;
-
-        let mut models = ModelsConfig::default();
-        models.providers.insert(
-            "anthropic".to_string(),
-            crate::config::models::ProviderConfig {
-                headers: Default::default(),
-                base_url: "https://api.anthropic.com".into(),
-                api_key: "sk-ant".into(),
-                timeout_ms: 30_000,
-                protocol: ProviderProtocol::Anthropic,
-            },
-        );
-        models.routing.insert(
-            RoutingSlot::Chat,
-            crate::config::models::ModelEntry {
-                provider: "anthropic".into(),
-                model: "claude-sonnet-4".into(),
-                capabilities: vec![ModelCapability::Chat],
-                options: serde_json::json!({}),
-                context_window: None,
-            },
-        );
-
-        let llm = LlmConfig::from_models_config(&models);
-        assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);
     }
 }
