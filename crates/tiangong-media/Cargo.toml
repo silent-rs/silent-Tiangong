@@ -11,4 +11,5 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls", "multipart"] }
-tokio = { workspace = true, features = ["sync"] }
+tiangong-llm = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }

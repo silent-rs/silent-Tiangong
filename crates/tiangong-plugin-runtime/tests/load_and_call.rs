@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
-use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
-use tiangong_core::tool_override::{
+use tiangong_core::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolSpecProvider,
 };
 use tiangong_plugin_runtime::{
@@ -287,18 +287,20 @@ fn handle_unknown_tool_returns_error() {
     // 插件已接管调用后产生的错误必须穿过适配器，不能退成未注册。
     let adapter = WasmPluginAdapter::new(plugin, config);
     let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");
-    let call = tiangong_core::model::ToolCall {
+    let call = tiangong_llm::tool::ToolCall {
         id: "call_2".into(),
         name: "nonexistent_tool".into(),
         arguments: serde_json::json!({}),
     };
     let result = runtime
-        .block_on(tiangong_core::tool_override::ToolOverrideHandler::handle(
-            &adapter,
-            &call,
-            &mut test_session(),
-            "test",
-        ))
+        .block_on(
+            tiangong_core::tools::extension::ToolOverrideHandler::handle(
+                &adapter,
+                &call,
+                &mut test_session(),
+                "test",
+            ),
+        )
         .expect("插件执行错误不得变成 None");
     assert!(!result.ok);
     assert!(result.stderr.contains("nonexistent_tool"));

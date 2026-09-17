@@ -3,11 +3,12 @@
 use std::sync::mpsc::Sender as StdSender;
 
 use crate::context::organizer::ContextOrganizer;
-use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::{ModelRequest, SingleProviderClient};
 use tiangong_types::StreamEvent;
+use tiangong_types::TokenUsage;
 
 pub(super) fn record_call_usage(
     ctx: &mut TurnContext,

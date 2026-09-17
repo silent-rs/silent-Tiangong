@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tiangong_core::core_config::CoreConfig;
+use tiangong_core::config::core::CoreConfig;
 use tiangong_llm::models_config::ModelsConfig;
 use tiangong_types::TrustMode;
 
@@ -190,9 +190,13 @@ impl TiangongConfig {
                     chat.context_window,
                 )
             })
-            .unwrap_or_else(tiangong_core::core_config::default_context_limit);
+            .unwrap_or_else(tiangong_core::config::core::default_context_limit);
         CoreConfig {
-            llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
+            llm: self
+                .models
+                .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+                .map(tiangong_llm::ModelEndpoint::from_resolved)
+                .unwrap_or_default(),
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
@@ -202,8 +206,8 @@ impl TiangongConfig {
     }
 
     /// 创建 CoreConfigProvider（用于注入 TiangongCore）
-    pub fn into_core_config_provider(self) -> tiangong_core::core_config::CoreConfigProvider {
-        tiangong_core::core_config::CoreConfigProvider::new(self.to_core_config())
+    pub fn into_core_config_provider(self) -> tiangong_core::config::core::CoreConfigProvider {
+        tiangong_core::config::core::CoreConfigProvider::new(self.to_core_config())
     }
 }
 

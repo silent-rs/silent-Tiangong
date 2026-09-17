@@ -12,16 +12,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::sidecar::SidecarConnection;
+use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::core_config::CoreConfig;
-use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
-use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
-use tiangong_core::tool_override::{
+use tiangong_core::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use tiangong_core::tools::result::{ToolExecutionRecord, ToolResult};
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 use tokio::task;
 
 use crate::config::PluginRuntimeConfig;
@@ -856,7 +856,7 @@ mod unloaded_adapter_tests {
         assert_eq!(adapter.try_tool_specs().unwrap()[0].name, "frozen_tool");
         assert_eq!(adapter.try_prompt_sections().unwrap(), vec!["冻结提示"]);
 
-        config.llm.chat.model = "changed-model".into();
+        config.llm.model = "changed-model".into();
         adapter.on_config_updated(&config);
         assert!(
             !adapter.context.lock().unwrap().config_applied,

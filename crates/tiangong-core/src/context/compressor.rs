@@ -1,8 +1,7 @@
-use crate::model::{
-    ModelRequest, ReasoningEffort, SingleProviderClient, StopReason, TokenUsage, ToolChoice,
-    ToolSpec,
-};
 use crate::session::{Message, MessagePhase, MessageRole, Session};
+use tiangong_llm::tool::{ToolChoice, ToolSpec};
+use tiangong_llm::{ModelRequest, ReasoningEffort, SingleProviderClient, StopReason};
+use tiangong_types::TokenUsage;
 
 /// 判断消息是否为可压缩的有效消息。
 pub(crate) fn is_compressible(message: &Message) -> bool {

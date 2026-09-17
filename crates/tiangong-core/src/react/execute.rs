@@ -12,17 +12,17 @@ use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
-use crate::model::{
-    InvalidToolCall, ModelRequest, ModelResponse, TokenUsage, ToolCall, ToolChoice, ToolSpec,
-};
 use crate::permission::TrustMode;
 use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessagePhase, MessageRole};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-use crate::tool::ToolResult;
+use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
+use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};
+use tiangong_llm::{InvalidToolCall, ModelRequest, ModelResponse};
+use tiangong_types::TokenUsage;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::command::{CommandEffect, Deferred, handle_command};
@@ -1142,7 +1142,7 @@ fn complete_llm_request(
 }
 
 /// 通用工具参数摘要:把 JSON arguments 的 key=value 拼成简短字符串。
-fn format_tool_args_summary(call: &crate::model::ToolCall) -> String {
+fn format_tool_args_summary(call: &tiangong_llm::tool::ToolCall) -> String {
     let Some(obj) = call.arguments.as_object() else {
         return String::new();
     };

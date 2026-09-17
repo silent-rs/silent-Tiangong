@@ -288,7 +288,7 @@ pub async fn load_session(
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
     let context_limit = if config.context_limit == 0 {
-        tiangong_core::core_config::default_context_limit()
+        tiangong_core::config::core::default_context_limit()
     } else {
         config.context_limit
     };
@@ -1976,33 +1976,6 @@ pub async fn get_provider_balance(
         .json::<serde_json::Value>()
         .await
         .map_err(|e| format!("解析余额响应失败: {e}"))
-}
-
-/// 获取会话成本统计
-#[tauri::command]
-pub async fn get_session_cost(
-    session_id: Option<String>,
-    state: State<'_, TiangongApp>,
-) -> Result<serde_json::Value, String> {
-    // task_records 是完整 Session 字段，session 真相源归磁盘（issue #245），
-    // 经 CoreManager 从磁盘加载，不在 app-state 的内存镜像里读。
-    let sid = state
-        .with_state_read(|core_state| {
-            Ok::<String, anyhow::Error>(
-                session_id
-                    .as_deref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| core_state.active_session_id.as_str().to_string()),
-            )
-        })
-        .await?;
-    match state.inner().core_manager.load_session(&sid) {
-        Ok(session) => {
-            let cost = tiangong_core::observe::build_session_cost(sid, &session.task_records);
-            Ok(serde_json::to_value(cost).unwrap_or_default())
-        }
-        Err(_) => Ok(serde_json::json!({})),
-    }
 }
 
 /// 获取当前活跃的 Worker 列表
@@ -4081,9 +4054,9 @@ pub async fn fetch_provider_models(
     protocol: Option<String>,
     headers: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<String>, String> {
-    use tiangong_core::model::{ProviderProtocol, SingleProviderClient};
     use tiangong_llm::models_config::ModelsConfig;
     use tiangong_llm::ModelEndpoint;
+    use tiangong_llm::{ProviderProtocol, SingleProviderClient};
 
     let resolved_key = ModelsConfig::resolve_api_key(&api_key);
     let endpoint = ModelEndpoint {
@@ -4130,8 +4103,8 @@ pub async fn probe_embedding_dimension(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<usize, String> {
-    use tiangong_core::model::ProviderProtocol;
     use tiangong_llm::models_config::ModelsConfig;
+    use tiangong_llm::ProviderProtocol;
 
     let protocol = protocol
         .as_deref()

@@ -91,62 +91,74 @@ impl FsService {
                 let req: ListDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 list_dir 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_list_dir(req, &*policy))
                         .await
                         .with_context(|| "list_dir 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 list_dir 响应失败")
             }
             TREE_DIR_OPERATION => {
                 let req: TreeDirRequest =
                     serde_json::from_value(payload).with_context(|| "解析 tree_dir 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_tree_dir(req, &*policy))
                         .await
                         .with_context(|| "tree_dir 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 tree_dir 响应失败")
             }
             READ_FILE_OPERATION => {
                 let req: ReadFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 read_file 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_read_file(req, &*policy))
                         .await
                         .with_context(|| "read_file 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 read_file 响应失败")
             }
             WRITE_FILE_OPERATION => {
                 let req: WriteFileRequest =
                     serde_json::from_value(payload).with_context(|| "解析 write_file 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp =
                     tokio::task::spawn_blocking(move || handlers::handle_write_file(req, &*policy))
                         .await
                         .with_context(|| "write_file 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 write_file 响应失败")
             }
             REPLACE_IN_FILE_OPERATION => {
                 let req: ReplaceInFileRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 replace_in_file 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handlers::handle_replace_in_file(req, &*policy)
                 })
                 .await
                 .with_context(|| "replace_in_file 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 replace_in_file 响应失败")
             }
             APPLY_PATCH_OPERATION => {
                 let req: ApplyPatchRequest =
                     serde_json::from_value(payload).with_context(|| "解析 apply_patch 请求失败")?;
                 let policy = path_policy_from_access(&req.access);
+                let access = req.access.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handlers::handle_apply_patch(req, &*policy)
                 })
                 .await
                 .with_context(|| "apply_patch 后台任务失败")?;
+                let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 apply_patch 响应失败")
             }
             SET_WORKSPACE_OPERATION => {

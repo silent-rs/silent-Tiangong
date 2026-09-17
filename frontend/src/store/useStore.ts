@@ -11,7 +11,6 @@ import type {
   Session,
   InputCache,
   StreamEvent,
-  TaskPlan,
   TokenStats,
 } from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
@@ -51,7 +50,6 @@ interface SessionViewCache {
   streamingMessageId: string | null;
   streamingContent: string;
   streamingReasoningContent: string;
-  currentPlan: TaskPlan | undefined;
   cwd: string;
   reasoningEffort: string;
 }
@@ -528,7 +526,6 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     streamingMessageId: null,
     streamingContent: '',
     streamingReasoningContent: '',
-    currentPlan: undefined,
     cwd: '',
     reasoningEffort: 'medium',
   };
@@ -548,7 +545,6 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     streamingMessageId: state.streamingMessageId,
     streamingContent: state.streamingContent,
     streamingReasoningContent: state.streamingReasoningContent,
-    currentPlan: state.currentPlan,
     cwd: state.sessionCwd,
     reasoningEffort: state.reasoningEffort,
   };
@@ -572,7 +568,6 @@ function hydrateSessionViewCache(
       ? current.lastUsage ?? loaded.last_usage ?? null
       : loaded.last_usage ?? current.lastUsage,
     lastDurationMs: current.lastDurationMs ?? loaded.last_duration_ms ?? null,
-    currentPlan: loaded.current_plan,
     cwd: loaded.cwd,
     reasoningEffort: loaded.reasoning_effort,
   };
@@ -593,7 +588,6 @@ function applyEventToSessionView(
   let streamingMessageId = current.streamingMessageId;
   let streamingContent = current.streamingContent;
   let streamingReasoningContent = current.streamingReasoningContent;
-  let currentPlan = current.currentPlan;
 
   // title_changed 是纯通知事件，不改变对话运行状态（自动/手动标题变更都会发）。
   if (
@@ -612,7 +606,6 @@ function applyEventToSessionView(
       runSummary = '正在处理';
       lastDurationMs = null;
       toolCallStartedAt = {};
-      currentPlan = undefined;
       break;
     case 'delta':
     case 'react_text':
@@ -774,7 +767,6 @@ function applyEventToSessionView(
       runStatus = 'idle';
       runSummary = '';
       contextManagementPending = false;
-      currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
       streamingContent = '';
@@ -790,7 +782,6 @@ function applyEventToSessionView(
       runStatus = 'idle';
       runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
       contextManagementPending = false;
-      currentPlan = undefined;
       toolCallStartedAt = {};
       streamingMessageId = null;
       streamingContent = '';
@@ -813,7 +804,6 @@ function applyEventToSessionView(
     streamingMessageId,
     streamingContent,
     streamingReasoningContent,
-    currentPlan,
     cwd: current.cwd,
     reasoningEffort: current.reasoningEffort,
     hydrated: current.hydrated,
@@ -835,7 +825,6 @@ export interface AppState {
   toolCallStartedAt: Record<string, number>;
   lastUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
   tokenStats: TokenStats | null;
-  currentPlan: TaskPlan | undefined;
   mcpServers: McpServer[] | null;
 
   // 尚未首次发送的新对话
@@ -993,7 +982,6 @@ export const useStore = create<AppState>((set, get) => ({
   toolCallStartedAt: {},
   lastUsage: null,
   tokenStats: null,
-  currentPlan: undefined,
   mcpServers: null,
   isNewConversation: true,
   updateAvailable: null,
@@ -1195,7 +1183,6 @@ export const useStore = create<AppState>((set, get) => ({
           runSummary: '',
           lastUsage: null,
           tokenStats: null,
-          currentPlan: undefined,
           streamingMessageId: null,
           streamingContent: '',
           streamingReasoningContent: '',
@@ -1260,7 +1247,6 @@ export const useStore = create<AppState>((set, get) => ({
           toolCallStartedAt: cache.toolCallStartedAt,
           lastUsage: cache.lastUsage,
           tokenStats: cache.tokenStats,
-          currentPlan: cache.currentPlan,
           sessionCwd: cache.cwd,
           streamingMessageId: keepsStreamingMessage ? cache.streamingMessageId : null,
           streamingContent: keepsStreamingMessage ? cache.streamingContent : '',
@@ -2172,7 +2158,6 @@ export const useStore = create<AppState>((set, get) => ({
         streamingMessageId: currentCache.streamingMessageId,
         streamingContent: currentCache.streamingContent,
         streamingReasoningContent: currentCache.streamingReasoningContent,
-        currentPlan: currentCache.currentPlan,
         agents: refreshCurrentAgents
           ? parseAgentsFromMessages(currentCache.messages)
           : state.agents,

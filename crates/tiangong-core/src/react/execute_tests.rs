@@ -7,19 +7,17 @@
 
 use super::super::outcome::{TurnExecutionOutcome, TurnExecutionResult};
 use super::execute_turn;
-use crate::agent_config::AgentConfig;
+use crate::config::agent::AgentConfig;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
-use crate::model::SingleProviderClient;
-use crate::model::{ToolCall, ToolSpec};
 use crate::observe::Observer;
 use crate::permission::TrustMode;
 use crate::prompt::SystemPromptConfig;
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use crate::tool::ToolResult;
-use crate::tool_override::{
+use crate::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
+use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,6 +25,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tiangong_llm::SingleProviderClient;
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 use tiangong_llm::{ModelEndpoint, ProviderProtocol};
 use tiangong_types::{StreamEvent, TokenUsage, stream::ContextCompressAction};
 use tokio::sync::{Barrier, Notify};
@@ -371,7 +371,7 @@ impl TestHarness {
         std::mem::forget(root);
 
         let agent_config = AgentConfig {
-            reasoning_effort: crate::model::ReasoningEffort::None,
+            reasoning_effort: tiangong_llm::ReasoningEffort::None,
             ..Default::default()
         };
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
@@ -924,7 +924,7 @@ async fn returns_cancelled_on_cancel_command() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = cmd_tx.send(Command::SetTrustMode(TrustMode::Supervised));
         let _ = cmd_tx.send(Command::SetReasoningEffort(
-            crate::model::ReasoningEffort::Max,
+            tiangong_llm::ReasoningEffort::Max,
         ));
         let _ = cmd_tx.send(Command::InjectTool {
             tool_name: "cancelled_probe".to_string(),
@@ -945,11 +945,11 @@ async fn returns_cancelled_on_cancel_command() {
     assert_eq!(harness.ctx.session.trust_mode, TrustMode::Supervised);
     assert_eq!(
         harness.ctx.agent_config.reasoning_effort,
-        crate::model::ReasoningEffort::Max
+        tiangong_llm::ReasoningEffort::Max
     );
     assert_eq!(
         harness.ctx.session.reasoning_effort,
-        Some(crate::model::ReasoningEffort::Max)
+        Some(tiangong_llm::ReasoningEffort::Max)
     );
     assert!(harness.ctx.session.deferred_tool_injections.is_empty());
     assert!(harness.ctx.session.messages.iter().any(|message| {
@@ -1985,7 +1985,7 @@ async fn command_storm_is_processed_in_order_without_panicking() {
         })
         .unwrap();
         tx.send(Command::SetReasoningEffort(
-            crate::model::ReasoningEffort::High,
+            tiangong_llm::ReasoningEffort::High,
         ))
         .unwrap();
         tx.send(Command::EmitStreamEvent(Box::new(
@@ -2011,7 +2011,7 @@ async fn command_storm_is_processed_in_order_without_panicking() {
     assert_eq!(ctx.session.title, "风暴标题", "标题命令应已生效");
     assert_eq!(
         ctx.session.reasoning_effort,
-        Some(crate::model::ReasoningEffort::High),
+        Some(tiangong_llm::ReasoningEffort::High),
         "思考强度命令应已生效"
     );
     assert!(
@@ -2063,7 +2063,7 @@ async fn reasoning_effort_update_applies_to_next_model_request() {
             .expect("工具应在期限内开始执行");
         cmd_tx
             .send(Command::SetReasoningEffort(
-                crate::model::ReasoningEffort::Max,
+                tiangong_llm::ReasoningEffort::Max,
             ))
             .expect("运行中的 turn 应接收思考强度更新");
         release.notify_one();
@@ -2075,11 +2075,11 @@ async fn reasoning_effort_update_applies_to_next_model_request() {
     assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
     assert_eq!(
         harness.ctx.agent_config.reasoning_effort,
-        crate::model::ReasoningEffort::Max
+        tiangong_llm::ReasoningEffort::Max
     );
     assert_eq!(
         harness.ctx.session.reasoning_effort,
-        Some(crate::model::ReasoningEffort::Max)
+        Some(tiangong_llm::ReasoningEffort::Max)
     );
 
     let requests = server.received_requests().await.unwrap();
@@ -2416,10 +2416,10 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
     .await;
 
     struct StallingFinishPlugin;
-    impl crate::tool_override::ToolSpecProvider for StallingFinishPlugin {}
-    impl crate::tool_override::ToolOverrideHandler for StallingFinishPlugin {}
-    impl crate::tool_override::PromptSectionProvider for StallingFinishPlugin {}
-    impl crate::tool_override::MentionCandidateProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::ToolSpecProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::ToolOverrideHandler for StallingFinishPlugin {}
+    impl crate::tools::extension::PromptSectionProvider for StallingFinishPlugin {}
+    impl crate::tools::extension::MentionCandidateProvider for StallingFinishPlugin {}
     impl Plugin for StallingFinishPlugin {
         fn id(&self) -> &str {
             "stalling-finish"

@@ -22,6 +22,7 @@ mod invocation;
 pub mod launcher_update;
 pub mod loader;
 pub mod manifest;
+pub mod platform;
 pub mod plugin_dev;
 pub mod protocol;
 pub mod registry;

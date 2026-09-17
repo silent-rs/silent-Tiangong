@@ -12,6 +12,7 @@
 
 pub mod ensure;
 pub mod registry;
+mod title;
 
 pub use self::registry::{CoreRegistry, CoreRegistryGuard};
 
@@ -21,8 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Mutex as AsyncMutex;
 
+use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::TiangongCore;
-use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
 
 use crate::SessionMetadata;
@@ -45,7 +46,7 @@ pub struct CoreManager {
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
     creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
-    config: tiangong_core::core_config::CoreConfigProvider,
+    config: tiangong_core::config::core::CoreConfigProvider,
     storage_root: PathBuf,
 }
 
@@ -56,7 +57,7 @@ impl CoreManager {
     ///   `sync_config` 的模板替换
     /// - `storage_root`：session 文件根（形如 `~/.tiangong`）
     pub fn new(
-        config: tiangong_core::core_config::CoreConfigProvider,
+        config: tiangong_core::config::core::CoreConfigProvider,
         storage_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
@@ -68,7 +69,7 @@ impl CoreManager {
     }
 
     /// 全局配置 provider（host 用它取 base 快照构建 per-session 配置）。
-    pub fn config(&self) -> &tiangong_core::core_config::CoreConfigProvider {
+    pub fn config(&self) -> &tiangong_core::config::core::CoreConfigProvider {
         &self.config
     }
 
@@ -377,7 +378,7 @@ impl std::fmt::Debug for CoreManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+    use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
     use tiangong_core::session::Session;
 
     fn make_manager(dir: &tempfile::TempDir) -> CoreManager {

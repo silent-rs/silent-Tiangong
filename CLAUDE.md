@@ -64,7 +64,8 @@ cargo run --release -- cli       # CLI 模式
 - `crates/tiangong-core/src/react/`：单轮 Agent Loop、命令、工具、压缩和收尾；
 - `crates/tiangong-core/src/turn_context.rs`：单轮执行上下文；
 - `crates/tiangong-core/src/session.rs`：会话消息和持久化状态；
-- `crates/tiangong-core/src/model.rs`：模型客户端抽象。
+- `crates/tiangong-core/src/config/`：core 配置（agent 运行时 / 最小配置契约 / 模型路由转发）；
+- `crates/tiangong-core/src/tools/`：工具公共契约（结果类型与插件扩展点）。
 
 审查或设计 Core 功能时必须以当前代码和上述两份现行文档为准，不得使用已经删除的 Driver/Inbox 迁移方案。
 

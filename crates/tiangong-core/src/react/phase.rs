@@ -9,8 +9,10 @@ use std::collections::{HashSet, VecDeque};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::outcome::TurnExecutionResult;
-use crate::model::{InvalidToolCall, ModelResponse, ModelStreamChunk, TokenUsage, ToolCall};
 use crate::stream_throttle::ThrottledStreamSink;
+use tiangong_llm::tool::ToolCall;
+use tiangong_llm::{InvalidToolCall, ModelResponse, ModelStreamChunk};
+use tiangong_types::TokenUsage;
 
 /// 执行阶段：任意时刻当前阶段唯一（ALR-001）。
 ///

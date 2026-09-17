@@ -67,7 +67,7 @@ pub(crate) fn append_assistant_tool_call_message(
     text: &str,
     reasoning_content: &str,
     reasoning_signature: Option<String>,
-    calls: &[&crate::model::ToolCall],
+    calls: &[&tiangong_llm::tool::ToolCall],
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
 ) {
@@ -299,7 +299,9 @@ recommended_next_action: {recommended_next_action}",
     }
 }
 
-pub(crate) fn classify_tool_result_failure(result: &crate::tool::ToolResult) -> ToolFailureKind {
+pub(crate) fn classify_tool_result_failure(
+    result: &crate::tools::result::ToolResult,
+) -> ToolFailureKind {
     let combined = format!("{}\n{}", result.summary, result.stderr).to_lowercase();
     if combined.contains("timed out") || combined.contains("timeout") || combined.contains("超时")
     {
@@ -384,7 +386,7 @@ fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'st
 
 pub(crate) fn tool_result_provider_text(
     tool_name: &str,
-    result: &crate::tool::ToolResult,
+    result: &crate::tools::result::ToolResult,
     _allow_memory_context: bool,
 ) -> String {
     // recall_memory 的引导文案已由 memory 插件内嵌进 ToolResult.stdout，
@@ -509,7 +511,7 @@ pub(crate) fn is_media_tool_name(tool_name: &str) -> bool {
     )
 }
 
-pub(crate) fn tool_result_full_output(result: &crate::tool::ToolResult) -> String {
+pub(crate) fn tool_result_full_output(result: &crate::tools::result::ToolResult) -> String {
     if result.ok {
         return if result.stdout.trim().is_empty() {
             result.summary.clone()
@@ -538,7 +540,7 @@ pub(crate) fn tool_result_full_output(result: &crate::tool::ToolResult) -> Strin
     }
 }
 
-pub(crate) fn tool_result_stream_output(result: &crate::tool::ToolResult) -> String {
+pub(crate) fn tool_result_stream_output(result: &crate::tools::result::ToolResult) -> String {
     let output = tool_result_full_output(result);
     truncate_chars_with_notice(
         &output,
@@ -847,7 +849,7 @@ mod tests {
 
     #[test]
     fn classify_tool_result_failure_distinguishes_common_kinds() {
-        let command_failed = crate::tool::ToolResult {
+        let command_failed = crate::tools::result::ToolResult {
             ok: false,
             summary: "命令执行失败".to_string(),
             stdout: String::new(),
@@ -860,7 +862,7 @@ mod tests {
             ToolFailureKind::CommandFailed
         );
 
-        let missing_environment = crate::tool::ToolResult {
+        let missing_environment = crate::tools::result::ToolResult {
             ok: false,
             summary: "工具执行失败".to_string(),
             stdout: String::new(),

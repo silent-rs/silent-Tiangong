@@ -1101,7 +1101,7 @@ pub fn collect_mention_groups(
     max_per_group: usize,
 ) -> Vec<tiangong_core::MentionGroup> {
     use std::collections::HashSet;
-    use tiangong_core::tool_override::MentionCandidateProvider;
+    use tiangong_core::tools::extension::MentionCandidateProvider;
 
     // 锁内仅取快照（适配器 Arc 与清单克隆），锁外再调用插件——WASM 的
     // 候选收集是跨调用（可能耗时），不得持注册表锁进行。

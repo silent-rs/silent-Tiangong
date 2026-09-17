@@ -8,9 +8,9 @@ use crate::context::compressor::{
 };
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
-use crate::model::TokenUsage;
 use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session};
 use crate::turn_context::TurnContext;
+use tiangong_types::TokenUsage;
 use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
 use super::cancel::abort_and_join;
@@ -586,13 +586,13 @@ fn notify_session_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_config::AgentConfig;
-    use crate::model::SingleProviderClient;
+    use crate::config::agent::AgentConfig;
     use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::session::Message;
     use crate::session::MessagePhase;
     use crate::session::MessageToolCall;
+    use tiangong_llm::SingleProviderClient;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
 
     fn test_context(mut session: Session) -> (TurnContext, tempfile::TempDir) {
@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn compression_keeps_current_declarations_and_survives_persist_failure() {
         use crate::core::plugin::Plugin;
-        use crate::tool_override::{
+        use crate::tools::extension::{
             MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
         };
 
@@ -766,11 +766,13 @@ mod tests {
         impl MentionCandidateProvider for ChangingPlugin {}
         impl ToolOverrideHandler for ChangingPlugin {}
         impl ToolSpecProvider for ChangingPlugin {
-            fn try_tool_specs(&self) -> std::result::Result<Vec<crate::model::ToolSpec>, String> {
+            fn try_tool_specs(
+                &self,
+            ) -> std::result::Result<Vec<tiangong_llm::tool::ToolSpec>, String> {
                 if self.fail {
                     return Err("offline".into());
                 }
-                Ok(vec![crate::model::ToolSpec {
+                Ok(vec![tiangong_llm::tool::ToolSpec {
                     name: "new_tool".into(),
                     description: "new".into(),
                     input_schema: serde_json::json!({"type":"object"}),

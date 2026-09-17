@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex, Once};
 
 use tiangong_core::core::Plugin;
-use tiangong_core::model::ToolCall;
 use tiangong_core::session::Session;
+use tiangong_llm::tool::ToolCall;
 use tiangong_plugin_runtime::bridge_call;
 use tiangong_plugin_runtime::registry::{
     RuntimeKind, load_installed_plugins, preload_installed_plugins,

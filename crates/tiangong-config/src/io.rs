@@ -332,7 +332,7 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_core::model::ProviderProtocol;
+    use tiangong_llm::ProviderProtocol;
     use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };

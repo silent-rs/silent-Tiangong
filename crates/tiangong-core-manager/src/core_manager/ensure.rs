@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::agent_input::{AgentInput, AgentInputKind, MessageInput};
+use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
 use tiangong_core::core::{Plugin, TiangongCore};
-use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_types::StreamEvent;
 
 use crate::CoreManager;
@@ -124,11 +124,24 @@ impl CoreManager {
     }
 
     /// 仅当指定会话存在 Core 时投递输入。
+    ///
+    /// 投递成功且输入为用户消息时顺带触发标题自动生成（见 [`title`] 模块）；
+    /// 标题生成在后台进行，不影响投递返回。
     pub fn deliver_to_core_if_live(&self, session_id: &str, input: AgentInputKind) -> bool {
+        let user_text = match &input {
+            AgentInputKind::Message(MessageInput::UserMessage { prepared, .. }) => prepared
+                .iter()
+                .find_map(|block| block.as_text().map(str::to_string)),
+            _ => None,
+        };
         let registry = self.registry();
-        registry
+        let delivered = registry
             .get(session_id)
-            .is_some_and(|core| core.deliver(input).is_ok())
+            .is_some_and(|core| core.deliver(input).is_ok());
+        if delivered && let Some(text) = user_text {
+            self.spawn_title_generation_if_needed(session_id, &text);
+        }
+        delivered
     }
 
     /// 设置指定会话 core 的信任模式（实时生效）。

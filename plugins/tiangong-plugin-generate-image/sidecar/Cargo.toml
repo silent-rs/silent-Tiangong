@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-generate-image-sidecar"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Generate-Image 独立 sidecar（读取模型配置、调用图片生成、归档落盘）"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 tiangong-plugin-generate-image-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
-tiangong-core = { workspace = true }
+tiangong-media = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media-archive = { workspace = true }

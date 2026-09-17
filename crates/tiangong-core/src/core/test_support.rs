@@ -17,8 +17,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use crate::agent_input::{AgentInput, AgentInputKind};
+use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::core::TiangongCore;
-use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::permission::TrustMode;
 use crate::session::Session;
 
@@ -628,7 +628,7 @@ pub async fn chat_request_at(server: &MockServer, idx: usize) -> RequestBody {
 /// 记录调用并返回固定结果的测试工具（经插件注册进 Core）。
 pub struct RecordingTool {
     pub name: &'static str,
-    pub invocations: Mutex<Vec<crate::model::ToolCall>>,
+    pub invocations: Mutex<Vec<tiangong_llm::tool::ToolCall>>,
     pub ok: bool,
 }
 
@@ -655,19 +655,20 @@ impl RecordingTool {
     }
 }
 
-impl crate::tool_override::ToolOverrideHandler for RecordingTool {
+impl crate::tools::extension::ToolOverrideHandler for RecordingTool {
     fn handle(
         &self,
-        call: &crate::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
         _session: &mut Session,
         _actor_id: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<crate::tools::result::ToolResult>> + Send>,
+    > {
         self.invocations.lock().unwrap().push(call.clone());
         let ok = self.ok;
         let name = self.name;
         Box::pin(async move {
-            Some(crate::tool::ToolResult {
+            Some(crate::tools::result::ToolResult {
                 ok,
                 summary: format!("{name} 已执行"),
                 stdout: "done".to_string(),
@@ -685,9 +686,9 @@ pub struct ToolPlugin {
     pub tool: Arc<RecordingTool>,
 }
 
-impl crate::tool_override::ToolSpecProvider for ToolPlugin {
-    fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
-        vec![crate::model::ToolSpec {
+impl crate::tools::extension::ToolSpecProvider for ToolPlugin {
+    fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
+        vec![tiangong_llm::tool::ToolSpec {
             name: self.tool.name.to_string(),
             description: "测试工具".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {}}),
@@ -695,20 +696,21 @@ impl crate::tool_override::ToolSpecProvider for ToolPlugin {
     }
 }
 
-impl crate::tool_override::ToolOverrideHandler for ToolPlugin {
+impl crate::tools::extension::ToolOverrideHandler for ToolPlugin {
     fn handle(
         &self,
-        call: &crate::model::ToolCall,
+        call: &tiangong_llm::tool::ToolCall,
         session: &mut Session,
         actor_id: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::tool::ToolResult>> + Send>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<crate::tools::result::ToolResult>> + Send>,
+    > {
         self.tool.handle(call, session, actor_id)
     }
 }
 
-impl crate::tool_override::PromptSectionProvider for ToolPlugin {}
-impl crate::tool_override::MentionCandidateProvider for ToolPlugin {}
+impl crate::tools::extension::PromptSectionProvider for ToolPlugin {}
+impl crate::tools::extension::MentionCandidateProvider for ToolPlugin {}
 impl crate::core::plugin::Plugin for ToolPlugin {
     fn id(&self) -> &str {
         self.id
@@ -1137,7 +1139,7 @@ pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, Even
 pub fn core_for_client(
     env: &TestEnv,
     sid: &str,
-    client: crate::model::SingleProviderClient,
+    client: tiangong_llm::SingleProviderClient,
 ) -> (TiangongCore, EventLog) {
     let mut session = Session::new("集成测试会话".to_string());
     session.id = sid.to_string();

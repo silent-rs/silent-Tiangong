@@ -98,45 +98,6 @@ pub async fn get_session(req: Request) -> Result<Response> {
     })))
 }
 
-/// GET /api/v1/sessions/:id/cost — 会话成本详情
-pub async fn get_session_cost(req: Request) -> Result<Response> {
-    let token = req.get_state::<AuthToken>()?.clone();
-    check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_observe(), "查看会话成本")?;
-
-    let requested_id: String = req.get_path_params("id")?;
-    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
-    let (id, core_manager, session_exists) = {
-        let app = app_ctx.state.lock().await;
-        let id = resolve_visible_session_id(
-            &access,
-            app.active_session_id.as_str(),
-            Some(&requested_id),
-        )?;
-        let exists = app.core_manager.session_exists(&id);
-        (id, app.core_manager.clone(), exists)
-    };
-
-    if !session_exists {
-        return Err(SilentError::business_error(
-            StatusCode::NOT_FOUND,
-            format!("会话 '{id}' 不存在"),
-        ));
-    }
-    // task_records 是完整 Session 字段；从磁盘 load（issue #245）。
-    let session = core_manager.load_session(&id).map_err(|error| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("加载会话失败：{error}"),
-        )
-    })?;
-
-    let cost =
-        tiangong_core::observe::build_session_cost(session.id.clone(), &session.task_records);
-    Ok(Response::json(&cost))
-}
-
 /// DELETE /api/v1/sessions/:id — 删除会话
 pub async fn delete_session(req: Request) -> Result<Response> {
     let token = req.get_state::<AuthToken>()?.clone();

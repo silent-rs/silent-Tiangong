@@ -117,7 +117,7 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
                 );
             } else {
                 let endpoint = tiangong_llm::ModelEndpoint::from_resolved(resolved);
-                match tiangong_core::model::SingleProviderClient::list_models(&endpoint) {
+                match tiangong_llm::SingleProviderClient::list_models(&endpoint) {
                     Ok(_) => report.ok("模型连通性", format!("{} 请求成功", endpoint.model)),
                     Err(e) => report.err("模型连通性", format!("{e:#}")),
                 }

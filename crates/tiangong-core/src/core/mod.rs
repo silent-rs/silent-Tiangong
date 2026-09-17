@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use typed_builder::TypedBuilder;
 
-use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::SingleProviderClient;
+use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::SingleProviderClient;
 use tiangong_types::StreamEvent;
 
 pub mod command;
@@ -35,8 +35,9 @@ pub use storage_location::CoreStorageLocation;
 
 /// 判断标题是否仍是默认值（"新对话"/"会话 X"）。
 ///
-/// 用于 lite 自动生成标题写回时，避免覆盖用户已手动改过的标题。
-pub(crate) fn is_default_title(title: &str) -> bool {
+/// 用于标题自动生成（现由 core-manager 经 [`crate::TiangongCore::set_title`]
+/// 驱动）预检与写回校验，避免覆盖用户已手动改过的标题。
+pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
 }
 
@@ -125,7 +126,7 @@ impl TiangongCore {
     /// 设置会话思考强度。
     ///
     /// 已经发出的模型请求不变；活跃 turn 会在下一次构建模型请求时使用新值。
-    pub fn set_reasoning_effort(&self, effort: crate::model::ReasoningEffort) {
+    pub fn set_reasoning_effort(&self, effort: tiangong_llm::ReasoningEffort) {
         self.config
             .update(|config| config.reasoning_effort = effort);
         if self.is_busy() {
@@ -155,8 +156,8 @@ impl TiangongCore {
     ///   turn 结束 run_turn 统一落盘（避免与 turn 对 session 的读写竞争）。
     /// - Core 空闲：Core 是 session 权威持有者且无并发 turn，直接 load+改+persist。
     ///
-    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（用于 lite 自动生成，
-    /// 但那条路径直接走 `shared_runtime::send_command`，不经过此方法）；用户手动编辑传 false。
+    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（标题自动生成
+    /// 由 core-manager 在投递用户消息时驱动，经此方法写回）；用户手动编辑传 false。
     pub fn set_title(&self, title: String, only_if_default: bool) -> Result<(), CoreError> {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -241,7 +242,7 @@ impl TiangongCore {
         let config = self.config.snapshot();
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
-        let on_retry: crate::model::OnRetryCallback =
+        let on_retry: tiangong_llm::OnRetryCallback =
             Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
                 let _ = retry_tx.send(StreamEvent::Retry {
                     message: error_text.to_string(),
@@ -250,21 +251,13 @@ impl TiangongCore {
                 });
             });
         #[cfg(test)]
-        let (client, lite_client) = if let Some(test_client) = self.test_client.clone() {
-            let test_client = test_client.with_on_retry(on_retry.clone());
-            let lite_client = config.llm.lite.as_ref().map(|_| test_client.clone());
-            (test_client, lite_client)
+        let client = if let Some(test_client) = self.test_client.clone() {
+            test_client.with_on_retry(on_retry.clone())
         } else {
-            (
-                SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
-                config.llm.lite.clone().map(SingleProviderClient::new),
-            )
+            SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
-        let client =
-            SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone());
-        #[cfg(not(test))]
-        let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
+        let client = SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone());
         let plugins = self
             .plugins
             .lock()
@@ -275,12 +268,11 @@ impl TiangongCore {
 
         Ok(TurnContext::builder()
             .client(client)
-            .lite_client(lite_client)
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
             .context_limit(config.context_limit)
-            .agent_config(crate::agent_config::AgentConfig {
+            .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
                 custom_system_prompt: config.custom_system_prompt.clone(),
@@ -584,17 +576,17 @@ impl Drop for TiangongCore {
 #[cfg(test)]
 mod shared_runtime_tests {
     use super::*;
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
 
     struct MentionPlugin {
         id: &'static str,
         values: Vec<crate::MentionCandidate>,
     }
 
-    impl crate::tool_override::ToolSpecProvider for MentionPlugin {}
-    impl crate::tool_override::ToolOverrideHandler for MentionPlugin {}
-    impl crate::tool_override::PromptSectionProvider for MentionPlugin {}
-    impl crate::tool_override::MentionCandidateProvider for MentionPlugin {
+    impl crate::tools::extension::ToolSpecProvider for MentionPlugin {}
+    impl crate::tools::extension::ToolOverrideHandler for MentionPlugin {}
+    impl crate::tools::extension::PromptSectionProvider for MentionPlugin {}
+    impl crate::tools::extension::MentionCandidateProvider for MentionPlugin {
         fn mention_candidates(&self) -> Vec<crate::MentionCandidate> {
             self.values.clone()
         }

@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::core_config::CoreConfig;
-use crate::model::ToolSpec;
+use crate::config::core::CoreConfig;
 use crate::permission::TrustMode;
 use crate::session::Session;
-use crate::tool_override::ToolOverrideHandler;
+use crate::tools::extension::ToolOverrideHandler;
+use tiangong_llm::tool::ToolSpec;
 
 use super::{Plugin, injection_tool_spec};
 
@@ -82,7 +82,7 @@ pub(crate) fn prepare_plugins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_override::{
+    use crate::tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler,
     };
 
@@ -103,7 +103,7 @@ mod tests {
             &self.id
         }
     }
-    impl crate::tool_override::ToolSpecProvider for OrderedPlugin {
+    impl crate::tools::extension::ToolSpecProvider for OrderedPlugin {
         fn tool_specs(&self) -> Vec<ToolSpec> {
             self.names.iter().map(|name| tool(name)).collect()
         }

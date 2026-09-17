@@ -6,8 +6,8 @@
 //! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
 //! core 不再感知浏览器快照注入。
 
-use crate::model::TokenUsage;
 use tiangong_types::StreamEvent;
+use tiangong_types::TokenUsage;
 
 pub(super) fn record_plugin_usage(
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,

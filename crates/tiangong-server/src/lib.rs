@@ -106,7 +106,7 @@ impl EmbeddedServerHandle {
 /// HTTP runtime 不拥有会话写入器；定时任务的 cron 调度由 scheduler sidecar 负责。
 pub struct EmbeddedServerDependencies {
     pub state: SharedState,
-    pub config: tiangong_core::core_config::CoreConfigProvider,
+    pub config: tiangong_core::config::core::CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
     pub event_bus: Arc<EventBus>,
 }

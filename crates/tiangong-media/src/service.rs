@@ -1,7 +1,12 @@
+//! 多媒体服务调用层：模型路由解析 + 超时控制 + 统一错误类型。
+//!
+//! 自 tiangong-core 迁入（core 零自用、消费者全部为多媒体插件 sidecar），
+//! 供生图 / 生视频 / 语音合成 / 语音识别插件共享复用。
+
 use std::fmt;
 use std::time::Duration;
 
-use crate::models_config::{ModelCapability, ModelsConfig, ResolvedModel};
+use tiangong_llm::models_config::{ModelCapability, ModelsConfig, ResolvedModel};
 
 pub struct MediaCallOutput<T> {
     pub resolved: ResolvedModel,
@@ -58,33 +63,22 @@ fn resolved_voice(resolved: &ResolvedModel, voice: Option<String>) -> Option<Str
     })
 }
 
-pub async fn generate_image(
-    models_config: &ModelsConfig,
-    prompt: String,
-    width: u32,
-    height: u32,
-    style: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::image::ImageGenResponse>, MediaServiceError> {
-    let resolved = resolve_media_model(models_config, ModelCapability::ImageGeneration)?;
-    generate_image_with(&resolved, prompt, width, height, style).await
-}
-
-/// 与 [`generate_image`] 相同，但直接接受已解析的端点，供插件复用（免去路由解析）。
+/// 生成图片：直接接受已解析的端点，供插件复用（插件侧完成路由解析）。
 pub async fn generate_image_with(
     resolved: &ResolvedModel,
     prompt: String,
     width: u32,
     height: u32,
     style: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::image::ImageGenResponse>, MediaServiceError> {
-    use tiangong_media::image::ImageGenerator;
+) -> Result<MediaCallOutput<crate::image::ImageGenResponse>, MediaServiceError> {
+    use crate::image::ImageGenerator;
 
-    let generator = tiangong_media::openai_image::OpenAIImageGenerator::new(
+    let generator = crate::openai_image::OpenAIImageGenerator::new(
         resolved.api_key.clone(),
         resolved.base_url.clone(),
         resolved.model.clone(),
     );
-    let request = tiangong_media::image::ImageGenRequest {
+    let request = crate::image::ImageGenRequest {
         prompt,
         negative_prompt: None,
         width,
@@ -105,24 +99,14 @@ pub async fn generate_image_with(
     })
 }
 
-pub async fn generate_video(
-    models_config: &ModelsConfig,
-    prompt: String,
-    duration: Option<u32>,
-    resolution: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::video::VideoGenTask>, MediaServiceError> {
-    let resolved = resolve_media_model(models_config, ModelCapability::VideoGeneration)?;
-    generate_video_with(&resolved, prompt, duration, resolution).await
-}
-
-/// 与 [`generate_video`] 相同，但直接接受已解析的端点，供插件复用（免去路由解析）。
+/// 生成视频：直接接受已解析的端点，供插件复用（插件侧完成路由解析）。
 pub async fn generate_video_with(
     resolved: &ResolvedModel,
     prompt: String,
     duration: Option<u32>,
     resolution: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::video::VideoGenTask>, MediaServiceError> {
-    use tiangong_media::video::{VideoGenStatus, VideoGenerator};
+) -> Result<MediaCallOutput<crate::video::VideoGenTask>, MediaServiceError> {
+    use crate::video::{VideoGenStatus, VideoGenerator};
 
     let endpoint_path = resolved
         .options
@@ -140,13 +124,13 @@ pub async fn generate_video_with(
         .get("poll_interval_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(2_000);
-    let generator = tiangong_media::openai_video::OpenAIVideoGenerator::new(
+    let generator = crate::openai_video::OpenAIVideoGenerator::new(
         resolved.api_key.clone(),
         resolved.base_url.clone(),
         resolved.model.clone(),
         endpoint_path,
     );
-    let request = tiangong_media::video::VideoGenRequest {
+    let request = crate::video::VideoGenRequest {
         prompt,
         duration,
         resolution,
@@ -181,32 +165,19 @@ pub async fn generate_video_with(
     })
 }
 
-pub async fn synthesize_speech(
-    models_config: &ModelsConfig,
-    text: String,
-    voice: Option<String>,
-    speed: Option<f64>,
-    output_format: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::tts::SynthesizeResponse>, MediaServiceError> {
-    let resolved = resolve_media_model(models_config, ModelCapability::Tts)?;
-    synthesize_speech_with(&resolved, text, voice, speed, output_format).await
-}
-
-/// 与 [`synthesize_speech`] 相同，但直接接受已解析的端点，供插件复用（免去路由解析）。
+/// 语音合成：直接接受已解析的端点，供插件复用（插件侧完成路由解析）。
 pub async fn synthesize_speech_with(
     resolved: &ResolvedModel,
     text: String,
     voice: Option<String>,
     speed: Option<f64>,
     output_format: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::tts::SynthesizeResponse>, MediaServiceError> {
-    use tiangong_media::tts::SpeechSynthesizer;
+) -> Result<MediaCallOutput<crate::tts::SynthesizeResponse>, MediaServiceError> {
+    use crate::tts::SpeechSynthesizer;
 
-    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
-    let request = tiangong_media::tts::SynthesizeRequest {
+    let synthesizer =
+        crate::openai_tts::OpenAITTS::new(resolved.api_key.clone(), resolved.base_url.clone());
+    let request = crate::tts::SynthesizeRequest {
         text,
         voice: resolved_voice(resolved, voice),
         speed,
@@ -225,30 +196,18 @@ pub async fn synthesize_speech_with(
     })
 }
 
-pub async fn transcribe_audio(
-    models_config: &ModelsConfig,
-    audio: Vec<u8>,
-    mime_type: String,
-    language: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::stt::TranscribeResponse>, MediaServiceError> {
-    let resolved = resolve_media_model(models_config, ModelCapability::Stt)?;
-    transcribe_audio_with(&resolved, audio, mime_type, language).await
-}
-
-/// 与 [`transcribe_audio`] 相同，但直接接受已解析的端点，供插件复用（免去路由解析）。
+/// 语音识别：直接接受已解析的端点，供插件复用（插件侧完成路由解析）。
 pub async fn transcribe_audio_with(
     resolved: &ResolvedModel,
     audio: Vec<u8>,
     mime_type: String,
     language: Option<String>,
-) -> Result<MediaCallOutput<tiangong_media::stt::TranscribeResponse>, MediaServiceError> {
-    use tiangong_media::stt::SpeechRecognizer;
+) -> Result<MediaCallOutput<crate::stt::TranscribeResponse>, MediaServiceError> {
+    use crate::stt::SpeechRecognizer;
 
-    let recognizer = tiangong_media::openai_stt::OpenAIWhisper::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
-    let request = tiangong_media::stt::TranscribeRequest {
+    let recognizer =
+        crate::openai_stt::OpenAIWhisper::new(resolved.api_key.clone(), resolved.base_url.clone());
+    let request = crate::stt::TranscribeRequest {
         audio,
         mime_type,
         language,
@@ -266,16 +225,15 @@ pub async fn transcribe_audio_with(
     })
 }
 
+/// 获取 TTS 音色列表（按 Tts 能力路由解析端点）。
 pub async fn list_tts_voices(
     models_config: &ModelsConfig,
-) -> Result<Vec<tiangong_media::tts::VoiceInfo>, MediaServiceError> {
-    use tiangong_media::tts::SpeechSynthesizer;
+) -> Result<Vec<crate::tts::VoiceInfo>, MediaServiceError> {
+    use crate::tts::SpeechSynthesizer;
 
     let resolved = resolve_media_model(models_config, ModelCapability::Tts)?;
-    let synthesizer = tiangong_media::openai_tts::OpenAITTS::new(
-        resolved.api_key.clone(),
-        resolved.base_url.clone(),
-    );
+    let synthesizer =
+        crate::openai_tts::OpenAITTS::new(resolved.api_key.clone(), resolved.base_url.clone());
 
     tokio::time::timeout(Duration::from_secs(10), synthesizer.list_voices())
         .await

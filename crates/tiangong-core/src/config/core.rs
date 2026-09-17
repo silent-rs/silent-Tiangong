@@ -13,9 +13,8 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::ProviderProtocol;
-use crate::models_config::ModelsConfig;
 use crate::permission::TrustMode;
+use tiangong_llm::ProviderProtocol;
 
 /// 模型端点配置（定义已迁移至 `tiangong-llm`，此处仅做 re-export 保持外部路径稳定）。
 pub use tiangong_llm::ModelEndpoint;
@@ -30,53 +29,15 @@ pub fn default_context_limit() -> usize {
 
 /// LLM 配置 — TiangongCore 运行所需的模型端点
 ///
-/// core 只关心它运行必需的 chat（主对话）与 lite（轻量任务）端点；
-/// 其他能力（image/video/tts/stt/multimodal/embedding/rerank）由各 plugin
-/// 自行从 `ModelsConfig` 路由解析，不经此配置中转。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LlmConfig {
-    /// 主 Chat 端点（必须）
-    pub chat: ModelEndpoint,
-    /// 轻量级文本端点（标题生成、意图分类等简单任务，未配置时回退到 chat）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lite: Option<ModelEndpoint>,
-}
-
-impl LlmConfig {
-    /// 从 ModelsConfig 解析出 core 运行所需的 chat + lite 端点。
-    pub fn from_models_config(models: &ModelsConfig) -> Self {
-        use crate::models_config::RoutingSlot;
-
-        let resolve = |slot: RoutingSlot| -> Option<ModelEndpoint> {
-            let resolved = models.resolve_slot(slot)?;
-            Some(ModelEndpoint {
-                headers: resolved.headers,
-                base_url: resolved.base_url,
-                api_key: resolved.api_key,
-                model: resolved.model,
-                protocol: resolved.protocol,
-                timeout_ms: resolved.timeout_ms,
-                options: resolved.options,
-            })
-        };
-
-        Self {
-            chat: resolve(RoutingSlot::Chat).unwrap_or_default(),
-            lite: resolve(RoutingSlot::Lite),
-        }
-    }
-
-    /// 检查是否有有效的 Chat 端点
-    pub fn is_valid(&self) -> bool {
-        !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
-    }
-}
-
 /// TiangongCore 运行所需的最小配置
+///
+/// 直接消费的端点仅主 Chat（[`ModelEndpoint`]）；lite、image/video/tts 等
+/// 其他能力由消费方自行从 `ModelsConfig` 路由解析，不经此配置中转
+/// （lite 的现行消费者是 core-manager 的标题生成）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// LLM 模型端点配置
-    pub llm: LlmConfig,
+    /// 主 Chat 模型端点
+    pub llm: ModelEndpoint,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -85,8 +46,8 @@ pub struct CoreConfig {
     pub custom_system_prompt: String,
     /// 思考强度设置
     #[serde(default = "default_reasoning_effort")]
-    #[serde(deserialize_with = "crate::model::deserialize_reasoning_effort_flexible")]
-    pub reasoning_effort: crate::model::ReasoningEffort,
+    #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
+    pub reasoning_effort: tiangong_llm::ReasoningEffort,
     /// 上下文窗口大小（token 数）
     pub context_limit: usize,
 }
@@ -94,11 +55,11 @@ pub struct CoreConfig {
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            llm: LlmConfig::default(),
+            llm: ModelEndpoint::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
-            reasoning_effort: crate::model::ReasoningEffort::Medium,
+            reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
             context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
@@ -120,7 +81,7 @@ pub struct CoreConfigBuilder {
 impl CoreConfigBuilder {
     /// 设置 Chat 端点（最常用的快捷方式）
     pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
-        self.config.llm.chat = ModelEndpoint {
+        self.config.llm = ModelEndpoint {
             headers: Default::default(),
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
@@ -132,8 +93,8 @@ impl CoreConfigBuilder {
         self
     }
 
-    /// 设置完整的 LlmConfig
-    pub fn with_llm_config(mut self, llm: LlmConfig) -> Self {
+    /// 设置完整的 LLM 端点
+    pub fn with_llm_config(mut self, llm: ModelEndpoint) -> Self {
         self.config.llm = llm;
         self
     }
@@ -220,14 +181,13 @@ impl std::fmt::Debug for CoreConfigProvider {
     }
 }
 
-fn default_reasoning_effort() -> crate::model::ReasoningEffort {
-    crate::model::ReasoningEffort::Medium
+fn default_reasoning_effort() -> tiangong_llm::ReasoningEffort {
+    tiangong_llm::ReasoningEffort::Medium
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models_config::ModelCapability;
 
     #[test]
     fn provider_snapshot_and_generation() {
@@ -269,40 +229,10 @@ mod tests {
             .with_context_limit(65536)
             .build();
 
-        assert_eq!(config.llm.chat.base_url, "https://api.example.com/v1");
-        assert_eq!(config.llm.chat.model, "gpt-4o");
-        assert!(config.llm.is_valid());
+        assert_eq!(config.llm.base_url, "https://api.example.com/v1");
+        assert_eq!(config.llm.model, "gpt-4o");
+        assert!(!config.llm.base_url.is_empty());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.context_limit, 65536);
-    }
-
-    #[test]
-    fn llm_config_from_models_config_preserves_protocol() {
-        use crate::models_config::RoutingSlot;
-
-        let mut models = ModelsConfig::default();
-        models.providers.insert(
-            "anthropic".to_string(),
-            crate::models_config::ProviderConfig {
-                headers: Default::default(),
-                base_url: "https://api.anthropic.com".into(),
-                api_key: "sk-ant".into(),
-                timeout_ms: 30_000,
-                protocol: ProviderProtocol::Anthropic,
-            },
-        );
-        models.routing.insert(
-            RoutingSlot::Chat,
-            crate::models_config::ModelEntry {
-                provider: "anthropic".into(),
-                model: "claude-sonnet-4".into(),
-                capabilities: vec![ModelCapability::Chat],
-                options: serde_json::json!({}),
-                context_window: None,
-            },
-        );
-
-        let llm = LlmConfig::from_models_config(&models);
-        assert_eq!(llm.chat.protocol, ProviderProtocol::Anthropic);
     }
 }

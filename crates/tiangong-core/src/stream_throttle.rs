@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tiangong_types::StreamEvent;
 
-use crate::model::ModelStreamChunk;
+use tiangong_llm::ModelStreamChunk;
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 

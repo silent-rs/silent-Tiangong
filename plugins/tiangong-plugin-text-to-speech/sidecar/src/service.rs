@@ -165,7 +165,7 @@ async fn synthesize(req: SynthesizeRequest) -> Result<SynthesizeResponse> {
     }
 
     let resolved = tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::Tts)?;
-    let output = tiangong_core::media::synthesize_speech_with(
+    let output = tiangong_media::service::synthesize_speech_with(
         &resolved, req.text, req.voice, req.speed, None,
     )
     .await
@@ -212,7 +212,7 @@ fn list_models() -> Result<ListModelsResponse> {
 /// 返回供应商音色列表（设置页选择用，调供应商 voices 接口）。
 async fn list_voices() -> Result<ListVoicesResponse> {
     let models_config = tiangong_plugin_sidecar::model::load_models_config()?;
-    let voices = tiangong_core::media::list_tts_voices(&models_config)
+    let voices = tiangong_media::service::list_tts_voices(&models_config)
         .await
         .map_err(|e| anyhow::anyhow!("获取音色列表失败：{e}"))?;
     Ok(ListVoicesResponse {

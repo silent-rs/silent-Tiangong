@@ -7,7 +7,7 @@
 //! tool_call name 复用 [`super::tool_spec::INJECTION_TOOL`]（指向
 //! [`crate::react::message::INJECTION_TOOL_NAME`]），避免重复定义。
 
-use crate::model::ToolSpec;
+use tiangong_llm::tool::ToolSpec;
 
 use super::tool_spec::INJECTION_TOOL;
 

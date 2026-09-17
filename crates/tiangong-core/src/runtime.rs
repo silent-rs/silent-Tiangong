@@ -1,30 +1,11 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agent_config::AgentConfig;
-use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
-use crate::models_config::ModelsConfig;
-use crate::planner::TaskPlan;
-use crate::tool::ToolExecutionRecord;
-use crate::tool_override::ToolOverrideHandler;
-
-pub use tiangong_types::RunStatus;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunSnapshot {
-    pub status: RunStatus,
-    pub summary: String,
-    pub last_session_id: Option<String>,
-    pub last_task_id: Option<String>,
-    pub last_duration_ms: Option<u64>,
-    pub last_result: Option<String>,
-    pub last_plan: Option<String>,
-    pub last_tool_result: Option<String>,
-    pub last_error: Option<String>,
-    pub last_usage: Option<TokenUsage>,
-    pub updated_at: String,
-}
+use crate::config::agent::AgentConfig;
+use crate::config::models::ModelsConfig;
+use crate::tools::extension::ToolOverrideHandler;
+use tiangong_llm::{ModelClient, SingleProviderClient};
+use tiangong_types::TokenUsage;
 
 #[derive(Debug, Clone)]
 pub struct LlmOutputRecord {
@@ -35,55 +16,22 @@ pub struct LlmOutputRecord {
     pub usage: TokenUsage,
 }
 
-/// 单条验证命令的执行结果记录。
-///
-/// 由 ReAct 执行链路在需要时收集（如运行测试、构建等验证命令），用于
-/// 上下文呈现与结果汇总。历史定义位于 `agents::response_agent`，随旧
-/// 流水线退场而收敛到 `runtime` 作为通用数据类型。
-#[derive(Debug, Clone)]
-pub struct VerifyExecutionRecord {
-    pub command: String,
-    pub ok: bool,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub summary: String,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TurnExecution {
-    pub assistant_message: String,
-    pub assistant_reasoning_content: String,
-    pub system_prompt: String,
-    pub plan: TaskPlan,
-    pub tool_result_summary: Option<String>,
-    pub tool_execution: Option<ToolExecutionRecord>,
-    pub verify_records: Vec<VerifyExecutionRecord>,
-    pub output_mode: String,
-    pub output_chunk_count: usize,
-    pub usage: TokenUsage,
-    /// 开发阶段：所有 LLM 调用的完整记录
-    pub llm_calls: Vec<crate::session::LlmCallRecord>,
-}
-
 #[derive(Clone)]
 pub struct RuntimeEngine {
     client: SingleProviderClient,
-    /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
-    lite_client: Option<SingleProviderClient>,
     /// 各插件贡献的子进程环境变量（供子进程执行注入）
     runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     pub context_limit: usize,
     agent_config: AgentConfig,
     models_config: ModelsConfig,
-    core_config: Option<crate::core_config::CoreConfig>,
+    core_config: Option<crate::config::core::CoreConfig>,
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的工具规格提供者
-    tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
+    tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tools::extension::ToolSpecProvider>>>>,
     /// Plugin 注册的 Prompt 段落提供者
-    prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
+    prompt_section_providers:
+        Arc<Mutex<Vec<Arc<dyn crate::tools::extension::PromptSectionProvider>>>>,
 }
 
 impl std::fmt::Debug for RuntimeEngine {
@@ -108,7 +56,6 @@ impl RuntimeEngine {
     ) -> Self {
         Self {
             client,
-            lite_client: None,
             runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
@@ -131,7 +78,6 @@ impl RuntimeEngine {
         let _ = trust_mode;
         Self {
             client,
-            lite_client: None,
             runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
@@ -143,34 +89,19 @@ impl RuntimeEngine {
         }
     }
 
-    /// 设置轻量级文本模型客户端
-    pub fn with_lite_client(mut self, client: SingleProviderClient) -> Self {
-        self.lite_client = Some(client);
-        self
-    }
-
     pub fn with_models_config(mut self, config: ModelsConfig) -> Self {
         self.models_config = config;
         self
     }
 
-    pub fn with_core_config(mut self, config: crate::core_config::CoreConfig) -> Self {
+    pub fn with_core_config(mut self, config: crate::config::core::CoreConfig) -> Self {
         self.core_config = Some(config);
         self
-    }
-
-    /// 获取 LlmConfig 引用（优先从 core_config 取）
-    pub fn llm_config(&self) -> Option<&crate::core_config::LlmConfig> {
-        self.core_config.as_ref().map(|c| &c.llm)
     }
 
     /// 获取模型客户端引用
     pub fn client(&self) -> &SingleProviderClient {
         &self.client
-    }
-    /// 获取轻量级模型客户端（未配置时回退到主客户端）
-    pub fn lite_client(&self) -> &SingleProviderClient {
-        self.lite_client.as_ref().unwrap_or(&self.client)
     }
     /// 对话模型本身是否具备 multimodal 能力（multimodal 路由与 chat 路由指向同一模型）
     pub fn chat_is_multimodal(&self) -> bool {
@@ -224,7 +155,7 @@ impl RuntimeEngine {
     /// 注册 Plugin 工具规格提供者
     pub fn register_tool_spec_provider(
         &self,
-        provider: Arc<dyn crate::tool_override::ToolSpecProvider>,
+        provider: Arc<dyn crate::tools::extension::ToolSpecProvider>,
     ) {
         if let Ok(mut guard) = self.tool_spec_providers.lock() {
             guard.push(provider);
@@ -232,7 +163,7 @@ impl RuntimeEngine {
     }
 
     /// 获取所有已注册的工具规格提供者（用于 runtime 重建时保留）
-    pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tool_override::ToolSpecProvider>> {
+    pub fn tool_spec_providers(&self) -> Vec<Arc<dyn crate::tools::extension::ToolSpecProvider>> {
         self.tool_spec_providers
             .lock()
             .map(|g| g.clone())
@@ -242,7 +173,7 @@ impl RuntimeEngine {
     /// 注册 Plugin Prompt 段落提供者
     pub fn register_prompt_section_provider(
         &self,
-        provider: Arc<dyn crate::tool_override::PromptSectionProvider>,
+        provider: Arc<dyn crate::tools::extension::PromptSectionProvider>,
     ) {
         if let Ok(mut guard) = self.prompt_section_providers.lock() {
             guard.push(provider);
@@ -261,7 +192,7 @@ impl RuntimeEngine {
     /// 获取所有已注册的 Prompt 段落提供者（用于 runtime 重建时保留）
     pub fn prompt_section_providers(
         &self,
-    ) -> Vec<Arc<dyn crate::tool_override::PromptSectionProvider>> {
+    ) -> Vec<Arc<dyn crate::tools::extension::PromptSectionProvider>> {
         self.prompt_section_providers
             .lock()
             .map(|g| g.clone())
@@ -280,69 +211,4 @@ impl RuntimeEngine {
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
-}
-
-/// 清理 LLM 响应中混入的工具执行 trace 文本
-#[allow(dead_code)]
-pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut in_trace_block = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("工具执行") && trimmed.contains('[') && trimmed.contains(']') {
-            in_trace_block = true;
-            continue;
-        }
-
-        if in_trace_block {
-            if trimmed.starts_with("命令:")
-                || trimmed.starts_with("ok=")
-                || trimmed.starts_with("summary:")
-                || trimmed.starts_with("tool=")
-                || trimmed.starts_with("stdout:")
-                || trimmed.starts_with("stderr:")
-                || trimmed.starts_with("duration_ms=")
-                || trimmed.starts_with("exit_code=")
-                || (trimmed.contains("ok=") && trimmed.contains("exit_code="))
-            {
-                continue;
-            }
-            if trimmed.is_empty() {
-                continue;
-            }
-            in_trace_block = false;
-            result.push_str(line);
-            result.push('\n');
-            continue;
-        }
-
-        if trimmed.contains("工具执行")
-            && trimmed.contains('[')
-            && (trimmed.contains("ok=") || trimmed.contains("exit_code="))
-        {
-            continue;
-        }
-
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    let mut cleaned = String::with_capacity(result.len());
-    let mut prev_empty = false;
-    for line in result.lines() {
-        if line.trim().is_empty() {
-            if !prev_empty {
-                cleaned.push('\n');
-            }
-            prev_empty = true;
-        } else {
-            cleaned.push_str(line);
-            cleaned.push('\n');
-            prev_empty = false;
-        }
-    }
-
-    cleaned.trim().to_string()
 }

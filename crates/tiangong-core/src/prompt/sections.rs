@@ -26,8 +26,11 @@ impl SystemPromptConfig {
 
 /// 构建完整的 system prompt 消息
 ///
-/// 组装顺序：插件段（含产品身份 / 通用规则 / 自定义指令 / 各能力说明）
-/// → 环境段（工作目录 / 文件根）→ 摘要段。
+/// 组装顺序：插件段（产品身份 / 通用规则 / 自定义指令 / 各能力说明）
+/// → 摘要段。
+/// 环境信息（当前工作目录、允许文件操作目录）不进入 system prompt：
+/// 属会话动态信息（cwd 可能迟落定或变更），改写已发送前缀会作废对话
+/// 历史缓存，改由 fs 工具结果回显（模型经首次文件工具调用获知）。
 /// 返回 `Message { role: System }`，由 `build_provider_messages()` 提取到 system prompt。
 pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
     let mut parts = Vec::new();
@@ -40,49 +43,22 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
         }
     }
 
-    // 环境段
-    parts.extend(collect_environment_parts(session));
-
     // 摘要段
     parts.extend(collect_summary_part(session));
+
+    if parts.is_empty() {
+        tracing::warn!(
+            "system prompt 组装为空：无插件段落且无摘要，请求将不带 system（检查插件加载状态）"
+        );
+    }
 
     assemble_system_message(parts)
 }
 
-/// 收集环境段（工作目录、文件根）
-///
-/// 会话标题不进入 system prompt：标题随 lite 自动起名 / 用户改名变化，
-/// 拼进 prompt 会在每次变化后破坏 KV cache 前缀（system prompt 是请求最前缀，
-/// 一变则其后全部对话历史缓存作废）。
-fn collect_environment_parts(session: &Session) -> Vec<String> {
-    let mut parts = Vec::new();
-    let workspace = session_working_directory(session);
-    parts.push(format!("当前工作目录：{}", workspace));
-    // 允许文件操作目录：工作空间 + 应用存储根（由 toolkit 硬编码为始终允许）。
-    parts.push(format!(
-        "允许文件操作目录：{}；{}",
-        workspace,
-        tiangong_toolkit::app_storage_root().display()
-    ));
-    parts
-}
-
-fn session_working_directory(session: &Session) -> String {
-    let cwd = session.cwd.trim();
-    if !cwd.is_empty() {
-        return std::path::PathBuf::from(cwd)
-            .canonicalize()
-            .unwrap_or_else(|_| std::path::PathBuf::from(cwd))
-            .display()
-            .to_string();
-    }
-
-    std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".into())
-}
-
 /// 收集摘要段
+///
+/// 摘要仅在上下文压缩时变化（压缩本身即缓存断点，不构成额外的前缀不稳定），
+/// 是 core 压缩职责的自然输出，故由 core 拼装。
 fn collect_summary_part(session: &Session) -> Vec<String> {
     if let Some(summary) = session
         .context_summary
@@ -127,13 +103,14 @@ mod tests {
 
     #[test]
     fn build_full_system_prompt_with_empty_sections_still_valid() {
-        // 未注入任何插件段落时，core 仍应构建仅含环境段的合法 system prompt。
+        // 未注入任何插件段落时，core 仍应构建合法的 system prompt。
+        // 环境信息已退出 system prompt（经 fs 工具结果回显），空段落时
+        // 内容允许为空，由插件段兜底非空。
         let session = Session::new("测试会话");
         let config = SystemPromptConfig::from_plugin_sections(Vec::new());
         let msg = build_full_system_prompt(&session, &config);
         assert_eq!(msg.role, MessageRole::System);
         let text = msg.content.first().unwrap().as_text().unwrap_or_default();
-        assert!(text.contains("当前工作目录"));
         // 标题不进入 system prompt（保持 KV cache 前缀稳定）
         assert!(!text.contains("测试会话"));
     }

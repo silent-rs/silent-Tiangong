@@ -10,11 +10,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use crate::agent_config::AgentConfig;
+use crate::config::agent::AgentConfig;
 use crate::core::plugin::Plugin;
-use crate::model::{SingleProviderClient, ToolSpec};
 use crate::session::Session;
-use crate::tool_override::ToolOverrideHandler;
+use crate::tools::extension::ToolOverrideHandler;
+use tiangong_llm::SingleProviderClient;
+use tiangong_llm::tool::ToolSpec;
 use tiangong_types::StreamEvent;
 
 use typed_builder::TypedBuilder;
@@ -35,9 +36,6 @@ pub struct TurnContext {
     pub(crate) turn_id: Option<String>,
     /// 模型请求客户端
     pub client: SingleProviderClient,
-    /// 轻量任务客户端（标题生成等）。未配置 lite 模型时为 None，回退到 chat client。
-    #[builder(default)]
-    pub lite_client: Option<SingleProviderClient>,
     /// 本轮会话（turn 期间独占,turn 结束时取回落盘）
     pub session: Session,
     /// 本轮内部事件发送端。
@@ -64,11 +62,6 @@ impl TurnContext {
 
     pub fn client(&self) -> &SingleProviderClient {
         &self.client
-    }
-
-    /// 轻量任务客户端，未配置 lite 时回退到 chat client。
-    pub fn lite_client(&self) -> &SingleProviderClient {
-        self.lite_client.as_ref().unwrap_or(&self.client)
     }
 
     pub fn agent_config(&self) -> &AgentConfig {

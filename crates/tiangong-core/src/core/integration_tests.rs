@@ -17,7 +17,7 @@ use crate::session::MessageRole;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_balanced() {
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
     use crate::session::Session;
     use serde_json::{Value, json};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -79,7 +79,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
             .with_chat(&server.uri(), "test", "glm-5.3-flash")
             .with_trust_mode(TrustMode::FullTrust)
             .build();
-        config.llm.chat.protocol = ProviderProtocol::Anthropic;
+        config.llm.protocol = ProviderProtocol::Anthropic;
         let (tx, _rx) = std::sync::mpsc::channel();
         super::TiangongCore::builder()
             .session_id(sid.clone())
@@ -167,9 +167,9 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
     use crate::core::plugin::Plugin;
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
-    use crate::tool_override::{
+    use crate::tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -194,12 +194,12 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
         }
     }
     impl ToolSpecProvider for OrderedPlugin {
-        fn tool_specs(&self) -> Vec<crate::model::ToolSpec> {
+        fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
             // tools 顺序由插件自身保证稳定（core 不代为排序）。
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.names
                 .iter()
-                .map(|name| crate::model::ToolSpec {
+                .map(|name| tiangong_llm::tool::ToolSpec {
                     name: (*name).into(),
                     description: self.id.into(),
                     input_schema: serde_json::json!({"type":"object","properties":{}}),
@@ -304,7 +304,9 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
                 ]
             );
             let system = payload["messages"][0]["content"].as_str().unwrap();
-            assert!(system.starts_with("插件提示:prompt\n\n插件提示:alpha\n\n插件提示:zeta\n\n"));
+            // 环境段已退出 system prompt：插件段之后直接是后续内容（无 cwd 行）
+            assert!(system.starts_with("插件提示:prompt\n\n插件提示:alpha\n\n插件提示:zeta"));
+            assert!(!system.contains("当前工作目录"));
             if let Some(previous) = &previous {
                 assert_eq!(previous["tools"], payload["tools"]);
                 let old = previous["messages"].as_array().unwrap();

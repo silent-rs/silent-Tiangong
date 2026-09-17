@@ -120,8 +120,11 @@ fn new_path_system_prompt_includes_all_sections() {
     assert!(text.contains("产品身份段"), "应包含产品身份段");
     assert!(text.contains("通用规则段"), "应包含通用规则段");
     assert!(text.contains("自定义指令段"), "应包含自定义指令段");
-    // 环境段
-    assert!(text.contains("当前工作目录"), "应包含工作目录");
+    // 环境信息不进入 system prompt（经 fs 工具结果回显工作目录）
+    assert!(
+        !text.contains("当前工作目录"),
+        "工作目录不应进入 system prompt"
+    );
     assert!(!text.contains("测试会话"), "会话标题不应进入 system prompt");
     // 各能力插件段落
     assert!(text.contains("test-skill"), "应包含 Skills 列表");

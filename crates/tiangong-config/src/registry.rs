@@ -184,7 +184,7 @@ pub fn plugin_set_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_core::model::ProviderProtocol;
+    use tiangong_llm::ProviderProtocol;
     use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };

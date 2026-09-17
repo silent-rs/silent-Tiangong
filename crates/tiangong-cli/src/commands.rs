@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use tiangong_app_state::app_state::TiangongState;
-use tiangong_core::core_config::CoreConfigProvider;
+use tiangong_core::config::core::CoreConfigProvider;
 
 use crate::completion;
 use crate::modal;

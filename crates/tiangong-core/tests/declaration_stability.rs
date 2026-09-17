@@ -11,16 +11,16 @@ use std::sync::{
 };
 use tiangong_core::{
     agent_input::{AgentInput, AgentInputKind},
+    config::core::{CoreConfig, CoreConfigProvider},
     core::{Plugin, TiangongCore},
-    core_config::{CoreConfig, CoreConfigProvider},
-    model::{ToolCall, ToolSpec},
     permission::TrustMode,
     session::Session,
-    tool::ToolResult,
-    tool_override::{
+    tools::extension::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     },
+    tools::result::ToolResult,
 };
+use tiangong_llm::tool::{ToolCall, ToolSpec};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 struct PluginState {
     available: AtomicBool,
