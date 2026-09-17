@@ -270,7 +270,6 @@ fn notification_sender() -> &'static tokio::sync::broadcast::Sender<(String, Str
 }
 
 struct ActiveTcpRequest {
-    request: PluginRequest,
     cancel: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -323,22 +322,12 @@ async fn serve_connection(
         let request = match frame {
             IpcFrame::Request(request) => request,
             IpcFrame::Cancel { request_id } => {
+                // 与 stdio 一致：只发取消信号并立即回取消响应；取消清理
+                // （可能是长动作）由执行侧在 dispatch future 销毁后的
+                // 取消分支内执行。
                 let target = active_requests().lock().await.remove(&request_id);
                 if let Some(target) = target {
                     let _ = target.cancel.send(());
-                    // 与 stdio 一致：取消清理可能是长动作，不能占住连接的
-                    // 读循环，否则同连接的其他请求与通知全部停摆。
-                    let service_for_cancel = Arc::clone(&service_obj);
-                    let cancel_request_id = request_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = service_for_cancel.cancel(&target.request).await {
-                            tracing::warn!(
-                                request_id = %cancel_request_id,
-                                %error,
-                                "TCP sidecar 取消清理失败"
-                            );
-                        }
-                    });
                 }
                 let response = PluginResponse::error(
                     &request_id,
@@ -380,27 +369,40 @@ async fn serve_connection(
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                 active_requests().lock().await.insert(
                     request.request_id.clone(),
-                    ActiveTcpRequest {
-                        request: plugin_request.clone(),
-                        cancel: cancel_tx,
-                    },
+                    ActiveTcpRequest { cancel: cancel_tx },
                 );
+                // 取消钩子在 dispatch future 销毁（select 进入取消分支）
+                // 之后调用：钩子必然看到 dispatch 的全部副作用（如取消
+                // 目标登记）；与 dispatch 并行执行存在登记前查询的丢失
+                // 窗口。与 stdio 的清理时序约定保持一致。
+                let cancel_request = plugin_request.clone();
                 let response = REQUEST_PROGRESS
                     .scope(
                         progress,
                         REQUEST_CONTEXT.scope(context, async {
                             tokio::select! {
-                                response = service_obj.dispatch(plugin_request) => response,
-                                _ = cancel_rx => PluginResponse::error(
-                                    &request.request_id,
-                                    PluginErrorCode::Cancelled,
-                                    "请求已取消",
-                                    false,
-                                ),
+                                response = service_obj.dispatch(plugin_request) => Some(response),
+                                _ = cancel_rx => None,
                             }
                         }),
                     )
                     .await;
+                let cancelled = response.is_none();
+                if cancelled && let Err(error) = service_obj.cancel(&cancel_request).await {
+                    tracing::warn!(
+                        request_id = %request.request_id,
+                        %error,
+                        "TCP sidecar 取消清理失败"
+                    );
+                }
+                let response = response.unwrap_or_else(|| {
+                    PluginResponse::error(
+                        &request.request_id,
+                        PluginErrorCode::Cancelled,
+                        "请求已取消",
+                        false,
+                    )
+                });
                 active_requests().lock().await.remove(&request.request_id);
                 response
             }
@@ -498,17 +500,16 @@ mod notification_tests {
         let request = PluginRequest::new("slow", serde_json::Value::Null);
         let request_id = request.request_id.clone();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-        active_requests().lock().await.insert(
-            request_id.clone(),
-            ActiveTcpRequest {
-                request: request.clone(),
-                cancel: cancel_tx,
-            },
-        );
+        active_requests()
+            .lock()
+            .await
+            .insert(request_id.clone(), ActiveTcpRequest { cancel: cancel_tx });
         let target = active_requests().lock().await.remove(&request_id);
         let target = target.expect("请求应已登记");
+        // 新语义：读循环只发信号；取消钩子由执行侧在 dispatch future
+        // 销毁后的取消分支内调用（此处模拟该时序：信号之后的清理）。
         let _ = target.cancel.send(());
-        service_obj.cancel(&target.request).await.unwrap();
+        service_obj.cancel(&request).await.unwrap();
         assert_eq!(
             service.cancelled.load(std::sync::atomic::Ordering::SeqCst),
             1

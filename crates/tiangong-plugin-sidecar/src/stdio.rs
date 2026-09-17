@@ -168,13 +168,10 @@ where
                 };
                 let request_id = request.request_id;
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                active.lock().await.insert(
-                    request_id.clone(),
-                    ActiveRequest {
-                        request: plugin_request.clone(),
-                        cancel: cancel_tx,
-                    },
-                );
+                active
+                    .lock()
+                    .await
+                    .insert(request_id.clone(), ActiveRequest { cancel: cancel_tx });
                 let permits_for_task = Arc::clone(&permits);
                 let writer_for_task = Arc::clone(&writer);
                 let service_for_task = Arc::clone(&service_obj);
@@ -189,6 +186,13 @@ where
                         writer: Arc::clone(&writer_for_task),
                         request_id: request_id.clone(),
                     };
+                    // 取消钩子由本任务在 dispatch future 销毁（select 进入
+                    // 取消分支）之后、并发许可释放之后调用：既保证钩子看
+                    // 到 dispatch 的全部副作用（如终端取消目标登记——与
+                    // dispatch 并行会在终端创建与登记之间查询，登记随后的
+                    // 完成无人清理，终端残留预留状态），又不在秒级清理期间
+                    // 占住并发许可，后续请求可立即处理。
+                    let cancel_request = plugin_request.clone();
                     let response = REQUEST_PROGRESS
                         .scope(progress, REQUEST_CONTEXT.scope(context, async {
                             tokio::select! {
@@ -197,9 +201,19 @@ where
                             }
                         }))
                         .await;
+                    let cancelled = response.is_none();
                     active_for_task.lock().await.remove(&request_id);
                     drop(permit);
-                    if let Some(response) = response
+                    if cancelled {
+                        if let Err(error) = service_for_task.cancel(&cancel_request).await {
+                            tracing::warn!(
+                                service = %service_for_log,
+                                request_id = %request_id,
+                                %error,
+                                "stdio 取消清理失败"
+                            );
+                        }
+                    } else if let Some(response) = response
                         && let Err(error) = respond(&writer_for_task, request_id, response).await
                     {
                         tracing::warn!(service = %service_for_log, %error, "stdio 请求处理失败");
@@ -207,26 +221,12 @@ where
                 });
             }
             IpcFrame::Cancel { request_id } => {
-                // 控制帧直接处理，不等待普通请求并发 permit。
+                // 控制帧直接处理，不等待普通请求并发 permit。取消清理
+                // （可能是长动作）由执行任务在 dispatch future 销毁后的
+                // 取消分支内执行，读循环只发信号、立即回取消响应。
                 let target = active.lock().await.remove(&request_id);
                 if let Some(target) = target {
                     let _ = target.cancel.send(());
-                    // 取消清理可能是长动作（如终端插件要确认 shell 真正
-                    // 回到提示符）。在读循环内 await 会让该 sidecar 的所有
-                    // 入站帧在此期间全部停摆，故交给独立任务执行。
-                    let service_for_cancel = Arc::clone(&service_obj);
-                    let service_for_cancel_log = service_name.clone();
-                    let cancel_request_id = request_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = service_for_cancel.cancel(&target.request).await {
-                            tracing::warn!(
-                                service = %service_for_cancel_log,
-                                request_id = %cancel_request_id,
-                                %error,
-                                "stdio 取消清理失败"
-                            );
-                        }
-                    });
                 }
                 let response = PluginResponse::error(
                     &request_id,
@@ -351,7 +351,6 @@ fn wait_for_process_exit(pid: libc::pid_t) -> bool {
 }
 
 struct ActiveRequest {
-    request: PluginRequest,
     cancel: tokio::sync::oneshot::Sender<()>,
 }
 
