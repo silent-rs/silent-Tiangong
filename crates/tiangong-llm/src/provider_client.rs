@@ -153,9 +153,6 @@ pub struct ModelResponse {
     pub invalid_tool_calls: Vec<InvalidToolCall>,
 }
 
-/// 向后兼容别名
-pub type ModelFunctionResponse = ModelResponse;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidToolCall {
     pub id: String,
@@ -167,8 +164,8 @@ pub struct InvalidToolCall {
 fn filter_invalid_openai_tool_calls(
     protocol: ProviderProtocol,
     functions: &[ToolSpec],
-    mut response: ModelFunctionResponse,
-) -> Result<ModelFunctionResponse> {
+    mut response: ModelResponse,
+) -> Result<ModelResponse> {
     if !matches!(
         protocol,
         ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
@@ -369,7 +366,7 @@ impl SingleProviderClient {
             },
             preserve_tool_call_order,
         )
-        .await?;
+        .await;
         filter_invalid_openai_tool_calls(self.protocol(), &req.tools, response)
     }
 
@@ -1146,11 +1143,17 @@ fn collect_provider_reasoning_signature(response: &ProviderResponse) -> Option<S
         })
 }
 
+/// 消费流事件并组装响应。
+///
+/// 流中断（传输错误或流内错误事件）时直接结束循环，把已产出的内容定稿为
+/// 本次响应（issue #551）：断在 tool_use 参数 JSON 中间的调用带 `__parse_error`
+/// 标记，由上层既有的无效参数链路处理；开头即断时为空响应，由上层按无效
+/// 输出处理。调用方对中断无感，不再让整轮失败。
 async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Sized>(
     mut stream: ProviderStream,
     on_delta: &mut F,
     preserve_tool_call_order: bool,
-) -> Result<ModelResponse> {
+) -> ModelResponse {
     let mut text = String::new();
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
@@ -1161,13 +1164,20 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
     let mut tool_call_order: Vec<String> = Vec::new();
 
     while let Some(event) = stream.next().await {
-        match event.map_err(map_llm_error)? {
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => {
+                tracing::warn!(error = %err, "流式响应中断，按已产出内容收尾");
+                break;
+            }
+        };
+        match event {
             ProviderStreamEvent::ReasoningDelta(delta) => {
                 if !delta.is_empty() {
                     reasoning_content.push_str(&delta);
                     on_delta(&ModelStreamChunk {
                         content: String::new(),
-                        reasoning_content: delta.clone(),
+                        reasoning_content: delta,
                         usage: None,
                     });
                 }
@@ -1194,7 +1204,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     call.arguments.to_string()
                 };
                 tool_call_order.push(call.id.clone());
-                tool_calls.insert(call.id.clone(), (call.name, args));
+                tool_calls.insert(call.id, (call.name, args));
             }
             ProviderStreamEvent::ToolCallDelta {
                 call_id,
@@ -1220,7 +1230,10 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
                     usage: Some(usage.clone()),
                 });
             }
-            ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
+            ProviderStreamEvent::Error(message) => {
+                tracing::warn!(error = %message, "流式响应中断，按已产出内容收尾");
+                break;
+            }
             ProviderStreamEvent::MessageEnd {
                 stop_reason: stream_stop_reason,
             } => {
@@ -1246,7 +1259,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
             .collect()
     };
 
-    Ok(ModelFunctionResponse {
+    ModelResponse {
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
@@ -1254,7 +1267,7 @@ async fn consume_provider_stream_events_async<F: FnMut(&ModelStreamChunk) + ?Siz
         usage: usage.into(),
         tool_calls,
         invalid_tool_calls: Vec::new(),
-    })
+    }
 }
 
 pub(crate) enum ProviderDispatch {
@@ -1294,18 +1307,18 @@ fn block_on_provider_stream(
     provider: ProviderDispatch,
     request: ProviderRequest,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
-) -> Result<ModelFunctionResponse> {
+) -> Result<ModelResponse> {
     async fn run_stream(
         provider: ProviderDispatch,
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
-    ) -> Result<ModelFunctionResponse> {
+    ) -> Result<ModelResponse> {
         let preserve_tool_call_order = matches!(
             &provider,
             ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_)
         );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
-        consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await
+        Ok(consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await)
     }
 
     match tokio::runtime::Handle::try_current() {
@@ -1556,8 +1569,8 @@ mod tests {
         }
     }
 
-    fn model_response(tool_calls: Vec<ToolCall>, total_tokens: usize) -> ModelFunctionResponse {
-        ModelFunctionResponse {
+    fn model_response(tool_calls: Vec<ToolCall>, total_tokens: usize) -> ModelResponse {
+        ModelResponse {
             text: String::new(),
             reasoning_content: String::new(),
             reasoning_signature: None,
@@ -1711,6 +1724,91 @@ mod tests {
         append_stream_tool_call_arguments(&mut raw_args, r#"{"path":"TODO.md"}"#);
 
         assert_eq!(raw_args, r#"{"path":"TODO.md"}"#);
+    }
+
+    /// 把固定事件序列合成 ProviderStream，模拟传输中断（issue #551）。
+    fn synthetic_stream(
+        events: Vec<Result<ProviderStreamEvent, crate::error::LlmError>>,
+    ) -> ProviderStream {
+        Box::pin(futures_util::stream::iter(events))
+    }
+
+    #[tokio::test]
+    async fn stream_interrupt_finalizes_produced_content() {
+        let events = vec![
+            Ok(ProviderStreamEvent::TextDelta("部分输出".to_string())),
+            // 完整调用：Start 即携带全部参数。
+            Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id: "call_complete".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "a"}),
+            })),
+            // 不完整调用：参数 JSON 只流出一半即断流。
+            Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id: "call_partial".to_string(),
+                name: "write_file".to_string(),
+                arguments: json!({}),
+            })),
+            Ok(ProviderStreamEvent::ToolCallDelta {
+                call_id: "call_partial".to_string(),
+                partial_json: r#"{"path":"b""#.to_string(),
+            }),
+            Err(crate::error::LlmError::Transport(
+                "error decoding response body".to_string(),
+            )),
+        ];
+
+        let response =
+            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
+                .await;
+
+        // 断流时未收到终止事件，stop_reason 保持缺失。
+        assert_eq!(response.stop_reason, None);
+        assert_eq!(response.text, "部分输出");
+        // 断在参数中间的调用带 __parse_error 标记，由上层既有的无效参数链路处理。
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "call_complete");
+        assert!(
+            response.tool_calls[1]
+                .arguments
+                .get("__parse_error")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_interrupt_before_output_yields_empty_response() {
+        // 开头即断：定稿为空响应，由上层按无效输出处理。
+        let events = vec![
+            Ok(ProviderStreamEvent::MessageStart),
+            Ok(ProviderStreamEvent::Usage(TokenUsageData::new(100, 0))),
+            Err(crate::error::LlmError::Transport(
+                "error decoding response body".to_string(),
+            )),
+        ];
+
+        let response =
+            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
+                .await;
+
+        assert_eq!(response.text, "");
+        assert!(response.tool_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_stream_error_event_finalizes_produced_content() {
+        // provider 在流内报告错误事件（如 overloaded）同样按中断收尾。
+        let events = vec![
+            Ok(ProviderStreamEvent::TextDelta("写到一半".to_string())),
+            Ok(ProviderStreamEvent::Error("overloaded_error".to_string())),
+        ];
+
+        let response =
+            consume_provider_stream_events_async(synthetic_stream(events), &mut |_| {}, false)
+                .await;
+
+        assert_eq!(response.text, "写到一半");
+        assert_eq!(response.stop_reason, None);
     }
 
     fn sse_body(chunks: &[Value]) -> Vec<u8> {

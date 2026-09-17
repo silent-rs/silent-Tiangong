@@ -9,9 +9,7 @@ use std::collections::{HashSet, VecDeque};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::outcome::TurnExecutionResult;
-use crate::model::{
-    InvalidToolCall, ModelFunctionResponse, ModelStreamChunk, TokenUsage, ToolCall,
-};
+use crate::model::{InvalidToolCall, ModelResponse, ModelStreamChunk, TokenUsage, ToolCall};
 use crate::stream_throttle::ThrottledStreamSink;
 
 /// 执行阶段：任意时刻当前阶段唯一（ALR-001）。
@@ -114,7 +112,7 @@ pub(super) struct ActiveLlm {
     pub(super) pending_msg_id: String,
     pub(super) sink: ThrottledStreamSink,
     pub(super) chunk_rx: UnboundedReceiver<ModelStreamChunk>,
-    pub(super) task: tokio::task::JoinHandle<anyhow::Result<ModelFunctionResponse>>,
+    pub(super) task: tokio::task::JoinHandle<anyhow::Result<ModelResponse>>,
     pub(super) streamed_text: String,
     pub(super) streamed_reasoning: String,
     pub(super) streaming_usage: TokenUsage,
