@@ -46,6 +46,12 @@ pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) 
     // 摘要段
     parts.extend(collect_summary_part(session));
 
+    if parts.is_empty() {
+        tracing::warn!(
+            "system prompt 组装为空：无插件段落且无摘要，请求将不带 system（检查插件加载状态）"
+        );
+    }
+
     assemble_system_message(parts)
 }
 

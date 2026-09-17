@@ -38,17 +38,23 @@ fn base_of(access: &FsAccessContext) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("会话工作目录未注入，无法执行文件工具"))
 }
 
-/// 在工具结果 stdout 头部回显本次会话工作目录（规范化绝对路径）。
+/// 在工具结果 summary 头部回显工作目录与可写根（规范化绝对路径）。
 ///
-/// 工作目录不进入 system prompt（会话动态信息，cwd 迟落定/变更时改写已发送
-/// 前缀会作废对话缓存），模型经 fs 工具调用获知当前目录；结果内的路径展示
-/// 仍是相对工作目录的形态。无状态设计：每次调用都回显，按需 sidecar 无需
-/// 维护"是否已告知"的会话状态。
+/// 工作目录与允许目录不进入 system prompt（会话动态信息，cwd 迟落定/变更时
+/// 改写已发送前缀会作废对话缓存），模型经 fs 工具调用获知。可写根为工作区
+/// 与应用存储根（`~/.tiangong`），与写边界校验同源自 toolkit。写进 summary
+/// 而非 stdout，避免污染 read_file 等工具的文件正文。无状态设计：每次调用
+/// 都回显，按需 sidecar 无需维护"是否已告知"的会话状态。
 pub fn annotate_workdir(mut resp: FsToolResponse, access: &FsAccessContext) -> FsToolResponse {
     if let Some(base) = access.workspace.as_deref() {
         let canonical = std::fs::canonicalize(base).unwrap_or_else(|_| PathBuf::from(base));
-        resp.stdout
-            .insert_str(0, &format!("工作目录：{}\n", canonical.display()));
+        let storage = shared::app_storage_root();
+        resp.summary = format!(
+            "工作目录：{}（另可写：{}）；{}",
+            canonical.display(),
+            storage.display(),
+            resp.summary
+        );
     }
     resp
 }

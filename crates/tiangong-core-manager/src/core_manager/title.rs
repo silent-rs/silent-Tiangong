@@ -28,19 +28,23 @@ impl CoreManager {
         if !is_default_title(&session.title) {
             return;
         }
-        let endpoint = self
-            .config
-            .snapshot()
+        let config = self.config.snapshot();
+        let endpoint = config
             .llm
             .lite
             .clone()
-            .unwrap_or_else(|| self.config.snapshot().llm.chat.clone());
+            .unwrap_or_else(|| config.llm.chat.clone());
         let manager = self.clone();
         let sid = session_id.to_string();
         let input = text.to_string();
         tokio::spawn(async move {
+            let sid_for_client = sid.clone();
             let title = tokio::task::spawn_blocking(move || {
-                SingleProviderClient::new(endpoint).complete_lite(&input)
+                // 绑定会话 id：自定义 header 的 ${session_id} 模板与缓存键依赖它
+                //（与迁移前 ctx.lite_client().with_session_id 行为对齐）。
+                SingleProviderClient::new(endpoint)
+                    .with_session_id(sid_for_client)
+                    .complete_lite(&input)
             })
             .await
             .ok()
