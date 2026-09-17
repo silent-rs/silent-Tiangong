@@ -561,19 +561,14 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
         .filter(|message| message.usage.is_some())
         .collect();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].role, MessageRole::Notice);
+    // 流内失败定稿为空响应（issue #551）：turn 因无效输出失败，用量随空
+    // assistant 消息保留，不再走 Notice 通道。
+    assert_eq!(records[0].role, MessageRole::Assistant);
     let record_id = records[0].id.clone();
     let usage = records[0].usage.as_ref().unwrap();
     assert_eq!(usage.tokens.cache_hit_rate(), Some(0.8));
-    assert_eq!(usage.status, tiangong_types::TurnStatus::Failed);
-    assert!(
-        !harness
-            .ctx
-            .session
-            .context()
-            .iter()
-            .any(|message| message.id == record_id)
-    );
+    // 空消息留在 session 消息列表中，但空内容在 provider 映射层被跳过、
+    // 不进入模型请求（下方下一轮请求断言覆盖）。
     let loaded =
         Session::load_from_storage(&harness.storage_root, &harness.ctx.session.id).unwrap();
     assert_eq!(
@@ -605,7 +600,7 @@ async fn failed_response_keeps_received_usage_without_polluting_model_history() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
-    use crate::model::{ModelFunctionResponse, ModelStreamChunk};
+    use crate::model::{ModelResponse, ModelStreamChunk};
     use crate::react::execute::{AgentLoopState, ToolInjectionBuffer};
     use crate::react::phase::{ActiveLlm, ExecutionPhase, LlmPurpose, StreamTiming};
     use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
@@ -646,7 +641,7 @@ async fn cancellation_drains_queued_usage_snapshots_and_records_only_once() {
             StreamTextKind::React,
         ),
         chunk_rx: rx,
-        task: tokio::spawn(std::future::pending::<anyhow::Result<ModelFunctionResponse>>()),
+        task: tokio::spawn(std::future::pending::<anyhow::Result<ModelResponse>>()),
         streamed_text: String::new(),
         streamed_reasoning: String::new(),
         streaming_usage: TokenUsage {

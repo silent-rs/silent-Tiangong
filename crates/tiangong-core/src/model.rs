@@ -7,8 +7,8 @@
 pub use tiangong_llm::ProviderProtocol;
 pub use tiangong_llm::StopReason;
 pub use tiangong_llm::provider_client::{
-    InvalidToolCall, ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse,
-    ModelStreamChunk, OnRetryCallback, SingleProviderClient,
+    InvalidToolCall, ModelClient, ModelRequest, ModelResponse, ModelStreamChunk, OnRetryCallback,
+    SingleProviderClient,
 };
 pub use tiangong_llm::request::{
     ReasoningEffort, deserialize_reasoning_effort_flexible,

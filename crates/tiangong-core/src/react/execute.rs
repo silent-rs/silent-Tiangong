@@ -13,8 +13,7 @@ use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{
-    InvalidToolCall, ModelFunctionResponse, ModelRequest, TokenUsage, ToolCall, ToolChoice,
-    ToolSpec,
+    InvalidToolCall, ModelRequest, ModelResponse, TokenUsage, ToolCall, ToolChoice, ToolSpec,
 };
 use crate::permission::TrustMode;
 use crate::react::context::{emit_token_usage, persist_error, select_client_for_request};
@@ -132,7 +131,7 @@ pub(super) fn set_runtime_trust_mode(
 fn record_tool_calls(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
-    response: &ModelFunctionResponse,
+    response: &ModelResponse,
     stage: String,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
@@ -627,7 +626,7 @@ fn is_need_more_work_text(text: &str) -> bool {
 fn handle_react_text_response(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
-    response: &ModelFunctionResponse,
+    response: &ModelResponse,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
 ) -> ReactTextDisposition {
@@ -1019,7 +1018,7 @@ fn complete_llm_request(
     streamed_reasoning: String,
     reasoning_elapsed_ms: Option<u64>,
     text_elapsed_ms: Option<u64>,
-    response_result: anyhow::Result<ModelFunctionResponse>,
+    response_result: anyhow::Result<ModelResponse>,
     streaming_usage: TokenUsage,
 ) -> NextStep {
     let context_limit = ctx.context_limit;

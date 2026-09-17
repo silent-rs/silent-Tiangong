@@ -16,7 +16,7 @@ use crate::permission::TrustMode;
 use crate::session::MessageRole;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn anthropic_continuations_failure_compression_and_reload_keep_usage_balanced() {
+async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_balanced() {
     use crate::core_config::{CoreConfig, CoreConfigProvider};
     use crate::session::Session;
     use serde_json::{Value, json};
@@ -38,7 +38,7 @@ async fn anthropic_continuations_failure_compression_and_reload_keep_usage_balan
         let usage = json!({"input_tokens":uncached,"cache_read_input_tokens":read,"cache_creation_input_tokens":created,"output_tokens":output});
         if body["stream"] != true {
             assert_eq!(index,4);
-            return ResponseTemplate::new(200).set_body_json(json!({"id":"summary","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"[[SUMMARY]]\n已完成前两轮，第三轮请求失败。"}],"stop_reason":"end_turn","usage":usage}));
+            return ResponseTemplate::new(200).set_body_json(json!({"id":"summary","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"[[SUMMARY]]\n已完成前两轮，第三轮流中断后按截断内容收尾。"}],"stop_reason":"end_turn","usage":usage}));
         }
         let block = if index==0 { json!({"type":"tool_use","id":"probe-call","name":"probe","input":{}}) } else { json!({"type":"text","text":"完成"}) };
         let mut events = vec![
@@ -51,6 +51,8 @@ async fn anthropic_continuations_failure_compression_and_reload_keep_usage_balan
             events.insert(2, json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}));
         }
         if index==3 {
+            // 文本流出后流内报错：llm 层截断定稿（issue #551），core 按正常
+            // 完成的响应接受，本轮仍 Success。
             events.push(json!({"type":"error","error":{"type":"api_error","message":"测试请求中断"}}));
         } else {
             events.push(json!({"type":"message_delta","delta":{"stop_reason":if index==0 {"tool_use"} else {"end_turn"}},"usage":usage}));
@@ -143,10 +145,10 @@ async fn anthropic_continuations_failure_compression_and_reload_keep_usage_balan
     wait_idle(&sid).await;
     assert_totals(&[10000, 10020, 10050], &[20, 30, 10]);
     assert_eq!(env.load_session(&sid).current_tokens, 10060);
-    send_message(&core, "usage-failed", "再次继续");
+    send_message(&core, "usage-truncated", "再次继续");
     assert_eq!(
-        wait_turn_status(&env, &sid, "usage-failed").await,
-        TurnStatus::Failed
+        wait_turn_status(&env, &sid, "usage-truncated").await,
+        TurnStatus::Success
     );
     wait_idle(&sid).await;
     assert_totals(&[10000, 10020, 10050, 10055], &[20, 30, 10, 3]);
