@@ -354,9 +354,14 @@ async fn serve_connection(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone())
-        {
+        match serde_json::from_value::<PluginRequest>(request.payload.clone()) {
             Ok(plugin_request) => {
+                // 请求处理交独立任务（与 stdio 一致）：dispatch 与取消
+                // 清理都不占住连接读循环——秒级清理期间同连接的其他帧
+                // 与通知照常收发。取消钩子在任务内于 dispatch future
+                // 销毁（select 进入取消分支）之后调用，必然看到 dispatch
+                // 的全部副作用（如取消目标登记）；与 dispatch 并行执行
+                // 存在登记前查询的丢失窗口。
                 let progress = ProgressHandle {
                     writer: Arc::clone(&connection.writer),
                     request_id: request.request_id.clone(),
@@ -371,65 +376,93 @@ async fn serve_connection(
                     request.request_id.clone(),
                     ActiveTcpRequest { cancel: cancel_tx },
                 );
-                // 取消钩子在 dispatch future 销毁（select 进入取消分支）
-                // 之后调用：钩子必然看到 dispatch 的全部副作用（如取消
-                // 目标登记）；与 dispatch 并行执行存在登记前查询的丢失
-                // 窗口。与 stdio 的清理时序约定保持一致。
+                let service_for_task = Arc::clone(&service_obj);
+                let writer_for_task = Arc::clone(&connection.writer);
+                let request_id = request.request_id.clone();
                 let cancel_request = plugin_request.clone();
-                let response = REQUEST_PROGRESS
-                    .scope(
-                        progress,
-                        REQUEST_CONTEXT.scope(context, async {
-                            tokio::select! {
-                                response = service_obj.dispatch(plugin_request) => Some(response),
-                                _ = cancel_rx => None,
-                            }
+                tokio::spawn(async move {
+                    let response = REQUEST_PROGRESS
+                        .scope(
+                            progress,
+                            REQUEST_CONTEXT.scope(context, async {
+                                tokio::select! {
+                                    response = service_for_task.dispatch(plugin_request) => Some(response),
+                                    _ = cancel_rx => None,
+                                }
+                            }),
+                        )
+                        .await;
+                    if response.is_none()
+                        && let Err(error) = service_for_task.cancel(&cancel_request).await
+                    {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            %error,
+                            "TCP sidecar 取消清理失败"
+                        );
+                    }
+                    active_requests().lock().await.remove(&request_id);
+                    let plugin_response = response.unwrap_or_else(|| {
+                        PluginResponse::error(
+                            &request_id,
+                            PluginErrorCode::Cancelled,
+                            "请求已取消",
+                            false,
+                        )
+                    });
+                    if let Some(err_msg) = &plugin_response.error_message {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            operation = %cancel_request.operation,
+                            error_code = ?plugin_response.error_code,
+                            error = %err_msg,
+                            "sidecar 操作失败"
+                        );
+                    }
+                    let payload = match serde_json::to_value(&plugin_response) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            tracing::warn!(request_id = %request_id, %error, "序列化 sidecar 响应失败");
+                            return;
+                        }
+                    };
+                    if let Err(error) = write_shared_frame(
+                        &writer_for_task,
+                        &IpcFrame::Response(IpcResponse {
+                            request_id,
+                            payload,
                         }),
                     )
-                    .await;
-                let cancelled = response.is_none();
-                if cancelled && let Err(error) = service_obj.cancel(&cancel_request).await {
-                    tracing::warn!(
-                        request_id = %request.request_id,
-                        %error,
-                        "TCP sidecar 取消清理失败"
-                    );
-                }
-                let response = response.unwrap_or_else(|| {
-                    PluginResponse::error(
-                        &request.request_id,
-                        PluginErrorCode::Cancelled,
-                        "请求已取消",
-                        false,
-                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "TCP sidecar 响应写出失败");
+                    }
                 });
-                active_requests().lock().await.remove(&request.request_id);
-                response
             }
-            Err(error) => PluginResponse::error(
-                &request.request_id,
-                PluginErrorCode::BadRequest,
-                format!("解析插件 sidecar 请求失败: {error}"),
-                false,
-            ),
-        };
-        if let Some(err_msg) = &plugin_response.error_message {
-            tracing::warn!(
-                request_id = %request.request_id,
-                operation,
-                error_code = ?plugin_response.error_code,
-                error = %err_msg,
-                "sidecar 操作失败"
-            );
+            Err(error) => {
+                let plugin_response = PluginResponse::error(
+                    &request.request_id,
+                    PluginErrorCode::BadRequest,
+                    format!("解析插件 sidecar 请求失败: {error}"),
+                    false,
+                );
+                tracing::warn!(
+                    request_id = %request.request_id,
+                    operation,
+                    error_code = ?plugin_response.error_code,
+                    error = ?plugin_response.error_message,
+                    "sidecar 操作失败"
+                );
+                let payload = serde_json::to_value(plugin_response)
+                    .with_context(|| "序列化 sidecar 响应失败")?;
+                connection
+                    .write_response(IpcResponse {
+                        request_id: request.request_id,
+                        payload,
+                    })
+                    .await?;
+            }
         }
-        let payload =
-            serde_json::to_value(plugin_response).with_context(|| "序列化 sidecar 响应失败")?;
-        connection
-            .write_response(IpcResponse {
-                request_id: request.request_id,
-                payload,
-            })
-            .await?;
     }
 }
 
