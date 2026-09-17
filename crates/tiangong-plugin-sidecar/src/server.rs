@@ -326,9 +326,19 @@ async fn serve_connection(
                 let target = active_requests().lock().await.remove(&request_id);
                 if let Some(target) = target {
                     let _ = target.cancel.send(());
-                    if let Err(error) = service_obj.cancel(&target.request).await {
-                        tracing::warn!(%request_id, %error, "TCP sidecar 取消清理失败");
-                    }
+                    // 与 stdio 一致：取消清理可能是长动作，不能占住连接的
+                    // 读循环，否则同连接的其他请求与通知全部停摆。
+                    let service_for_cancel = Arc::clone(&service_obj);
+                    let cancel_request_id = request_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = service_for_cancel.cancel(&target.request).await {
+                            tracing::warn!(
+                                request_id = %cancel_request_id,
+                                %error,
+                                "TCP sidecar 取消清理失败"
+                            );
+                        }
+                    });
                 }
                 let response = PluginResponse::error(
                     &request_id,

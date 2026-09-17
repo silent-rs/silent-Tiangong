@@ -211,9 +211,22 @@ where
                 let target = active.lock().await.remove(&request_id);
                 if let Some(target) = target {
                     let _ = target.cancel.send(());
-                    if let Err(error) = service_obj.cancel(&target.request).await {
-                        tracing::warn!(service = %service_name, %request_id, %error, "stdio 取消清理失败");
-                    }
+                    // 取消清理可能是长动作（如终端插件要确认 shell 真正
+                    // 回到提示符）。在读循环内 await 会让该 sidecar 的所有
+                    // 入站帧在此期间全部停摆，故交给独立任务执行。
+                    let service_for_cancel = Arc::clone(&service_obj);
+                    let service_for_cancel_log = service_name.clone();
+                    let cancel_request_id = request_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = service_for_cancel.cancel(&target.request).await {
+                            tracing::warn!(
+                                service = %service_for_cancel_log,
+                                request_id = %cancel_request_id,
+                                %error,
+                                "stdio 取消清理失败"
+                            );
+                        }
+                    });
                 }
                 let response = PluginResponse::error(
                     &request_id,
