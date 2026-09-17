@@ -30,39 +30,25 @@ pub fn default_context_limit() -> usize {
 
 /// LLM 配置 — TiangongCore 运行所需的模型端点
 ///
-/// core 只关心它运行必需的 chat（主对话）与 lite（轻量任务）端点；
-/// 其他能力（image/video/tts/stt/multimodal/embedding/rerank）由各 plugin
-/// 自行从 `ModelsConfig` 路由解析，不经此配置中转。
+/// Core 直接消费的模型端点配置（仅主 Chat 端点）；其他能力（lite、
+/// image/video/tts/stt/multimodal 等）由消费方自行从 `ModelsConfig`
+/// 路由解析，不经此配置中转（lite 的现行消费者是 core-manager 的标题生成）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// 主 Chat 端点（必须）
     pub chat: ModelEndpoint,
-    /// 轻量级文本端点（标题生成、意图分类等简单任务，未配置时回退到 chat）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lite: Option<ModelEndpoint>,
 }
 
 impl LlmConfig {
-    /// 从 ModelsConfig 解析出 core 运行所需的 chat + lite 端点。
+    /// 从 ModelsConfig 解析出 core 运行所需的 chat 端点。
     pub fn from_models_config(models: &ModelsConfig) -> Self {
         use crate::config::models::RoutingSlot;
 
-        let resolve = |slot: RoutingSlot| -> Option<ModelEndpoint> {
-            let resolved = models.resolve_slot(slot)?;
-            Some(ModelEndpoint {
-                headers: resolved.headers,
-                base_url: resolved.base_url,
-                api_key: resolved.api_key,
-                model: resolved.model,
-                protocol: resolved.protocol,
-                timeout_ms: resolved.timeout_ms,
-                options: resolved.options,
-            })
-        };
-
         Self {
-            chat: resolve(RoutingSlot::Chat).unwrap_or_default(),
-            lite: resolve(RoutingSlot::Lite),
+            chat: models
+                .resolve_slot(RoutingSlot::Chat)
+                .map(ModelEndpoint::from_resolved)
+                .unwrap_or_default(),
         }
     }
 
