@@ -2285,6 +2285,39 @@ struct TerminalCloseArgs {
     terminal_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TerminalStatusArgs {
+    /// 缺省查询当前会话全部终端；指定则返回该终端详情。
+    #[serde(default)]
+    terminal_id: String,
+}
+
+/// 终端状态对外标签（Agent 查询与摘要呈现用）。
+fn phase_label(phase: SessionPhase, exited_code: Option<i32>) -> &'static str {
+    if exited_code.is_some() {
+        return "exited";
+    }
+    match phase {
+        SessionPhase::Idle => "idle",
+        SessionPhase::Reserved => "reserved",
+        SessionPhase::Running => "running",
+        SessionPhase::Interactive => "interactive",
+        SessionPhase::Unresponsive => "unresponsive",
+    }
+}
+
+/// 摘要中的中文表述。
+fn phase_label_cn(label: &str) -> &'static str {
+    match label {
+        "idle" => "空闲",
+        "reserved" => "已预留",
+        "running" => "执行中",
+        "interactive" => "交互中",
+        "unresponsive" => "未就绪（暂不自动复用）",
+        _ => "已退出",
+    }
+}
+
 /// 经进度帧请求宿主执行 App 原语（建立/收起本插件标签）。
 async fn request_host_app_open(scope_id: &str, instance_id: &str, focus: bool) {
     let mut payload = serde_json::json!({
@@ -2622,6 +2655,92 @@ impl TerminalService {
         request_host_app_close(&scope.session_id, &target).await;
         ToolOutcome::ok(format!("已关闭终端 {target}"))
     }
+
+    /// terminal_status：查询当前会话的终端状态（只读，不触碰任何 PTY）。
+    /// 不带 terminal_id 返回全部终端概要（按创建序）；带 terminal_id 返回
+    /// 该终端详情（含最近可见输出尾部），归属校验与 terminal_send 一致。
+    fn tool_terminal_status(&self, scope: &ToolScope, payload: serde_json::Value) -> ToolOutcome {
+        let parsed = match serde_json::from_value::<TerminalStatusArgs>(payload) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolOutcome::fail(format!("terminal_status 参数无效：{error}")),
+        };
+        let target = parsed.terminal_id.trim().to_string();
+        let sessions = self.sessions.lock().expect("会话表锁损坏");
+        if target.is_empty() {
+            // 概要含已退出待回收的终端：Agent 排查「为什么复用失败」时
+            // 需要看到完整在表集合，与前端恢复列表（只列存活）目的不同。
+            let mut entries: Vec<(u64, &String, &PtySession)> = sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.scope_id.as_deref() == Some(scope.session_id.as_str())
+                })
+                .map(|(id, session)| (session.sequence, id, session))
+                .collect();
+            entries.sort_by_key(|(sequence, _, _)| *sequence);
+            let mut status_counts: Vec<(&str, usize)> = Vec::new();
+            let terminals: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|(_, id, session)| {
+                    let label = phase_label(session.phase, session.exited_code);
+                    if let Some(count) = status_counts.iter_mut().find(|(name, _)| *name == label) {
+                        count.1 += 1;
+                    } else {
+                        status_counts.push((label, 1));
+                    }
+                    serde_json::json!({
+                        "terminal_id": id,
+                        "status": label,
+                        "exited_code": session.exited_code,
+                    })
+                })
+                .collect();
+            let summary = if terminals.is_empty() {
+                "当前会话没有终端".to_string()
+            } else {
+                let breakdown = status_counts
+                    .iter()
+                    .map(|(label, count)| format!("{}×{}", phase_label_cn(label), count))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                format!("当前会话有 {} 个终端：{}", terminals.len(), breakdown)
+            };
+            return ToolOutcome {
+                ok: true,
+                summary,
+                stdout: Some(
+                    serde_json::to_string(&serde_json::json!({ "terminals": terminals }))
+                        .unwrap_or_default(),
+                ),
+                stderr: None,
+                exit_code: 0,
+            };
+        }
+        let Some(session) = sessions.get(&target) else {
+            return ToolOutcome::fail(format!("终端 {target} 不存在"));
+        };
+        if session.scope_id.as_deref() != Some(scope.session_id.as_str()) {
+            return ToolOutcome::fail(format!("终端 {target} 不属于当前会话"));
+        }
+        let label = phase_label(session.phase, session.exited_code);
+        let visible = String::from_utf8_lossy(&session.display_history).to_string();
+        let reversed_tail = visible.chars().rev().take(2000).collect::<String>();
+        let recent_output = reversed_tail.chars().rev().collect::<String>();
+        ToolOutcome {
+            ok: true,
+            summary: format!("终端 {target} 状态：{}", phase_label_cn(label)),
+            stdout: Some(
+                serde_json::to_string(&serde_json::json!({
+                    "terminal_id": target,
+                    "status": label,
+                    "exited_code": session.exited_code,
+                    "recent_output": recent_output,
+                }))
+                .unwrap_or_default(),
+            ),
+            stderr: None,
+            exit_code: 0,
+        }
+    }
 }
 
 impl TerminalService {
@@ -2798,7 +2917,12 @@ async fn dispatch_operation(
     // 缺失即拒绝——不允许脱离会话真相源执行终端操作。
     if matches!(
         operation,
-        "run_command" | "run_shell" | "terminal_open" | "terminal_send" | "terminal_close"
+        "run_command"
+            | "run_shell"
+            | "terminal_open"
+            | "terminal_send"
+            | "terminal_close"
+            | "terminal_status"
     ) {
         let scope = tool_scope(request_id, context)?;
         let outcome = match operation {
@@ -2806,6 +2930,7 @@ async fn dispatch_operation(
             "run_shell" => service.tool_run_command(&scope, true, payload).await,
             "terminal_open" => service.tool_terminal_open(&scope).await,
             "terminal_send" => service.tool_terminal_send(&scope, payload).await,
+            "terminal_status" => service.tool_terminal_status(&scope, payload),
             _ => service.tool_terminal_close(&scope, payload).await,
         };
         return Ok(serde_json::to_value(outcome)?);
@@ -2823,6 +2948,7 @@ async fn dispatch_operation(
                 "tool:terminal_open",
                 "tool:terminal_send",
                 "tool:terminal_close",
+                "tool:terminal_status",
             ],
             "instance_id": format!("terminal-sidecar-{}", std::process::id()),
             "status": "ready",
@@ -4652,6 +4778,148 @@ mod tests {
                     session_id: terminal.to_string(),
                 })
                 .unwrap();
+        }
+    }
+
+    /// terminal_status：概要（仅本会话、含已退出终端与状态映射、按创建
+    /// 序）与详情（含最近输出尾部）；跨会话与不存在终端明确失败。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_status_概要详情与跨会话拒绝() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+        let spawn = |terminal_id: &str, scope_id: &str| SpawnRequest {
+            session_id: Some(terminal_id.to_string()),
+            cmd: String::new(),
+            args: Vec::new(),
+            script: None,
+            cwd: Some(workspace.clone()),
+            scope_id: Some(scope_id.to_string()),
+            reserve: false,
+            cols: default_cols(),
+            rows: default_rows(),
+        };
+        service
+            .spawn_session(spawn("status-idle", "session-a"))
+            .unwrap();
+        service
+            .spawn_session(spawn("status-busy", "session-a"))
+            .unwrap();
+        service
+            .spawn_session(spawn("status-other", "session-b"))
+            .unwrap();
+        service
+            .spawn_session(spawn("status-dead", "session-a"))
+            .unwrap();
+        // 覆盖状态映射：交互中与已退出（待回收）。
+        service
+            .with_session("status-busy", |session| {
+                session.phase = SessionPhase::Interactive;
+                Ok(())
+            })
+            .unwrap();
+        service
+            .with_session("status-dead", |session| {
+                session.exited_code = Some(130);
+                Ok(())
+            })
+            .unwrap();
+
+        let listed = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_status",
+                    serde_json::json!({}),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(listed["ok"], true, "概要查询失败: {listed}");
+        let overview: serde_json::Value =
+            serde_json::from_str(listed["stdout"].as_str().expect("概要应有 stdout"))
+                .expect("概要 stdout 应为 JSON");
+        let terminals = overview["terminals"].as_array().expect("概要应为数组");
+        let ids: Vec<&str> = terminals
+            .iter()
+            .map(|terminal| terminal["terminal_id"].as_str().expect("应有编号"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["status-idle", "status-busy", "status-dead"],
+            "概要应仅含本会话终端（含已退出）并按创建序"
+        );
+        let status_of = |id: &str| {
+            terminals
+                .iter()
+                .find(|terminal| terminal["terminal_id"] == id)
+                .and_then(|terminal| terminal["status"].as_str())
+                .unwrap_or_default()
+        };
+        assert_eq!(status_of("status-idle"), "idle");
+        assert_eq!(status_of("status-busy"), "interactive");
+        assert_eq!(status_of("status-dead"), "exited");
+        assert_eq!(
+            terminals
+                .iter()
+                .find(|terminal| terminal["terminal_id"] == "status-dead")
+                .and_then(|terminal| terminal["exited_code"].as_i64()),
+            Some(130)
+        );
+
+        let detail = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_status",
+                    serde_json::json!({ "terminal_id": "status-idle" }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(detail["ok"], true, "详情查询失败: {detail}");
+        let detail_payload: serde_json::Value =
+            serde_json::from_str(detail["stdout"].as_str().expect("详情应有 stdout"))
+                .expect("详情 stdout 应为 JSON");
+        assert_eq!(detail_payload["status"], "idle");
+        assert!(
+            detail_payload.get("recent_output").is_some(),
+            "详情应含最近输出字段: {detail_payload}"
+        );
+
+        // 跨会话与不存在终端：明确失败，与其他工具的归属语义一致。
+        let denied = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_status",
+                    serde_json::json!({ "terminal_id": "status-idle" }),
+                    Some(("session-b", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(denied["ok"], false, "跨会话查询应被拒绝: {denied}");
+        assert!(
+            denied["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("不属于当前会话"),
+            "拒绝原因应明示归属: {}",
+            denied["summary"]
+        );
+        let missing = outcome_of(
+            service
+                .dispatch_test(tool_request(
+                    "terminal_status",
+                    serde_json::json!({ "terminal_id": "status-none" }),
+                    Some(("session-a", workspace.as_str())),
+                ))
+                .await,
+        );
+        assert_eq!(missing["ok"], false, "查询不存在的终端应失败: {missing}");
+
+        // 先收集再循环：for 头部表达式里的锁守卫会活到整个循环结束。
+        let session_ids: Vec<String> = service.sessions.lock().unwrap().keys().cloned().collect();
+        for session_id in session_ids {
+            let _ = service.kill_session(SessionIdRequest { session_id });
         }
     }
 
