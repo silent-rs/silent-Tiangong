@@ -856,7 +856,7 @@ mod unloaded_adapter_tests {
         assert_eq!(adapter.try_tool_specs().unwrap()[0].name, "frozen_tool");
         assert_eq!(adapter.try_prompt_sections().unwrap(), vec!["冻结提示"]);
 
-        config.llm.chat.model = "changed-model".into();
+        config.llm.model = "changed-model".into();
         adapter.on_config_updated(&config);
         assert!(
             !adapter.context.lock().unwrap().config_applied,
