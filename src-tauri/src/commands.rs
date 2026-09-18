@@ -346,6 +346,7 @@ pub async fn delete_session(
     let _ = state.release_any_input_send_claim(&deleted_id);
     state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
+    state.config_handoff_store.forget(&deleted_id);
     Ok(())
 }
 
@@ -5067,6 +5068,10 @@ fn notify_plugins_changed(app: &AppHandle) {
     // 主前端事件到达不了插件沙箱；插件页面（如插件创作的项目列表）经
     // 桥接订阅 plugins.changed 获知插件集变化后自行刷新。
     tiangong_plugin_runtime::emit_plugins_changed();
+    // 插件集合/版本变化即执行配置变化：给活跃会话标记待交接，空闲会话
+    // 当场整理上下文，忙会话留标记等下一条消息。
+    app.state::<crate::app::TiangongApp>()
+        .mark_all_sessions_for_plugin_change();
 }
 
 pub(crate) async fn download_and_install_plugin(

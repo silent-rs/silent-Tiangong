@@ -552,7 +552,9 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
-    // 用户可见的压缩记录：历史被折叠后仍能从消息列表查证发生过压缩。
+    // 用户可见的压缩记录：历史被折叠后仍能从消息列表查证发生过压缩
+    // （#245 app-state 收窄时该消息随事件消费代码一起被误删，前端的
+    // [上下文管理] 渲染分支一直空挂着）。
     //
     // 插在**摘要边界处**而不是消息末尾：边界之后可能已经有属于上一轮的
     // 助手回复（手动整理与切换前整理都发生在轮次之间），追加到末尾会让

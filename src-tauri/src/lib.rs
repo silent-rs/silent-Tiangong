@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod commands;
+mod config_handoff;
 mod core_factory;
 mod embedded_server;
 #[cfg(target_os = "macos")]

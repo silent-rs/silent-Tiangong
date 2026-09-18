@@ -66,6 +66,8 @@ pub struct TiangongApp {
     /// 桌面端 Core 构造依赖（issue #245）：持有 app_handle/skill/mcp/config/
     /// storage_root,提供 `build_plugins()` 供 `ensure_core` 前构造插件集合。
     pub desktop_factory: std::sync::Arc<crate::core_factory::DesktopCoreFactory>,
+    /// 插件变化上下文交接的状态容器（标记 / 首检 / 定档指纹）。
+    pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -90,6 +92,31 @@ pub struct ToolInjection {
 struct InputSendClaim {
     revision: u64,
     attachment_paths: Vec<String>,
+}
+
+/// 计算当前插件配置指纹（runtime 注册表中启用插件的 id@version）。
+///
+/// 注册在 runtime 的插件都是动态注册的（含 prompt），装卸/升级/启停全部
+/// 经 registry，天然全覆盖、无需特判。
+pub(crate) fn execution_fingerprint_at(storage_root: &std::path::Path) -> String {
+    let statuses = tiangong_plugin_runtime::registry::list_plugins(
+        storage_root,
+        tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+    );
+    let plugins: Vec<(String, String)> = statuses
+        .iter()
+        .filter(|status| status.enabled)
+        .map(|status| {
+            (
+                status.id.clone(),
+                status
+                    .loaded_version
+                    .clone()
+                    .unwrap_or_else(|| status.manifest_version.clone()),
+            )
+        })
+        .collect();
+    crate::config_handoff::execution_fingerprint(&plugins)
 }
 
 fn merge_agent_output_messages(
@@ -195,6 +222,9 @@ impl TiangongApp {
             embedded_server: Mutex::new(None),
             app_handle,
             desktop_factory,
+            config_handoff_store: crate::config_handoff::ConfigHandoffStore::new(
+                storage_root.clone(),
+            ),
             core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -869,11 +899,60 @@ impl TiangongApp {
             .await
     }
 
+    /// 插件集合/版本变化的变化点打标（`notify_plugins_changed` 调用）：
+    /// 给每个活跃会话标记待交接并后台立即处理（空闲当场压缩，忙留标记）。
+    ///
+    /// 插件指纹与会话无关（同一进程内所有会话看到同一套 runtime 注册表），
+    /// 因此只需算一次。不活跃会话（无 Core）不打标：由首检兜底发现。
+    pub fn mark_all_sessions_for_plugin_change(&self) {
+        let fingerprint = execution_fingerprint_at(&self.desktop_factory.storage_root);
+        crate::config_handoff::mark_all_sessions(
+            &self.config_handoff_store,
+            &self.core_manager,
+            &fingerprint,
+        );
+    }
+
+    /// 投递前的插件配置交接：待交接标记命中则执行，否则首检指纹兜底。
+    ///
+    /// 交接失败不阻断投递——消息照常发送，只是历史未经整理（失败已在
+    /// `run_handoff` 内定档，不会反复重压）。会话忙时同样放行：本轮结束
+    /// 后的下一条消息会在空闲窗口补做。
+    async fn handoff_before_deliver(&self, session_id: &str) {
+        use crate::config_handoff::ConfigHandoffOutcome;
+        let storage_root = self.desktop_factory.storage_root.clone();
+        let outcome = crate::config_handoff::ensure_before_deliver(
+            &self.config_handoff_store,
+            &self.core_manager,
+            session_id,
+            || execution_fingerprint_at(&storage_root),
+        )
+        .await;
+        match outcome {
+            ConfigHandoffOutcome::Aligned => {}
+            ConfigHandoffOutcome::SkippedBusy => {
+                tracing::debug!(session_id, "会话执行中，插件交接延后到下一条消息");
+            }
+            ConfigHandoffOutcome::Failed(reason) => {
+                tracing::warn!(session_id, reason, "插件交接压缩未完成，上下文未整理即继续");
+            }
+        }
+    }
+
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     ///
-    /// app 层只做 host 专属的远端 turn 所有权检查，然后把消息交给
-    /// `CoreManager`：模型选择随消息携带（`with_model_ref`），解析、上下文
-    /// 整理与切换都是 Manager 投递路径的内部步骤，app 层不感知也不介入。
+    /// app 层只做 host 专属的远端 turn 所有权检查与插件变化的上下文交接，
+    /// 然后把消息交给 `CoreManager`：模型选择随消息携带（`with_model_ref`），
+    /// 模型解析、切换前的上下文整理都是 Manager 投递路径的内部步骤。
+    ///
+    /// 插件变化的交接在此**同步完成后**再投递：调用方（发送/编辑重发/嵌入
+    /// server）持有会话发送锁，交接与投递因此处在同一临界区内——既保证多条
+    /// 消息的先后顺序，也让交接失败沿调用栈回报，不会出现「命令已返回但消息
+    /// 还没送到」的中间态。
+    ///
+    /// 交接检查只挂在**用户消息投递**入口——ensure_core 的其余调用方
+    /// （工具注入恢复、/clear、/compress、切换会话查看）不产生模型请求，
+    /// 不应触发交接压缩。
     ///
     /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型。
     pub async fn deliver_prepared_if_live(
@@ -886,6 +965,7 @@ impl TiangongApp {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
+        self.handoff_before_deliver(session_id).await;
         self.core_manager
             .deliver_user_message(
                 session_id,
