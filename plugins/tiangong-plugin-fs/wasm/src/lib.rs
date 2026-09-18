@@ -21,9 +21,9 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use bindings::tiangong::plugin::{clock, feedback};
 use tiangong_plugin_fs_protocol::tools::{
-    ApplyPatch, ApplyPatchRequest, FsToolResponse, ListDir, ListDirRequest, ReadFile,
-    ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, TreeDir, TreeDirRequest, WriteFile,
-    WriteFileRequest,
+    ApplyPatch, ApplyPatchRequest, FsToolResponse, ListDir, ListDirRequest, MentionFiles,
+    MentionFilesRequest, ReadFile, ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, TreeDir,
+    TreeDirRequest, WriteFile, WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{
     FsOperation, TOOL_APPLY_PATCH, TOOL_CURRENT_TIME, TOOL_LIST_DIR, TOOL_READ_FILE,
@@ -454,9 +454,65 @@ impl UiGuest for Component {
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
+        // @提及文件候选：宿主经 plugin-ui 消息通道按会话上下文查询。
+        if request.method == "__tiangong.mention_candidates.v1" {
+            return Ok(ViewMessageResponse {
+                payload: mention_files_payload(&request.payload),
+            });
+        }
         Err(plugin_err("Fs 插件暂无页面消息"))
     }
+}
+
+/// 按宿主查询构造文件候选 JSON（失败一律降级为空列表，不阻塞输入框补全）。
+fn mention_files_payload(payload: &str) -> String {
+    let query: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    // 工作区取宿主注入的请求级上下文：草稿/全局查询没有工作区，直接无候选。
+    let access = state::access_context();
+    if access.workspace.is_none() {
+        return "[]".to_string();
+    }
+    let request = MentionFilesRequest {
+        query: query
+            .get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        limit: query
+            .get("max_per_group")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize,
+        access,
+    };
+    let Ok(response) = sidecar_client::invoke::<MentionFiles>(&request) else {
+        return "[]".to_string();
+    };
+    let candidates: Vec<serde_json::Value> = response
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            // 路径含空白时用反引号包裹：前端 token 扫描到空白即止，
+            // 不包裹会把路径截断（跨平台统一 `/` 分隔，可原样往返）。
+            let token = if candidate
+                .relative_path
+                .chars()
+                .any(|character| character.is_whitespace())
+            {
+                format!("@file:`{}`", candidate.relative_path)
+            } else {
+                format!("@file:{}", candidate.relative_path)
+            };
+            serde_json::json!({
+                "value": token,
+                "label": candidate.file_name,
+                "kind": "file",
+                "hint": candidate.relative_path,
+                "mark": "F",
+            })
+        })
+        .collect();
+    serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".to_string())
 }
 bindings::export!(Component with_types_in bindings);

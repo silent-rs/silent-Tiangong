@@ -17,6 +17,8 @@ pub const WRITE_FILE_OPERATION: &str = "fs.write_file";
 pub const REPLACE_IN_FILE_OPERATION: &str = "fs.replace_in_file";
 pub const APPLY_PATCH_OPERATION: &str = "fs.apply_patch";
 pub const SET_WORKSPACE_OPERATION: &str = "fs.set_workspace";
+/// @提及文件候选检索（输入框补全用，不读取文件内容）。
+pub const MENTION_FILES_OPERATION: &str = "fs.mention_files";
 
 // ── 通用响应（对齐 core ToolResult 字段，便于 sidecar 直接构造）─────
 
@@ -159,4 +161,43 @@ impl FsOperation for SetWorkspace {
     const NAME: &'static str = SET_WORKSPACE_OPERATION;
     type Request = SetWorkspaceRequest;
     type Response = Ack;
+}
+
+// ── @提及文件候选 ─────────────────────────────────────────────
+
+/// 文件候选检索请求：按查询词在工作区内匹配文件路径。
+///
+/// 只返回路径，不读取任何文件内容——候选用于输入框补全，真正的读取仍需
+/// 模型显式调用 `read_file`，受原有路径策略约束。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFilesRequest {
+    /// 查询词（用户在 `@` 之后输入的内容）；为空时返回工作区内的靠前若干文件。
+    #[serde(default)]
+    pub query: String,
+    /// 返回数量上限。
+    #[serde(default)]
+    pub limit: usize,
+    #[serde(flatten)]
+    pub access: FsAccessContext,
+}
+
+/// 单个文件候选。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFileCandidate {
+    /// 相对工作区的路径（候选 token 用，保持跨平台一致的 `/` 分隔）。
+    pub relative_path: String,
+    /// 文件名（展示用）。
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFilesResponse {
+    pub candidates: Vec<MentionFileCandidate>,
+}
+
+pub struct MentionFiles;
+impl FsOperation for MentionFiles {
+    const NAME: &'static str = MENTION_FILES_OPERATION;
+    type Request = MentionFilesRequest;
+    type Response = MentionFilesResponse;
 }

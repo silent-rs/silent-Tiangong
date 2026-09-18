@@ -131,3 +131,60 @@ describe('serializeBlocks 往返不变量', () => {
     });
   }
 });
+
+describe('@file 文件提及', () => {
+  it('识别不含空白的相对路径，label 取文件名', () => {
+    expect(classifyMention('@file:src/core/session.rs')).toEqual({
+      kind: 'file',
+      label: 'session.rs',
+    });
+    expect(classifyMention('@file:README.md')).toEqual({ kind: 'file', label: 'README.md' });
+  });
+
+  it('反引号包裹的路径可含空格与中文', () => {
+    expect(classifyMention('@file:`设计 文档/需求 说明.md`')).toEqual({
+      kind: 'file',
+      label: '需求 说明.md',
+    });
+  });
+
+  it('空路径不构成提及', () => {
+    expect(classifyMention('@file:')).toBeNull();
+    expect(classifyMention('@file:``')).toBeNull();
+  });
+
+  it('含空格的文件提及在解析后可原样序列化回去', () => {
+    const text = '请看 @file:`设计 文档/需求 说明.md` 这份文档';
+    const blocks = parseBlocks(text);
+    // 契约：serialize(parse(text)) === text，后端原文直送模型。
+    expect(serializeBlocks(blocks)).toBe(text);
+    const mention = blocks.find((block) => block.type === 'mention');
+    expect(mention).toMatchObject({
+      kind: 'file',
+      token: '@file:`设计 文档/需求 说明.md`',
+      label: '需求 说明.md',
+    });
+  });
+
+  it('不含空格的文件提及同样可往返', () => {
+    const text = '改一下 @file:src/main.rs 谢谢';
+    expect(serializeBlocks(parseBlocks(text))).toBe(text);
+    expect(hasMention(text)).toBe(true);
+  });
+
+  it('多个文件提及与普通文本混排互不干扰', () => {
+    const text = '@file:a.rs 和 @file:`b 2.rs` 都要改';
+    const blocks = parseBlocks(text);
+    expect(serializeBlocks(blocks)).toBe(text);
+    const tokens = blocks
+      .filter((block) => block.type === 'mention')
+      .map((block) => (block.type === 'mention' ? block.token : ''));
+    expect(tokens).toEqual(['@file:a.rs', '@file:`b 2.rs`']);
+  });
+
+  it('未配对的反引号不吞掉后续文本', () => {
+    const text = '@file:`未闭合 后面还有字';
+    // 未配对时按普通文本处理，序列化仍需完全一致。
+    expect(serializeBlocks(parseBlocks(text))).toBe(text);
+  });
+});

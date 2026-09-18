@@ -4,7 +4,6 @@ use super::connections::remove_sidecar_connection;
 use super::migrations::post_install_sidecar_check_with;
 
 use super::*;
-use tiangong_core::tools::extension::MentionCandidateProvider;
 
 /// 指纹只反映插件能力的声明态：加载顺序与重复项不构成变化。
 #[test]

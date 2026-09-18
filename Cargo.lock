@@ -11200,7 +11200,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-protocol"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -11208,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-sidecar"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11229,7 +11229,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-wasm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "serde",
