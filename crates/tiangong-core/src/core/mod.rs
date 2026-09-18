@@ -110,12 +110,6 @@ impl TiangongCore {
         Ok(())
     }
 
-    /// 当前配置快照（供宿主读取会话实际执行配置——模型切换的比对与
-    /// 交接指纹都要用与实际请求一致的端点）。
-    pub fn config_snapshot(&self) -> crate::config::core::CoreConfig {
-        (*self.config.snapshot()).clone()
-    }
-
     /// 是否有活跃的 turn task（有则视为 Running）。
     pub fn is_stopped(&self) -> bool {
         !crate::shared_runtime::is_running(&self.session_id)
@@ -254,6 +248,9 @@ impl TiangongCore {
             return Err(CoreError::Busy);
         }
         let mut session = self.load_session()?;
+        if session.model_ref == model_ref {
+            return Ok(()); // 同值跳过：减少整份 session 读写的覆盖窗口
+        }
         session.model_ref = model_ref;
         session.updated_at = tiangong_types::now_text();
         session

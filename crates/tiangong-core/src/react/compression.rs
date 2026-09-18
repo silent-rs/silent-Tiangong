@@ -476,6 +476,13 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
+    // 用户可见的压缩记录：历史被折叠后用户仍能从消息列表查证（#245
+    // app-state 收窄时该消息被随事件消费代码一起误删，前端渲染分支
+    // [上下文管理] 一直空挂着）。System 不属于对话历史，不参与后续压缩。
+    candidate.messages.push(Message::new(
+        MessageRole::System,
+        "[上下文管理] 上下文已压缩",
+    ));
     // 摘要段变化需要重建 system prompt（内容一致时保留原消息）。
     rebuild_system_prompt_for_session(&mut candidate, &ctx.plugins);
     candidate

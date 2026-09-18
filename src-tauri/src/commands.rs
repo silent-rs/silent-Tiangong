@@ -263,7 +263,7 @@ pub async fn switch_session(
     if !state.core_manager.has_live_core(&session_id) {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
@@ -713,10 +713,19 @@ async fn send_message_inner(
         }
         Some(cwd)
     };
-    // 发送时把当前所选模型持久化到会话（幂等）：新会话由 ensure 的初始
-    // 引用写入，既有会话在此补写——发送后 session 必定记录当前模型。
-    // 失败仅告警不阻断（Append 到运行中会话时 core 忙拒绝写，模型保持
-    // 运行中的值不变）。
+    let ensured = state
+        .ensure_core(
+            &session_id,
+            workspace_dir,
+            initial_trust_mode,
+            initial_reasoning_effort,
+            stream_tx,
+        )
+        .await;
+    // 发送时把当前所选模型持久化到会话（幂等）——必须在 ensure 之后：
+    // Core 不存在时写引用必失败（「会话无活跃 Core」），此时 Core 已
+    // 就绪、新会话与空闲会话均能写入。Append 到运行中会话时 core 忙
+    // 拒写仅告警（此时前端携带的是现值，无丢失）。
     if let Some(model_ref) = initial_model_ref
         .clone()
         .filter(|key| !key.trim().is_empty())
@@ -728,16 +737,6 @@ async fn send_message_inner(
             tracing::warn!(session_id = %session_id, error, "发送时写入会话模型引用失败");
         }
     }
-    let ensured = state
-        .ensure_core(
-            &session_id,
-            workspace_dir,
-            initial_trust_mode,
-            initial_reasoning_effort,
-            initial_model_ref,
-            stream_tx,
-        )
-        .await;
     let ensured = match ensured {
         Ok(ensured) => ensured,
         Err(error) => {
@@ -1115,7 +1114,7 @@ pub async fn edit_and_resend(
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
-        .ensure_core(&session_id, None, None, None, None, stream_tx)
+        .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
     let ensured = match ensured {
         Ok(ensured) => ensured,
@@ -1262,7 +1261,7 @@ async fn run_context_slash_command(
         let session_id = current_session_id;
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
@@ -1300,14 +1299,29 @@ pub async fn get_session_model(
 pub async fn set_session_model(
     session_id: String,
     model_ref: Option<String>,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
-    let (stream_tx, _stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
-    state
-        .ensure_core(&session_id, None, None, None, None, stream_tx)
+    // 与其他 ensure_core 调用点一致：新建 Core 必须启动流消费者，否则
+    // 该会话的全部流式事件（含压缩与完成）发不出去、界面哑掉。
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    let ensured = state
+        .ensure_core(&session_id, None, None, None, stream_tx)
         .await?;
+    if ensured.is_new {
+        start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
+    }
+    // 选模型时兜底：引用指向的模型必须可解析——失效直接拒绝并说明，
+    // 不允许把失效引用写入会话（用户配置的模型没了应在选择时就报错，
+    // 而不是等发送时静默回退）。
+    if let Some(key) = model_ref.as_deref().filter(|key| !key.trim().is_empty()) {
+        let models = state
+            .with_state_read(|core_state| Ok(core_state.config.models.clone()))
+            .await?;
+        crate::app::resolve_model_endpoint(&models, key)?;
+    }
     state
         .core_manager
         .set_core_model_ref(&session_id, model_ref)

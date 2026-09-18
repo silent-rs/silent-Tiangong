@@ -218,37 +218,6 @@ pub(crate) fn execution_fingerprint(
         .collect()
 }
 
-/// 变化点入口（插件集合/版本变化）：对每个活跃会话按其**自身执行指纹**
-/// 打标并立即尝试处理——空闲会话当场压缩，忙会话留标记等投递路径。
-///
-/// 指纹由调用方按会话各自解析（会话可自持模型，同一变化对不同会话的
-/// 实际影响不同）。不活跃会话（无 Core）不打标：其变化由首检兜底发现。
-pub(crate) fn mark_all_sessions<F>(
-    store: &ConfigHandoffStore,
-    manager: &CoreManager,
-    fingerprint_of: F,
-) where
-    F: Fn(&str) -> String,
-{
-    let targets: Vec<(String, String)> = {
-        let registry = manager.registry();
-        registry
-            .iter()
-            .map(|(id, _)| (id.clone(), fingerprint_of(&id)))
-            .collect()
-    };
-    if targets.is_empty() {
-        return;
-    }
-    tracing::info!(
-        sessions = targets.len(),
-        "执行配置已变化，活跃会话标记待交接并开始处理"
-    );
-    for (id, target) in targets {
-        mark_session(store, manager, &id, &target);
-    }
-}
-
 /// 变化点入口（会话显式切换模型 / 会话实际执行端点变化）：单会话打标
 /// 并立即尝试处理。空闲当场压缩（压缩用 Core 当前配置——切换场景下
 /// 即旧模型，天然实现「原模型优先」），忙则留标记等投递路径。
@@ -577,7 +546,6 @@ mod handoff_e2e_tests {
                 id,
                 config_for(base_url),
                 "/tmp".to_string(),
-                None,
                 stream_tx,
                 Vec::new,
             )
@@ -697,7 +665,7 @@ mod handoff_e2e_tests {
 
         // 变化点打标（写标记 + spawn 后台处理）：后台交接的压缩挂起中。
         let fp = fingerprint_for(&server.uri());
-        mark_all_sessions(&store, &manager, |_| fp.clone());
+        mark_session(&store, &manager, "e2e-busy", &fp);
         tokio::time::sleep(Duration::from_millis(400)).await;
         // 压缩进行中标记在场；投递路径执行：deliver 得 Busy，不打断。
         assert!(store.pending_handoff("e2e-busy").is_some());
@@ -781,7 +749,6 @@ mod handoff_e2e_tests {
 
         // 压缩失败（Failed）后仍完成切换——不再返回 Err。
         let outcome = crate::app::apply_session_model_at(
-            &state,
             &store,
             &manager,
             std::path::Path::new("/nonexistent"),

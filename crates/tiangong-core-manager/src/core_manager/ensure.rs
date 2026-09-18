@@ -33,7 +33,6 @@ impl CoreManager {
         session_id: &str,
         session_config: CoreConfig,
         workspace_dir: String,
-        initial_model_ref: Option<String>,
         stream_tx: Sender<StreamEvent>,
         build_plugins: F,
     ) -> Result<EnsuredCore, String>
@@ -70,13 +69,6 @@ impl CoreManager {
             .plugins(plugins)
             .build();
         let id = core.session_id().to_string();
-        // 新会话带初始模型引用时立即写入（新 Core 必空闲）；执行端点由
-        // 投递前的端点校正按引用切换——新会话无历史，零成本直切。
-        if let Some(model_ref) = initial_model_ref.filter(|key| !key.trim().is_empty())
-            && let Err(error) = core.set_model_ref(Some(model_ref))
-        {
-            tracing::warn!(session_id = %id, %error, "新会话写入初始模型引用失败，使用默认模型");
-        }
         self.registry().insert(id.clone(), core);
         Ok(EnsuredCore {
             session_id: id,

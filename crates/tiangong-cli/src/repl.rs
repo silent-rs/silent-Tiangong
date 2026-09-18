@@ -116,7 +116,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 &session_id,
                 session_config,
                 workspace_dir,
-                None,
                 stream_tx.clone(),
                 || plugins,
             ))
