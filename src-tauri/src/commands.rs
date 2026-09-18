@@ -1256,6 +1256,69 @@ async fn run_context_slash_command(
     }
 }
 
+/// 切换会话级对话模型（models 注册表 key；None 恢复跟随路由默认）。
+///
+/// 单会话状态机：忙时拒绝；空闲时先用**当前（旧）模型**完成上下文交接
+/// 压缩（Core 现持配置即旧模型——原模型优先由此自然成立），成功后才
+/// 写入新 model_ref 并热更配置；交接失败则切换不生效、引用保持旧值。
+#[tauri::command]
+pub async fn set_session_model(
+    session_id: String,
+    model_ref: Option<String>,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    use crate::config_handoff::{handoff_to, ConfigHandoffOutcome};
+
+    // 与发送共享会话边界，防止切换与消息投递并发交错。
+    let session_lock = state.session_send_lock(&session_id);
+    let _send_guard = session_lock.lock_owned().await;
+    let (stream_tx, _stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    state
+        .ensure_core(&session_id, None, None, None, stream_tx)
+        .await?;
+    let core = {
+        let registry = state.core_manager.registry();
+        registry
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "会话 Core 不存在".to_string())?
+    };
+    if core.is_busy() {
+        return Err("会话正在执行，当前回合结束后可切换模型".to_string());
+    }
+    // 按待写入的引用解析新端点与窗口（失效引用回退路由默认）。
+    let app_config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    let resolved = app_config.to_core_config_for_session(model_ref.as_deref());
+    let mut new_config = core.config_snapshot();
+    new_config.llm = resolved.llm;
+    new_config.context_limit = resolved.context_limit;
+    // 交接压缩用 Core 现持配置（旧模型）；成功即定档新指纹。
+    let fingerprint = state.compute_execution_fingerprint(&new_config.llm);
+    match handoff_to(
+        &state.config_handoff_store,
+        &state.core_manager,
+        &session_id,
+        &fingerprint,
+    )
+    .await
+    {
+        ConfigHandoffOutcome::Aligned => {}
+        ConfigHandoffOutcome::SkippedBusy => {
+            return Err("会话正在执行，当前回合结束后可切换模型".to_string())
+        }
+        ConfigHandoffOutcome::Failed(reason) => {
+            return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
+        }
+    }
+    core.set_model_ref(model_ref.clone())
+        .map_err(|_| "写入会话模型失败".to_string())?;
+    core.replace_config(new_config)
+        .map_err(|_| "刷新会话配置失败".to_string())?;
+    Ok(())
+}
+
 /// 手动触发上下文压缩
 #[tauri::command]
 pub async fn compress_context(
@@ -4890,7 +4953,7 @@ fn notify_plugins_changed(app: &AppHandle) {
     // 插件集合/版本变化是配置交接的触发源之一（另一个是模型切换，见
     // sync_core_config_from_state）：活跃会话标记待交接，空闲即压。
     app.state::<crate::app::TiangongApp>()
-        .mark_config_handoff_from_global();
+        .mark_all_sessions_for_plugin_change();
 }
 
 pub(crate) async fn download_and_install_plugin(

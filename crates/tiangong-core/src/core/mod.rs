@@ -98,6 +98,12 @@ impl TiangongCore {
         Ok(())
     }
 
+    /// 当前配置快照（供宿主读取会话实际执行配置——模型切换的比对与
+    /// 交接指纹都要用与实际请求一致的端点）。
+    pub fn config_snapshot(&self) -> crate::config::core::CoreConfig {
+        (*self.config.snapshot()).clone()
+    }
+
     /// 是否有活跃的 turn task（有则视为 Running）。
     pub fn is_stopped(&self) -> bool {
         !crate::shared_runtime::is_running(&self.session_id)
@@ -187,6 +193,24 @@ impl TiangongCore {
             .map_err(|_| CoreError::WorkerStopped)?;
         // 空闲时也发 TitleChanged，让前端统一经事件更新标题（手动改空闲会话同样通知）。
         let _ = self.stream_tx.send(StreamEvent::TitleChanged { title });
+        Ok(())
+    }
+
+    /// 设置会话级对话模型引用（models 注册表 key；None 表示跟随路由默认）。
+    ///
+    /// 与 set_title 同构的会话字段设置器：只在空闲期直接写盘（调用方——
+    /// 会话模型切换命令——应先完成上下文交接并校验忙态，这里仅防御性
+    /// 拒绝），忙时返回 Busy 不投递命令——运行中的 turn 不得中途换模型。
+    pub fn set_model_ref(&self, model_ref: Option<String>) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        let mut session = self.load_session()?;
+        session.model_ref = model_ref;
+        session.updated_at = tiangong_types::now_text();
+        session
+            .try_persist_to_disk()
+            .map_err(|_| CoreError::WorkerStopped)?;
         Ok(())
     }
 

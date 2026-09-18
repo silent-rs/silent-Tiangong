@@ -33,6 +33,9 @@ pub struct SessionMetadata {
     /// 父会话 ID（Worker 子会话标注；UI 列表按此过滤掉子会话）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// 会话级对话模型（models 注册表 key）；None 表示跟随路由默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<String>,
 }
 
 impl From<&Session> for SessionMetadata {
@@ -48,6 +51,7 @@ impl From<&Session> for SessionMetadata {
             cwd_mode: session.cwd_mode.clone(),
             message_count: session.messages.len(),
             parent_session_id: session.parent_session_id.clone(),
+            model_ref: session.model_ref.clone(),
         }
     }
 }
@@ -103,6 +107,10 @@ impl SessionMetadata {
                 .get("parent_session_id")
                 .and_then(|item| item.as_str())
                 .map(str::to_string),
+            model_ref: value
+                .get("model_ref")
+                .and_then(|item| item.as_str())
+                .map(str::to_string),
         }
     }
 
@@ -129,6 +137,7 @@ mod tests {
             cwd_mode: SessionCwdMode::Inherit,
             message_count: 3,
             parent_session_id: None,
+            model_ref: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMetadata = serde_json::from_str(&json).unwrap();
@@ -148,6 +157,7 @@ mod tests {
             cwd_mode: SessionCwdMode::Inherit,
             message_count: 0,
             parent_session_id: None,
+            model_ref: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("reasoning_effort"));

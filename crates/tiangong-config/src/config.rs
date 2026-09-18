@@ -205,6 +205,31 @@ impl TiangongConfig {
         }
     }
 
+    /// 会话级入口：按会话的模型引用解析，失败或未设置时回退路由默认。
+    ///
+    /// 回退不写回会话——引用保持原值，模型被加回配置后自动恢复使用。
+    /// context_limit 随所选模型一并解析，不用默认模型的窗口。
+    pub fn to_core_config_for_session(&self, model_ref: Option<&str>) -> CoreConfig {
+        match model_ref
+            .filter(|key| !key.trim().is_empty())
+            .and_then(|key| self.models.resolve_model_by_key(key))
+        {
+            Some(resolved) => {
+                let context_limit = crate::io::resolve_context_limit_with_override(
+                    &self.storage_root,
+                    &resolved.model,
+                    resolved.context_window,
+                );
+                CoreConfig {
+                    llm: tiangong_llm::ModelEndpoint::from_resolved(resolved),
+                    context_limit,
+                    ..self.to_core_config()
+                }
+            }
+            None => self.to_core_config(),
+        }
+    }
+
     /// 创建 CoreConfigProvider（用于注入 TiangongCore）
     pub fn into_core_config_provider(self) -> tiangong_core::config::core::CoreConfigProvider {
         tiangong_core::config::core::CoreConfigProvider::new(self.to_core_config())
@@ -355,6 +380,87 @@ mod tests {
         );
 
         assert_eq!(config.to_core_config().context_limit, 131_072);
+    }
+
+    #[test]
+    fn to_core_config_for_session_resolves_and_falls_back() {
+        use tiangong_llm::model::ProviderProtocol;
+        use tiangong_llm::models_config::{
+            ModelCapability, ModelEntry, ProviderConfig, RoutingSlot,
+        };
+
+        let mut config = TiangongConfig::default();
+        let provider = |base_url: &str| ProviderConfig {
+            headers: Default::default(),
+            base_url: base_url.to_string(),
+            api_key: "key".to_string(),
+            timeout_ms: 60_000,
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+        };
+        config.models.providers.insert(
+            "default-provider".to_string(),
+            provider("https://default.example.com"),
+        );
+        config.models.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "default-provider".to_string(),
+                model: "default-model".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+                context_window: Some(32_768),
+            },
+        );
+        config.models.providers.insert(
+            "other-provider".to_string(),
+            provider("https://other.example.com"),
+        );
+        config.models.models.insert(
+            "glm".to_string(),
+            ModelEntry {
+                provider: "other-provider".to_string(),
+                model: "glm-5.3".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+                context_window: Some(200_000),
+            },
+        );
+
+        let base = config.to_core_config();
+        let endpoint_of = |config: &tiangong_core::config::core::CoreConfig| {
+            (
+                config.llm.base_url.clone(),
+                config.llm.model.clone(),
+                config.llm.protocol,
+            )
+        };
+        let base_endpoint = endpoint_of(&base);
+        // 未设置 / 空：跟随路由默认。
+        assert_eq!(
+            endpoint_of(&config.to_core_config_for_session(None)),
+            base_endpoint
+        );
+        assert_eq!(
+            endpoint_of(&config.to_core_config_for_session(Some("   "))),
+            base_endpoint,
+            "空白引用视同未设置"
+        );
+        // 有效引用：该模型的端点与窗口。
+        let session = config.to_core_config_for_session(Some("glm"));
+        assert_eq!(session.llm.base_url, "https://other.example.com");
+        assert_eq!(session.llm.model, "glm-5.3");
+        assert_eq!(session.context_limit, 200_000);
+        // 失效引用（key 不存在 / provider 已删）：回退默认，端点一致。
+        assert_eq!(
+            endpoint_of(&config.to_core_config_for_session(Some("deleted"))),
+            base_endpoint
+        );
+        config.models.providers.remove("other-provider");
+        assert_eq!(
+            endpoint_of(&config.to_core_config_for_session(Some("glm"))),
+            base_endpoint,
+            "provider 已删须回退路由默认"
+        );
     }
 
     #[test]

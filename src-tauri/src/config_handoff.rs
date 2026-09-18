@@ -218,43 +218,64 @@ pub(crate) fn execution_fingerprint(
         .collect()
 }
 
-/// 变化点入口：给全部活跃会话打上待交接标记并立即尝试处理——空闲会话
-/// 当场压缩，忙会话留标记等投递路径。处理在后台并行进行，立即返回。
+/// 变化点入口（插件集合/版本变化）：对每个活跃会话按其**自身执行指纹**
+/// 打标并立即尝试处理——空闲会话当场压缩，忙会话留标记等投递路径。
 ///
-/// 不活跃会话（无 Core）不打标：其配置变化由首检兜底发现。
-pub(crate) fn mark_and_process(
+/// 指纹由调用方按会话各自解析（会话可自持模型，同一变化对不同会话的
+/// 实际影响不同）。不活跃会话（无 Core）不打标：其变化由首检兜底发现。
+pub(crate) fn mark_all_sessions<F>(
     store: &ConfigHandoffStore,
     manager: &CoreManager,
-    target_fingerprint: &str,
-) {
-    let session_ids: Vec<String> = {
+    fingerprint_of: F,
+) where
+    F: Fn(&str) -> String,
+{
+    let targets: Vec<(String, String)> = {
         let registry = manager.registry();
-        registry.iter().map(|(id, _)| id.clone()).collect()
+        registry
+            .iter()
+            .map(|(id, _)| (id.clone(), fingerprint_of(&id)))
+            .collect()
     };
-    if session_ids.is_empty() {
+    if targets.is_empty() {
         return;
     }
-    store.set_pending_handoff(&session_ids, target_fingerprint);
     tracing::info!(
-        sessions = session_ids.len(),
+        sessions = targets.len(),
         "执行配置已变化，活跃会话标记待交接并开始处理"
     );
-    // 有 runtime 上下文（含 tauri async runtime 线程）时立即并行处理；
+    for (id, target) in targets {
+        mark_session(store, manager, &id, &target);
+    }
+}
+
+/// 变化点入口（会话显式切换模型 / 会话实际执行端点变化）：单会话打标
+/// 并立即尝试处理。空闲当场压缩（压缩用 Core 当前配置——切换场景下
+/// 即旧模型，天然实现「原模型优先」），忙则留标记等投递路径。
+pub(crate) fn mark_session(
+    store: &ConfigHandoffStore,
+    manager: &CoreManager,
+    session_id: &str,
+    target_fingerprint: &str,
+) {
+    store.set_pending_handoff(
+        std::slice::from_ref(&session_id.to_string()),
+        target_fingerprint,
+    );
+    // 有 runtime 上下文（含 tauri async runtime 线程）时立即处理；
     // 否则只留标记，由投递路径处理。
     let target = target_fingerprint.to_string();
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        for id in session_ids {
-            let store = store.clone();
-            let manager = manager.clone();
-            let target = target.clone();
-            handle.spawn(async move {
-                if let ConfigHandoffOutcome::Failed(reason) =
-                    run_handoff(&store, &manager, &id, &target).await
-                {
-                    tracing::warn!(session_id = %id, reason, "配置交接压缩未完成，标记保留重试");
-                }
-            });
-        }
+        let store = store.clone();
+        let manager = manager.clone();
+        let id = session_id.to_string();
+        handle.spawn(async move {
+            if let ConfigHandoffOutcome::Failed(reason) =
+                run_handoff(&store, &manager, &id, &target).await
+            {
+                tracing::warn!(session_id = %id, reason, "配置交接压缩未完成，标记保留重试");
+            }
+        });
     }
 }
 
@@ -282,6 +303,23 @@ where
         return run_handoff(store, manager, session_id, &current).await;
     }
     ConfigHandoffOutcome::Aligned
+}
+
+/// 面向显式切换的幂等交接入口：目标指纹已定档（或已有标记在途）时按
+/// 标记语义处理，否则执行交接——重复设置同一模型不会引发无谓压缩。
+pub(crate) async fn handoff_to(
+    store: &ConfigHandoffStore,
+    manager: &CoreManager,
+    session_id: &str,
+    target: &str,
+) -> ConfigHandoffOutcome {
+    if store.pending_handoff(session_id).is_some() {
+        return run_handoff(store, manager, session_id, target).await;
+    }
+    if store.pinned_matches(session_id, target) {
+        return ConfigHandoffOutcome::Aligned;
+    }
+    run_handoff(store, manager, session_id, target).await
 }
 
 /// 执行一次交接：无可交接历史直接定档；否则注入手动压缩并等待收敛，
@@ -599,7 +637,7 @@ mod handoff_e2e_tests {
             .await;
         make_core(&manager, "e2e-retry", &recovered.uri()).await;
         let new_target = fingerprint_for(&recovered.uri());
-        mark_and_process(&store, &manager, &new_target);
+        mark_session(&store, &manager, "e2e-retry", &new_target);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !store.pinned_matches("e2e-retry", &new_target) {
             assert!(
@@ -627,7 +665,7 @@ mod handoff_e2e_tests {
 
         // 变化点打标（写标记 + spawn 后台处理）：后台交接的压缩挂起中。
         let fp = fingerprint_for(&server.uri());
-        mark_and_process(&store, &manager, &fp);
+        mark_all_sessions(&store, &manager, |_| fp.clone());
         tokio::time::sleep(Duration::from_millis(400)).await;
         // 压缩进行中标记在场；投递路径执行：deliver 得 Busy，不打断。
         assert!(store.pending_handoff("e2e-busy").is_some());
@@ -671,7 +709,7 @@ mod handoff_e2e_tests {
 
         // 变化点打标（目标=新配置指纹），后台立即处理空闲会话。
         let target = fingerprint_for("https://changed.example.com");
-        mark_and_process(&store, &manager, &target);
+        mark_session(&store, &manager, "e2e-mark", &target);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !store.pinned_matches("e2e-mark", &target) {
             assert!(

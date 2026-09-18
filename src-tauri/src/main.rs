@@ -788,6 +788,7 @@ fn run_gui() {
             tiangong_app::commands::get_session_meta,
             tiangong_app::commands::switch_session,
             tiangong_app::commands::load_session,
+            tiangong_app::commands::set_session_model,
             tiangong_app::commands::delete_session,
             tiangong_app::commands::delete_sessions_by_cwd,
             tiangong_app::commands::list_trashed_sessions,

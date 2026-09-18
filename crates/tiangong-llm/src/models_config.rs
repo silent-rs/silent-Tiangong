@@ -471,6 +471,27 @@ impl ModelsConfig {
         self.resolve_slot(slot)
     }
 
+    /// 按模型注册表 key 解析完整配置（会话级模型引用的解析入口）。
+    ///
+    /// 两次查表即失效判据：key 不在 models 注册表，或其 provider 已删——
+    /// 均返回 None，由调用方回退路由默认。纯配置查表，与请求成败无关。
+    pub fn resolve_model_by_key(&self, key: &str) -> Option<ResolvedModel> {
+        let entry = self.models.get(key)?;
+        let provider = self.providers.get(&entry.provider)?;
+
+        Some(ResolvedModel {
+            headers: provider.headers.clone(),
+            provider: entry.provider.clone(),
+            base_url: provider.base_url.clone(),
+            api_key: Self::resolve_api_key(&provider.api_key),
+            timeout_ms: provider.timeout_ms,
+            protocol: provider.protocol,
+            model: entry.model.clone(),
+            options: entry.options.clone(),
+            context_window: entry.context_window,
+        })
+    }
+
     /// 按路由槽位获取完整配置
     pub fn resolve_slot(&self, slot: RoutingSlot) -> Option<ResolvedModel> {
         let entry = self.routing.get(&slot)?;
