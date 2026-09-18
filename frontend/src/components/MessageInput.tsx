@@ -8,6 +8,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, textContent } from '@/api/tauri';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
@@ -190,8 +191,11 @@ export function MessageInput({
     : currentSessionRunStatus || runStatus;
 
   // 会话级模型选择：引用来自会话（null=跟随设置默认）；选项来自模型注册表。
+  // Radix Select 不允许空字符串 value，「跟随默认」用哨兵值表示。
+  const MODEL_DEFAULT_VALUE = '__default__';
   const [sessionModelRef, setSessionModelRef] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<{ key: string; label: string }[]>([]);
+  const [defaultModelLabel, setDefaultModelLabel] = useState<string>('默认');
   const [modelSwitching, setModelSwitching] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -201,15 +205,24 @@ export function MessageInput({
         .catch(console.error);
     }
     api.listSessionChatModels()
-      .then((models) => {
+      .then((result) => {
         if (cancelled) return;
-        setModelOptions(models.map(([key, label]) => ({ key, label: label || key })));
+        setModelOptions(result.models.map(([key, label]) => ({ key, label: label || key })));
+        // 跟随默认时显示路由配置的实际模型名。
+        setDefaultModelLabel(
+          result.default_ref
+            ? (result.models.find(([key]) => key === result.default_ref)?.[1] ?? '默认')
+            : '默认',
+        );
       })
       .catch(console.error);
     return () => { cancelled = true; };
   }, [activeSessionId]);
   const modelUnavailable = sessionModelRef != null
     && !modelOptions.some((option) => option.key === sessionModelRef);
+  const modelDisplay = modelUnavailable
+    ? `${sessionModelRef}（不可用）`
+    : (modelOptions.find((option) => option.key === sessionModelRef)?.label ?? defaultModelLabel);
   // 新对话也可选择（随首条消息作为初始值写入会话；已有会话立即写引用，
   // 压缩与端点切换推迟到下一次发消息——切走又切回无需压缩）。
   const modelSelectorDisabled = currentRunStatus !== 'idle' || modelSwitching;
@@ -220,7 +233,7 @@ export function MessageInput({
       : '会话模型（发送消息时生效，切换上下文会先整理）';
   const handleSessionModelChange = async (value: string) => {
     if (modelSwitching || currentRunStatus !== 'idle') return;
-    const nextRef = value === '' ? null : value;
+    const nextRef = value === MODEL_DEFAULT_VALUE ? null : value;
     // 新对话：仅缓存选择，随首条消息作为初始引用写入会话。
     if (!activeSessionId) {
       setSessionModelRef(nextRef);
@@ -1109,47 +1122,48 @@ export function MessageInput({
               </div>
               <div className="flex items-center gap-0.5 shrink-0">
                 <SessionInputPluginHost slot="session.input-status" />
-                <label
-                  className={`flex h-6 items-center gap-1 rounded-md px-1.5 text-xs transition-colors cursor-pointer ${
-                    modelSelectorDisabled
-                      ? 'opacity-50 cursor-not-allowed text-muted-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
-                  }`}
-                  title={modelSelectorTitle}
+                <Select
+                  value={sessionModelRef ?? MODEL_DEFAULT_VALUE}
+                  onValueChange={(value) => { void handleSessionModelChange(value); }}
+                  disabled={modelSelectorDisabled}
                 >
-                  <Cpu className="w-3 h-3 shrink-0" />
-                  <select
-                    value={sessionModelRef ?? ''}
-                    onChange={(e) => { void handleSessionModelChange(e.target.value); }}
-                    disabled={modelSelectorDisabled}
-                    className="max-w-28 cursor-pointer truncate border-none bg-transparent text-xs outline-none appearance-none"
+                  <SelectTrigger
+                    title={modelSelectorTitle}
+                    className="h-6 w-auto gap-1 rounded-md border-none bg-transparent px-1.5 text-xs text-muted-foreground shadow-none transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus:ring-0 focus:ring-offset-0"
                   >
-                    <option value="">默认模型</option>
+                    <Cpu className="w-3 h-3 shrink-0" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="min-w-max">
+                    <SelectItem value={MODEL_DEFAULT_VALUE} className="text-xs">{defaultModelLabel}</SelectItem>
                     {modelOptions.map((option) => (
-                      <option key={option.key} value={option.key}>{option.label}</option>
+                      <SelectItem key={option.key} value={option.key} className="text-xs">
+                        {option.label}
+                      </SelectItem>
                     ))}
-                    {modelUnavailable && (
-                      <option value={sessionModelRef}>{sessionModelRef}（不可用，当前使用默认）</option>
+                    {modelUnavailable && sessionModelRef != null && (
+                      <SelectItem value={sessionModelRef} className="text-xs">
+                        {modelDisplay}
+                      </SelectItem>
                     )}
-                  </select>
-                </label>
-                <label
-                  className="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors cursor-pointer hover:bg-accent hover:text-foreground"
-                  title="思考强度"
-                >
-                  <Brain className="w-3 h-3 shrink-0" />
-                  <select
-                    value={reasoningEffort}
-                    onChange={(e) => setReasoningEffort(e.target.value)}
-                    className="cursor-pointer border-none bg-transparent text-xs outline-none appearance-none"
+                  </SelectContent>
+                </Select>
+                <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
+                  <SelectTrigger
+                    title="思考强度"
+                    className="h-6 w-auto gap-1 rounded-md border-none bg-transparent px-1.5 text-xs text-muted-foreground shadow-none transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus:ring-0 focus:ring-offset-0"
                   >
-                    <option value="none">不思考</option>
-                    <option value="low">低强度</option>
-                    <option value="medium">中强度</option>
-                    <option value="high">高强度</option>
-                    <option value="max">最大强度</option>
-                  </select>
-                </label>
+                    <Brain className="w-3 h-3 shrink-0" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="min-w-max">
+                    <SelectItem value="none" className="text-xs">不思考</SelectItem>
+                    <SelectItem value="low" className="text-xs">低强度</SelectItem>
+                    <SelectItem value="medium" className="text-xs">中强度</SelectItem>
+                    <SelectItem value="high" className="text-xs">高强度</SelectItem>
+                    <SelectItem value="max" className="text-xs">最大强度</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <SessionInputPluginHost slot="session.before-input" />

@@ -1298,15 +1298,25 @@ pub async fn set_session_model(
         .set_core_model_ref(&session_id, model_ref)
 }
 
-/// 列出会话可切换的 Chat 模型（key + 模型名，数据源为宿主模型注册表）。
+/// 会话可切换的 Chat 模型列表与路由默认模型引用。
+#[derive(serde::Serialize)]
+pub struct SessionChatModelsView {
+    /// 注册表 key + 模型名（仅 Chat 能力）。
+    pub models: Vec<(String, String)>,
+    /// 路由 Chat 槽位当前指向的注册表 key（未配置或不在注册表时 None）。
+    pub default_ref: Option<String>,
+}
+
+/// 列出会话可切换的 Chat 模型（数据源为宿主模型注册表与路由表）。
 #[tauri::command]
 pub async fn list_session_chat_models(
     state: State<'_, TiangongApp>,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<SessionChatModelsView, String> {
+    use tiangong_llm::models_config::RoutingSlot;
     let models = state
         .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
-    Ok(models
+    let chat_models: Vec<(String, String)> = models
         .models
         .iter()
         .filter(|(_, entry)| {
@@ -1315,7 +1325,21 @@ pub async fn list_session_chat_models(
                 .contains(&tiangong_llm::models_config::ModelCapability::Chat)
         })
         .map(|(key, entry)| (key.clone(), entry.model.clone()))
-        .collect())
+        .collect();
+    // 路由默认指向的注册表 key：按 provider+模型名反查（与序列化约定一致）。
+    let default_ref = models.routing.get(&RoutingSlot::Chat).and_then(|entry| {
+        models
+            .models
+            .iter()
+            .find(|(_, candidate)| {
+                candidate.provider == entry.provider && candidate.model == entry.model
+            })
+            .map(|(key, _)| key.clone())
+    });
+    Ok(SessionChatModelsView {
+        models: chat_models,
+        default_ref,
+    })
 }
 
 /// 手动触发上下文压缩
