@@ -22,7 +22,10 @@ pub use tiangong_llm::ModelEndpoint;
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// 默认 context_window（模型名无法解析时的回退值）。
+/// 模型端点未声明上下文窗口时的兜底值。
+///
+/// `ModelEndpoint.context_window` 虽是 `Option`，实际路径上均由模型注册表
+/// 填充；这里只是类型上的兜底，不构成配置项。
 pub fn default_context_limit() -> usize {
     DEFAULT_CONTEXT_LIMIT
 }
@@ -44,8 +47,6 @@ pub struct CoreConfig {
     #[serde(default = "default_reasoning_effort")]
     #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
     pub reasoning_effort: tiangong_llm::ReasoningEffort,
-    /// 上下文窗口大小（token 数）
-    pub context_limit: usize,
 }
 
 impl Default for CoreConfig {
@@ -55,7 +56,6 @@ impl Default for CoreConfig {
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
-            context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
 }
@@ -105,12 +105,6 @@ impl CoreConfigBuilder {
 
     pub fn with_custom_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.config.custom_system_prompt = prompt.into();
-        self
-    }
-
-    /// 设置上下文窗口大小
-    pub fn with_context_limit(mut self, limit: usize) -> Self {
-        self.config.context_limit = limit;
         self
     }
 
@@ -189,7 +183,7 @@ mod tests {
 
         assert_eq!(provider.generation(), 1);
         let snap = provider.snapshot();
-        assert_eq!(snap.context_limit, DEFAULT_CONTEXT_LIMIT);
+        assert!(snap.custom_system_prompt.is_empty());
     }
 
     #[test]
@@ -197,11 +191,11 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         assert_eq!(provider.generation(), 1);
 
-        provider.update(|c| c.context_limit = 65536);
+        provider.update(|c| c.custom_system_prompt = "改写".to_string());
         assert_eq!(provider.generation(), 2);
 
         let snap = provider.snapshot();
-        assert_eq!(snap.context_limit, 65536);
+        assert_eq!(snap.custom_system_prompt, "改写");
     }
 
     #[test]
@@ -209,20 +203,20 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         let cloned = provider.clone();
 
-        provider.update(|c| c.context_limit = 16384);
+        provider.update(|c| c.custom_system_prompt = "共享".to_string());
         assert_eq!(cloned.generation(), 2);
-        assert_eq!(cloned.snapshot().context_limit, 16384);
+        assert_eq!(cloned.snapshot().custom_system_prompt, "共享");
     }
 
     #[test]
     fn builder_basic() {
         let config = CoreConfig::builder()
             .with_trust_mode(TrustMode::FullTrust)
-            .with_context_limit(65536)
+            .with_custom_system_prompt("提示")
             .build();
 
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
-        assert_eq!(config.context_limit, 65536);
+        assert_eq!(config.custom_system_prompt, "提示");
     }
 
     #[test]

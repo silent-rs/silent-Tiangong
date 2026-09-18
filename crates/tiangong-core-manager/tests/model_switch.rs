@@ -109,7 +109,7 @@ async fn 目标与当前模型相同时不压缩不切换() {
 
     let target = manager.resolve_turn_model(Some("model-a")).unwrap();
     manager
-        .switch_model_if_needed("same-model", target)
+        .switch_model_for_test("same-model", target)
         .await
         .expect("相同模型不应失败");
 
@@ -141,7 +141,7 @@ async fn 模型不同时先压缩再切换() {
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     manager
-        .switch_model_if_needed("switch-ok", target)
+        .switch_model_for_test("switch-ok", target)
         .await
         .expect("切换应成功");
 
@@ -182,7 +182,7 @@ async fn 压缩失败仍继续切换模型() {
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     manager
-        .switch_model_if_needed("compact-fail", target)
+        .switch_model_for_test("compact-fail", target)
         .await
         .expect("压缩失败不应阻断模型切换");
 
@@ -222,7 +222,7 @@ async fn 无可整理历史时零模型调用直接切换() {
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     manager
-        .switch_model_if_needed("empty-history", target)
+        .switch_model_for_test("empty-history", target)
         .await
         .expect("无历史时切换应成功");
 
@@ -302,7 +302,7 @@ async fn core重建后从会话恢复目标模型() {
     // 目标与恢复后的当前模型一致 → 不触发压缩。
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     manager
-        .switch_model_if_needed("restore-model", target)
+        .switch_model_for_test("restore-model", target)
         .await
         .unwrap();
     assert!(
@@ -345,7 +345,7 @@ async fn 失效引用不静默回退默认且重选有效模型仍识别为切�
     // 当前模型不可用，跳过整理（用空端点压缩必然失败，会把用户永久卡死）。
     let target = manager.resolve_turn_model(Some("model-a")).unwrap();
     manager
-        .switch_model_if_needed("stale-ref", target)
+        .switch_model_for_test("stale-ref", target)
         .await
         .expect("重选有效模型应成功切换");
     assert!(
@@ -388,7 +388,7 @@ async fn 会话执行中拒绝切换模型() {
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     let error = manager
-        .switch_model_if_needed("busy-switch", target)
+        .switch_model_for_test("busy-switch", target)
         .await
         .expect_err("执行中必须拒绝切换");
     assert!(error.contains("正在执行"), "{error}");
@@ -455,7 +455,7 @@ async fn 同名模型跨服务端切换仍先压缩再切换() {
 
     let target = manager.resolve_turn_model(Some("same-on-new")).unwrap();
     manager
-        .switch_model_if_needed("same-name", target)
+        .switch_model_for_test("same-name", target)
         .await
         .expect("同名不同服务端应识别为切换");
 
@@ -513,7 +513,7 @@ async fn 同一模型换注册表条目不触发压缩与切换() {
 
     let target = manager.resolve_turn_model(Some("alias-two")).unwrap();
     manager
-        .switch_model_if_needed("alias-switch", target)
+        .switch_model_for_test("alias-switch", target)
         .await
         .expect("同一模型换条目不应失败");
 
@@ -529,7 +529,7 @@ async fn 同一模型换注册表条目不触发压缩与切换() {
 /// 切换必须等压缩进入终态后才发生。
 ///
 /// 若压缩刚启动就切换，会与压缩任务并发读写 Session，或撞上 `Busy`。
-/// 用慢响应把压缩拖住：`switch_model_if_needed` 返回时 Core 必须已空闲，
+/// 用慢响应把压缩拖住：`switch_model_for_test` 返回时 Core 必须已空闲，
 /// 且切换确实生效。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn 切换在压缩进入终态后才发生() {
@@ -546,7 +546,7 @@ async fn 切换在压缩进入终态后才发生() {
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
     manager
-        .switch_model_if_needed("await-terminal", target)
+        .switch_model_for_test("await-terminal", target)
         .await
         .expect("切换应成功");
 
@@ -624,7 +624,7 @@ async fn 上下文窗口随模型切换同步生效() {
     let target = manager.resolve_turn_model(Some("narrow")).unwrap();
     assert_eq!(target.context_window, Some(32_768));
     manager
-        .switch_model_if_needed("window-follow", target)
+        .switch_model_for_test("window-follow", target)
         .await
         .expect("切换应成功");
 
@@ -661,4 +661,120 @@ fn 未声明窗口的模型端点留空() {
         endpoint.context_window, None,
         "未声明窗口时留空，由调用方回落到 CoreConfig.context_limit"
     );
+}
+
+/// 模型编排失败时消息不投递，Core 状态保持不变。
+///
+/// 编排在 Manager 投递路径内部完成：解析失败直接返回错误，用户消息不进
+/// 会话、也不触发任何模型调用，当前模型保持原样。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 模型解析失败不投递消息且保持当前模型() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    seed_models(&dir, &server.uri(), "model-a");
+    seed_session(&dir, "bad-model", Some("model-a"));
+    let manager = manager_at(&dir);
+    make_core(&manager, "bad-model").await;
+
+    let before = manager.load_session("bad-model").unwrap().messages.len();
+
+    let error = manager
+        .deliver_user_message(
+            "bad-model",
+            AgentInputKind::prepared_with_id(
+                "m-bad".to_string(),
+                vec![tiangong_types::ContentBlock::text("你好")],
+            )
+            .with_model_ref(Some("no-such-model".to_string())),
+        )
+        .await
+        .expect_err("目标模型不存在应失败");
+
+    assert!(error.contains("已不在配置中"), "{error}");
+
+    // 消息未投递。
+    let after = manager.load_session("bad-model").unwrap().messages.len();
+    assert_eq!(after, before, "解析失败时不得投递用户消息");
+    // Core 仍在且模型未变。
+    let current = {
+        let registry = manager.registry();
+        registry.get("bad-model").unwrap().current_endpoint()
+    };
+    assert_eq!(current.model, "model-a", "失败后仍保持原模型");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "解析失败不应触发任何模型调用"
+    );
+    manager.retire_core("bad-model", true).await.unwrap();
+}
+
+/// 投递路径内部完成模型切换：宿主只调一次投递，切换对其透明。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 投递用户消息时自动完成模型切换() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(summary_reply())
+        .mount(&server)
+        .await;
+    seed_models(&dir, &server.uri(), "model-a");
+    seed_session(&dir, "deliver-switch", Some("model-a"));
+    let manager = manager_at(&dir);
+    make_core(&manager, "deliver-switch").await;
+
+    manager
+        .deliver_user_message(
+            "deliver-switch",
+            AgentInputKind::prepared_with_id(
+                "m-1".to_string(),
+                vec![tiangong_types::ContentBlock::text("换个模型继续")],
+            )
+            .with_model_ref(Some("model-b".to_string())),
+        )
+        .await
+        .expect("投递应成功");
+
+    // 切换已在投递路径内完成。
+    let current = {
+        let registry = manager.registry();
+        registry.get("deliver-switch").unwrap().current_endpoint()
+    };
+    assert_eq!(current.model, "model-b", "投递路径内部应完成模型切换");
+    // 用户选择已记录，供前端回显。
+    let session = manager.load_session("deliver-switch").unwrap();
+    assert_eq!(session.model_ref.as_deref(), Some("model-b"));
+    manager.retire_core("deliver-switch", true).await.unwrap();
+}
+
+/// 模型选择随消息携带，非用户消息不受影响。
+///
+/// 宿主只需把界面上选的模型附在消息上，解析与切换是 Manager 投递路径的
+/// 内部步骤——app 层不再传递额外参数、也不参与编排。
+#[test]
+fn 模型选择随用户消息携带() {
+    use tiangong_core::agent_input::MessageInput;
+
+    let input =
+        AgentInputKind::prepared_with_id("m", vec![tiangong_types::ContentBlock::text("x")])
+            .with_model_ref(Some("model-b".to_string()));
+    match &input {
+        AgentInputKind::Message(MessageInput::UserMessage { model_ref, .. }) => {
+            assert_eq!(model_ref.as_deref(), Some("model-b"));
+        }
+        _ => panic!("应为用户消息"),
+    }
+
+    // 空白与空串归一为 None（跟随默认），避免把空选择当成有效 key。
+    let blank =
+        AgentInputKind::prepared_with_id("m", vec![]).with_model_ref(Some("   ".to_string()));
+    match &blank {
+        AgentInputKind::Message(MessageInput::UserMessage { model_ref, .. }) => {
+            assert!(model_ref.is_none(), "空白选择应归一为跟随默认");
+        }
+        _ => panic!("应为用户消息"),
+    }
+
+    // 命令类输入不承载模型选择，附加操作是安全的空操作。
+    let command = AgentInputKind::cancel().with_model_ref(Some("model-b".to_string()));
+    assert!(matches!(command, AgentInputKind::Command(_)));
 }

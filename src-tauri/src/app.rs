@@ -873,18 +873,11 @@ impl TiangongApp {
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     ///
-    /// 含 host 专属的远端 turn 所有权检查（`remote_turn_allows_message`），
-    /// Core 操作本身经 `core_manager`（issue #245）。
+    /// app 层只做 host 专属的远端 turn 所有权检查，然后把消息交给
+    /// `CoreManager`：模型选择随消息携带（`with_model_ref`），解析、上下文
+    /// 整理与切换都是 Manager 投递路径的内部步骤，app 层不感知也不介入。
     ///
-    /// 投递前完成会话模型的端点校正（模型引用是会话的持久属性，Core 可能
-    /// 被懒重建或跟随默认变化）；引用失效直接报错，不静默换模型执行。
-    /// 投递前由 `CoreManager` 完成模型编排：解析本轮目标模型 → 与 Core
-    /// 当前实际模型比较 → 不同则先用旧模型整理上下文、再切换到新模型。
-    /// 任一步失败立即返回错误且不投递消息；调用方持有会话发送锁，整个
-    /// 过程与投递处在同一临界区内。
-    ///
-    /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型（默认本身会变，
-    /// 因此仍需经 Manager 解析成实际目标后比较）。
+    /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型。
     pub async fn deliver_prepared_if_live(
         &self,
         session_id: &str,
@@ -895,22 +888,13 @@ impl TiangongApp {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
-        if !self.core_manager.has_live_core(session_id) {
-            return Err("会话 Core 不存在".to_string());
-        }
-        // 模型编排全部交给 Manager：解析目标 → 与 Core 当前实际模型比较 →
-        // 需要时先整理上下文再切换。任一步失败立即返回，不投递用户消息。
-        let target = self.core_manager.resolve_turn_model(model_ref)?;
         self.core_manager
-            .switch_model_if_needed(session_id, target)
-            .await?;
-        self.core_manager
-            .deliver_to_core_if_live(
+            .deliver_user_message(
                 session_id,
-                AgentInputKind::prepared_with_id(message_id, prepared),
+                AgentInputKind::prepared_with_id(message_id, prepared)
+                    .with_model_ref(model_ref.map(str::to_string)),
             )
-            .then_some(())
-            .ok_or_else(|| "会话 Core 投递失败".to_string())
+            .await
     }
 
     /// 启动嵌入式 Server（共享 app 的 state 和 config）

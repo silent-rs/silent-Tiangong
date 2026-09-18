@@ -384,7 +384,11 @@ impl TiangongCore {
             // 上下文窗口跟随当前实际模型：会话切换模型后窗口必须同步变化，
             // 否则换到小窗口模型仍按旧窗口判断自动压缩，请求会被 Provider
             // 拒绝。端点未声明窗口时回落到配置值（路由默认模型推导而来）。
-            .context_limit(endpoint.context_window.unwrap_or(config.context_limit))
+            .context_limit(
+                endpoint
+                    .context_window
+                    .unwrap_or_else(crate::config::core::default_context_limit),
+            )
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
@@ -673,6 +677,9 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
+                // 模型选择由 CoreManager 在投递前消费（解析并按需切换），
+                // Core 只负责执行；到这里已无需再看。
+                model_ref: _,
             }) => {
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
                 if self.is_busy() {

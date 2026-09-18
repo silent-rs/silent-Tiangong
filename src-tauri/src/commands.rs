@@ -288,12 +288,11 @@ pub async fn load_session(
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
     // token 统计的分母跟随会话实际模型：有活跃 Core 时取其当前端点的窗口，
-    // 否则按会话的模型选择解析；都拿不到才回落配置兜底。
+    // 否则按会话的模型选择解析；都拿不到才回落默认窗口。
     let context_limit = state
         .core_manager
         .session_context_limit(&session_id)
         .filter(|limit| *limit > 0)
-        .or(Some(config.context_limit).filter(|limit| *limit > 0))
         .unwrap_or_else(tiangong_core::config::core::default_context_limit);
     let default_reasoning_effort = config.reasoning_effort;
     let manager = state.core_manager.clone();
@@ -730,15 +729,9 @@ async fn send_message_inner(
         }
     };
     let sid = ensured.session_id.clone();
-    // 记录用户的模型选择（Session.model_ref = 选择策略，可为 None 表示
-    // 跟随默认）。实际模型的解析、比较与切换由 Manager 在投递时编排。
-    // 忙时拒写仅告警：运行中不换模型，本轮仍用 Core 当前实际模型。
+    // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
+    // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
     let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
-    if let Some(model_ref) = turn_model_ref.clone() {
-        if let Err(error) = state.core_manager.set_core_model_ref(&sid, Some(model_ref)) {
-            tracing::warn!(session_id = %sid, error, "发送时写入会话模型引用失败");
-        }
-    }
     if let Err(error) = state
         .deliver_prepared_if_live(
             &sid,

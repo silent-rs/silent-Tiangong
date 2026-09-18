@@ -176,16 +176,14 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     ///
-    /// `context_limit` 只是没有端点信息时的通用兜底（core 默认 200k）：会话
-    /// 实际使用的窗口由 `ModelEndpoint.context_window` 承载，切换模型时同步
-    /// 变化，不再从路由默认模型推导。
+    /// 上下文窗口不在此配置中：它跟随 `ModelEndpoint.context_window`，切换
+    /// 模型时同步变化。
     pub fn to_core_config(&self) -> CoreConfig {
         CoreConfig {
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
-            context_limit: tiangong_core::config::core::default_context_limit(),
         }
     }
 
@@ -373,16 +371,11 @@ mod tests {
             },
         );
 
-        // 窗口跟随端点：切换模型时随之变化。
+        // 窗口跟随端点：切换模型时随之变化，CoreConfig 不再承载该字段
+        // （否则它由路由默认模型推导，会话切到别的模型后不会变）。
         assert_eq!(
             config.default_chat_endpoint().unwrap().context_window,
             Some(131_072)
-        );
-        // CoreConfig 只保留与模型无关的通用兜底，不再从路由默认模型推导——
-        // 否则会话切到别的模型后它不会变，仍按旧窗口判断自动压缩。
-        assert_eq!(
-            config.to_core_config().context_limit,
-            tiangong_core::config::core::default_context_limit()
         );
     }
 

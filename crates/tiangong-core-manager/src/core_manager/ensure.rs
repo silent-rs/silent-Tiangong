@@ -191,8 +191,9 @@ impl CoreManager {
     ///
     /// 只有模型切换本身失败才返回 Err（调用方据此中止发送）。
     ///
-    /// 调用方必须持有会话发送锁，避免并发请求交错压缩与切换。
-    pub async fn switch_model_if_needed(
+    /// 内部方法：模型编排属于 Manager 职责，宿主经
+    /// [`Self::deliver_user_message`] 投递即可，不感知切换过程。
+    async fn switch_model_if_needed(
         &self,
         session_id: &str,
         target: ModelEndpoint,
@@ -236,6 +237,55 @@ impl CoreManager {
             }
             other => other.to_string(),
         })
+    }
+
+    /// 仅供集成测试驱动模型编排（不投递消息）。
+    ///
+    /// 生产路径请用 [`Self::deliver_user_message`]：模型编排是投递的内部
+    /// 步骤，宿主不应单独触发切换。
+    #[doc(hidden)]
+    pub async fn switch_model_for_test(
+        &self,
+        session_id: &str,
+        target: ModelEndpoint,
+    ) -> Result<(), String> {
+        self.switch_model_if_needed(session_id, target).await
+    }
+
+    /// 投递用户消息：Manager 内部完成模型编排后再投递，宿主无感。
+    ///
+    /// 模型选择随消息携带（`AgentInputKind::with_model_ref`），本方法据此：
+    /// 1. 记录到 `Session.model_ref`（选择策略，持久化供前端回显）；
+    /// 2. 解析成实际目标端点；
+    /// 3. 与 Core 当前实际模型比较，不同则先整理上下文再切换；
+    /// 4. 投递消息。
+    ///
+    /// 宿主不应再单独调用模型切换相关接口——切换全程是本方法的内部步骤。
+    /// 非用户消息（命令等）不做编排，直接投递。
+    pub async fn deliver_user_message(
+        &self,
+        session_id: &str,
+        input: AgentInputKind,
+    ) -> Result<(), String> {
+        let model_ref = match &input {
+            AgentInputKind::Message(MessageInput::UserMessage { model_ref, .. }) => model_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_string),
+            _ => None,
+        };
+        // 先记录用户选择：忙时拒写仅告警（运行中不换模型，本轮沿用当前模型）。
+        if let Some(key) = model_ref.clone()
+            && let Err(error) = self.set_core_model_ref(session_id, Some(key))
+        {
+            tracing::warn!(session_id, error, "写入会话模型引用失败");
+        }
+        let target = self.resolve_turn_model(model_ref.as_deref())?;
+        self.switch_model_if_needed(session_id, target).await?;
+        self.deliver_to_core_if_live(session_id, input)
+            .then_some(())
+            .ok_or_else(|| "会话 Core 投递失败".to_string())
     }
 
     /// 关闭并等待指定会话的 Core 结束。
@@ -306,10 +356,12 @@ impl CoreManager {
         delivered
     }
 
-    /// 写入会话级对话模型引用（models 注册表 key；None 恢复跟随默认）。
+    /// 记录会话级对话模型选择（models 注册表 key；None 恢复跟随默认）。
     ///
-    /// 轻量写入：只改引用不动执行端点——端点由投递前的端点校正按引用
-    /// 切换，切走又切回时端点从未变化。运行中不写（core 忙即拒绝）。
+    /// 只写 `Session.model_ref` 这一**选择策略**，不触碰执行端点：实际切换
+    /// 由下一次投递时的模型编排完成（见 [`Self::deliver_user_message`]），
+    /// 因此用户切走又切回时端点从未变化、也不会白白整理一次上下文。
+    /// 运行中不写（core 忙即拒绝）。
     pub fn set_core_model_ref(
         &self,
         session_id: &str,
