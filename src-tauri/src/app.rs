@@ -788,7 +788,21 @@ impl TiangongApp {
         // 总是热更存活 Core 的配置(replace_config + set_trust_mode)。
         // 能力集合变化时,存活 Core 的插件列表不变(构造时固定),
         // 但 endpoint/trust 等配置会热更——这是期望行为。
-        self.core_manager.sync_config(template, &session_configs);
+        let previous = self.core_manager.config().snapshot();
+        self.core_manager
+            .sync_config(template.clone(), &session_configs);
+        // 模型端点变化是配置交接的触发源之一（另一个是插件变化，见
+        // notify_plugins_changed）：给活跃会话打标并立即尝试交接。
+        let changed = |llm: &tiangong_llm::ModelEndpoint| {
+            (
+                llm.protocol.clone(),
+                llm.base_url.clone(),
+                llm.model.clone(),
+            )
+        };
+        if changed(&previous.llm) != changed(&template.llm) {
+            self.mark_config_handoff(&template.llm);
+        }
         Ok(())
     }
 
@@ -860,15 +874,100 @@ impl TiangongApp {
         let models = app_config.models.clone();
         let ensured = self
             .core_manager
-            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
-                factory.build_plugins_sync(models)
-            })
+            .ensure_core(
+                session_id,
+                session_config.clone(),
+                workspace_dir,
+                stream_tx,
+                || factory.build_plugins_sync(models),
+            )
             .await
             .expect("ensure_core 不应失败");
+        // 投递消息前的配置交接检查（桌面与嵌入 server 的消息都经本方法，
+        // 挂这里即全覆盖）：待交接标记命中则执行交接；否则每会话每进程
+        // 首检一次指纹兜底（防重启丢标记与漏报的变化点）。
+        self.handoff_config_if_changed(session_id, &session_config)
+            .await;
         Ok(EnsuredCore {
             session_id: ensured.session_id,
             is_new: ensured.is_new,
         })
+    }
+
+    /// 投递消息前的配置交接：模型端点或插件声明（版本/启用集合）变化时，
+    /// 先经 core 既有手动压缩整理上下文，再让新配置接管（决策在宿主层，
+    /// core 只保留通用压缩能力——见 core_manager 层 `config_handoff` 模块）。
+    ///
+    /// 运行期是标记制：变化点（插件命令的 `notify_plugins_changed`、模型
+    /// 切换的 `sync_core_config_from_state`）已打标并尝试即时处理，这里只
+    /// 查内存标记；首检兜底每会话每进程一次，之后零指纹计算。会话忙
+    /// （turn 执行中）不打断；交接失败也放行消息（下一条消息前自动重试）。
+    async fn handoff_config_if_changed(
+        &self,
+        session_id: &str,
+        session_config: &tiangong_core::config::core::CoreConfig,
+    ) {
+        use tiangong_core_manager::core_manager::config_handoff::ConfigHandoffOutcome;
+        let report = |outcome: ConfigHandoffOutcome| match outcome {
+            ConfigHandoffOutcome::Aligned => {}
+            ConfigHandoffOutcome::SkippedBusy => {
+                tracing::debug!(session_id, "会话执行中，配置交接延后到下一条消息");
+            }
+            ConfigHandoffOutcome::Failed(reason) => {
+                tracing::warn!(session_id, reason, "配置交接压缩未完成，上下文未整理即继续");
+            }
+        };
+        if self.core_manager.pending_handoff(session_id) {
+            report(self.core_manager.run_pending_handoff(session_id).await);
+            return;
+        }
+        if self.core_manager.handoff_bootstrap_needed(session_id) {
+            let fingerprint = self.compute_execution_fingerprint(&session_config.llm);
+            report(
+                self.core_manager
+                    .bootstrap_handoff_check(session_id, &fingerprint)
+                    .await,
+            );
+        }
+    }
+
+    /// 变化点打标：算当前执行指纹，对全部活跃会话标记待交接——manager
+    /// 后台立即处理空闲会话（识别即压），忙会话留标记等投递路径。
+    pub fn mark_config_handoff(&self, endpoint: &tiangong_llm::ModelEndpoint) {
+        let fingerprint = self.compute_execution_fingerprint(endpoint);
+        self.core_manager.mark_sessions_for_handoff(&fingerprint);
+    }
+
+    /// 同 [`Self::mark_config_handoff`]，模型端点取全局模板（插件变化等
+    /// 不涉及模型的场景使用）。
+    pub fn mark_config_handoff_from_global(&self) {
+        let endpoint = self.core_manager.config().snapshot().llm.clone();
+        self.mark_config_handoff(&endpoint);
+    }
+
+    /// 计算执行配置指纹：模型端点 + plugin-runtime 注册表启用插件的
+    /// id@version。注册在 runtime 的插件都是动态注册的（含 prompt），
+    /// 装卸/升级/启停全部经 registry，天然全覆盖、无需特判。
+    fn compute_execution_fingerprint(&self, endpoint: &tiangong_llm::ModelEndpoint) -> String {
+        use tiangong_core_manager::core_manager::config_handoff::execution_fingerprint;
+        let statuses = tiangong_plugin_runtime::registry::list_plugins(
+            &self.desktop_factory.storage_root,
+            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+        );
+        let plugins: Vec<(String, String)> = statuses
+            .iter()
+            .filter(|status| status.enabled)
+            .map(|status| {
+                (
+                    status.id.clone(),
+                    status
+                        .loaded_version
+                        .clone()
+                        .unwrap_or_else(|| status.manifest_version.clone()),
+                )
+            })
+            .collect();
+        execution_fingerprint(endpoint, &plugins)
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。

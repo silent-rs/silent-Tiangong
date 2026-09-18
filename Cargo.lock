@@ -10869,6 +10869,7 @@ version = "0.16.9"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tiangong-config",
  "tiangong-core",
@@ -10876,6 +10877,7 @@ dependencies = [
  "tiangong-types",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

@@ -4877,6 +4877,10 @@ fn notify_plugins_changed(app: &AppHandle) {
     // 主前端事件到达不了插件沙箱；插件页面（如插件创作的项目列表）经
     // 桥接订阅 plugins.changed 获知插件集变化后自行刷新。
     tiangong_plugin_runtime::emit_plugins_changed();
+    // 插件集合/版本变化是配置交接的触发源之一（另一个是模型切换，见
+    // sync_core_config_from_state）：活跃会话标记待交接，空闲即压。
+    app.state::<crate::app::TiangongApp>()
+        .mark_config_handoff_from_global();
 }
 
 pub(crate) async fn download_and_install_plugin(

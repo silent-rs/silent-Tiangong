@@ -11,8 +11,11 @@ tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
