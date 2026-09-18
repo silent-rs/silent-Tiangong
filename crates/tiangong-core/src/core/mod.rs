@@ -42,11 +42,6 @@ pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
 }
 
-/// 等待整理上下文收敛的上限：大历史会话的摘要输出可能需要数分钟。
-const COMPACT_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
-/// 等待整理上下文收敛的轮询间隔。
-const COMPACT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
-
 /// 天工智能体核心
 #[derive(TypedBuilder, Clone)]
 #[builder(
@@ -143,49 +138,30 @@ impl TiangongCore {
             .clone()
     }
 
-    /// 整理上下文：对既有历史执行一次手动压缩并等待其收敛。
+    /// 整理上下文：对既有历史执行一次手动压缩，并等待其进入终态。
     ///
-    /// 供宿主在模型切换前调用——用**旧模型**把历史折叠成摘要，新模型
-    /// 接手的是整理后的上下文。无可压缩历史时立即返回 Ok（不调模型）。
+    /// 供宿主在模型切换前调用——用**旧模型**把历史折叠成摘要，新模型接手
+    /// 的是整理后的上下文。复用 `CommandInput::CompressContext` 的同一份压缩
+    /// 实现，区别只在于本方法等待压缩任务进入终态（成功 / 失败 / 取消）后
+    /// 才返回，便于宿主据此决定下一步。
     ///
-    /// 与 `CommandInput::CompressContext` 共用同一压缩实现，区别只在于
-    /// 本方法会等待完成并把失败如实返回，便于宿主据此中止后续步骤。
-    pub async fn compact_context(&self) -> Result<(), CoreError> {
-        if self.is_busy() {
-            return Err(CoreError::Busy);
-        }
-        let before = self.load_session()?;
-        // 边界之后只剩 System/Notice（或历史已全部折叠）时无需模型调用。
-        let has_history = before
-            .messages
-            .iter()
-            .skip(before.summary_up_to.min(before.messages.len()))
-            .any(|message| {
-                message.role != crate::session::MessageRole::System
-                    && message.role != crate::session::MessageRole::Notice
-            });
-        if !has_history {
-            return Ok(());
-        }
-        let summary_before = before.summary_up_to;
-        self.compress_context()?;
-        // compress_context 返回 Ok 时压缩任务已注册任务槽，is_busy 立即可靠。
-        let deadline = tokio::time::Instant::now() + COMPACT_WAIT_LIMIT;
-        while self.is_busy() {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::ContextCompactionFailed(
-                    "整理上下文超时".to_string(),
-                ));
-            }
-            tokio::time::sleep(COMPACT_POLL_INTERVAL).await;
-        }
-        let after = self.load_session()?;
-        if after.summary_up_to > summary_before {
-            Ok(())
-        } else {
-            Err(CoreError::ContextCompactionFailed(
-                "整理上下文未推进摘要边界（模型调用失败或无可压缩内容）".to_string(),
-            ))
+    /// `context_limit` 为本次压缩使用的上下文窗口（通常取目标模型的窗口）：
+    /// 压缩产物最终交给目标模型，用目标窗口裁剪更贴合。它只影响本次压缩，
+    /// 不写回 `CoreConfig`。
+    ///
+    /// 返回 `Ok(())` 表示压缩已成功应用或无可压缩历史；`Err` 表示压缩未能
+    /// 完成（模型调用失败、被取消、worker 退出等）。**返回 Err 时压缩任务
+    /// 同样已进入终态**，调用方可以安全地继续后续操作。
+    pub async fn compact_context(&self, context_limit: usize) -> Result<(), CoreError> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.spawn_context_compression(Some(context_limit), Some(completion_tx))?;
+        // 任务在任何终态下都会发送一次通知；发送端被丢弃（worker 异常退出）
+        // 时 recv 返回 Err，同样结束等待，不会悬挂。
+        match completion_rx.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(CoreError::ContextCompactionFailed(
+                "压缩任务未给出结果（worker 已退出）".to_string(),
+            )),
         }
     }
 
@@ -557,7 +533,15 @@ impl TiangongCore {
     /// 压缩状态下只接受引导消息与取消类命令：用户消息取消压缩并直接
     /// 起轮（压缩可随时重新发起）；其余信号（插件可用性广播等）不接受，
     /// 不打断压缩。运行中调用返回 `Busy`。
-    fn compress_context(&self) -> Result<(), CoreError> {
+    ///
+    /// `context_limit` 覆盖本次压缩使用的上下文窗口（`None` 用会话配置值）；
+    /// `completion_tx` 在压缩进入任一终态时收到一次结果，供等待方结束等待。
+    /// 任务结束路径上必然发送（发送端随任务一起释放，接收端不会悬挂）。
+    fn spawn_context_compression(
+        &self,
+        context_limit: Option<usize>,
+        completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), CoreError>>>,
+    ) -> Result<(), CoreError> {
         if self.is_busy() {
             return Err(CoreError::Busy);
         }
@@ -576,23 +560,59 @@ impl TiangongCore {
                 &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
             );
             Ok(async move {
-                if let Some(crate::react::compression::CompressionInterrupt::Command(
-                    Command::InjectUserMessage {
-                        message_id,
-                        content,
-                    },
-                )) = crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
-                    .await
-                {
-                    // 压缩已被引导消息终止且未应用任何结果。腾出任务槽后
-                    // 起新轮；取消类终止无需接续。
+                use crate::react::compression::ManualCompressionOutcome as Outcome;
+                let outcome = crate::react::compression::run_manual_context_compression(
+                    ctx,
+                    &mut cmd_rx,
+                    context_limit,
+                )
+                .await;
+                let interrupted_by_message = matches!(
+                    outcome,
+                    Outcome::Interrupted(crate::react::compression::CompressionInterrupt::Command(
+                        Command::InjectUserMessage { .. }
+                    ))
+                );
+                // 等待方被唤醒后往往立刻切换模型，而 spawn_turn 的 wrapper 要等
+                // 本 future 返回才注销任务槽——必须先腾出槽位再通知，否则等待方
+                // 读到的仍是 Busy，切换会被拒绝。引导消息分支同样需要空槽位起新轮。
+                if completion_tx.is_some() || interrupted_by_message {
                     crate::shared_runtime::release_agent(&session_id);
+                }
+                if let Some(tx) = completion_tx {
+                    let result = match &outcome {
+                        Outcome::Succeeded | Outcome::Noop => Ok(()),
+                        Outcome::Failed(reason) => {
+                            Err(CoreError::ContextCompactionFailed(reason.clone()))
+                        }
+                        Outcome::Interrupted(_) => Err(CoreError::ContextCompactionFailed(
+                            "整理上下文被中断".to_string(),
+                        )),
+                    };
+                    let _ = tx.send(result);
+                }
+                if let Outcome::Interrupted(
+                    crate::react::compression::CompressionInterrupt::Command(
+                        Command::InjectUserMessage {
+                            message_id,
+                            content,
+                        },
+                    ),
+                ) = outcome
+                {
+                    // 压缩已被引导消息终止且未应用任何结果；槽位已腾出，
+                    // 直接起新轮。取消类终止无需接续。
                     if let Err(error) = core.start_user_turn(message_id, content) {
                         tracing::warn!(%error, session_id = %session_id, "压缩中断后起新轮失败");
                     }
                 }
             })
         })
+    }
+
+    /// 用户手动触发的上下文压缩（`CommandInput::CompressContext`）。
+    fn compress_context(&self) -> Result<(), CoreError> {
+        self.spawn_context_compression(None, None)
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -825,10 +845,56 @@ mod model_endpoint_tests {
     async fn 无可整理历史时不调用模型() {
         let root = tempfile::tempdir().unwrap();
         let core = test_core(root.path(), "compact-empty");
-        // 空会话（无对话历史）：compact 应立即返回，不触发模型请求。
-        core.compact_context()
+        // 空会话（无对话历史）：压缩任务判定 Noop 并立即给出终态，不触发模型请求。
+        core.compact_context(200_000)
             .await
             .expect("无历史时整理上下文应直接成功");
+    }
+
+    /// 旧模型不可达时压缩必然失败，但等待必须结束（不能挂到超时）。
+    ///
+    /// 回归：早期实现靠轮询 `is_busy()` + 180s 上限判断收敛，端点不可用
+    /// 会把用户卡在一次长等待里。现在由压缩任务主动通知终态。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 压缩失败时等待立即结束并返回错误() {
+        let root = tempfile::tempdir().unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let core = TiangongCore::builder()
+            .session_id("compact-unreachable")
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root.path())
+            .workspace_dir(root.path().to_string_lossy())
+            .stream_tx(event_tx)
+            // 指向必然连接失败的地址，且超时很短。
+            .model_endpoint({
+                let mut endpoint = chat_endpoint("http://127.0.0.1:1", "sk-test", "dead-model");
+                endpoint.timeout_ms = 300;
+                endpoint
+            })
+            .plugins(vec![])
+            .build();
+
+        // 预置可压缩历史，确保真的会发起模型请求。
+        let mut session = Session::new("失败压缩");
+        session.id = "compact-unreachable".to_string();
+        session.bind_storage_root(root.path().to_path_buf());
+        for round in [("第一问", "第一答"), ("第二问", "第二答")] {
+            session.append_message(crate::session::MessageRole::User, round.0);
+            session.append_message(crate::session::MessageRole::Assistant, round.1);
+        }
+        session.try_persist_to_disk().unwrap();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            core.compact_context(200_000),
+        )
+        .await
+        .expect("压缩失败必须及时结束等待，不得挂到固定超时")
+        .expect_err("端点不可达时压缩应失败");
+        assert!(matches!(error, CoreError::ContextCompactionFailed(_)));
+        // 终态已到达：任务槽已释放，后续切换不会撞 Busy。
+        assert!(!core.is_busy(), "压缩返回时任务槽必须已释放");
     }
 }
 

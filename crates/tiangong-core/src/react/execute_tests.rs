@@ -308,6 +308,7 @@ fn endpoint_with_protocol(server: &MockServer, protocol: ProviderProtocol) -> Mo
         protocol,
         timeout_ms: 5_000,
         options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
     }
 }
 
@@ -863,7 +864,7 @@ async fn cancel_interrupts_manual_context_compression() {
 
     tokio::time::timeout(
         Duration::from_secs(10),
-        crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx),
+        crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx, None),
     )
     .await
     .expect("取消手动压缩后任务应及时结束");

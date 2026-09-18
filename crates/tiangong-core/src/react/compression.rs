@@ -162,7 +162,7 @@ impl ContextCompression {
         mut self,
         ctx: &mut TurnContext,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    ) -> Option<CompressionInterrupt> {
+    ) -> ManualCompressionOutcome {
         loop {
             tokio::select! {
                 biased;
@@ -172,7 +172,9 @@ impl ContextCompression {
                             | Command::Shutdown
                             | Command::InjectUserMessage { .. })) => {
                             self.cancel(ctx).await;
-                            return Some(CompressionInterrupt::Command(command));
+                            return ManualCompressionOutcome::Interrupted(
+                                CompressionInterrupt::Command(command),
+                            );
                         }
                         Some(Command::SetTitle { title, only_if_default }) => {
                             if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
@@ -197,14 +199,15 @@ impl ContextCompression {
                         Some(_) => continue,
                         None => {
                             self.cancel(ctx).await;
-                            return Some(CompressionInterrupt::Closed);
+                            return ManualCompressionOutcome::Interrupted(
+                                CompressionInterrupt::Closed,
+                            );
                         }
                     }
                 }
                 task_result = &mut self.task => {
                     let result = resolve_task_result(task_result);
-                    self.complete(ctx, result, None);
-                    return None;
+                    return self.complete(ctx, result, None);
                 }
             }
         }
@@ -214,12 +217,15 @@ impl ContextCompression {
     ///
     /// `result` 来自 `run` 的完成返回。Auto/Forced 的用量计入 `turn_usage`
     /// （turn 累计）；Manual 计入 session 并显式落盘。
+    ///
+    /// 返回值只对 Manual 有意义（供等待方判断终态）；Auto/Forced 返回
+    /// `Noop` 占位，调用方忽略即可。
     pub(crate) fn complete(
         self,
         ctx: &mut TurnContext,
         result: CompressionResult,
         turn_usage: Option<&mut TokenUsage>,
-    ) {
+    ) -> ManualCompressionOutcome {
         let Self {
             kind,
             task,
@@ -241,6 +247,7 @@ impl ContextCompression {
                     observed_tokens,
                     result,
                 );
+                ManualCompressionOutcome::Noop
             }
             CompressionKind::Auto { observed_tokens } => {
                 complete_with_turn_usage(
@@ -249,6 +256,7 @@ impl ContextCompression {
                     observed_tokens,
                     result,
                 );
+                ManualCompressionOutcome::Noop
             }
             CompressionKind::Manual { .. } => complete_manual(ctx, result),
         }
@@ -286,16 +294,35 @@ fn complete_with_turn_usage(
     }
 }
 
+/// 手动压缩的终态结果。
+///
+/// 压缩任务无论走到哪个分支都会产出一个终态，供等待方（模型切换编排）
+/// 结束等待；`Interrupted` 同时携带需要接续处理的中断原因。
+pub(crate) enum ManualCompressionOutcome {
+    /// 压缩已成功应用（摘要边界推进）。
+    Succeeded,
+    /// 无可压缩历史，未调用模型。
+    Noop,
+    /// 压缩执行失败（模型调用或应用摘要失败）。
+    Failed(String),
+    /// 压缩被命令中断（取消 / 关闭 / 引导消息）。
+    Interrupted(CompressionInterrupt),
+}
+
 /// 在独立 turn task 中执行手动压缩。
 ///
 /// 只接受引导消息与取消类命令：引导消息取消压缩并立即起新轮；其余
 /// 信号在压缩状态下不接受（忽略），压缩照常收敛。
+///
+/// `context_limit` 为 `None` 时使用 `ctx.context_limit`（会话配置的通用
+/// 回退限制）；模型切换前的压缩传入目标模型的上下文窗口。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) -> Option<CompressionInterrupt> {
+    context_limit: Option<usize>,
+) -> ManualCompressionOutcome {
     let observed_tokens = ctx.session.current_tokens;
-    let organizer = ContextOrganizer::new(ctx.context_limit);
+    let organizer = ContextOrganizer::new(context_limit.unwrap_or(ctx.context_limit));
 
     let compressor = ContextCompressor::new(
         ctx.session.clone(),
@@ -305,7 +332,7 @@ pub(crate) async fn run_manual_context_compression(
     );
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
-        return None;
+        return ManualCompressionOutcome::Noop;
     }
     let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
     compression.run_manual(&mut ctx, cmd_rx).await
@@ -410,20 +437,28 @@ fn resolve_task_result(
     result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())))
 }
 
-fn complete_manual(ctx: &mut TurnContext, result: CompressionResult) {
+/// 手动压缩提交：返回终态供等待方判断（成功 / 失败原因）。
+fn complete_manual(ctx: &mut TurnContext, result: CompressionResult) -> ManualCompressionOutcome {
     match result {
         Ok(update) => match apply_compression(ctx, &update, true) {
-            Ok(current_tokens) => notify_manual_success(ctx, &update, current_tokens),
+            Ok(current_tokens) => {
+                notify_manual_success(ctx, &update, current_tokens);
+                ManualCompressionOutcome::Succeeded
+            }
             Err(error) => {
                 ctx.session.token_usage.accumulate(&update.usage);
                 ctx.session.persist_to_disk();
+                let reason = error.to_string();
                 notify_manual_failure(ctx, &update.usage, &error);
+                ManualCompressionOutcome::Failed(reason)
             }
         },
         Err(error) => {
             ctx.session.token_usage.accumulate(&error.usage);
             ctx.session.persist_to_disk();
+            let reason = error.to_string();
             notify_manual_failure(ctx, &error.usage, &error);
+            ManualCompressionOutcome::Failed(reason)
         }
     }
 }
@@ -607,6 +642,7 @@ mod tests {
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 1_000,
             options: serde_json::Value::Object(serde_json::Map::new()),
+            context_window: None,
         });
         let ctx = TurnContext::builder()
             .client(client)
@@ -850,11 +886,14 @@ mod tests {
             .unwrap();
         let handle =
             tokio::spawn(async move { compression.run_manual(&mut ctx, &mut cmd_rx).await });
-        let interrupt = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("等待 run_manual 超时")
             .unwrap();
-        assert!(interrupt.is_none(), "非引导/取消命令不得中断手动压缩");
+        assert!(
+            !matches!(outcome, ManualCompressionOutcome::Interrupted(_)),
+            "非引导/取消命令不得中断手动压缩"
+        );
         let restored = Session::load_from_storage(root.path(), &session_id).unwrap();
         assert_eq!(restored.title, "压缩中改标题");
     }
@@ -896,10 +935,15 @@ mod tests {
                 if cancel {
                     assert!(matches!(
                         interrupt,
-                        Some(CompressionInterrupt::Command(Command::Cancel))
+                        ManualCompressionOutcome::Interrupted(CompressionInterrupt::Command(
+                            Command::Cancel
+                        ))
                     ));
                 } else {
-                    assert!(interrupt.is_none());
+                    assert!(!matches!(
+                        interrupt,
+                        ManualCompressionOutcome::Interrupted(_)
+                    ));
                 }
                 let expected = if fail_save { "原标题" } else { "新标题" };
                 assert_eq!(ctx.session.title, expected);
@@ -940,7 +984,7 @@ mod tests {
         .expect("取消应立即返回");
         assert!(matches!(
             interrupt,
-            Some(CompressionInterrupt::Command(Command::Cancel))
+            ManualCompressionOutcome::Interrupted(CompressionInterrupt::Command(Command::Cancel))
         ));
     }
 

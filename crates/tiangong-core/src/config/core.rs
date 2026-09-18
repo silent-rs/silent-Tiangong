@@ -81,6 +81,7 @@ pub fn chat_endpoint(base_url: &str, api_key: &str, model: &str) -> ModelEndpoin
         protocol: ProviderProtocol::default(),
         timeout_ms: DEFAULT_TIMEOUT_MS,
         options: Value::Object(serde_json::Map::new()),
+        context_window: None,
     }
 }
 

@@ -267,6 +267,7 @@ fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
             protocol: provider.protocol,
             timeout_ms: provider.timeout_ms,
             options: entry.options.clone(),
+            context_window: entry.context_window,
         }
     };
 

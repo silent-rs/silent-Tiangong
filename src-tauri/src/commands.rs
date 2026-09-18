@@ -4191,6 +4191,7 @@ pub async fn fetch_provider_models(
             .unwrap_or_default(),
         timeout_ms: timeout_ms.unwrap_or(60_000),
         options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
     };
     SingleProviderClient::list_models_async(&endpoint)
         .await

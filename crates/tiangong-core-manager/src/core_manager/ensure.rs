@@ -164,7 +164,14 @@ impl CoreManager {
     }
 
     /// 模型切换编排：目标与 Core 当前实际模型不一致时，先用旧模型整理
-    /// 上下文，再切换到新模型。任一步失败立即返回，不回滚、不继续。
+    /// 上下文，再切换到新模型。
+    ///
+    /// 压缩**不是**切换的前置条件：它只是尽力让新模型接手更紧凑的上下文。
+    /// 压缩失败、被取消或启动失败都只记录警告并继续切换——否则旧模型不可
+    /// 用（额度耗尽、服务下线）时用户将永远换不掉模型。但必须等到压缩进入
+    /// 终态才切换，避免与压缩任务并发读写 Session、或切换时撞上 `Busy`。
+    ///
+    /// 只有模型切换本身失败才返回 Err（调用方据此中止发送）。
     ///
     /// 调用方必须持有会话发送锁，避免并发请求交错压缩与切换。
     pub async fn switch_model_if_needed(
@@ -186,17 +193,23 @@ impl CoreManager {
         if current.is_same_model(&target) {
             return Ok(());
         }
-        // 当前模型不可用（失效引用：Core 重建时端点为空）时
-        // 跳过整理——用一个无法发请求的端点压缩必然失败，会把用户永久
-        // 卡在失效状态。此时历史也从未被该模型处理过，直接切换即可。
+        // 当前模型不可用（失效引用：Core 重建时端点为空）时跳过整理——用一个
+        // 无法发请求的端点压缩必然失败，白等一轮。此时历史也从未被该模型
+        // 处理过，直接切换即可。
         if current.is_usable() {
-            // 用旧模型整理历史：新模型接手的是折叠后的上下文。
-            core.compact_context().await.map_err(|error| match error {
-                tiangong_core::core::CoreError::Busy => {
-                    "会话正在执行，当前回合结束后可切换模型".to_string()
-                }
-                other => other.to_string(),
-            })?;
+            // 压缩产物最终交给目标模型，按目标模型的窗口裁剪更贴合；
+            // 目标未声明窗口时回落到会话配置的通用限制。
+            let context_limit = target
+                .context_window
+                .unwrap_or_else(|| self.config().snapshot().context_limit);
+            if let Err(error) = core.compact_context(context_limit).await {
+                tracing::warn!(
+                    session_id,
+                    %error,
+                    target_model = %target.model,
+                    "模型切换前上下文整理未完成，继续切换模型"
+                );
+            }
         } else {
             tracing::info!(
                 session_id,

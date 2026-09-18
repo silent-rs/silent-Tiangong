@@ -37,6 +37,11 @@ pub struct ModelEndpoint {
     pub timeout_ms: u64,
     #[serde(default)]
     pub options: Value,
+    /// 模型上下文窗口（透传自模型注册表；None 表示用通用回退限制）。
+    ///
+    /// 不属于模型身份（见 [`Self::model_key`]）：窗口变化不触发切换前压缩。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -53,6 +58,7 @@ impl Default for ModelEndpoint {
             protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             options: Value::Object(serde_json::Map::new()),
+            context_window: None,
         }
     }
 }
@@ -71,6 +77,7 @@ impl ModelEndpoint {
             protocol: resolved.protocol,
             timeout_ms: resolved.timeout_ms,
             options: resolved.options,
+            context_window: resolved.context_window,
         }
     }
 
@@ -115,7 +122,7 @@ impl ModelEndpoint {
             protocol: self.protocol,
             model: self.model.clone(),
             options: self.options.clone(),
-            context_window: None,
+            context_window: self.context_window,
         }
     }
 }

@@ -1878,6 +1878,7 @@ mod tests {
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 5_000,
             options: serde_json::Value::Object(serde_json::Map::new()),
+            context_window: None,
         });
         let request = ModelRequest {
             session_id: None,
@@ -1950,6 +1951,7 @@ mod tests {
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 5_000,
             options: serde_json::Value::Object(serde_json::Map::new()),
+            context_window: None,
         });
         let request = ModelRequest {
             session_id: None,
@@ -2029,6 +2031,7 @@ mod tests {
             protocol: ProviderProtocol::OpenAiChatCompletions,
             timeout_ms: 5_000,
             options: Value::Object(serde_json::Map::new()),
+            context_window: None,
         });
         let request = ModelRequest {
             session_id: None,

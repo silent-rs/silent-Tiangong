@@ -162,8 +162,12 @@ async fn 模型不同时先压缩再切换() {
     manager.retire_core("switch-ok", true).await.unwrap();
 }
 
+/// 压缩失败不得阻断模型切换。
+///
+/// 旧模型额度耗尽或服务下线时压缩必然失败；若把它当作整体失败，用户将
+/// 永远换不掉模型。压缩只是尽力而为，失败仅记录警告。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 压缩失败时不切换模型() {
+async fn 压缩失败仍继续切换模型() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     // 压缩恒失败。
@@ -177,11 +181,18 @@ async fn 压缩失败时不切换模型() {
     make_core(&manager, "compact-fail").await;
 
     let target = manager.resolve_turn_model(Some("model-b")).unwrap();
-    let error = manager
+    manager
         .switch_model_if_needed("compact-fail", target)
         .await
-        .expect_err("压缩失败必须终止编排");
-    assert!(error.contains("整理上下文"), "错误应指明压缩阶段：{error}");
+        .expect("压缩失败不应阻断模型切换");
+
+    // 压缩确实尝试过且失败（摘要边界未推进）。
+    let session = manager.load_session("compact-fail").unwrap();
+    assert_eq!(session.summary_up_to, 0, "压缩失败不应推进摘要边界");
+    assert!(
+        !server.received_requests().await.unwrap().is_empty(),
+        "应实际尝试过压缩"
+    );
 
     let current = {
         let registry = manager.registry();
@@ -191,10 +202,7 @@ async fn 压缩失败时不切换模型() {
             .current_endpoint()
             .model
     };
-    assert_eq!(
-        current, "model-a",
-        "压缩失败不得切换模型，下一次发送仍会重新编排"
-    );
+    assert_eq!(current, "model-b", "压缩失败后仍应切换到目标模型");
     manager.retire_core("compact-fail", true).await.unwrap();
 }
 
@@ -516,4 +524,95 @@ async fn 同一模型换注册表条目不触发压缩与切换() {
     let session = manager.load_session("alias-switch").unwrap();
     assert_eq!(session.summary_up_to, 0, "实际模型未变，上下文应原样保留");
     manager.retire_core("alias-switch", true).await.unwrap();
+}
+
+/// 切换必须等压缩进入终态后才发生。
+///
+/// 若压缩刚启动就切换，会与压缩任务并发读写 Session，或撞上 `Busy`。
+/// 用慢响应把压缩拖住：`switch_model_if_needed` 返回时 Core 必须已空闲，
+/// 且切换确实生效。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 切换在压缩进入终态后才发生() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(summary_reply().set_delay(std::time::Duration::from_millis(700)))
+        .mount(&server)
+        .await;
+    seed_models(&dir, &server.uri(), "model-a");
+    seed_session(&dir, "await-terminal", Some("model-a"));
+    let manager = manager_at(&dir);
+    make_core(&manager, "await-terminal").await;
+
+    let target = manager.resolve_turn_model(Some("model-b")).unwrap();
+    manager
+        .switch_model_if_needed("await-terminal", target)
+        .await
+        .expect("切换应成功");
+
+    let core = {
+        let registry = manager.registry();
+        registry.get("await-terminal").cloned().unwrap()
+    };
+    assert!(
+        !core.is_busy(),
+        "返回时压缩任务必须已进入终态，任务槽已释放"
+    );
+    assert_eq!(core.current_endpoint().model, "model-b");
+    let session = manager.load_session("await-terminal").unwrap();
+    assert!(session.summary_up_to > 0, "慢压缩应等到收敛而不是被跳过");
+    manager.retire_core("await-terminal", true).await.unwrap();
+}
+
+/// 切换前压缩使用目标模型的上下文窗口。
+///
+/// 压缩产物最终交给目标模型，按目标窗口裁剪更贴合；目标未声明窗口时
+/// 回落到会话配置的通用限制。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 目标模型的上下文窗口透传到端点() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = serde_json::json!({
+        "providers": {
+            "p": {
+                "base_url": "http://unused.invalid",
+                "api_key": "test-key",
+                "timeout_ms": 60000,
+                "protocol": "openai_chat_completions",
+                "headers": {}
+            }
+        },
+        "models": {
+            "narrow": {
+                "provider": "p",
+                "model": "narrow-model",
+                "capabilities": ["chat"],
+                "context_window": 32768
+            },
+            "unspecified": {"provider": "p", "model": "plain-model", "capabilities": ["chat"]}
+        },
+        "routing": {"chat": "narrow"}
+    });
+    std::fs::write(
+        dir.path().join("models.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    let manager = manager_at(&dir);
+
+    let narrow = manager.resolve_turn_model(Some("narrow")).unwrap();
+    assert_eq!(
+        narrow.context_window,
+        Some(32768),
+        "注册表声明的窗口必须透传到端点，供切换前压缩使用"
+    );
+    // 窗口不属于模型身份：仅窗口不同不触发切换。
+    let mut same_model_wider = narrow.clone();
+    same_model_wider.context_window = Some(200_000);
+    assert!(narrow.is_same_model(&same_model_wider));
+
+    let unspecified = manager.resolve_turn_model(Some("unspecified")).unwrap();
+    assert_eq!(
+        unspecified.context_window, None,
+        "未声明窗口时留空，由调用方回落到会话配置"
+    );
 }
