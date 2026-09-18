@@ -53,6 +53,13 @@ pub(super) async fn prepare_before_request(
         match compression.run(ctx, cmd_rx).await {
             Ok(result) => {
                 compression.complete(ctx, result, Some(accumulated_usage));
+                // 交接成功（标记已被 adopt 清除）：上下文刚折叠为摘要，传入的
+                // 观测 token 还是压缩前的陈旧值，据此判断只会误触发一次注定
+                // 失败的二次压缩（保留区已无更早历史）。失败则照常走压力
+                // 检查，作为溢出兜底。
+                if ctx.session.pending_config_handoff.is_none() {
+                    return RequestPreparation::Ready;
+                }
             }
             Err(interrupt) => {
                 accumulated_usage.accumulate(&compression.cancelled_usage);

@@ -25,7 +25,10 @@ pub enum ConfigChangeKind {
     Model,
     /// 仅工具（插件）声明变化。
     Tools,
-    /// 模型与工具同时变化。
+    /// 模型与插件至少其一变化（无法细分时的保守归类）。
+    ///
+    /// 会话只持久化指纹摘要，比对时区分不出具体来源，实际记录的种类几乎
+    /// 总是 `Both`——故其文案用「或」而非「和」，不向用户声称两者都变了。
     Both,
 }
 
@@ -35,7 +38,7 @@ impl ConfigChangeKind {
         match self {
             Self::Model => "模型",
             Self::Tools => "插件",
-            Self::Both => "模型和插件",
+            Self::Both => "模型或插件",
         }
     }
 

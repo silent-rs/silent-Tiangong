@@ -575,7 +575,10 @@ fn complete_handoff(
     }
 }
 
-/// 交接失败：保留标记（不调用 adopt），明确告知新配置尚未生效。
+/// 交接失败：保留标记（不调用 adopt），如实告知本轮未经整理直接以新配置继续。
+///
+/// 失败不阻断本轮：正式请求仍按新配置发出（不能因整理失败拒绝回答），
+/// 下一轮安全边界检测到标记仍在会再次尝试整理。
 fn notify_handoff_failure(
     ctx: &mut TurnContext,
     kind: crate::config::fingerprint::ConfigChangeKind,
@@ -585,12 +588,12 @@ fn notify_handoff_failure(
         session_id = %ctx.session.id,
         error = %error,
         change = kind.describe(),
-        "配置交接压缩失败，新配置未生效，保留标记等待下一轮重试"
+        "配置交接压缩失败，本轮未经整理直接以新配置继续，保留标记等待下一轮重试"
     );
     append_handoff_notice(
         ctx,
         format!(
-            "{}配置已变更，但上下文整理失败，本轮仍使用原配置，稍后自动重试。",
+            "{}配置已变更，但上下文整理失败，本轮直接以新配置继续，稍后自动重试整理。",
             kind.describe()
         ),
     );
