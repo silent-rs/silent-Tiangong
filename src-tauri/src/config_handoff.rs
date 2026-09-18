@@ -482,12 +482,7 @@ mod handoff_e2e_tests {
     }
 
     /// 预置带两轮问答历史的会话，并定档一个与目标不一致的旧指纹。
-    fn seed_session_with_stale_pin(
-        dir: &tempfile::TempDir,
-        store: &ConfigHandoffStore,
-        manager: &CoreManager,
-        id: &str,
-    ) {
+    fn seed_session_with_stale_pin(dir: &tempfile::TempDir, store: &ConfigHandoffStore, id: &str) {
         let mut session = Session::new("交接测试");
         session.id = id.to_string();
         session.bind_storage_root(dir.path().to_path_buf());
@@ -541,7 +536,7 @@ mod handoff_e2e_tests {
             .respond_with(completion_reply("[[SUMMARY]]\n交接摘要"))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-bootstrap");
+        seed_session_with_stale_pin(&dir, &store, "e2e-bootstrap");
         make_core(&manager, "e2e-bootstrap", &server.uri()).await;
 
         // 首检：定档与当前指纹不一致 → 压缩交接。
@@ -582,7 +577,7 @@ mod handoff_e2e_tests {
             .respond_with(ResponseTemplate::new(500).set_body_string("compression unavailable"))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-retry");
+        seed_session_with_stale_pin(&dir, &store, "e2e-retry");
         make_core(&manager, "e2e-retry", &server.uri()).await;
 
         let fp = fingerprint_for(&server.uri());
@@ -627,7 +622,7 @@ mod handoff_e2e_tests {
             .respond_with(completion_reply("慢摘要").set_delay(Duration::from_secs(30)))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-busy");
+        seed_session_with_stale_pin(&dir, &store, "e2e-busy");
         make_core(&manager, "e2e-busy", &server.uri()).await;
 
         // 变化点打标（写标记 + spawn 后台处理）：后台交接的压缩挂起中。
@@ -670,7 +665,7 @@ mod handoff_e2e_tests {
             .mount(&server)
             .await;
         // 会话在当前指纹下已定档（模拟上一进程的正常收尾）。
-        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-mark");
+        seed_session_with_stale_pin(&dir, &store, "e2e-mark");
         make_core(&manager, "e2e-mark", &server.uri()).await;
         store.complete_handoff("e2e-mark", &fingerprint_for(&server.uri()));
 

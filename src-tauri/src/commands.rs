@@ -728,8 +728,9 @@ async fn send_message_inner(
         }
     };
     let sid = ensured.session_id.clone();
-    if let Err(error) =
-        state.deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
+    if let Err(error) = state
+        .deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
+        .await
     {
         shutdown_join_core_if_current(state, &sid).await;
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
@@ -1108,7 +1109,10 @@ pub async fn edit_and_resend(
         }
     };
     let sid = ensured.session_id.clone();
-    if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
+    if let Err(error) = state
+        .deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone())
+        .await
+    {
         // 复用 Core 时不销毁 Core（它仍可能被其它流程持有）。deliver 失败时尚未启动
         // 新 turn，只需把磁盘 session 恢复到编辑前状态，Core 下次读取即为正确内容。
         restore_edited_session(state.inner(), &session_id, original_session).await;

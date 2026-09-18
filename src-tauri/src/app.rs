@@ -799,11 +799,7 @@ impl TiangongApp {
         // 模型端点变化是配置交接的触发源之一（另一个是插件变化，见
         // notify_plugins_changed）：给活跃会话打标并立即尝试交接。
         let changed = |llm: &tiangong_llm::ModelEndpoint| {
-            (
-                llm.protocol.clone(),
-                llm.base_url.clone(),
-                llm.model.clone(),
-            )
+            (llm.protocol, llm.base_url.clone(), llm.model.clone())
         };
         if changed(&previous.llm) != changed(&template.llm) {
             self.mark_config_handoff(&template.llm);
@@ -846,22 +842,57 @@ impl TiangongApp {
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<EnsuredCore, String> {
         self.wait_plugin_preload().await?;
-        let (app_config, agent_config, default_workspace_dir) = self
-            .with_state_read(|state| {
-                Ok((
-                    state.config.clone(),
-                    state.agent_config.clone(),
-                    state.workspace_dir.clone(),
-                ))
+        let (app_config, default_workspace_dir) = self
+            .with_state_read(|state| Ok((state.config.clone(), state.workspace_dir.clone())))
+            .await
+            .unwrap_or_default();
+        let (session_config, workspace_dir) = self
+            .resolve_session_context(
+                session_id,
+                workspace_dir,
+                initial_trust_mode,
+                initial_reasoning_effort,
+            )
+            .await;
+        let workspace_dir = workspace_dir.unwrap_or(default_workspace_dir);
+        // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
+        // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
+        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        let factory = self.desktop_factory.clone();
+        let models = app_config.models.clone();
+        let ensured = self
+            .core_manager
+            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
+                factory.build_plugins_sync(models)
             })
+            .await
+            .expect("ensure_core 不应失败");
+        Ok(EnsuredCore {
+            session_id: ensured.session_id,
+            is_new: ensured.is_new,
+        })
+    }
+
+    /// 构建会话级执行上下文（per-session 配置 + 工作目录）。
+    ///
+    /// 模型端点来自全局模板；trust/effort 按会话覆盖（盘上会话优先，
+    /// 否则用调用方给的初始值兜底）。供 ensure_core 与投递前的交接检查
+    /// 共用——后者须用与实际请求一致的端点算指纹。
+    async fn resolve_session_context(
+        &self,
+        session_id: &str,
+        workspace_dir: Option<String>,
+        initial_trust_mode: Option<tiangong_types::TrustMode>,
+        initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+    ) -> (tiangong_core::config::core::CoreConfig, Option<String>) {
+        let (app_config, agent_config) = self
+            .with_state_read(|state| Ok((state.config.clone(), state.agent_config.clone())))
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
         session_config.default_trust_mode = app_config.default_trust_mode;
+        let workspace_dir = workspace_dir.filter(|cwd| !cwd.trim().is_empty());
         let existing_session = self.core_manager.load_session(session_id).ok();
-        let workspace_dir = workspace_dir
-            .filter(|cwd| !cwd.trim().is_empty())
-            .unwrap_or(default_workspace_dir);
         if let Some(session) = existing_session {
             session_config.trust_mode = session.trust_mode;
             session_config.reasoning_effort = session
@@ -872,31 +903,7 @@ impl TiangongApp {
             session_config.reasoning_effort =
                 initial_reasoning_effort.unwrap_or(agent_config.reasoning_effort);
         }
-        // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
-        // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
-        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
-        let factory = self.desktop_factory.clone();
-        let models = app_config.models.clone();
-        let ensured = self
-            .core_manager
-            .ensure_core(
-                session_id,
-                session_config.clone(),
-                workspace_dir,
-                stream_tx,
-                || factory.build_plugins_sync(models),
-            )
-            .await
-            .expect("ensure_core 不应失败");
-        // 投递消息前的配置交接检查（桌面与嵌入 server 的消息都经本方法，
-        // 挂这里即全覆盖）：待交接标记命中则执行交接；否则每会话每进程
-        // 首检一次指纹兜底（防重启丢标记与漏报的变化点）。
-        self.handoff_config_if_changed(session_id, &session_config)
-            .await;
-        Ok(EnsuredCore {
-            session_id: ensured.session_id,
-            is_new: ensured.is_new,
-        })
+        (session_config, workspace_dir)
     }
 
     /// 投递消息前的配置交接（状态与编排都在 `crate::config_handoff`）：
@@ -975,7 +982,11 @@ impl TiangongApp {
     ///
     /// 含 host 专属的远端 turn 所有权检查（`remote_turn_allows_message`），
     /// Core 操作本身经 `core_manager`（issue #245）。
-    pub fn deliver_prepared_if_live(
+    ///
+    /// 配置交接检查只挂在**用户消息投递**入口（本方法；发送、编辑重发、
+    /// 嵌入 server 三路共用）——ensure_core 的其余调用方（工具注入恢复、
+    /// /clear、/compress、切换会话查看）不产生模型请求，不得触发交接压缩。
+    pub async fn deliver_prepared_if_live(
         &self,
         session_id: &str,
         message_id: String,
@@ -987,6 +998,11 @@ impl TiangongApp {
         if !self.core_manager.has_live_core(session_id) {
             return Err("会话 Core 不存在".to_string());
         }
+        let (session_config, _) = self
+            .resolve_session_context(session_id, None, None, None)
+            .await;
+        self.handoff_config_if_changed(session_id, &session_config)
+            .await;
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,
