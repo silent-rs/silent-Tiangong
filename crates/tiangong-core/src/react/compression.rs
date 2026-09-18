@@ -28,6 +28,14 @@ pub(crate) enum CompressionKind {
     Forced,
     /// 手动压缩：不含当前任务续接，用量计入 session 并显式落盘。
     Manual { observed_tokens: usize },
+    /// 配置交接压缩：模型或插件组合变化后，先整理上下文再启用新配置。
+    ///
+    /// 与 Auto 共用同一套压缩、分割与提交逻辑，仅触发原因与通知文案不同；
+    /// 用量同样计入 turn 累计。
+    Handoff {
+        observed_tokens: usize,
+        kind: crate::config::fingerprint::ConfigChangeKind,
+    },
 }
 
 /// 压缩会话的中断原因（`run` 返回；取消类命令已在内部分流）。
@@ -67,6 +75,24 @@ impl ContextCompression {
         Self::start(ctx, organizer, 0, CompressionKind::Forced)
     }
 
+    /// 发起配置交接压缩（模型或插件组合变化）。
+    pub(super) fn handoff(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        kind: crate::config::fingerprint::ConfigChangeKind,
+    ) -> Self {
+        Self::start(
+            ctx,
+            organizer,
+            observed_tokens,
+            CompressionKind::Handoff {
+                observed_tokens,
+                kind,
+            },
+        )
+    }
+
     /// 发起手动压缩。
     fn manual(ctx: &TurnContext, organizer: &ContextOrganizer, observed_tokens: usize) -> Self {
         Self::start(
@@ -87,11 +113,21 @@ impl ContextCompression {
         kind: CompressionKind,
     ) -> Self {
         notify_started(ctx);
+        // 交接压缩优先用积累这段上下文的原模型：它才认得历史里的思考块与
+        // 工具协议细节。原模型客户端不存在（没换模型、或进程重启后端点已丢）
+        // 时回退当前模型；原模型调用失败按普通压缩失败处理，标记保留下轮重试。
+        let client = match kind {
+            CompressionKind::Handoff { .. } => ctx
+                .handoff_client
+                .clone()
+                .unwrap_or_else(|| ctx.client.clone()),
+            _ => ctx.client.clone(),
+        };
         Self {
             task: start_task(
                 ContextCompressor::new(
                     ctx.session.clone(),
-                    ctx.client.clone(),
+                    client,
                     ctx.tools.clone(),
                     ctx.agent_config.reasoning_effort,
                 ),
@@ -247,6 +283,18 @@ impl ContextCompression {
                     ctx,
                     turn_usage.expect("Auto 压缩必须提供 turn 用量"),
                     observed_tokens,
+                    result,
+                );
+            }
+            CompressionKind::Handoff {
+                observed_tokens,
+                kind,
+            } => {
+                complete_handoff(
+                    ctx,
+                    turn_usage.expect("交接压缩必须提供 turn 用量"),
+                    observed_tokens,
+                    kind,
                     result,
                 );
             }
@@ -483,6 +531,79 @@ fn apply_compression(
         .map_err(anyhow::Error::msg)?;
     ctx.session = candidate;
     Ok(current_tokens)
+}
+
+/// 交接压缩的提交：成功才启用新配置并落盘，失败保留标记等下轮重试。
+///
+/// 与 Auto 共用 `apply_compression`；差别只在成功后要把待交接指纹提升为
+/// 当前指纹，并向消息列表写入用户可见的 notice。
+fn complete_handoff(
+    ctx: &mut TurnContext,
+    turn_usage: &mut TokenUsage,
+    observed_tokens: usize,
+    kind: crate::config::fingerprint::ConfigChangeKind,
+    result: CompressionResult,
+) {
+    match result {
+        Ok(update) => {
+            turn_usage.accumulate(&update.usage);
+            match apply_compression(ctx, &update, false) {
+                Ok(current_tokens) => {
+                    // 压缩已成功落盘，此刻起旧配置不再需要：提升指纹并清除标记。
+                    ctx.session.adopt_pending_config();
+                    ctx.session.persist_to_disk();
+                    notify_auto_success(ctx, &update, current_tokens, observed_tokens);
+                    append_handoff_notice(
+                        ctx,
+                        format!(
+                            "{}配置已变更，上下文整理完成，继续使用新配置执行。",
+                            kind.describe()
+                        ),
+                    );
+                }
+                Err(error) => {
+                    notify_auto_failure(ctx, &update.usage, &error);
+                    notify_handoff_failure(ctx, kind, &error);
+                }
+            }
+        }
+        Err(error) => {
+            turn_usage.accumulate(&error.usage);
+            notify_auto_failure(ctx, &error.usage, &error);
+            notify_handoff_failure(ctx, kind, &error);
+        }
+    }
+}
+
+/// 交接失败：保留标记（不调用 adopt），明确告知新配置尚未生效。
+fn notify_handoff_failure(
+    ctx: &mut TurnContext,
+    kind: crate::config::fingerprint::ConfigChangeKind,
+    error: &dyn std::fmt::Display,
+) {
+    tracing::warn!(
+        session_id = %ctx.session.id,
+        error = %error,
+        change = kind.describe(),
+        "配置交接压缩失败，新配置未生效，保留标记等待下一轮重试"
+    );
+    append_handoff_notice(
+        ctx,
+        format!(
+            "{}配置已变更，但上下文整理失败，本轮仍使用原配置，稍后自动重试。",
+            kind.describe()
+        ),
+    );
+}
+
+/// 写入用户可见的 notice 消息（Notice 不进入模型上下文，也不参与压缩）。
+fn append_handoff_notice(ctx: &mut TurnContext, content: String) {
+    let mut message = Message::new(MessageRole::Notice, content);
+    let message_id = message.id.clone();
+    message.phase = MessagePhase::Normal;
+    ctx.session.messages.push(message);
+    ctx.session.persist_to_disk();
+    crate::react::message::emit_session_message_upsert(ctx, &message_id);
 }
 
 fn notify_started(ctx: &TurnContext) {

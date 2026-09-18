@@ -1871,6 +1871,7 @@ await runSidecar({
             config,
             true,
             id.to_string(),
+            String::new(),
             Some(first.clone()),
         );
         let runtime = tokio::runtime::Runtime::new().expect("创建 runtime 失败");

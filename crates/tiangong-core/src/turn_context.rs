@@ -52,6 +52,13 @@ pub struct TurnContext {
     pub observer: crate::observe::Observer,
     /// 构建前收集完成的工具覆盖处理器。
     pub(crate) tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+    /// 交接压缩优先使用的原模型客户端（切换模型前那一个）。
+    ///
+    /// 仅在本轮存在待交接配置、且模型确实变化时为 `Some`。原模型不可用时
+    /// 由压缩流程回退到当前模型；进程重启后原端点已不在内存，同样回退。
+    /// 端点含凭据，只在内存传递，不写入会话文件。
+    #[builder(default)]
+    pub(crate) handoff_client: Option<SingleProviderClient>,
     // ===== turn 级配置 =====
     /// 当前执行单元可用的工具集
     pub tools: Vec<ToolSpec>,

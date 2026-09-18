@@ -45,6 +45,21 @@ pub(super) async fn prepare_before_request(
     observed_tokens: usize,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> RequestPreparation {
+    // 配置交接优先于压力压缩：模型/插件变化后先整理上下文，再按新配置发请求。
+    // 这里是请求前的安全边界——已发出的请求与执行中的工具批次不受影响。
+    if let Some(pending) = ctx.session.pending_config_handoff.clone() {
+        let mut compression =
+            ContextCompression::handoff(ctx, organizer, observed_tokens, pending.kind);
+        match compression.run(ctx, cmd_rx).await {
+            Ok(result) => {
+                compression.complete(ctx, result, Some(accumulated_usage));
+            }
+            Err(interrupt) => {
+                accumulated_usage.accumulate(&compression.cancelled_usage);
+                return RequestPreparation::Interrupted(interrupted_deferred(interrupt));
+            }
+        }
+    }
     if !organizer.needs_compression(observed_tokens) {
         return RequestPreparation::Ready;
     }
