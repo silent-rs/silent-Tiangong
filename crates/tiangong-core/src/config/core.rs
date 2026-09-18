@@ -27,17 +27,13 @@ pub fn default_context_limit() -> usize {
     DEFAULT_CONTEXT_LIMIT
 }
 
-/// LLM 配置 — TiangongCore 运行所需的模型端点
+/// LLM 配置 — TiangongCore 运行所需的最小配置
 ///
-/// TiangongCore 运行所需的最小配置
-///
-/// 直接消费的端点仅主 Chat（[`ModelEndpoint`]）；lite、image/video/tts 等
-/// 其他能力由消费方自行从 `ModelsConfig` 路由解析，不经此配置中转
-/// （lite 的现行消费者是 core-manager 的标题生成）。
+/// 模型端点**不在**此配置中：会话实际使用的模型由宿主（CoreManager）解析
+/// 模型注册表后经 `TiangongCore::switch_model` 交给 Core，Core 以
+/// `CoreRuntimeModel` 持有运行时唯一真相。这里只保留与模型无关的运行参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// 主 Chat 模型端点
-    pub llm: ModelEndpoint,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -55,7 +51,6 @@ pub struct CoreConfig {
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            llm: ModelEndpoint::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
@@ -72,6 +67,23 @@ impl CoreConfig {
     }
 }
 
+/// 构造一个 Chat 模型端点（测试与默认回退的快捷方式）。
+///
+/// 模型端点不再属于 `CoreConfig`——会话实际模型由宿主解析注册表后经
+/// `TiangongCore::switch_model` 交给 Core。本函数只是端点字面量的构造
+/// 便利，不代表任何"当前模型"语义。
+pub fn chat_endpoint(base_url: &str, api_key: &str, model: &str) -> ModelEndpoint {
+    ModelEndpoint {
+        headers: Default::default(),
+        base_url: base_url.to_string(),
+        api_key: api_key.to_string(),
+        model: model.to_string(),
+        protocol: ProviderProtocol::default(),
+        timeout_ms: DEFAULT_TIMEOUT_MS,
+        options: Value::Object(serde_json::Map::new()),
+    }
+}
+
 /// CoreConfig 构建器
 #[derive(Debug, Default)]
 pub struct CoreConfigBuilder {
@@ -79,26 +91,6 @@ pub struct CoreConfigBuilder {
 }
 
 impl CoreConfigBuilder {
-    /// 设置 Chat 端点（最常用的快捷方式）
-    pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
-        self.config.llm = ModelEndpoint {
-            headers: Default::default(),
-            base_url: base_url.to_string(),
-            api_key: api_key.to_string(),
-            model: model.to_string(),
-            protocol: ProviderProtocol::default(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            options: Value::Object(serde_json::Map::new()),
-        };
-        self
-    }
-
-    /// 设置完整的 LLM 端点
-    pub fn with_llm_config(mut self, llm: ModelEndpoint) -> Self {
-        self.config.llm = llm;
-        self
-    }
-
     /// 设置信任模式
     pub fn with_trust_mode(mut self, mode: TrustMode) -> Self {
         self.config.trust_mode = mode;
@@ -224,15 +216,19 @@ mod tests {
     #[test]
     fn builder_basic() {
         let config = CoreConfig::builder()
-            .with_chat("https://api.example.com/v1", "sk-test", "gpt-4o")
             .with_trust_mode(TrustMode::FullTrust)
             .with_context_limit(65536)
             .build();
 
-        assert_eq!(config.llm.base_url, "https://api.example.com/v1");
-        assert_eq!(config.llm.model, "gpt-4o");
-        assert!(!config.llm.base_url.is_empty());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.context_limit, 65536);
+    }
+
+    #[test]
+    fn chat_endpoint_构造完整端点() {
+        let endpoint = chat_endpoint("https://api.example.com/v1", "sk-test", "gpt-4o");
+        assert_eq!(endpoint.base_url, "https://api.example.com/v1");
+        assert_eq!(endpoint.model, "gpt-4o");
+        assert_eq!(endpoint.api_key, "sk-test");
     }
 }

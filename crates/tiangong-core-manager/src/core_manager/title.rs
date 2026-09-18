@@ -28,13 +28,18 @@ impl CoreManager {
         if !is_default_title(&session.title) {
             return;
         }
-        // lite 端点不经 CoreConfig（core 只携带 chat），从磁盘模型配置的
-        // Lite 路由槽解析；未配置时回退 chat。标题生成低频，实时读盘可接受
-        // 且能感知模型配置热更。
-        let endpoint = tiangong_config::io::load_models_config_at(&self.storage_root)
+        // lite 端点不经 CoreConfig（模型端点已从中移除），从磁盘模型配置的
+        // Lite 路由槽解析；未配置时回退 Chat 路由。标题生成低频，实时读盘
+        // 可接受且能感知模型配置热更。无可用模型时放弃生成标题。
+        let models = tiangong_config::io::load_models_config_at(&self.storage_root);
+        let endpoint = models
             .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
-            .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or_else(|| self.config.snapshot().llm.clone());
+            .or_else(|| models.resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat))
+            .map(tiangong_llm::ModelEndpoint::from_resolved);
+        let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.base_url.trim().is_empty())
+        else {
+            return;
+        };
         let manager = self.clone();
         let sid = session_id.to_string();
         let input = text.to_string();

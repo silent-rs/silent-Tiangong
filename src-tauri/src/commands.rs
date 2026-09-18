@@ -727,21 +727,22 @@ async fn send_message_inner(
         }
     };
     let sid = ensured.session_id.clone();
-    // 发送时把当前所选模型持久化到会话（幂等）——必须在 ensure 之后：
-    // Core 不存在时写引用会失败（「会话无活跃 Core」）。用 ensured 返回的
-    // 会话 ID（新会话场景下它才是权威 ID）。失效引用在此拒绝，避免把
-    // 用不了的模型写进会话；忙时拒写仅告警（运行中不换模型）。
-    if let Some(model_ref) = initial_model_ref.filter(|key| !key.trim().is_empty()) {
-        let models = state
-            .with_state_read(|core_state| Ok(core_state.config.models.clone()))
-            .await?;
-        crate::app::resolve_model_endpoint(&models, &model_ref)?;
+    // 记录用户的模型选择（Session.model_ref = 选择策略，可为 None 表示
+    // 跟随默认）。实际模型的解析、比较与切换由 Manager 在投递时编排。
+    // 忙时拒写仅告警：运行中不换模型，本轮仍用 Core 当前实际模型。
+    let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
+    if let Some(model_ref) = turn_model_ref.clone() {
         if let Err(error) = state.core_manager.set_core_model_ref(&sid, Some(model_ref)) {
             tracing::warn!(session_id = %sid, error, "发送时写入会话模型引用失败");
         }
     }
     if let Err(error) = state
-        .deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
+        .deliver_prepared_if_live(
+            &sid,
+            user_message_id.clone(),
+            prepared.clone(),
+            turn_model_ref.as_deref(),
+        )
         .await
     {
         shutdown_join_core_if_current(state, &sid).await;
@@ -1105,6 +1106,12 @@ pub async fn edit_and_resend(
     // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
+    // 编辑重发不改变模型：沿用会话已记录的选择策略。
+    let session_model_ref = state
+        .core_manager
+        .load_session(&session_id)
+        .ok()
+        .and_then(|session| session.model_ref);
     let ensured = state
         .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
@@ -1122,7 +1129,13 @@ pub async fn edit_and_resend(
     };
     let sid = ensured.session_id.clone();
     if let Err(error) = state
-        .deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone())
+        .deliver_prepared_if_live(
+            &sid,
+            message_id.clone(),
+            prepared.clone(),
+            // 编辑重发沿用会话已记录的模型选择，不改变模型。
+            session_model_ref.as_deref(),
+        )
         .await
     {
         // 复用 Core 时不销毁 Core（它仍可能被其它流程持有）。deliver 失败时尚未启动
@@ -1957,10 +1970,7 @@ pub async fn set_session_model(
     // 选择时即校验：失效引用直接拒绝，不写进会话（切回「跟随默认」的
     // None 不需要校验，这是用户从失效状态自救的出口）。
     if let Some(key) = model_ref.as_deref().filter(|key| !key.trim().is_empty()) {
-        let models = state
-            .with_state_read(|core_state| Ok(core_state.config.models.clone()))
-            .await?;
-        crate::app::resolve_model_endpoint(&models, key)?;
+        state.core_manager.resolve_turn_model(Some(key))?;
     }
     // 与其他 ensure_core 调用点一致：新建 Core 必须启动流消费者，否则
     // 该会话的全部流式事件发不出去、界面哑掉。

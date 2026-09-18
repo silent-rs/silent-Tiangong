@@ -192,17 +192,35 @@ impl TiangongConfig {
             })
             .unwrap_or_else(tiangong_core::config::core::default_context_limit);
         CoreConfig {
-            llm: self
-                .models
-                .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-                .map(tiangong_llm::ModelEndpoint::from_resolved)
-                .unwrap_or_default(),
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
             context_limit,
         }
+    }
+
+    /// 解析路由 Chat 槽位的默认模型端点。
+    ///
+    /// 模型端点不再属于 `CoreConfig`——会话实际模型由宿主解析后交给 Core。
+    /// 本方法供宿主在「用户未指定模型」时确定目标端点。
+    pub fn default_chat_endpoint(&self) -> Option<tiangong_llm::ModelEndpoint> {
+        self.models
+            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+            .map(tiangong_llm::ModelEndpoint::from_resolved)
+    }
+
+    /// 路由 Chat 槽位当前指向的模型注册表 key（未配置或不在注册表时 None）。
+    pub fn default_chat_model_ref(&self) -> Option<String> {
+        let routed = self
+            .models
+            .routing
+            .get(&tiangong_llm::models_config::RoutingSlot::Chat)?;
+        self.models
+            .models
+            .iter()
+            .find(|(_, entry)| entry.provider == routed.provider && entry.model == routed.model)
+            .map(|(key, _)| key.clone())
     }
 
     /// 创建 CoreConfigProvider（用于注入 TiangongCore）

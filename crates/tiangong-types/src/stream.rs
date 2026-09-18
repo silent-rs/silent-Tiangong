@@ -228,6 +228,20 @@ pub enum StreamEvent {
     },
     /// 会话标题变更（标题生成完成 / 用户编辑）。消费线程据此 emit sessions_updated。
     TitleChanged { title: String },
+    /// 模型切换已开始（切换前的上下文整理已完成）。
+    ModelSwitchStarted {
+        /// 目标模型的注册表 key。
+        model_ref: String,
+        /// 目标模型名（供 UI 展示）。
+        model_name: String,
+    },
+    /// 模型已切换：此后的请求使用新模型。
+    ModelSwitched {
+        /// 已生效模型的注册表 key。
+        model_ref: String,
+        /// 已生效的模型名（供 UI 展示）。
+        model_name: String,
+    },
 }
 
 /// 上下文压缩/清理操作类型

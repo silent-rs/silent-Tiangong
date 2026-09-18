@@ -234,7 +234,7 @@ export function MessageInput({
       ? '正在切换模型…'
       : modelUnavailable
         ? `${sessionModelRef} 已不在配置中，请重选模型或恢复配置`
-        : '会话模型（下一次发送时生效）';
+        : '会话模型（下一次发送时生效；切换会先整理上下文）';
   const handleSessionModelChange = async (value: string) => {
     if (modelSwitching || currentRunStatus !== 'idle') return;
     const nextRef = value === MODEL_DEFAULT_VALUE ? null : value;

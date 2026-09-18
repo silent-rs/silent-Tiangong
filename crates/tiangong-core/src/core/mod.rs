@@ -42,8 +42,31 @@ pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
 }
 
-fn default_active_endpoint() -> Arc<std::sync::Mutex<Option<ModelEndpoint>>> {
-    Arc::new(std::sync::Mutex::new(None))
+/// 等待整理上下文收敛的上限：大历史会话的摘要输出可能需要数分钟。
+const COMPACT_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+/// 等待整理上下文收敛的轮询间隔。
+const COMPACT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Core 的运行时模型状态：当前**实际已应用**的模型。
+///
+/// 与 `Session.model_ref`（用户选择策略，可为 None 表示跟随默认）不同，
+/// 这里记录的是 Core 真正在用的模型——它是模型是否需要切换的唯一真相。
+/// 由宿主在构造时初始化、经 [`TiangongCore::switch_model`] 更新。
+#[derive(Debug, Clone)]
+pub struct CoreRuntimeModel {
+    /// 当前实际模型的注册表 key。
+    pub model_ref: String,
+    /// 当前实际模型的执行端点。
+    pub endpoint: ModelEndpoint,
+}
+
+/// 模型切换的目标（宿主解析注册表后传入，core 不知道注册表）。
+#[derive(Debug, Clone)]
+pub struct ResolvedTurnModel {
+    /// 目标模型的注册表 key。
+    pub model_ref: String,
+    /// 目标模型的执行端点。
+    pub endpoint: ModelEndpoint,
 }
 
 /// 天工智能体核心
@@ -77,14 +100,16 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
-    /// 当前生效的执行端点（会话实际发请求用的模型）。
+    /// 当前**实际已应用**的模型（运行时唯一真相）。
     ///
-    /// `None` 表示「跟随路由默认」——配置默认变化时自动跟随（热更）；
-    /// 用户显式切换过才写入具体端点。会话自持模型的解析归宿主：宿主把
-    /// 解析好的端点经 [`Self::switch_endpoint`] 交给这里，core 不知道
-    /// 模型注册表。
-    #[builder(default = default_active_endpoint())]
-    active_endpoint: Arc<std::sync::Mutex<Option<ModelEndpoint>>>,
+    /// 构造时由宿主按 Session.model_ref 与模型注册表解析后传入；之后只由
+    /// [`Self::switch_model`] 在切换成功时更新——切换失败保持旧值，下一次
+    /// 发送仍会识别出差异并重新走压缩+切换。
+    #[builder(setter(transform = |model: ResolvedTurnModel| Arc::new(std::sync::Mutex::new(CoreRuntimeModel {
+        model_ref: model.model_ref,
+        endpoint: model.endpoint,
+    }))))]
+    runtime_model: Arc<std::sync::Mutex<CoreRuntimeModel>>,
     /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
     #[cfg(test)]
     #[builder(default, setter(strip_option))]
@@ -121,26 +146,104 @@ impl TiangongCore {
         crate::shared_runtime::is_running(&self.session_id)
     }
 
-    /// 当前生效的执行端点：显式切换过用切换值，否则跟随配置默认（热更）。
-    pub fn current_endpoint(&self) -> ModelEndpoint {
-        let switched = self
-            .active_endpoint
+    /// 当前实际已应用模型的注册表 key（运行时唯一真相）。
+    ///
+    /// 宿主据此判断本轮是否需要切换模型——不要用 `Session.model_ref`
+    /// 代替：后者是用户的选择策略（None 表示跟随默认），不是实际状态。
+    pub fn current_model_ref(&self) -> String {
+        self.runtime_model
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        switched.unwrap_or_else(|| self.config.snapshot().llm.clone())
+            .model_ref
+            .clone()
     }
 
-    /// 切换执行端点（原子）：运行中不切换（忙即拒绝），设置后下一轮
-    /// 请求即用新端点。已发出的请求不受影响。
-    pub fn switch_endpoint(&self, new: ModelEndpoint) -> Result<(), CoreError> {
+    /// 当前实际执行端点。
+    pub fn current_endpoint(&self) -> ModelEndpoint {
+        self.runtime_model
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .endpoint
+            .clone()
+    }
+
+    /// 整理上下文：对既有历史执行一次手动压缩并等待其收敛。
+    ///
+    /// 供宿主在模型切换前调用——用**旧模型**把历史折叠成摘要，新模型
+    /// 接手的是整理后的上下文。无可压缩历史时立即返回 Ok（不调模型）。
+    ///
+    /// 与 `CommandInput::CompressContext` 共用同一压缩实现，区别只在于
+    /// 本方法会等待完成并把失败如实返回，便于宿主据此中止后续步骤。
+    pub async fn compact_context(&self) -> Result<(), CoreError> {
         if self.is_busy() {
             return Err(CoreError::Busy);
         }
-        *self
-            .active_endpoint
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(new);
+        let before = self.load_session()?;
+        // 边界之后只剩 System/Notice（或历史已全部折叠）时无需模型调用。
+        let has_history = before
+            .messages
+            .iter()
+            .skip(before.summary_up_to.min(before.messages.len()))
+            .any(|message| {
+                message.role != crate::session::MessageRole::System
+                    && message.role != crate::session::MessageRole::Notice
+            });
+        if !has_history {
+            return Ok(());
+        }
+        let summary_before = before.summary_up_to;
+        self.compress_context()?;
+        // compress_context 返回 Ok 时压缩任务已注册任务槽，is_busy 立即可靠。
+        let deadline = tokio::time::Instant::now() + COMPACT_WAIT_LIMIT;
+        while self.is_busy() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CoreError::ContextCompactionFailed(
+                    "整理上下文超时".to_string(),
+                ));
+            }
+            tokio::time::sleep(COMPACT_POLL_INTERVAL).await;
+        }
+        let after = self.load_session()?;
+        if after.summary_up_to > summary_before {
+            Ok(())
+        } else {
+            Err(CoreError::ContextCompactionFailed(
+                "整理上下文未推进摘要边界（模型调用失败或无可压缩内容）".to_string(),
+            ))
+        }
+    }
+
+    /// 切换当前模型（原子）：运行中不切换（忙即拒绝）。
+    ///
+    /// 只有切换成功才更新 `current_model_ref`；失败保持旧值，宿主下一次
+    /// 发送仍会识别出差异并重新编排。切换后的请求使用新模型，已发出的
+    /// 请求不受影响。
+    pub fn switch_model(&self, target: ResolvedTurnModel) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        if target.endpoint.base_url.trim().is_empty() || target.endpoint.model.trim().is_empty() {
+            return Err(CoreError::ModelSwitchFailed(format!(
+                "目标模型 {} 的端点配置不完整",
+                target.model_ref
+            )));
+        }
+        let _ = self.stream_tx.send(StreamEvent::ModelSwitchStarted {
+            model_ref: target.model_ref.clone(),
+            model_name: target.endpoint.model.clone(),
+        });
+        {
+            let mut current = self
+                .runtime_model
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            current.model_ref = target.model_ref.clone();
+            current.endpoint = target.endpoint.clone();
+        }
+        let _ = self.stream_tx.send(StreamEvent::ModelSwitched {
+            model_ref: target.model_ref,
+            model_name: target.endpoint.model,
+        });
         Ok(())
     }
 
@@ -635,68 +738,91 @@ impl Drop for TiangongCore {
 }
 
 #[cfg(test)]
-mod endpoint_switch_tests {
+mod runtime_model_tests {
     use super::*;
-    use crate::config::core::{CoreConfig, CoreConfigProvider};
+    use crate::config::core::{CoreConfig, CoreConfigProvider, chat_endpoint};
 
-    fn endpoint(model: &str) -> ModelEndpoint {
-        ModelEndpoint {
-            model: model.to_string(),
-            base_url: "https://api.example.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            ..Default::default()
+    fn target(model: &str, key: &str) -> ResolvedTurnModel {
+        ResolvedTurnModel {
+            model_ref: key.to_string(),
+            endpoint: chat_endpoint("https://api.example.com/v1", "sk-test", model),
         }
     }
 
     fn test_core(root: &std::path::Path, session_id: &str) -> TiangongCore {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
-        let config = CoreConfig {
-            llm: endpoint("default-model"),
-            ..Default::default()
-        };
         TiangongCore::builder()
             .session_id(session_id)
-            .config(CoreConfigProvider::new(config))
+            .config(CoreConfigProvider::new(CoreConfig::default()))
             .trust_mode(crate::permission::TrustMode::FullTrust)
             .storage_root(root)
             .workspace_dir(root.to_string_lossy())
             .stream_tx(event_tx)
             .plugins(vec![])
+            .runtime_model(target("initial-model", "key-initial"))
             .build()
     }
 
     #[test]
-    fn 未切换时端点跟随配置默认() {
+    fn 构造时即持有实际模型() {
         let root = tempfile::tempdir().unwrap();
-        let core = test_core(root.path(), "follow-default");
-        assert_eq!(core.current_endpoint().model, "default-model");
-
-        // 配置默认变化后自动跟随（热更）——未显式切换的会话不锁定端点。
-        let next = CoreConfig {
-            llm: endpoint("changed-default"),
-            ..Default::default()
-        };
-        core.replace_config(next).unwrap();
-        assert_eq!(core.current_endpoint().model, "changed-default");
+        let core = test_core(root.path(), "runtime-init");
+        assert_eq!(core.current_model_ref(), "key-initial");
+        assert_eq!(core.current_endpoint().model, "initial-model");
     }
 
     #[test]
-    fn 切换后端点自持不再跟随默认() {
+    fn 切换成功后当前模型更新并发出事件() {
         let root = tempfile::tempdir().unwrap();
-        let core = test_core(root.path(), "self-held");
-        core.switch_endpoint(endpoint("picked-model")).unwrap();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let core = TiangongCore::builder()
+            .session_id("runtime-switch")
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root.path())
+            .workspace_dir(root.path().to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(vec![])
+            .runtime_model(target("initial-model", "key-initial"))
+            .build();
+
+        core.switch_model(target("picked-model", "key-picked"))
+            .unwrap();
+        assert_eq!(core.current_model_ref(), "key-picked");
         assert_eq!(core.current_endpoint().model, "picked-model");
 
-        // 已自持端点的会话不受路由默认变化影响。
-        let next = CoreConfig {
-            llm: endpoint("changed-default"),
-            ..Default::default()
+        let events: Vec<StreamEvent> = event_rx.try_iter().collect();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ModelSwitchStarted { model_ref, .. } if model_ref == "key-picked"
+            )),
+            "应发出 ModelSwitchStarted"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ModelSwitched { model_ref, model_name }
+                    if model_ref == "key-picked" && model_name == "picked-model"
+            )),
+            "应发出 ModelSwitched"
+        );
+    }
+
+    #[test]
+    fn 端点不完整时切换失败且保持旧模型() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "runtime-invalid");
+        let broken = ResolvedTurnModel {
+            model_ref: "key-broken".to_string(),
+            endpoint: chat_endpoint("", "sk-test", ""),
         };
-        core.replace_config(next).unwrap();
+        let error = core.switch_model(broken).expect_err("不完整端点应拒绝切换");
+        assert!(matches!(error, CoreError::ModelSwitchFailed(_)));
         assert_eq!(
-            core.current_endpoint().model,
-            "picked-model",
-            "切换过的会话不应跟随默认变化"
+            core.current_model_ref(),
+            "key-initial",
+            "切换失败必须保持旧模型，下一次发送才会重新编排"
         );
     }
 
@@ -714,10 +840,25 @@ mod endpoint_switch_tests {
         let again = Session::load_from_storage(root.path(), "ref-persist").unwrap();
         assert_eq!(again.updated_at, first_updated, "同值写入不应刷新时间戳");
 
-        // None 恢复跟随默认。
+        // None 恢复跟随默认（用户选择策略，不影响 Core 当前实际模型）。
         core.set_model_ref(None).unwrap();
         let cleared = Session::load_from_storage(root.path(), "ref-persist").unwrap();
         assert!(cleared.model_ref.is_none());
+        assert_eq!(
+            core.current_model_ref(),
+            "key-initial",
+            "清除用户选择不改变 Core 已应用的实际模型"
+        );
+    }
+
+    #[tokio::test]
+    async fn 无可整理历史时不调用模型() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "compact-empty");
+        // 空会话（无对话历史）：compact 应立即返回，不触发模型请求。
+        core.compact_context()
+            .await
+            .expect("无历史时整理上下文应直接成功");
     }
 }
 
@@ -773,6 +914,7 @@ mod shared_runtime_tests {
                     values: vec![candidate("@two")],
                 }),
             ])
+            .runtime_model(crate::core::test_support::test_model("http://test.invalid"))
             .build();
 
         let values = core
@@ -803,6 +945,7 @@ mod shared_runtime_tests {
                     .workspace_dir(root.path().to_string_lossy())
                     .stream_tx(event_tx)
                     .plugins(vec![])
+                    .runtime_model(crate::core::test_support::test_model("http://test.invalid"))
                     .build()
             })
             .collect();

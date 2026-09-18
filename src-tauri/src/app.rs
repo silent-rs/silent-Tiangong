@@ -97,101 +97,6 @@ pub(crate) struct EnsuredCore {
     pub(crate) is_new: bool,
 }
 
-/// 按模型注册表 key 解析执行端点（失效为硬错误）。
-///
-/// 用户选过的模型从配置中消失是**配置问题，应由用户修复**——不静默
-/// 回退默认：否则用户会在不知情的情况下用别的模型继续对话。两类失效
-/// 分别给出可操作的提示；凭据为空同样视为不可用（请求必然鉴权失败）。
-pub(crate) fn resolve_model_endpoint(
-    models: &tiangong_llm::models_config::ModelsConfig,
-    key: &str,
-) -> Result<tiangong_llm::ModelEndpoint, String> {
-    let entry = models.models.get(key).ok_or_else(|| {
-        format!("会话模型 {key} 已不在配置中，请在输入框左侧的模型选择器中重选，或恢复该模型配置")
-    })?;
-    let provider = models.providers.get(&entry.provider).ok_or_else(|| {
-        format!(
-            "会话模型 {key} 的服务提供方 {} 已删除，请在输入框左侧的模型选择器中重选，或恢复该提供方配置",
-            entry.provider
-        )
-    })?;
-    let api_key = tiangong_llm::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
-    if api_key.trim().is_empty() {
-        return Err(format!(
-            "会话模型 {key} 的凭据未配置（服务提供方 {} 的 api_key 为空或其环境变量未设置），请补齐配置后再发送",
-            entry.provider
-        ));
-    }
-    Ok(tiangong_llm::ModelEndpoint::from_resolved(
-        tiangong_llm::models_config::ResolvedModel {
-            headers: provider.headers.clone(),
-            provider: entry.provider.clone(),
-            base_url: provider.base_url.clone(),
-            api_key,
-            timeout_ms: provider.timeout_ms,
-            protocol: provider.protocol,
-            model: entry.model.clone(),
-            options: entry.options.clone(),
-            context_window: entry.context_window,
-        },
-    ))
-}
-
-/// 会话应然执行端点：model_ref 指向的模型优先，未设置时用路由默认。
-///
-/// 引用失效返回 Err（不回退默认），由调用方决定是拦截还是告警。
-async fn session_effective_endpoint_at(
-    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
-    manager: &tiangong_core_manager::CoreManager,
-    session_id: &str,
-) -> Result<tiangong_llm::ModelEndpoint, String> {
-    let (models, default_endpoint) = {
-        let guard = state.lock().await;
-        (
-            guard.config.models.clone(),
-            guard.config.to_core_config().llm,
-        )
-    };
-    match manager
-        .load_session(session_id)
-        .ok()
-        .and_then(|session| session.model_ref)
-    {
-        None => Ok(default_endpoint),
-        Some(key) => resolve_model_endpoint(&models, &key),
-    }
-}
-
-/// 会话端点校正：应然端点与 Core 当前生效端点不一致时切换（引用不变）。
-///
-/// 覆盖三类漂移——懒重建 Core 后的自持端点恢复、跟随默认的会话在默认
-/// 变化后的跟随、用户切换模型后的首次生效。无活跃 Core 时直接返回：
-/// ensure 之后的投递路径会再次校正。
-async fn reconcile_session_endpoint_at(
-    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
-    manager: &tiangong_core_manager::CoreManager,
-    session_id: &str,
-) -> Result<(), String> {
-    let expected = session_effective_endpoint_at(state, manager, session_id).await?;
-    let current = {
-        let registry = manager.registry();
-        registry.get(session_id).map(|core| core.current_endpoint())
-    };
-    let Some(current) = current else {
-        return Ok(());
-    };
-    if (expected.protocol, &expected.base_url, &expected.model)
-        == (current.protocol, &current.base_url, &current.model)
-    {
-        return Ok(());
-    }
-    let model_ref = manager
-        .load_session(session_id)
-        .ok()
-        .and_then(|session| session.model_ref);
-    manager.set_core_session_model(session_id, model_ref, expected)
-}
-
 fn merge_agent_output_messages(
     view: &mut Vec<tiangong_types::Message>,
     agent_id: &str,
@@ -973,11 +878,19 @@ impl TiangongApp {
     ///
     /// 投递前完成会话模型的端点校正（模型引用是会话的持久属性，Core 可能
     /// 被懒重建或跟随默认变化）；引用失效直接报错，不静默换模型执行。
+    /// 投递前由 `CoreManager` 完成模型编排：解析本轮目标模型 → 与 Core
+    /// 当前实际模型比较 → 不同则先用旧模型整理上下文、再切换到新模型。
+    /// 任一步失败立即返回错误且不投递消息；调用方持有会话发送锁，整个
+    /// 过程与投递处在同一临界区内。
+    ///
+    /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型（默认本身会变，
+    /// 因此仍需经 Manager 解析成实际目标后比较）。
     pub async fn deliver_prepared_if_live(
         &self,
         session_id: &str,
         message_id: String,
         prepared: Vec<tiangong_types::ContentBlock>,
+        model_ref: Option<&str>,
     ) -> Result<(), String> {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
@@ -985,9 +898,12 @@ impl TiangongApp {
         if !self.core_manager.has_live_core(session_id) {
             return Err("会话 Core 不存在".to_string());
         }
-        // 端点校正失败即拒绝投递：模型引用失效属于配置问题，必须让用户
-        // 看到并修复，不能静默用别的模型跑对话。
-        reconcile_session_endpoint_at(&self.state, &self.core_manager, session_id).await?;
+        // 模型编排全部交给 Manager：解析目标 → 与 Core 当前实际模型比较 →
+        // 需要时先整理上下文再切换。任一步失败立即返回，不投递用户消息。
+        let target = self.core_manager.resolve_turn_model(model_ref)?;
+        self.core_manager
+            .switch_model_if_needed(session_id, target)
+            .await?;
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,
@@ -1191,6 +1107,14 @@ mod tests {
             .storage_root(storage_root.path())
             .workspace_dir(storage_root.path().to_string_lossy())
             .trust_mode(session.trust_mode)
+            .runtime_model(tiangong_core::core::ResolvedTurnModel {
+                model_ref: "test-model".to_string(),
+                endpoint: tiangong_core::config::core::chat_endpoint(
+                    "http://test.invalid",
+                    "test-key",
+                    "test-model",
+                ),
+            })
             .build();
         assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");
         // 直接经 core_manager registry 插入(issue #245:不再有 TiangongApp.lock_cores)。

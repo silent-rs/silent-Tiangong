@@ -32,6 +32,15 @@ fn main() {
         )
         .stream_tx(tx)
         .plugins(Vec::new())
+        // Core 构造即需持有实际模型（宿主解析模型注册表后传入）。
+        .runtime_model(tiangong_core::core::ResolvedTurnModel {
+            model_ref: "example-model".to_string(),
+            endpoint: tiangong_core::config::core::chat_endpoint(
+                "https://api.example.com/v1",
+                "sk-example",
+                "example-model",
+            ),
+        })
         .build();
 
     println!("=== 发送: 你好 ===");

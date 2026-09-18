@@ -439,6 +439,16 @@ impl ResponseState {
                 ));
             }
 
+            StreamEvent::ModelSwitchStarted { model_name, .. } => {
+                self.end_active_stream();
+                output::status(&format!("正在切换模型: {model_name}"));
+            }
+
+            StreamEvent::ModelSwitched { model_name, .. } => {
+                self.end_active_stream();
+                output::status(&format!("已切换至模型: {model_name}"));
+            }
+
             StreamEvent::IndexStatus { phase, count } => {
                 if phase == "done" {
                     output::status(&format!("索引扫描完成: {count} 个文件"));

@@ -439,6 +439,12 @@ async fn send_message_and_wait(
             stream_tx,
         )
         .await;
+    // 远端投递不改变模型：沿用会话已记录的选择策略。
+    let session_model_ref = state
+        .core_manager
+        .load_session(&session_id)
+        .ok()
+        .and_then(|session| session.model_ref);
     let ensured = match ensured {
         Ok(ensured) => ensured,
         Err(error) => {
@@ -448,7 +454,13 @@ async fn send_message_and_wait(
     };
     let waiter = state.register_remote_turn_waiter(&session_id, &message_id);
     if let Err(error) = state
-        .deliver_prepared_if_live(&ensured.session_id, message_id.clone(), prepared)
+        .deliver_prepared_if_live(
+            &ensured.session_id,
+            message_id.clone(),
+            prepared,
+            // 远端投递沿用会话已记录的模型选择。
+            session_model_ref.as_deref(),
+        )
         .await
     {
         rollback_failed_delivery(state, &session_id, &message_id, created_paths).await;

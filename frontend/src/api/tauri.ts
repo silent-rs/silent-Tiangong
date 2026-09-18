@@ -264,6 +264,10 @@ export interface StreamEvent {
   path?: string;
   /** title_changed 事件携带的新标题。 */
   title?: string;
+  /** model_switch_started / model_switched 携带的模型注册表 key。 */
+  model_ref?: string;
+  /** model_switch_started / model_switched 携带的模型名（用于展示）。 */
+  model_name?: string;
 }
 
 export interface SessionStreamEvent {

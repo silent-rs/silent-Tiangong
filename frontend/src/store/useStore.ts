@@ -711,6 +711,14 @@ function applyEventToSessionView(
         ? `记忆检索完成，命中 ${event.hit_count} 条`
         : '记忆检索完成，无相关记忆';
       break;
+    case 'model_switch_started':
+      runStatus = 'executing';
+      runSummary = `正在切换模型：${event.model_name || event.model_ref || ''}`;
+      break;
+    case 'model_switched':
+      runStatus = 'executing';
+      runSummary = `已切换至 ${event.model_name || event.model_ref || ''}`;
+      break;
     case 'context_compressing':
       runStatus = 'executing';
       runSummary = '正在压缩早期上下文...';
