@@ -735,10 +735,19 @@ impl Drop for TiangongCore {
 #[cfg(test)]
 mod model_endpoint_tests {
     use super::*;
-    use crate::config::core::{CoreConfig, CoreConfigProvider, chat_endpoint};
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
+
+    fn endpoint(base_url: &str, model: &str) -> ModelEndpoint {
+        ModelEndpoint {
+            base_url: base_url.to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
 
     fn target(model: &str) -> ModelEndpoint {
-        chat_endpoint("https://api.example.com/v1", "sk-test", model)
+        endpoint("https://api.example.com/v1", model)
     }
 
     fn test_core(root: &std::path::Path, session_id: &str) -> TiangongCore {
@@ -807,7 +816,7 @@ mod model_endpoint_tests {
     fn 端点不完整时切换失败且保持旧模型() {
         let root = tempfile::tempdir().unwrap();
         let core = test_core(root.path(), "runtime-invalid");
-        let broken = chat_endpoint("", "sk-test", "");
+        let broken = endpoint("", "");
         let error = core.switch_model(broken).expect_err("不完整端点应拒绝切换");
         assert!(matches!(error, CoreError::ModelSwitchFailed(_)));
         assert_eq!(
@@ -868,10 +877,9 @@ mod model_endpoint_tests {
             .workspace_dir(root.path().to_string_lossy())
             .stream_tx(event_tx)
             // 指向必然连接失败的地址，且超时很短。
-            .model_endpoint({
-                let mut endpoint = chat_endpoint("http://127.0.0.1:1", "sk-test", "dead-model");
-                endpoint.timeout_ms = 300;
-                endpoint
+            .model_endpoint(ModelEndpoint {
+                timeout_ms: 300,
+                ..endpoint("http://127.0.0.1:1", "dead-model")
             })
             .plugins(vec![])
             .build();

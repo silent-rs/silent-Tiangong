@@ -161,7 +161,12 @@ fn core(
 
 /// 测试用运行时模型：Core 构造时必须持有实际模型端点。
 fn turn_model(base_url: &str) -> tiangong_llm::ModelEndpoint {
-    tiangong_core::config::core::chat_endpoint(base_url, "test", "test-model")
+    tiangong_llm::ModelEndpoint {
+        base_url: base_url.to_string(),
+        api_key: "test".to_string(),
+        model: "test-model".to_string(),
+        ..Default::default()
+    }
 }
 
 async fn send(

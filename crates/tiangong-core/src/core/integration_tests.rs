@@ -78,9 +78,13 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
         let config = CoreConfig::builder()
             .with_trust_mode(TrustMode::FullTrust)
             .build();
-        let mut endpoint =
-            crate::config::core::chat_endpoint(&server.uri(), "test", "glm-5.3-flash");
-        endpoint.protocol = ProviderProtocol::Anthropic;
+        let endpoint = tiangong_llm::ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test".to_string(),
+            model: "glm-5.3-flash".to_string(),
+            protocol: ProviderProtocol::Anthropic,
+            ..Default::default()
+        };
         let (tx, _rx) = std::sync::mpsc::channel();
         super::TiangongCore::builder()
             .session_id(sid.clone())

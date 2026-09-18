@@ -11,16 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::permission::TrustMode;
-use tiangong_llm::ProviderProtocol;
 
 /// 模型端点配置（定义已迁移至 `tiangong-llm`，此处仅做 re-export 保持外部路径稳定）。
 pub use tiangong_llm::ModelEndpoint;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 /// 模型端点未声明上下文窗口时的兜底值。
 ///
@@ -64,24 +61,6 @@ impl CoreConfig {
     /// 快捷构建器
     pub fn builder() -> CoreConfigBuilder {
         CoreConfigBuilder::default()
-    }
-}
-
-/// 构造一个 Chat 模型端点（测试与默认回退的快捷方式）。
-///
-/// 模型端点不再属于 `CoreConfig`——会话实际模型由宿主解析注册表后经
-/// `TiangongCore::switch_model` 交给 Core。本函数只是端点字面量的构造
-/// 便利，不代表任何"当前模型"语义。
-pub fn chat_endpoint(base_url: &str, api_key: &str, model: &str) -> ModelEndpoint {
-    ModelEndpoint {
-        headers: Default::default(),
-        base_url: base_url.to_string(),
-        api_key: api_key.to_string(),
-        model: model.to_string(),
-        protocol: ProviderProtocol::default(),
-        timeout_ms: DEFAULT_TIMEOUT_MS,
-        options: Value::Object(serde_json::Map::new()),
-        context_window: None,
     }
 }
 
@@ -217,13 +196,5 @@ mod tests {
 
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.custom_system_prompt, "提示");
-    }
-
-    #[test]
-    fn chat_endpoint_构造完整端点() {
-        let endpoint = chat_endpoint("https://api.example.com/v1", "sk-test", "gpt-4o");
-        assert_eq!(endpoint.base_url, "https://api.example.com/v1");
-        assert_eq!(endpoint.model, "gpt-4o");
-        assert_eq!(endpoint.api_key, "sk-test");
     }
 }

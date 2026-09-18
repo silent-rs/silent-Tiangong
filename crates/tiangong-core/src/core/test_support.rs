@@ -1129,9 +1129,14 @@ pub fn core_with(
     (core, EventLog::new(event_rx))
 }
 
-/// 测试用的运行时模型端点（`model_ref` 与模型名一致）。
+/// 测试用的运行时模型端点。
 pub fn test_model(endpoint: &str) -> tiangong_llm::ModelEndpoint {
-    crate::config::core::chat_endpoint(endpoint, "test-key", "test-model")
+    tiangong_llm::ModelEndpoint {
+        base_url: endpoint.to_string(),
+        api_key: "test-key".to_string(),
+        model: "test-model".to_string(),
+        ..Default::default()
+    }
 }
 
 pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, EventLog) {
