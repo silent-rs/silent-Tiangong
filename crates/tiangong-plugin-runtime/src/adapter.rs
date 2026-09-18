@@ -36,8 +36,6 @@ pub struct WasmPluginAdapter {
     config: PluginRuntimeConfig,
     /// 插件 id，构造期确定后不变。
     id: String,
-    /// 插件版本，参与执行配置指纹（升级需要交接上下文）。
-    version: String,
     /// 反馈通道（每 turn 注入），供 handle 发送流事件。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
@@ -76,19 +74,12 @@ impl WasmPluginAdapter {
         sidecar: Option<Arc<dyn SidecarConnection>>,
     ) -> Self {
         let inner = Arc::new(Mutex::new(plugin));
-        let descriptor = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe());
-        let id_string = descriptor
-            .as_ref()
-            .map(|d| d.id.clone())
+        let id_string = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
+            .map(|d| d.id)
             .unwrap_or_else(|_| "wasm-unknown".to_string());
-        let version = descriptor
-            .as_ref()
-            .map(|d| d.version.clone())
-            .unwrap_or_default();
         Self {
             inner: RwLock::new(Some(inner)),
             id: id_string,
-            version,
             config,
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
@@ -101,20 +92,16 @@ impl WasmPluginAdapter {
     }
 
     /// 使用预加载阶段已校验的插件 ID 构造实例，避免每个 Core 重复调用 describe。
-    ///
-    /// `version` 取自插件清单：参与执行配置指纹，插件升级后触发一次上下文交接。
     pub(crate) fn new_with_id(
         plugin: WasmPlugin,
         config: PluginRuntimeConfig,
         enabled: bool,
         id: String,
-        version: String,
         sidecar: Option<Arc<dyn SidecarConnection>>,
     ) -> Self {
         Self {
             inner: RwLock::new(Some(Arc::new(Mutex::new(plugin)))),
             id,
-            version,
             config,
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
@@ -274,10 +261,6 @@ impl WasmPluginAdapter {
 impl Plugin for WasmPluginAdapter {
     fn id(&self) -> &str {
         &self.id
-    }
-
-    fn version(&self) -> &str {
-        &self.version
     }
 
     /// 注入反馈通道（每 turn 注入），缓存供 handle 发送流事件。
@@ -794,7 +777,6 @@ mod unloaded_adapter_tests {
             inner: RwLock::new(None),
             config: PluginRuntimeConfig::default(),
             id: "unloaded-plugin".into(),
-            version: String::new(),
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             context_updates: Mutex::new(()),

@@ -10854,7 +10854,6 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "tiangong-llm",
  "tiangong-types",

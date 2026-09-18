@@ -5,7 +5,6 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::fingerprint::{ConfigChangeKind, ConfigFingerprint, PendingConfigHandoff};
 use crate::permission::TrustMode;
 use tiangong_types::TokenUsage;
 
@@ -123,87 +122,12 @@ pub struct Session {
     /// 工具调用批次闭合前收到的外部工具输入；下一安全边界按顺序注入。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tool_injections: Vec<DeferredToolInjection>,
-    /// 当前上下文所对应的执行配置指纹（模型 + 工具声明 + 插件版本）。
-    ///
-    /// 由 `ConfigFingerprint::of` 计算，只含模型标识、工具名与插件版本，
-    /// 不含任何凭据。
-    /// 为空表示尚未定档（新会话或历史会话首次加载），此时不触发交接压缩。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_fingerprint: Option<String>,
-    /// 待交接的配置变化：模型或工具声明与 `config_fingerprint` 不一致时记录。
-    ///
-    /// 存在标记即表示「下一个安全边界要先压缩再继续」。压缩成功后清除并把
-    /// `config_fingerprint` 推进到新值；失败或取消保留，下一轮重试。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_config_handoff: Option<PendingConfigHandoff>,
     /// 当前 Session 独立的持久化根，仅用于运行时，不写入会话 JSON。
     #[serde(skip)]
     storage_root: Option<PathBuf>,
 }
 
 impl Session {
-    /// 按当前执行配置对齐指纹与交接标记（每轮构建上下文时调用）。
-    ///
-    /// 三种情形：
-    /// - 尚未定档（新会话，或历史会话首次加载）：直接写入指纹，不触发交接——
-    ///   没有按旧配置积累的上下文，也就无从交接；
-    /// - 指纹一致：无事发生；
-    /// - 指纹变化：记录/合并待交接标记。已有标记时把变化种类并集起来，
-    ///   避免连续调整只记住最后一次。
-    ///
-    /// 返回是否需要在本轮安全边界执行交接压缩。
-    pub fn sync_config_fingerprint(&mut self, current: &ConfigFingerprint) -> bool {
-        let digest = current.digest();
-        let Some(previous) = self.config_fingerprint.clone() else {
-            // 首次定档：没有旧上下文需要交接。
-            self.config_fingerprint = Some(digest);
-            self.pending_config_handoff = None;
-            return false;
-        };
-        if previous == digest {
-            // 指纹回到已定档状态（例如改回原模型）：撤销未处理的标记。
-            self.pending_config_handoff = None;
-            return false;
-        }
-        // 只存摘要时无法区分变化来源，故以 Both 合并；变化种类仅用于文案。
-        let kind = match self.pending_config_handoff.take() {
-            Some(pending) if pending.fingerprint == digest => pending.kind,
-            Some(pending) => pending.kind.merge(ConfigChangeKind::Both),
-            None => ConfigChangeKind::Both,
-        };
-        self.pending_config_handoff = Some(PendingConfigHandoff {
-            fingerprint: digest,
-            kind,
-        });
-        // 没有可交接的历史（空上下文）时无需压缩，直接启用新配置。
-        if !self.has_compressible_history() {
-            self.adopt_pending_config();
-            return false;
-        }
-        true
-    }
-
-    /// 交接完成：把目标指纹提升为当前指纹并清除标记。
-    ///
-    /// 仅在压缩成功落盘后、或确认无历史可交接时调用；失败与取消保留标记。
-    pub fn adopt_pending_config(&mut self) {
-        if let Some(pending) = self.pending_config_handoff.take() {
-            self.config_fingerprint = Some(pending.fingerprint);
-        }
-    }
-
-    /// 摘要边界之后是否还有可交接的历史消息。
-    ///
-    /// System 与 Notice 不属于对话历史：只有 System 提示的新会话视为无历史。
-    fn has_compressible_history(&self) -> bool {
-        self.messages
-            .iter()
-            .skip(self.summary_up_to.min(self.messages.len()))
-            .any(|message| {
-                message.role != MessageRole::System && message.role != MessageRole::Notice
-            })
-    }
-
     pub fn has_user_messages(&self) -> bool {
         self.messages.iter().any(|m| m.role == MessageRole::User)
     }
@@ -233,8 +157,6 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
-            config_fingerprint: None,
-            pending_config_handoff: None,
             storage_root: None,
         }
     }
@@ -269,8 +191,6 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
-            config_fingerprint: None,
-            pending_config_handoff: None,
             storage_root: None,
         }
     }
@@ -1056,123 +976,5 @@ mod plugin_session_tests {
 
         // 位置 0 之前无 Notice：不变。
         assert_eq!(plugin_turn_start_idx(&session, 0), 0);
-    }
-}
-
-#[cfg(test)]
-mod config_handoff_tests {
-    use super::*;
-    use crate::config::fingerprint::ConfigChangeKind;
-    use tiangong_llm::ModelEndpoint;
-    use tiangong_llm::tool::ToolSpec;
-
-    fn endpoint(model: &str) -> ModelEndpoint {
-        ModelEndpoint {
-            model: model.to_string(),
-            base_url: "https://api.example.com/v1".to_string(),
-            api_key: "sk-secret".to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn tool(name: &str) -> ToolSpec {
-        ToolSpec {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({}),
-        }
-    }
-
-    fn fingerprint(model: &str, tools: &[&str]) -> ConfigFingerprint {
-        let tools: Vec<ToolSpec> = tools.iter().map(|name| tool(name)).collect();
-        ConfigFingerprint::of(&endpoint(model), &tools, &[])
-    }
-
-    #[test]
-    fn 首次定档不触发交接() {
-        let mut session = Session::new("新会话");
-        session.append_message(MessageRole::User, "你好");
-
-        assert!(
-            !session.sync_config_fingerprint(&fingerprint("gpt-4o", &["a"])),
-            "尚无旧配置上下文时不应交接"
-        );
-        assert!(session.config_fingerprint.is_some());
-        assert!(session.pending_config_handoff.is_none());
-    }
-
-    #[test]
-    fn 有历史时配置变化触发交接并在成功后提升指纹() {
-        let mut session = Session::new("会话");
-        session.append_message(MessageRole::User, "你好");
-        session.sync_config_fingerprint(&fingerprint("gpt-4o", &["a"]));
-
-        let target = fingerprint("claude", &["a"]);
-        assert!(
-            session.sync_config_fingerprint(&target),
-            "换模型且有历史时必须交接"
-        );
-        let pending = session
-            .pending_config_handoff
-            .clone()
-            .expect("应记录待交接标记");
-        assert_eq!(pending.fingerprint, target.digest());
-
-        // 压缩失败：标记必须保留，指纹不得提升。
-        assert_ne!(session.config_fingerprint, Some(target.digest()));
-
-        // 压缩成功后才启用新配置。
-        session.adopt_pending_config();
-        assert_eq!(session.config_fingerprint, Some(target.digest()));
-        assert!(session.pending_config_handoff.is_none());
-    }
-
-    #[test]
-    fn 空上下文直接启用新配置不触发压缩() {
-        let mut session = Session::new("空会话");
-        session.sync_config_fingerprint(&fingerprint("gpt-4o", &["a"]));
-
-        let target = fingerprint("claude", &["a"]);
-        assert!(
-            !session.sync_config_fingerprint(&target),
-            "没有可交接历史时不应调用模型压缩"
-        );
-        assert_eq!(session.config_fingerprint, Some(target.digest()));
-        assert!(session.pending_config_handoff.is_none());
-    }
-
-    #[test]
-    fn 连续调整合并标记且改回原配置撤销标记() {
-        let mut session = Session::new("会话");
-        session.append_message(MessageRole::User, "你好");
-        let base = fingerprint("gpt-4o", &["a"]);
-        session.sync_config_fingerprint(&base);
-
-        session.sync_config_fingerprint(&fingerprint("claude", &["a"]));
-        let merged = fingerprint("claude", &["a", "b"]);
-        assert!(session.sync_config_fingerprint(&merged));
-        let pending = session.pending_config_handoff.clone().expect("应有标记");
-        assert_eq!(pending.fingerprint, merged.digest(), "标记应指向最新配置");
-        assert_eq!(pending.kind, ConfigChangeKind::Both);
-
-        // 改回定档配置：无需交接，标记撤销。
-        assert!(!session.sync_config_fingerprint(&base));
-        assert!(session.pending_config_handoff.is_none());
-    }
-
-    #[test]
-    fn 标记随会话持久化以便重启后继续交接() {
-        let mut session = Session::new("会话");
-        session.append_message(MessageRole::User, "你好");
-        session.sync_config_fingerprint(&fingerprint("gpt-4o", &["a"]));
-        session.sync_config_fingerprint(&fingerprint("claude", &["a"]));
-
-        let json = serde_json::to_string(&session).expect("序列化成功");
-        assert!(!json.contains("sk-secret"), "会话文件不得包含任何凭据");
-        let restored: Session = serde_json::from_str(&json).expect("反序列化成功");
-        assert_eq!(
-            restored.pending_config_handoff, session.pending_config_handoff,
-            "重启后仍应知道有待交接的配置变化"
-        );
     }
 }

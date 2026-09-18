@@ -339,15 +339,9 @@ async fn failed_execution_and_retry_do_not_change_declarations_or_invent_feedbac
 async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failure() {
     let root = tempfile::tempdir().unwrap();
     let server = MockServer::builder().start().await;
-    // 按**正式**请求计数：交接压缩走非流式 completion，不占序号，
-    // 否则插件缺席触发的那次压缩会顶掉本应产生工具调用的第 2 轮。
     let step = AtomicUsize::new(0);
     Mock::given(method("POST"))
-        .respond_with(move |request: &wiremock::Request| {
-            let payload: Value = serde_json::from_slice(&request.body).unwrap();
-            if payload["stream"] != true {
-                return reply(None);
-            }
+        .respond_with(move |_: &wiremock::Request| {
             let step = step.fetch_add(1, Ordering::SeqCst);
             reply((step == 1).then_some(step))
         })
@@ -372,10 +366,9 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
         .build();
     send(&restored, &rx, "调用原工具").await;
     let requests = server.received_requests().await.unwrap();
-    let bodies: Vec<Value> = requests
-        .iter()
-        .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap())
-        .collect();
+    assert_eq!(requests.len(), 3);
+    let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let next: Value = serde_json::from_slice(&requests[2].body).unwrap();
     let names_of = |payload: &Value| -> Vec<String> {
         payload["tools"]
             .as_array()
@@ -384,28 +377,14 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
             .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
             .collect()
     };
-    // 插件缺席使工具声明变化，重建后的首个请求是交接压缩（非流式、禁用工具）。
-    let is_compression =
-        |payload: &Value| payload["stream"] != true && payload["tool_choice"] == json!("none");
-    let first = bodies.first().expect("首轮请求");
-    // 正式请求 = 非压缩请求；取重建之后的最后一个，即插件缺席后的续聊请求。
-    let next = bodies
-        .iter()
-        .rfind(|payload| !is_compression(payload))
-        .expect("插件缺席后的正式请求");
-    assert_eq!(names_of(first), vec!["plugin_injection", "probe_read"]);
+    assert_eq!(names_of(&first), vec!["plugin_injection", "probe_read"]);
     assert_eq!(
-        names_of(next),
+        names_of(&next),
         vec!["plugin_injection"],
         "插件缺席后其工具应即时消失"
     );
-    // 插件缺席使工具声明变化，续聊前先执行一次交接压缩。
     assert!(
-        bodies.iter().any(is_compression),
-        "插件缺席后应先执行交接压缩"
-    );
-    assert!(
-        next.to_string()
+        String::from_utf8_lossy(&requests[2].body)
             .contains("工具 probe_read 不在本次 tools 定义中"),
         "插件缺席后模型对其调用的反馈应保留在请求中"
     );
@@ -439,22 +418,14 @@ async fn offline_plugin_starts_missing_and_recovers_next_turn() {
         .iter()
         .map(|request| serde_json::from_slice(&request.body).unwrap())
         .collect();
-    // 插件恢复使工具声明变化，第 2 轮请求前先做一次交接压缩（多一次请求）。
-    // 压缩沿生产接口走非流式 completion 且禁用工具调用，据此与正式请求区分。
-    let is_compression =
-        |payload: &Value| payload["stream"] != true && payload["tool_choice"] == json!("none");
-    assert_eq!(bodies.len(), 4);
+    assert_eq!(bodies.len(), 3);
     let tool_count = |payload: &Value| payload["tools"].as_array().unwrap().len();
     assert_eq!(tool_count(&bodies[0]), 1, "离线开局应只有内置工具");
-    assert!(
-        is_compression(&bodies[1]),
-        "插件恢复后先交接压缩，再按新声明发起正式请求"
-    );
     assert_eq!(
-        tool_count(&bodies[2]),
+        tool_count(&bodies[1]),
         2,
-        "交接完成后的正式请求应带上恢复的插件工具"
+        "插件恢复后的下一轮即应带上其工具"
     );
-    assert_eq!(tool_count(&bodies[3]), 2);
+    assert_eq!(tool_count(&bodies[2]), 2);
     core.shutdown_join().unwrap();
 }

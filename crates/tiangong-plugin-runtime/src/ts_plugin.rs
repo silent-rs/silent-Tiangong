@@ -31,8 +31,6 @@ struct TsPluginState {
 
 pub struct TsPluginAdapter {
     id: String,
-    /// 清单版本，参与执行配置指纹（升级需要交接上下文）。
-    version: String,
     state: RwLock<TsPluginState>,
     enabled: AtomicBool,
     feedback_tx: RwLock<Option<tiangong_core::core::plugin::PluginFeedbackTx>>,
@@ -70,7 +68,6 @@ impl TsPluginAdapter {
     ) -> Self {
         Self {
             id: manifest.id.clone(),
-            version: manifest.version.clone(),
             state: RwLock::new(TsPluginState {
                 tools: manifest.tools.clone().unwrap_or_default(),
                 prompts: manifest.prompt.clone().unwrap_or_default(),
@@ -175,10 +172,6 @@ impl TsPluginAdapter {
 impl Plugin for TsPluginAdapter {
     fn id(&self) -> &str {
         &self.id
-    }
-
-    fn version(&self) -> &str {
-        &self.version
     }
 
     fn set_feedback_tx(&self, tx: tiangong_core::core::plugin::PluginFeedbackTx) {

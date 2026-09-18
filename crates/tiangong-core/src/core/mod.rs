@@ -72,13 +72,6 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
-    /// 上一次定档所用的模型端点（会话级，仅内存）。
-    ///
-    /// 交接压缩优先用它，让摘要仍由积累这段上下文的模型生成。端点含凭据，
-    /// 因此绝不落盘；进程重启后为空，交接压缩直接用当前模型。
-    #[builder(default)]
-    #[allow(clippy::type_complexity)]
-    pinned_endpoint: Arc<std::sync::Mutex<Option<tiangong_llm::ModelEndpoint>>>,
     /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
     #[cfg(test)]
     #[builder(default, setter(strip_option))]
@@ -273,43 +266,6 @@ impl TiangongCore {
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
 
-        // 配置指纹对齐：模型、工具声明或插件版本变化时记下待交接标记，由本轮
-        // 安全边界触发一次常规自动压缩；空上下文直接启用新配置，不做无谓调用。
-        let plugin_versions: Vec<(&str, &str)> = prepared_plugins
-            .plugins
-            .iter()
-            .map(|plugin| (plugin.id(), plugin.version()))
-            .collect();
-        let fingerprint = crate::config::fingerprint::ConfigFingerprint::of(
-            &config.llm,
-            &prepared_plugins.tools,
-            &plugin_versions,
-        );
-        let needs_handoff = session.sync_config_fingerprint(&fingerprint);
-        // 原模型优先：仅当确实换了模型，才为交接压缩准备切换前的客户端。
-        // 端点只存在内存中，进程重启后为空，届时压缩直接使用当前模型。
-        let previous_endpoint = {
-            let mut pinned = self
-                .pinned_endpoint
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let previous = pinned.clone();
-            // 交接未完成前保留原端点，使失败重试仍能用原模型。
-            if !needs_handoff || previous.is_none() {
-                *pinned = Some(config.llm.clone());
-            }
-            previous
-        };
-        let handoff_client = needs_handoff
-            .then_some(previous_endpoint)
-            .flatten()
-            // 只有模型确实变化才需要原模型客户端；仅插件变化时当前模型即可。
-            .filter(|endpoint| {
-                crate::config::fingerprint::ConfigFingerprint::of(endpoint, &[], &[]).model_key()
-                    != fingerprint.model_key()
-            })
-            .map(|endpoint| SingleProviderClient::new(endpoint).with_on_retry(on_retry.clone()));
-
         Ok(TurnContext::builder()
             .client(client)
             .session(session)
@@ -325,7 +281,6 @@ impl TiangongCore {
             .trust_mode(trust_mode)
             .observer(crate::observe::Observer::new(self.storage_root.clone()))
             .tool_overrides(prepared_plugins.tool_overrides)
-            .handoff_client(handoff_client)
             .tools(prepared_plugins.tools)
             .build())
     }

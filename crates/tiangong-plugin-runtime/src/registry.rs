@@ -2342,7 +2342,6 @@ fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plu
         PluginRuntimeConfig::default(),
         enabled,
         descriptor_id,
-        manifest.version.clone(),
         sidecar.map(|s| s as Arc<dyn SidecarConnection>),
     ));
     if let Ok(mut plugins) = loaded_plugins().lock()

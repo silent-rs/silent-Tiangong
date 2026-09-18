@@ -16,7 +16,6 @@ chrono = { workspace = true, default-features = false, features = [
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "time",
