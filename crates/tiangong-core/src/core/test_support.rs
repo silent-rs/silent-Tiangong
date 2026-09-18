@@ -1124,17 +1124,14 @@ pub fn core_with(
         .workspace_dir(env.root.to_string_lossy())
         .stream_tx(event_tx)
         .plugins(plugins)
-        .runtime_model(test_model(endpoint))
+        .model_endpoint(test_model(endpoint))
         .build();
     (core, EventLog::new(event_rx))
 }
 
-/// 测试用的运行时模型：把端点包装成 Core 构造所需的已解析模型。
-pub fn test_model(endpoint: &str) -> crate::core::ResolvedTurnModel {
-    crate::core::ResolvedTurnModel {
-        model_ref: "test-model".to_string(),
-        endpoint: crate::config::core::chat_endpoint(endpoint, "test-key", "test-model"),
-    }
+/// 测试用的运行时模型端点（`model_ref` 与模型名一致）。
+pub fn test_model(endpoint: &str) -> tiangong_llm::ModelEndpoint {
+    crate::config::core::chat_endpoint(endpoint, "test-key", "test-model")
 }
 
 pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, EventLog) {
@@ -1164,7 +1161,7 @@ pub fn core_for_client(
         .workspace_dir(env.root.to_string_lossy())
         .stream_tx(event_tx)
         .plugins(Vec::new())
-        .runtime_model(test_model("http://scripted-provider.invalid"))
+        .model_endpoint(test_model("http://scripted-provider.invalid"))
         .test_client(client)
         .build();
     (core, EventLog::new(event_rx))

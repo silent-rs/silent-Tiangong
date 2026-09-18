@@ -93,10 +93,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
                 id: "usage-probe",
                 tool: tool.clone(),
             })])
-            .runtime_model(crate::core::ResolvedTurnModel {
-                model_ref: "glm-5.3-flash".to_string(),
-                endpoint,
-            })
+            .model_endpoint(endpoint)
             .build()
     };
     let assert_totals = |expected_inputs: &[usize], expected_outputs: &[usize]| {
@@ -274,7 +271,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             .workspace_dir(env.root.to_string_lossy())
             .stream_tx(event_tx)
             .plugins(plugins)
-            .runtime_model(crate::core::test_support::test_model(&server.uri()))
+            .model_endpoint(crate::core::test_support::test_model(&server.uri()))
             .build();
         for round in 0..2 {
             let id = format!("msg-{generation}-{round}");

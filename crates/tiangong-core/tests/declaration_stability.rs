@@ -154,17 +154,14 @@ fn core(
         .config(CoreConfigProvider::new(config.clone()))
         .stream_tx(tx)
         .plugins(vec![plugin])
-        .runtime_model(turn_model(&server.uri()))
+        .model_endpoint(turn_model(&server.uri()))
         .build();
     (core, config, rx, session.id)
 }
 
-/// 测试用运行时模型：Core 构造时必须持有实际模型。
-fn turn_model(base_url: &str) -> tiangong_core::core::ResolvedTurnModel {
-    tiangong_core::core::ResolvedTurnModel {
-        model_ref: "test-model".to_string(),
-        endpoint: tiangong_core::config::core::chat_endpoint(base_url, "test", "test-model"),
-    }
+/// 测试用运行时模型：Core 构造时必须持有实际模型端点。
+fn turn_model(base_url: &str) -> tiangong_llm::ModelEndpoint {
+    tiangong_core::config::core::chat_endpoint(base_url, "test", "test-model")
 }
 
 async fn send(
@@ -266,7 +263,7 @@ async fn declaration_jitter_is_absorbed_by_process_cache_across_core_recreation(
             .config(CoreConfigProvider::new(config))
             .stream_tx(tx)
             .plugins(vec![plugin(id, state.clone()) as Arc<dyn Plugin>])
-            .runtime_model(turn_model(&server.uri()))
+            .model_endpoint(turn_model(&server.uri()))
             .build();
         send(&restored, &rx, "重建后继续").await;
         let requests = server.received_requests().await.unwrap();
@@ -372,7 +369,7 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
         .config(CoreConfigProvider::new(config))
         .stream_tx(tx)
         .plugins(Vec::new())
-        .runtime_model(turn_model(&server.uri()))
+        .model_endpoint(turn_model(&server.uri()))
         .build();
     send(&restored, &rx, "调用原工具").await;
     let requests = server.received_requests().await.unwrap();

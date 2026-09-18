@@ -230,15 +230,11 @@ pub enum StreamEvent {
     TitleChanged { title: String },
     /// 模型切换已开始（切换前的上下文整理已完成）。
     ModelSwitchStarted {
-        /// 目标模型的注册表 key。
-        model_ref: String,
         /// 目标模型名（供 UI 展示）。
         model_name: String,
     },
     /// 模型已切换：此后的请求使用新模型。
     ModelSwitched {
-        /// 已生效模型的注册表 key。
-        model_ref: String,
         /// 已生效的模型名（供 UI 展示）。
         model_name: String,
     },

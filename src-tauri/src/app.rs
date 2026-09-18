@@ -1107,14 +1107,11 @@ mod tests {
             .storage_root(storage_root.path())
             .workspace_dir(storage_root.path().to_string_lossy())
             .trust_mode(session.trust_mode)
-            .runtime_model(tiangong_core::core::ResolvedTurnModel {
-                model_ref: "test-model".to_string(),
-                endpoint: tiangong_core::config::core::chat_endpoint(
-                    "http://test.invalid",
-                    "test-key",
-                    "test-model",
-                ),
-            })
+            .model_endpoint(tiangong_core::config::core::chat_endpoint(
+                "http://test.invalid",
+                "test-key",
+                "test-model",
+            ))
             .build();
         assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");
         // 直接经 core_manager registry 插入(issue #245:不再有 TiangongApp.lock_cores)。

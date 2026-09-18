@@ -135,7 +135,7 @@ async fn 模型不同时先压缩再切换() {
 
     let before = {
         let registry = manager.registry();
-        registry.get("switch-ok").unwrap().current_model_ref()
+        registry.get("switch-ok").unwrap().current_endpoint().model
     };
     assert_eq!(before, "model-a", "初始模型来自 Session.model_ref");
 
@@ -156,7 +156,7 @@ async fn 模型不同时先压缩再切换() {
     // 模型已切换。
     let after = {
         let registry = manager.registry();
-        registry.get("switch-ok").unwrap().current_model_ref()
+        registry.get("switch-ok").unwrap().current_endpoint().model
     };
     assert_eq!(after, "model-b");
     manager.retire_core("switch-ok", true).await.unwrap();
@@ -185,7 +185,11 @@ async fn 压缩失败时不切换模型() {
 
     let current = {
         let registry = manager.registry();
-        registry.get("compact-fail").unwrap().current_model_ref()
+        registry
+            .get("compact-fail")
+            .unwrap()
+            .current_endpoint()
+            .model
     };
     assert_eq!(
         current, "model-a",
@@ -220,7 +224,11 @@ async fn 无可整理历史时零模型调用直接切换() {
     );
     let current = {
         let registry = manager.registry();
-        registry.get("empty-history").unwrap().current_model_ref()
+        registry
+            .get("empty-history")
+            .unwrap()
+            .current_endpoint()
+            .model
     };
     assert_eq!(current, "model-b");
     manager.retire_core("empty-history", true).await.unwrap();
@@ -251,13 +259,13 @@ fn 默认模型变化时目标随之变化() {
 
     // None = 跟随默认：解析结果应是当前默认模型。
     let first = manager.resolve_turn_model(None).unwrap();
-    assert_eq!(first.model_ref, "model-a");
+    assert_eq!(first.model, "model-a");
 
     // 默认改为 model-b 后，同样的 None 解析出不同目标——这正是不能直接
     // 用 None 与当前模型比较的原因。
     seed_models(&dir, "http://unused.invalid", "model-b");
     let second = manager.resolve_turn_model(None).unwrap();
-    assert_eq!(second.model_ref, "model-b");
+    assert_eq!(second.model, "model-b");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -272,7 +280,11 @@ async fn core重建后从会话恢复目标模型() {
 
     let current = {
         let registry = manager.registry();
-        registry.get("restore-model").unwrap().current_model_ref()
+        registry
+            .get("restore-model")
+            .unwrap()
+            .current_endpoint()
+            .model
     };
     assert_eq!(
         current, "model-b",
@@ -293,7 +305,7 @@ async fn core重建后从会话恢复目标模型() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 失效引用保留为当前模型且重选有效模型仍识别为切换() {
+async fn 失效引用不静默回退默认且重选有效模型仍识别为切换() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -308,11 +320,11 @@ async fn 失效引用保留为当前模型且重选有效模型仍识别为切�
 
     let current = {
         let registry = manager.registry();
-        registry.get("stale-ref").unwrap().current_model_ref()
+        registry.get("stale-ref").unwrap().current_endpoint()
     };
-    assert_eq!(
-        current, "deleted-model",
-        "失效引用保留为当前模型状态，不静默改成默认"
+    assert!(
+        !current.is_usable(),
+        "失效引用不得静默回退到路由默认，应保持不可用状态由发送路径报错"
     );
 
     // 发送前解析该失效引用会明确报错。
@@ -334,7 +346,7 @@ async fn 失效引用保留为当前模型且重选有效模型仍识别为切�
     );
     let after = {
         let registry = manager.registry();
-        registry.get("stale-ref").unwrap().current_model_ref()
+        registry.get("stale-ref").unwrap().current_endpoint().model
     };
     assert_eq!(after, "model-a");
     manager.retire_core("stale-ref", true).await.unwrap();
@@ -375,8 +387,133 @@ async fn 会话执行中拒绝切换模型() {
 
     let current = {
         let registry = manager.registry();
-        registry.get("busy-switch").unwrap().current_model_ref()
+        registry
+            .get("busy-switch")
+            .unwrap()
+            .current_endpoint()
+            .model
     };
     assert_eq!(current, "model-a", "拒绝切换后保持旧模型");
     manager.retire_core("busy-switch", true).await.unwrap();
+}
+
+/// 两个 provider 提供同名模型时，切换必须被识别。
+///
+/// 回归：若用模型名当身份（或只比模型名），此场景会被判为「未变化」，
+/// 结果是新端点不生效、切换前的上下文整理也被跳过。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 同名模型跨服务端切换仍先压缩再切换() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(summary_reply())
+        .mount(&old_server)
+        .await;
+    let new_server = MockServer::start().await;
+
+    // 两个 provider 的模型名完全相同，只有服务端地址不同。
+    let config = serde_json::json!({
+        "providers": {
+            "old": {
+                "base_url": old_server.uri(),
+                "api_key": "test-key",
+                "timeout_ms": 60000,
+                "protocol": "openai_chat_completions",
+                "headers": {}
+            },
+            "new": {
+                "base_url": new_server.uri(),
+                "api_key": "test-key",
+                "timeout_ms": 60000,
+                "protocol": "openai_chat_completions",
+                "headers": {}
+            }
+        },
+        "models": {
+            "same-on-old": {"provider": "old", "model": "qwen3-max", "capabilities": ["chat"]},
+            "same-on-new": {"provider": "new", "model": "qwen3-max", "capabilities": ["chat"]}
+        },
+        "routing": {"chat": "same-on-old"}
+    });
+    std::fs::write(
+        dir.path().join("models.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    seed_session(&dir, "same-name", Some("same-on-old"));
+
+    let manager = manager_at(&dir);
+    make_core(&manager, "same-name").await;
+
+    let target = manager.resolve_turn_model(Some("same-on-new")).unwrap();
+    manager
+        .switch_model_if_needed("same-name", target)
+        .await
+        .expect("同名不同服务端应识别为切换");
+
+    let session = manager.load_session("same-name").unwrap();
+    assert!(
+        session.summary_up_to > 0,
+        "同名模型跨服务端切换同样要先整理上下文"
+    );
+    assert!(
+        !old_server.received_requests().await.unwrap().is_empty(),
+        "整理上下文应由旧服务端完成"
+    );
+    let current = {
+        let registry = manager.registry();
+        registry.get("same-name").unwrap().current_endpoint()
+    };
+    assert_eq!(current.model, "qwen3-max");
+    assert_eq!(current.base_url, new_server.uri(), "端点应指向新服务端");
+    manager.retire_core("same-name", true).await.unwrap();
+}
+
+/// 两个注册表条目指向同一服务端的同一模型时，不得判为切换。
+///
+/// 端点身份由 `base_url + model` 派生：换 key（甚至换 provider 名）但实际
+/// 模型没变，重复压缩会白白丢失上下文细节并多花一次模型调用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 同一模型换注册表条目不触发压缩与切换() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let config = serde_json::json!({
+        "providers": {
+            "p": {
+                "base_url": server.uri(),
+                "api_key": "test-key",
+                "timeout_ms": 60000,
+                "protocol": "openai_chat_completions",
+                "headers": {}
+            }
+        },
+        "models": {
+            "alias-one": {"provider": "p", "model": "gpt-4o", "capabilities": ["chat"]},
+            "alias-two": {"provider": "p", "model": "gpt-4o", "capabilities": ["chat"]}
+        },
+        "routing": {"chat": "alias-one"}
+    });
+    std::fs::write(
+        dir.path().join("models.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+    seed_session(&dir, "alias-switch", Some("alias-one"));
+
+    let manager = manager_at(&dir);
+    make_core(&manager, "alias-switch").await;
+
+    let target = manager.resolve_turn_model(Some("alias-two")).unwrap();
+    manager
+        .switch_model_if_needed("alias-switch", target)
+        .await
+        .expect("同一模型换条目不应失败");
+
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "实际模型未变，不得触发压缩"
+    );
+    let session = manager.load_session("alias-switch").unwrap();
+    assert_eq!(session.summary_up_to, 0, "实际模型未变，上下文应原样保留");
+    manager.retire_core("alias-switch", true).await.unwrap();
 }

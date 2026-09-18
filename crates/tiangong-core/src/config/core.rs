@@ -31,7 +31,7 @@ pub fn default_context_limit() -> usize {
 ///
 /// 模型端点**不在**此配置中：会话实际使用的模型由宿主（CoreManager）解析
 /// 模型注册表后经 `TiangongCore::switch_model` 交给 Core，Core 以
-/// `CoreRuntimeModel` 持有运行时唯一真相。这里只保留与模型无关的运行参数。
+/// `ModelEndpoint` 持有运行时唯一真相。这里只保留与模型无关的运行参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
     /// 权限信任模式

@@ -713,11 +713,11 @@ function applyEventToSessionView(
       break;
     case 'model_switch_started':
       runStatus = 'executing';
-      runSummary = `正在切换模型：${event.model_name || event.model_ref || ''}`;
+      runSummary = `正在切换模型：${event.model_name || ''}`;
       break;
     case 'model_switched':
       runStatus = 'executing';
-      runSummary = `已切换至 ${event.model_name || event.model_ref || ''}`;
+      runSummary = `已切换至 ${event.model_name || ''}`;
       break;
     case 'context_compressing':
       runStatus = 'executing';
