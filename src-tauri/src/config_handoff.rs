@@ -35,9 +35,9 @@ use tiangong_llm::ModelEndpoint;
 
 /// 定档指纹存储文件（storage_root 下，session_id → 指纹摘要）。
 const FINGERPRINTS_FILE: &str = "config-fingerprints.json";
-/// 等待交接压缩收敛的上限：压缩调用通常数秒到数十秒完成；超时后消息
-/// 照常投递（进行中的压缩会被用户消息按既有语义取消并起新轮）。
-const HANDOFF_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// 等待交接压缩收敛的上限：大历史会话的摘要输出可能需要数分钟；超时
+/// 后消息照常投递（进行中的压缩会被用户消息按既有语义取消并起新轮）。
+const HANDOFF_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
 /// 等待收敛的轮询间隔。
 const HANDOFF_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
@@ -328,6 +328,12 @@ where
     }
     let current = fingerprint();
     !store.pinned_matches(session_id, &current)
+}
+
+/// 直接种档（不经压缩）：定档目标指纹并清除待交接标记。供「首次设置
+/// 模型不视为切换」等无需整理的路径收尾，保证首检不再误判。
+pub(crate) fn finalize_handoff(store: &ConfigHandoffStore, session_id: &str, fingerprint: &str) {
+    store.complete_handoff(session_id, fingerprint);
 }
 
 /// 面向显式切换的幂等交接入口：目标指纹已定档（或已有标记在途）时按
@@ -748,6 +754,143 @@ mod handoff_e2e_tests {
         let session = manager.load_session("e2e-mark").unwrap();
         assert_eq!(session.context_summary.as_deref(), Some("识别即压摘要"));
         manager.retire_core("e2e-mark", true).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 压缩失败仍完成切换且投递固化实际模型() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, manager) = make_pair(&dir);
+        // 压缩恒失败（500）的模型端点：对话一旦跑起来重试压缩无意义，
+        // 切换必达（历史未经整理仅告警）。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("always fail"))
+            .mount(&server)
+            .await;
+        seed_session_with_stale_pin(&dir, &store, "e2e-persist");
+        make_core(&manager, "e2e-persist", &server.uri()).await;
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tiangong_app_state::app_state::TiangongState::new(),
+        ));
+        let new_endpoint = tiangong_llm::ModelEndpoint {
+            base_url: "https://changed.example.com".into(),
+            model: "m".into(),
+            api_key: "k".into(),
+            ..Default::default()
+        };
+
+        // 压缩失败（Failed）后仍完成切换——不再返回 Err。
+        let outcome = crate::app::apply_session_model_at(
+            &state,
+            &store,
+            &manager,
+            std::path::Path::new("/nonexistent"),
+            "e2e-persist",
+            Some("new-key".to_string()),
+            new_endpoint,
+        )
+        .await;
+        assert!(outcome.is_ok(), "压缩失败不得阻断切换");
+        let current = {
+            let registry = manager.registry();
+            registry
+                .get("e2e-persist")
+                .map(|core| core.current_endpoint())
+        };
+        assert_eq!(
+            current.expect("core").base_url,
+            "https://changed.example.com",
+            "失败后端点仍应切换生效"
+        );
+
+        // 投递固化：会话引用已被切换收尾写为 new-key（端点不在测试注册
+        // 表，反查无匹配）——固化保持现值不变。
+        crate::app::pin_effective_model(&state, &manager, "e2e-persist").await;
+        let session = manager.load_session("e2e-persist").unwrap();
+        assert_eq!(
+            session.model_ref,
+            Some("new-key".to_string()),
+            "端点不在注册表时固化保持现值"
+        );
+        manager.retire_core("e2e-persist", true).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 首次设置模型不压缩直接切换() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, manager) = make_pair(&dir);
+        let server = MockServer::start().await;
+        // 老会话：从未设置过 model_ref（升级兼容场景），Core 也从未切换
+        // 过端点；用户首次指定模型 k。
+        let mut session = Session::new("老会话");
+        session.id = "e2e-first".to_string();
+        session.bind_storage_root(dir.path().to_path_buf());
+        for round in [("第一问", "第一答"), ("第二问", "第二答")] {
+            session.append_message(MessageRole::User, round.0);
+            session.append_message(MessageRole::Assistant, round.1);
+        }
+        session.model_ref = Some("k".to_string());
+        session.try_persist_to_disk().unwrap();
+
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(
+            tiangong_app_state::app_state::TiangongState::new(),
+        ));
+        // 注册表提供模型 k（独立端点）。
+        {
+            let mut guard = state.lock().await;
+            guard.config.models.providers.insert(
+                "p".to_string(),
+                tiangong_llm::models_config::ProviderConfig {
+                    headers: Default::default(),
+                    base_url: "https://k.example.com".to_string(),
+                    api_key: "k".to_string(),
+                    timeout_ms: 60_000,
+                    protocol: tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions,
+                },
+            );
+            guard.config.models.models.insert(
+                "k".to_string(),
+                tiangong_llm::models_config::ModelEntry {
+                    provider: "p".to_string(),
+                    model: "k-model".to_string(),
+                    capabilities: vec![tiangong_llm::models_config::ModelCapability::Chat],
+                    ..Default::default()
+                },
+            );
+        }
+        make_core(&manager, "e2e-first", &server.uri()).await;
+
+        // 端点漂移（k ≠ 当前默认）→ 首次设置：不压缩直接切换。
+        let outcome = crate::app::reconcile_session_endpoint_at(
+            &state,
+            &store,
+            &manager,
+            std::path::Path::new("/nonexistent"),
+            "e2e-first",
+        )
+        .await;
+        assert!(outcome.is_ok());
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "首次设置模型不得触发压缩调用"
+        );
+        let current = {
+            let registry = manager.registry();
+            registry
+                .get("e2e-first")
+                .map(|core| core.current_endpoint())
+        };
+        assert_eq!(
+            current.expect("core").base_url,
+            "https://k.example.com",
+            "首次设置直接切换端点"
+        );
+        assert_eq!(
+            manager.load_session("e2e-first").unwrap().model_ref,
+            Some("k".to_string()),
+            "引用保持用户设定"
+        );
+        manager.retire_core("e2e-first", true).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

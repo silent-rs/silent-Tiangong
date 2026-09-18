@@ -136,6 +136,18 @@ impl TiangongCore {
         switched.unwrap_or_else(|| self.config.snapshot().llm.clone())
     }
 
+    /// 是否显式切换过端点（从未切换=「跟随默认」状态）。
+    ///
+    /// 供宿主判定「首次设置模型」：model_ref 从无到有的第一次指定不算
+    /// 模型切换，不触发上下文交接压缩（老会话升级兼容——上下文原样
+    /// 延续到新模型）。
+    pub fn has_switched_endpoint(&self) -> bool {
+        self.active_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
+    }
+
     /// 切换执行端点（原子）：运行中不切换（忙即拒绝），设置后下一轮
     /// 请求即用新端点。压缩交接等前置编排由宿主分步完成（先用旧端点
     /// 压缩、成功后调本方法收尾）——core 不内嵌压缩，保持机制单一。

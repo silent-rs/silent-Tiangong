@@ -126,7 +126,7 @@ async fn session_effective_endpoint_at(
 /// 分步切换会话模型（自由函数版，供后台投递序列复用）：
 /// ① 用当前（旧）端点完成上下文压缩交接（无历史直接定档）→
 /// ② 原子收尾（端点生效 + 引用持久化）。任一步失败保持旧值。
-async fn apply_session_model_at(
+pub(crate) async fn apply_session_model_at(
     state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
     store: &crate::config_handoff::ConfigHandoffStore,
     manager: &tiangong_core_manager::CoreManager,
@@ -136,6 +136,8 @@ async fn apply_session_model_at(
     endpoint: tiangong_llm::ModelEndpoint,
 ) -> Result<(), String> {
     use crate::config_handoff::ConfigHandoffOutcome;
+    // 压缩尽力而为一次，成败都完成切换——对话一旦产生（KV 缓存已按
+    // 当前上下文写入），重试压缩毫无意义，失败只告警不阻断切换。
     let fingerprint = execution_fingerprint_at(plugins_root, &endpoint);
     match crate::config_handoff::handoff_to(store, manager, session_id, &fingerprint).await {
         ConfigHandoffOutcome::Aligned => {}
@@ -143,7 +145,11 @@ async fn apply_session_model_at(
             return Err("会话正在执行，当前回合结束后可切换模型".to_string())
         }
         ConfigHandoffOutcome::Failed(reason) => {
-            return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
+            tracing::warn!(
+                session_id,
+                reason,
+                "上下文交接压缩未完成，历史未经整理直接切换模型"
+            );
         }
     }
     manager.set_core_session_model(session_id, model_ref, endpoint)
@@ -151,7 +157,7 @@ async fn apply_session_model_at(
 
 /// 会话端点校正（自由函数版）：应然端点与 Core 当前生效端点不一致时
 /// 分步切换（引用保持现值）。
-async fn reconcile_session_endpoint_at(
+pub(crate) async fn reconcile_session_endpoint_at(
     state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
     store: &crate::config_handoff::ConfigHandoffStore,
     manager: &tiangong_core_manager::CoreManager,
@@ -175,6 +181,21 @@ async fn reconcile_session_endpoint_at(
         .load_session(session_id)
         .ok()
         .and_then(|session| session.model_ref);
+    // 首次设置模型（Core 从未显式切换过端点）：不视为模型切换——不
+    // 做交接压缩，上下文原样延续到新模型。老会话升级后第一次指定
+    // 模型同样适用（向后兼容），直接切换并种档避免首检误判。
+    let first_switch = {
+        let registry = manager.registry();
+        registry
+            .get(session_id)
+            .is_some_and(|core| !core.has_switched_endpoint())
+    };
+    if first_switch {
+        let fingerprint = execution_fingerprint_at(plugins_root, &expected);
+        manager.set_core_session_model(session_id, model_ref.clone(), expected)?;
+        crate::config_handoff::finalize_handoff(store, session_id, &fingerprint);
+        return Ok(());
+    }
     apply_session_model_at(
         state,
         store,
@@ -216,6 +237,63 @@ async fn handoff_sequence(
         ConfigHandoffOutcome::Failed(reason) => {
             tracing::warn!(session_id, reason, "配置交接压缩未完成，上下文未整理即继续");
         }
+    }
+}
+
+/// 按端点反查模型注册表 key（provider 基址+协议+模型名匹配）。
+fn model_key_of_endpoint(
+    models: &tiangong_llm::models_config::ModelsConfig,
+    endpoint: &tiangong_llm::ModelEndpoint,
+) -> Option<String> {
+    models
+        .models
+        .iter()
+        .find(|(_, entry)| {
+            models
+                .providers
+                .get(&entry.provider)
+                .is_some_and(|provider| {
+                    provider.base_url == endpoint.base_url
+                        && provider.protocol == endpoint.protocol
+                        && entry.model == endpoint.model
+                })
+        })
+        .map(|(key, _)| key.clone())
+}
+
+/// 投递前固化会话实际执行的模型：**仅对已设置过 model_ref 的会话**，
+/// 把 Core 当前生效端点反查注册表 key 写回 model_ref——切换后若因故
+/// 用其他模型跑过对话（压缩失败仍切换等），落盘实际所用模型使漂移
+/// 消失、不再重复压缩（对话已产生，KV 缓存已按当前上下文写入）。
+/// 从未设置过引用的会话不固化：保持「跟随默认」的延续性（改全局
+/// 默认自然跟随，升级零打扰）；core 忙时写入被拒仅告警。
+pub(crate) async fn pin_effective_model(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    manager: &tiangong_core_manager::CoreManager,
+    session_id: &str,
+) {
+    let models = {
+        let guard = state.lock().await;
+        guard.config.models.clone()
+    };
+    let current = {
+        let registry = manager.registry();
+        registry.get(session_id).map(|core| core.current_endpoint())
+    };
+    // 从未设置过引用的会话不固化（保持跟随默认的延续性）。
+    let already_set = manager
+        .load_session(session_id)
+        .ok()
+        .is_some_and(|session| session.model_ref.is_some());
+    if !already_set {
+        return;
+    }
+    let Some(endpoint) = current else { return };
+    let Some(key) = model_key_of_endpoint(&models, &endpoint) else {
+        return; // 端点不在注册表（理论上不会发生），保持现值
+    };
+    if let Err(error) = manager.set_core_model_ref(session_id, Some(key)) {
+        tracing::debug!(session_id, error, "投递前固化会话模型被拒（会话忙）");
     }
 }
 
@@ -1136,6 +1214,11 @@ impl TiangongApp {
         .await
     }
 
+    /// 投递前固化会话实际执行的模型（见自由函数版说明）。
+    async fn pin_effective_model(&self, session_id: &str) {
+        pin_effective_model(&self.state, &self.core_manager, session_id).await;
+    }
+
     /// 插件集合/版本变化的变化点打标（notify_plugins_changed 调用）：对
     /// 每个活跃会话按其**自身执行端点**算指纹标记待交接并后台立即处理
     /// ——会话可自持模型，同一插件变化对各会话的指纹影响一致但端点各异。
@@ -1224,6 +1307,8 @@ impl TiangongApp {
             tracing::info!(session_id, "发送前需要配置交接，消息将在交接完成后继续");
             tauri::async_runtime::spawn(async move {
                 handoff_sequence(&state, &store, &manager, &plugins_root, &sid).await;
+                // 固化实际执行的模型（切换成败已定，投递即将用它跑）。
+                pin_effective_model(&state, &manager, &sid).await;
                 let delivered = manager.deliver_to_core_if_live(
                     &sid,
                     AgentInputKind::prepared_with_id(message_id, prepared),
@@ -1234,6 +1319,8 @@ impl TiangongApp {
             });
             return Ok(());
         }
+        // 固化实际执行的模型（无漂移时端点即当前值）。
+        self.pin_effective_model(session_id).await;
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,
