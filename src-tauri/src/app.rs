@@ -68,6 +68,8 @@ pub struct TiangongApp {
     pub desktop_factory: std::sync::Arc<crate::core_factory::DesktopCoreFactory>,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
+    /// 配置交接状态容器（标记表/首检记录/定档指纹，见 `crate::config_handoff`）。
+    pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -201,6 +203,9 @@ impl TiangongApp {
             app_handle,
             desktop_factory,
             core_manager,
+            config_handoff_store: crate::config_handoff::ConfigHandoffStore::new(
+                storage_root.clone(),
+            ),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
@@ -894,17 +899,19 @@ impl TiangongApp {
         })
     }
 
-    /// 投递消息前的配置交接（编排见 `crate::config_handoff`）：待交接标记
-    /// 命中则执行交接；否则每会话每进程首检一次指纹兜底（防重启丢标记与
-    /// 漏报的变化点），指纹惰性求值——首检之外的投递路径零指纹计算。
+    /// 投递消息前的配置交接（状态与编排都在 `crate::config_handoff`）：
+    /// 待交接标记命中则执行交接；否则每会话每进程首检一次指纹兜底（防
+    /// 重启丢标记与漏报的变化点），指纹惰性求值——首检之外的投递路径
+    /// 零指纹计算。
     async fn handoff_config_if_changed(
         &self,
         session_id: &str,
         session_config: &tiangong_core::config::core::CoreConfig,
     ) {
-        use tiangong_core_manager::core_manager::config_handoff::ConfigHandoffOutcome;
+        use crate::config_handoff::ConfigHandoffOutcome;
         let endpoint = session_config.llm.clone();
         let outcome = crate::config_handoff::ensure_before_deliver(
+            &self.config_handoff_store,
             &self.core_manager,
             session_id,
             // 惰性：仅首检兜底分支才会计算。
@@ -922,11 +929,15 @@ impl TiangongApp {
         }
     }
 
-    /// 变化点打标：算当前执行指纹，交编排层对全部活跃会话标记待交接并
-    /// 后台立即处理（空闲即压，忙则留标记等投递路径）。
+    /// 变化点打标：算当前执行指纹，交 `crate::config_handoff` 对全部活跃
+    /// 会话标记待交接并后台立即处理（空闲即压，忙则留标记等投递路径）。
     pub fn mark_config_handoff(&self, endpoint: &tiangong_llm::ModelEndpoint) {
         let fingerprint = self.compute_execution_fingerprint(endpoint);
-        crate::config_handoff::mark_and_process(&self.core_manager, &fingerprint);
+        crate::config_handoff::mark_and_process(
+            &self.config_handoff_store,
+            &self.core_manager,
+            &fingerprint,
+        );
     }
 
     /// 同 [`Self::mark_config_handoff`]，模型端点取全局模板（插件变化等
@@ -940,7 +951,6 @@ impl TiangongApp {
     /// id@version。注册在 runtime 的插件都是动态注册的（含 prompt），
     /// 装卸/升级/启停全部经 registry，天然全覆盖、无需特判。
     fn compute_execution_fingerprint(&self, endpoint: &tiangong_llm::ModelEndpoint) -> String {
-        use tiangong_core_manager::core_manager::config_handoff::execution_fingerprint;
         let statuses = tiangong_plugin_runtime::registry::list_plugins(
             &self.desktop_factory.storage_root,
             tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
@@ -958,7 +968,7 @@ impl TiangongApp {
                 )
             })
             .collect();
-        execution_fingerprint(endpoint, &plugins)
+        crate::config_handoff::execution_fingerprint(endpoint, &plugins)
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。

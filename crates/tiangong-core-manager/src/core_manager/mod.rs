@@ -10,12 +10,10 @@
 //! 内置在 `ensure_core`：host 在调用前构造好 plugin 集合并作为参数传入
 //! （不同 host 的 plugin 构造差异大，不能在共享层硬编码）。
 
-pub mod config_handoff;
 pub mod ensure;
 pub mod registry;
 mod title;
 
-pub use self::config_handoff::ConfigHandoffOutcome;
 pub use self::registry::{CoreRegistry, CoreRegistryGuard};
 
 use std::collections::HashMap;
@@ -29,7 +27,6 @@ use tiangong_core::core::TiangongCore;
 use tiangong_core::session::Session;
 
 use crate::SessionMetadata;
-use crate::core_manager::config_handoff::HandoffState;
 
 /// `ensure_core` 的返回：区分新建与复用既有 Core。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,9 +48,6 @@ pub struct CoreManager {
     creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     config: tiangong_core::config::core::CoreConfigProvider,
     storage_root: PathBuf,
-    /// 配置交接状态：待交接标记（变化点写入）+ 首检记录 + 定档指纹缓存，
-    /// 见 [`config_handoff`] 模块说明。
-    handoff_state: Arc<Mutex<HandoffState>>,
 }
 
 impl CoreManager {
@@ -71,7 +65,6 @@ impl CoreManager {
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
             config,
             storage_root: storage_root.into(),
-            handoff_state: Arc::new(Mutex::new(HandoffState::default())),
         }
     }
 
@@ -287,7 +280,6 @@ impl CoreManager {
 
     /// 删除"正在清理"目录中的会话文件（全部资源清理成功后调用）。
     pub fn delete_purging_session(&self, session_id: &str) -> Result<(), String> {
-        self.forget_config_fingerprint(session_id);
         let path = self
             .storage_root
             .join("trash")
@@ -326,7 +318,6 @@ impl CoreManager {
         .map_err(|error| format!("等待会话 {sid_for_err} 的 worker 退出失败：{error}"))?;
         // worker 已退出，安全移文件到回收区。
         self.trash_session_file(session_id)?;
-        self.forget_config_fingerprint(session_id);
         Ok(())
     }
 
@@ -385,12 +376,12 @@ impl std::fmt::Debug for CoreManager {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use tiangong_core::config::core::{CoreConfig, CoreConfigProvider};
     use tiangong_core::session::Session;
 
-    pub(crate) fn make_manager(dir: &tempfile::TempDir) -> CoreManager {
+    fn make_manager(dir: &tempfile::TempDir) -> CoreManager {
         CoreManager::new(
             CoreConfigProvider::new(CoreConfig::default()),
             dir.path().to_path_buf(),

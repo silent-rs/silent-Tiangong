@@ -1,32 +1,232 @@
-//! 配置交接**编排**：识别待交接标记后经 core 既有的手动压缩能力整理
-//! 上下文，再让新配置接管。
+//! 配置变化上下文交接：宿主层在变化点打标，识别标记后经 core 既有的
+//! 手动压缩能力整理上下文，再让新配置接管。
 //!
-//! 状态记账（标记表/首检记录/定档指纹）在 manager（`core_manager::
-//! config_handoff`），这里做决策与执行：变化点打标后的即时处理（空闲即
-//! 压、忙则留标记）、投递消息前的快查与首检兜底、压缩发起与收敛判据。
-//! core 只保留通用压缩能力（手动压缩命令），不感知「交接」概念。
+//! 状态记账与编排都在本模块（app 层）——manager 恪守记账定位（Core
+//! 注册表/会话文件/创建锁，issue #245），core 只保留通用压缩能力（手动
+//! 压缩命令），两者都不感知「交接」概念。runtime（plugin-runtime）同样
+//! 零改动：变化感知在 app 即全覆盖（app 依赖 runtime，插件命令共用
+//! `notify_plugins_changed` 尾部、模型切换在 `sync_core_config_from_state`）。
 //!
-//! 两个变化入口在宿主：插件装卸/升级/启停/回滚/重载统一挂在
-//! `notify_plugins_changed`（插件命令的公共成功尾部）；模型切换挂在
-//! `sync_core_config_from_state`（比对前后模板端点）。
+//! 运行期是**标记制**：变化发生的地方给活跃会话打标并立即尝试处理
+//! （空闲即压，忙则留标记）；投递消息路径只查内存标记。兜底是**首检
+//! 指纹比对**：每会话每进程首次投递前算一次执行配置指纹与落盘定档
+//! 比对，防两类漏报——进程重启丢内存标记、未走正常变化入口的变化。
+//! 定档指纹持久化在 storage_root 下（不进会话文件）——会话复制/导出后
+//! 丢失定档只会重新定档，不触发无谓交接。
+//!
+//! 指纹输入全部是「声明态」：模型（协议+端点+模型名，凭据绝不参与）与
+//! 插件（id@version + 启用集合）。插件部分覆盖注册在 plugin-runtime 的
+//! 全部已安装插件（含 prompt 文案插件）——它们都是动态注册的，装卸/
+//! 升级/启停一律经 registry，天然全部参与指纹；编译期编进 App 的进程内
+//! 插件是历史形态（当前已不存在，runtime 保留该形态仅作动态插件载体），
+//! 即便未来恢复，其恒定性质也无需参与指纹。加载顺序、运行期抖动（如
+//! sidecar 临时掉线）不改变指纹；反之插件升级即使工具名不变也会触发
+//! 交接——历史里按旧版本产生的调用与新版本行为可能已不一致。
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind, CommandInput};
 use tiangong_core::core::CoreError;
 use tiangong_core::session::{MessageRole, Session};
-use tiangong_core_manager::core_manager::config_handoff::ConfigHandoffOutcome;
 use tiangong_core_manager::CoreManager;
+use tiangong_llm::ModelEndpoint;
 
+/// 定档指纹存储文件（storage_root 下，session_id → 指纹摘要）。
+const FINGERPRINTS_FILE: &str = "config-fingerprints.json";
 /// 等待交接压缩收敛的上限：压缩调用通常数秒到数十秒完成；超时后消息
 /// 照常投递（进行中的压缩会被用户消息按既有语义取消并起新轮）。
 const HANDOFF_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// 等待收敛的轮询间隔。
 const HANDOFF_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// 一次交接检查的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigHandoffOutcome {
+    /// 配置已对齐：指纹一致、首次定档、无可交接历史或交接完成。
+    Aligned,
+    /// 会话正在执行 turn：不打断，消息照常投递，标记保留待下一条消息。
+    SkippedBusy,
+    /// 交接压缩未完成（模型错误/超时）：上下文未整理即继续，标记保留重试。
+    Failed(String),
+}
+
+/// 交接内存状态：待处理标记 + 首检记录 + 定档指纹缓存（懒加载）。
+#[derive(Default)]
+struct HandoffState {
+    /// 待交接标记：session_id → 目标指纹（变化点写入，交接完成清除、
+    /// 失败/忙保留供投递路径重试）。
+    pending: HashMap<String, String>,
+    /// 本进程已完成首检指纹兜底比对的会话（首检每会话每进程一次）。
+    checked: HashSet<String>,
+    /// 定档指纹表（session_id → 摘要），None 表示尚未从磁盘加载。
+    pinned: Option<HashMap<String, String>>,
+}
+
+/// 配置交接状态容器（app 层单例，与 TiangongApp 同生命周期）。
+#[derive(Clone)]
+pub(crate) struct ConfigHandoffStore {
+    state: Arc<Mutex<HandoffState>>,
+    storage_root: PathBuf,
+}
+
+impl ConfigHandoffStore {
+    pub(crate) fn new(storage_root: PathBuf) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HandoffState::default())),
+            storage_root,
+        }
+    }
+
+    /// 写入待交接标记（变化点与交接失败时调用；幂等，后写覆盖目标指纹）。
+    fn set_pending_handoff(&self, session_ids: &[String], target_fingerprint: &str) {
+        if session_ids.is_empty() {
+            return;
+        }
+        self.lock_state().pending.extend(
+            session_ids
+                .iter()
+                .map(|id| (id.clone(), target_fingerprint.to_string())),
+        );
+    }
+
+    /// 读取待交接标记的目标指纹（投递路径快查；无标记返回 None）。
+    fn pending_handoff(&self, session_id: &str) -> Option<String> {
+        self.lock_state().pending.get(session_id).cloned()
+    }
+
+    /// 本会话是否尚未做过首检指纹兜底比对（每会话每进程一次）。
+    fn bootstrap_needed(&self, session_id: &str) -> bool {
+        !self.lock_state().checked.contains(session_id)
+    }
+
+    /// 标记本会话已完成首检。
+    fn mark_checked(&self, session_id: &str) {
+        self.lock_state().checked.insert(session_id.to_string());
+    }
+
+    /// 交接完成：定档目标指纹（落盘）并清除待交接标记。
+    fn complete_handoff(&self, session_id: &str, fingerprint: &str) {
+        let changed = {
+            let mut state = self.lock_state();
+            state.pending.remove(session_id);
+            let pinned = state.pinned.get_or_insert_with(HashMap::new);
+            pinned.insert(session_id.to_string(), fingerprint.to_string())
+                != Some(fingerprint.to_string())
+        };
+        if changed {
+            self.save_fingerprints();
+        }
+    }
+
+    /// 定档指纹是否与给定值一致（首检兜底比对的读侧）。
+    fn pinned_matches(&self, session_id: &str, fingerprint: &str) -> bool {
+        self.lock_state()
+            .pinned
+            .as_ref()
+            .and_then(|pinned| pinned.get(session_id))
+            .is_some_and(|p| p == fingerprint)
+    }
+
+    /// 移除会话的交接状态（会话删除/物理清理时调用，避免残留脏记录）。
+    pub(crate) fn forget(&self, session_id: &str) {
+        let removed = {
+            let mut state = self.lock_state();
+            let from_pinned = state
+                .pinned
+                .as_mut()
+                .is_some_and(|pinned| pinned.remove(session_id).is_some());
+            state.checked.remove(session_id)
+                || state.pending.remove(session_id).is_some()
+                || from_pinned
+        };
+        if removed {
+            self.save_fingerprints();
+        }
+    }
+
+    /// 状态锁：首次访问时从磁盘懒加载定档表，之后驻留内存。
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HandoffState> {
+        let mut guard = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if guard.pinned.is_none() {
+            let loaded = std::fs::read_to_string(self.storage_root.join(FINGERPRINTS_FILE))
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok())
+                .unwrap_or_default();
+            guard.pinned = Some(loaded);
+        }
+        guard
+    }
+
+    /// 原子落盘（临时文件 + rename）。
+    fn save_fingerprints(&self) {
+        let snapshot = self.lock_state().pinned.clone().unwrap_or_default();
+        let path = self.storage_root.join(FINGERPRINTS_FILE);
+        let tmp = self.storage_root.join(format!("{FINGERPRINTS_FILE}.tmp"));
+        let write = serde_json::to_string_pretty(&snapshot)
+            .map_err(|error| error.to_string())
+            .and_then(|content| std::fs::write(&tmp, content).map_err(|error| error.to_string()))
+            .and_then(|()| std::fs::rename(&tmp, &path).map_err(|error| error.to_string()));
+        if let Err(error) = write {
+            tracing::warn!(%error, "定档指纹落盘失败，下次进程内仍可用，重启后丢失");
+        }
+    }
+}
+
+/// 计算执行配置指纹：模型标识 + 启用的 runtime 注册插件（id@version）。
+///
+/// 插件输入应是 plugin-runtime 注册表启用集合的声明态——注册在 runtime
+/// 的插件都是动态注册的（含 prompt），装卸/升级/启停全部经 registry 变化，
+/// 因此无需任何特判。插件键排序去重后参与摘要（加载顺序不是能力变化）；
+/// 无版本的插件只记 id。凭据（api_key/headers）与运行参数
+/// （trust_mode/reasoning_effort）不参与：前者绝不落盘，后者下一轮直接
+/// 生效、无需交接。
+pub(crate) fn execution_fingerprint(
+    endpoint: &ModelEndpoint,
+    plugins: &[(String, String)],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut plugin_keys: Vec<String> = plugins
+        .iter()
+        .map(|(id, version)| {
+            if version.is_empty() {
+                id.clone()
+            } else {
+                format!("{id}@{version}")
+            }
+        })
+        .collect();
+    plugin_keys.sort();
+    plugin_keys.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(
+        format!(
+            "{:?}|{}|{}",
+            endpoint.protocol, endpoint.base_url, endpoint.model
+        )
+        .as_bytes(),
+    );
+    for key in plugin_keys {
+        hasher.update(b"\x1f");
+        hasher.update(key.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// 变化点入口：给全部活跃会话打上待交接标记并立即尝试处理——空闲会话
 /// 当场压缩，忙会话留标记等投递路径。处理在后台并行进行，立即返回。
 ///
 /// 不活跃会话（无 Core）不打标：其配置变化由首检兜底发现。
-pub(crate) fn mark_and_process(manager: &CoreManager, target_fingerprint: &str) {
+pub(crate) fn mark_and_process(
+    store: &ConfigHandoffStore,
+    manager: &CoreManager,
+    target_fingerprint: &str,
+) {
     let session_ids: Vec<String> = {
         let registry = manager.registry();
         registry.iter().map(|(id, _)| id.clone()).collect()
@@ -34,7 +234,7 @@ pub(crate) fn mark_and_process(manager: &CoreManager, target_fingerprint: &str) 
     if session_ids.is_empty() {
         return;
     }
-    manager.set_pending_handoff(&session_ids, target_fingerprint);
+    store.set_pending_handoff(&session_ids, target_fingerprint);
     tracing::info!(
         sessions = session_ids.len(),
         "执行配置已变化，活跃会话标记待交接并开始处理"
@@ -44,11 +244,12 @@ pub(crate) fn mark_and_process(manager: &CoreManager, target_fingerprint: &str) 
     let target = target_fingerprint.to_string();
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         for id in session_ids {
+            let store = store.clone();
             let manager = manager.clone();
             let target = target.clone();
             handle.spawn(async move {
                 if let ConfigHandoffOutcome::Failed(reason) =
-                    run_handoff(&manager, &id, &target).await
+                    run_handoff(&store, &manager, &id, &target).await
                 {
                     tracing::warn!(session_id = %id, reason, "配置交接压缩未完成，标记保留重试");
                 }
@@ -61,6 +262,7 @@ pub(crate) fn mark_and_process(manager: &CoreManager, target_fingerprint: &str) 
 /// 首检一次指纹兜底（防重启丢标记与漏报的变化点），指纹经 `fingerprint`
 /// 惰性求值——首检之外的投递路径零指纹计算。
 pub(crate) async fn ensure_before_deliver<F>(
+    store: &ConfigHandoffStore,
     manager: &CoreManager,
     session_id: &str,
     fingerprint: F,
@@ -68,16 +270,16 @@ pub(crate) async fn ensure_before_deliver<F>(
 where
     F: FnOnce() -> String,
 {
-    if let Some(target) = manager.pending_handoff(session_id) {
-        return run_handoff(manager, session_id, &target).await;
+    if let Some(target) = store.pending_handoff(session_id) {
+        return run_handoff(store, manager, session_id, &target).await;
     }
-    if manager.handoff_bootstrap_needed(session_id) {
-        manager.mark_handoff_checked(session_id);
+    if store.bootstrap_needed(session_id) {
+        store.mark_checked(session_id);
         let current = fingerprint();
-        if manager.pinned_fingerprint_matches(session_id, &current) {
+        if store.pinned_matches(session_id, &current) {
             return ConfigHandoffOutcome::Aligned;
         }
-        return run_handoff(manager, session_id, &current).await;
+        return run_handoff(store, manager, session_id, &current).await;
     }
     ConfigHandoffOutcome::Aligned
 }
@@ -85,20 +287,22 @@ where
 /// 执行一次交接：无可交接历史直接定档；否则注入手动压缩并等待收敛，
 /// 摘要边界推进才算成功并定档。失败/忙写入待交接标记供投递路径重试。
 pub(crate) async fn run_handoff(
+    store: &ConfigHandoffStore,
     manager: &CoreManager,
     session_id: &str,
     target: &str,
 ) -> ConfigHandoffOutcome {
-    let outcome = run_handoff_inner(manager, session_id, target).await;
+    let outcome = run_handoff_inner(store, manager, session_id, target).await;
     if !matches!(outcome, ConfigHandoffOutcome::Aligned) {
         // 未完成：写入/保留待交接标记——变化点路径本就有标记（幂等），
         // 首检兜底路径据此获得后续投递前的重试入口。
-        manager.set_pending_handoff(std::slice::from_ref(&session_id.to_string()), target);
+        store.set_pending_handoff(std::slice::from_ref(&session_id.to_string()), target);
     }
     outcome
 }
 
 async fn run_handoff_inner(
+    store: &ConfigHandoffStore,
     manager: &CoreManager,
     session_id: &str,
     target: &str,
@@ -107,13 +311,13 @@ async fn run_handoff_inner(
         Ok(session) => session,
         Err(_) => {
             // 会话文件尚不存在（新对话）：没有按旧配置积累的上下文。
-            manager.complete_handoff(session_id, target);
+            store.complete_handoff(session_id, target);
             return ConfigHandoffOutcome::Aligned;
         }
     };
     if !has_handable_history(&session) {
         // 边界之后只剩 System/Notice（或历史已折叠为摘要）：直接定档。
-        manager.complete_handoff(session_id, target);
+        store.complete_handoff(session_id, target);
         return ConfigHandoffOutcome::Aligned;
     }
     let Some(core) = manager.registry().get(session_id).cloned() else {
@@ -136,7 +340,7 @@ async fn run_handoff_inner(
     }
     match manager.load_session(session_id) {
         Ok(after) if after.summary_up_to > summary_before => {
-            manager.complete_handoff(session_id, target);
+            store.complete_handoff(session_id, target);
             ConfigHandoffOutcome::Aligned
         }
         Ok(_) => ConfigHandoffOutcome::Failed(
@@ -158,6 +362,96 @@ fn has_handable_history(session: &Session) -> bool {
         .any(|message| message.role != MessageRole::System && message.role != MessageRole::Notice)
 }
 
+/// 纯函数与状态记账单测。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn endpoint(model: &str) -> ModelEndpoint {
+        ModelEndpoint {
+            model: model.to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-secret".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 凭据与顺序不参与指纹() {
+        let mut other_key = endpoint("gpt-4o");
+        other_key.api_key = "sk-another".to_string();
+        let base = execution_fingerprint(
+            &endpoint("gpt-4o"),
+            &[
+                ("fs".into(), "0.1.9".into()),
+                ("terminal".into(), "0.3.8".into()),
+            ],
+        );
+        let same = execution_fingerprint(
+            &other_key,
+            &[
+                ("terminal".into(), "0.3.8".into()),
+                ("fs".into(), "0.1.9".into()),
+            ],
+        );
+        assert_eq!(base, same, "换凭据/调序不应触发交接");
+        assert!(!base.contains("sk-"), "摘要不得包含凭据原文");
+    }
+
+    #[test]
+    fn 模型与插件版本变化改变指纹() {
+        let plugins = [("fs".to_string(), "0.1.9".to_string())];
+        let base = execution_fingerprint(&endpoint("gpt-4o"), &plugins);
+        assert_ne!(
+            execution_fingerprint(&endpoint("claude"), &plugins),
+            base,
+            "换模型应触发交接"
+        );
+        assert_ne!(
+            execution_fingerprint(&endpoint("gpt-4o"), &[("fs".into(), "0.2.0".into())]),
+            base,
+            "插件升级即使工具名不变也应触发交接"
+        );
+    }
+
+    #[test]
+    fn 标记与定档的状态记账roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigHandoffStore::new(dir.path().to_path_buf());
+
+        // 待交接标记：写入、读取、完成清除。
+        assert_eq!(store.pending_handoff("s1"), None);
+        store.set_pending_handoff(&["s1".to_string()], "fp-target");
+        assert_eq!(store.pending_handoff("s1").as_deref(), Some("fp-target"));
+        store.set_pending_handoff(&["s1".to_string()], "fp-newer");
+        assert_eq!(
+            store.pending_handoff("s1").as_deref(),
+            Some("fp-newer"),
+            "变化点再次打标覆盖目标"
+        );
+        store.complete_handoff("s1", "fp-newer");
+        assert_eq!(store.pending_handoff("s1"), None, "完成清除标记");
+        assert!(store.pinned_matches("s1", "fp-newer"));
+
+        // 首检记录：一次性。
+        assert!(store.bootstrap_needed("s2"));
+        store.mark_checked("s2");
+        assert!(!store.bootstrap_needed("s2"));
+
+        // 定档持久化：新实例懒加载恢复；首检记录仅进程内，重启后重做。
+        let restored = ConfigHandoffStore::new(dir.path().to_path_buf());
+        assert!(restored.pinned_matches("s1", "fp-newer"));
+        assert!(
+            restored.bootstrap_needed("s2"),
+            "首检记录不落盘，新进程重做首检兜底"
+        );
+        restored.forget("s1");
+        assert!(!restored.pinned_matches("s1", "fp-newer"));
+        let again = ConfigHandoffStore::new(dir.path().to_path_buf());
+        assert!(!again.pinned_matches("s1", "fp-newer"), "遗忘须落盘");
+    }
+}
+
 /// 端到端：真 TiangongCore + wiremock 模型端点，验证标记制的识别处理、
 /// 首检兜底与成败判定。
 #[cfg(test)]
@@ -170,10 +464,13 @@ mod handoff_e2e_tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn make_manager(dir: &tempfile::TempDir) -> CoreManager {
-        CoreManager::new(
-            CoreConfigProvider::new(CoreConfig::default()),
-            dir.path().to_path_buf(),
+    fn make_pair(dir: &tempfile::TempDir) -> (ConfigHandoffStore, CoreManager) {
+        (
+            ConfigHandoffStore::new(dir.path().to_path_buf()),
+            CoreManager::new(
+                CoreConfigProvider::new(CoreConfig::default()),
+                dir.path().to_path_buf(),
+            ),
         )
     }
 
@@ -185,7 +482,12 @@ mod handoff_e2e_tests {
     }
 
     /// 预置带两轮问答历史的会话，并定档一个与目标不一致的旧指纹。
-    fn seed_session_with_stale_pin(dir: &tempfile::TempDir, manager: &CoreManager, id: &str) {
+    fn seed_session_with_stale_pin(
+        dir: &tempfile::TempDir,
+        store: &ConfigHandoffStore,
+        manager: &CoreManager,
+        id: &str,
+    ) {
         let mut session = Session::new("交接测试");
         session.id = id.to_string();
         session.bind_storage_root(dir.path().to_path_buf());
@@ -194,7 +496,7 @@ mod handoff_e2e_tests {
             session.append_message(MessageRole::Assistant, round.1);
         }
         session.try_persist_to_disk().unwrap();
-        manager.complete_handoff(id, "stale-fingerprint");
+        store.complete_handoff(id, "stale-fingerprint");
     }
 
     fn completion_reply(content: &str) -> ResponseTemplate {
@@ -219,8 +521,8 @@ mod handoff_e2e_tests {
     }
 
     fn fingerprint_for(base_url: &str) -> String {
-        tiangong_core_manager::core_manager::config_handoff::execution_fingerprint(
-            &tiangong_llm::ModelEndpoint {
+        execution_fingerprint(
+            &ModelEndpoint {
                 model: "test-model".into(),
                 base_url: base_url.to_string(),
                 api_key: "test-key".into(),
@@ -233,18 +535,18 @@ mod handoff_e2e_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 首检兜底发现配置变化并经手动压缩交接() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = make_manager(&dir);
+        let (store, manager) = make_pair(&dir);
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(completion_reply("[[SUMMARY]]\n交接摘要"))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &manager, "e2e-bootstrap");
+        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-bootstrap");
         make_core(&manager, "e2e-bootstrap", &server.uri()).await;
 
         // 首检：定档与当前指纹不一致 → 压缩交接。
         let fp = fingerprint_for(&server.uri());
-        let outcome = ensure_before_deliver(&manager, "e2e-bootstrap", || fp.clone()).await;
+        let outcome = ensure_before_deliver(&store, &manager, "e2e-bootstrap", || fp.clone()).await;
         assert_eq!(outcome, ConfigHandoffOutcome::Aligned);
 
         let session = manager.load_session("e2e-bootstrap").unwrap();
@@ -255,12 +557,12 @@ mod handoff_e2e_tests {
         );
         assert!(session.summary_up_to > 0, "摘要边界应推进");
         assert!(
-            manager.pinned_fingerprint_matches("e2e-bootstrap", &fp),
+            store.pinned_matches("e2e-bootstrap", &fp),
             "交接成功后定档须更新"
         );
         // 之后的投递路径：首检已做、无标记，惰性指纹不再求值。
         let mut evaluated = false;
-        let outcome = ensure_before_deliver(&manager, "e2e-bootstrap", || {
+        let outcome = ensure_before_deliver(&store, &manager, "e2e-bootstrap", || {
             evaluated = true;
             String::new()
         })
@@ -274,28 +576,25 @@ mod handoff_e2e_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 交接失败写入标记供投递路径重试() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = make_manager(&dir);
+        let (store, manager) = make_pair(&dir);
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(500).set_body_string("compression unavailable"))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &manager, "e2e-retry");
+        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-retry");
         make_core(&manager, "e2e-retry", &server.uri()).await;
 
         let fp = fingerprint_for(&server.uri());
-        let outcome = ensure_before_deliver(&manager, "e2e-retry", || fp.clone()).await;
+        let outcome = ensure_before_deliver(&store, &manager, "e2e-retry", || fp.clone()).await;
         assert!(matches!(outcome, ConfigHandoffOutcome::Failed(_)));
         assert!(
-            manager.pending_handoff("e2e-retry").is_some(),
+            store.pending_handoff("e2e-retry").is_some(),
             "失败必须写入待交接标记，投递路径据此重试"
         );
-        assert!(
-            !manager.pinned_fingerprint_matches("e2e-retry", &fp),
-            "失败须保留旧定档"
-        );
+        assert!(!store.pinned_matches("e2e-retry", &fp), "失败须保留旧定档");
 
-        // 模型恢复后（新端点+变化点刷新目标），投递路径经标记重试成功。
+        // 模型恢复后（新端点+变化点刷新目标），后台处理完成交接。
         drop(server);
         manager.retire_core("e2e-retry", false).await.unwrap();
         let recovered = MockServer::start().await;
@@ -305,39 +604,39 @@ mod handoff_e2e_tests {
             .await;
         make_core(&manager, "e2e-retry", &recovered.uri()).await;
         let new_target = fingerprint_for(&recovered.uri());
-        mark_and_process(&manager, &new_target);
+        mark_and_process(&store, &manager, &new_target);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !manager.pinned_fingerprint_matches("e2e-retry", &new_target) {
+        while !store.pinned_matches("e2e-retry", &new_target) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "变化点后台处理应及时完成交接"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(manager.pending_handoff("e2e-retry"), None);
+        assert_eq!(store.pending_handoff("e2e-retry"), None);
         manager.retire_core("e2e-retry", true).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 会话执行中不打断并跳过交接() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = make_manager(&dir);
+        let (store, manager) = make_pair(&dir);
         let server = MockServer::start().await;
         // 压缩响应长时间挂起：占住任务槽，构造「会话忙」。
         Mock::given(method("POST"))
             .respond_with(completion_reply("慢摘要").set_delay(Duration::from_secs(30)))
             .mount(&server)
             .await;
-        seed_session_with_stale_pin(&dir, &manager, "e2e-busy");
+        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-busy");
         make_core(&manager, "e2e-busy", &server.uri()).await;
 
         // 变化点打标（写标记 + spawn 后台处理）：后台交接的压缩挂起中。
         let fp = fingerprint_for(&server.uri());
-        mark_and_process(&manager, &fp);
+        mark_and_process(&store, &manager, &fp);
         tokio::time::sleep(Duration::from_millis(400)).await;
         // 压缩进行中标记在场；投递路径执行：deliver 得 Busy，不打断。
-        assert!(manager.pending_handoff("e2e-busy").is_some());
-        let second = ensure_before_deliver(&manager, "e2e-busy", || fp.clone()).await;
+        assert!(store.pending_handoff("e2e-busy").is_some());
+        let second = ensure_before_deliver(&store, &manager, "e2e-busy", || fp.clone()).await;
         assert_eq!(second, ConfigHandoffOutcome::SkippedBusy);
 
         // 取消挂起的压缩：任务槽释放后后台判据判为未推进 → Failed，标记保留。
@@ -355,7 +654,7 @@ mod handoff_e2e_tests {
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
-            manager.pending_handoff("e2e-busy").is_some(),
+            store.pending_handoff("e2e-busy").is_some(),
             "失败保留标记，投递路径据此重试"
         );
         manager.retire_core("e2e-busy", true).await.unwrap();
@@ -364,29 +663,29 @@ mod handoff_e2e_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 变化点打标后空闲会话立即交接() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = make_manager(&dir);
+        let (store, manager) = make_pair(&dir);
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(completion_reply("[[SUMMARY]]\n识别即压摘要"))
             .mount(&server)
             .await;
         // 会话在当前指纹下已定档（模拟上一进程的正常收尾）。
-        seed_session_with_stale_pin(&dir, &manager, "e2e-mark");
+        seed_session_with_stale_pin(&dir, &store, &manager, "e2e-mark");
         make_core(&manager, "e2e-mark", &server.uri()).await;
-        manager.complete_handoff("e2e-mark", &fingerprint_for(&server.uri()));
+        store.complete_handoff("e2e-mark", &fingerprint_for(&server.uri()));
 
         // 变化点打标（目标=新配置指纹），后台立即处理空闲会话。
         let target = fingerprint_for("https://changed.example.com");
-        mark_and_process(&manager, &target);
+        mark_and_process(&store, &manager, &target);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !manager.pinned_fingerprint_matches("e2e-mark", &target) {
+        while !store.pinned_matches("e2e-mark", &target) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "打标后空闲会话应及时完成交接"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert_eq!(manager.pending_handoff("e2e-mark"), None, "完成后清除标记");
+        assert_eq!(store.pending_handoff("e2e-mark"), None, "完成后清除标记");
         let session = manager.load_session("e2e-mark").unwrap();
         assert_eq!(session.context_summary.as_deref(), Some("识别即压摘要"));
         manager.retire_core("e2e-mark", true).await.unwrap();
@@ -395,7 +694,7 @@ mod handoff_e2e_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 无可交接历史时直接定档零模型调用() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = make_manager(&dir);
+        let (store, manager) = make_pair(&dir);
         let server = MockServer::start().await;
 
         // 只有 System/Notice 的会话：新配置直接生效，不调模型。
@@ -408,17 +707,17 @@ mod handoff_e2e_tests {
         ));
         session.try_persist_to_disk().unwrap();
         let fp = fingerprint_for(&server.uri());
-        let outcome = ensure_before_deliver(&manager, "system-only", || fp.clone()).await;
+        let outcome = ensure_before_deliver(&store, &manager, "system-only", || fp.clone()).await;
         assert_eq!(outcome, ConfigHandoffOutcome::Aligned);
-        assert!(manager.pinned_fingerprint_matches("system-only", &fp));
+        assert!(store.pinned_matches("system-only", &fp));
         assert!(
             server.received_requests().await.unwrap().is_empty(),
             "无可交接历史不得发起模型调用"
         );
 
         // 会话文件不存在（新对话）同样直接定档。
-        let outcome = ensure_before_deliver(&manager, "fresh", || fp.clone()).await;
+        let outcome = ensure_before_deliver(&store, &manager, "fresh", || fp.clone()).await;
         assert_eq!(outcome, ConfigHandoffOutcome::Aligned);
-        assert!(manager.pinned_fingerprint_matches("fresh", &fp));
+        assert!(store.pinned_matches("fresh", &fp));
     }
 }

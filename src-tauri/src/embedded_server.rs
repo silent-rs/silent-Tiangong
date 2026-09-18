@@ -587,6 +587,7 @@ async fn delete_session(
     let _send_guard = state.session_send_lock(session_id).lock_owned().await;
     // 逻辑删除：原子移动到 trash + 取消 Core。
     state.core_manager.delete_session(session_id).await?;
+    state.config_handoff_store.forget(session_id);
     // 清理内存状态。
     state.fail_remote_session_waiters(session_id, "目标会话已删除");
     state

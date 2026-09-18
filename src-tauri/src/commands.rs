@@ -333,6 +333,7 @@ pub async fn delete_session(
         .delete_session(&deleted_id)
         .await
         .map_err(|error| format!("删除会话失败：{error}"))?;
+    state.inner().config_handoff_store.forget(&deleted_id);
     // 清理内存状态。
     state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
     state
@@ -376,11 +377,16 @@ pub async fn delete_sessions_by_cwd(
     }
     // 并发逻辑删除（等待 worker 退出 + 原子移动到 trash）。收集每项结果。
     let core_manager = state.inner().core_manager.clone();
+    let handoff_store = state.inner().config_handoff_store.clone();
     let deletes = deleted_ids.iter().map(|id| {
         let id = id.clone();
         let manager = core_manager.clone();
+        let handoff_store = handoff_store.clone();
         async move {
             let result = manager.delete_session(&id).await;
+            if result.is_ok() {
+                handoff_store.forget(&id);
+            }
             (id, result)
         }
     });
