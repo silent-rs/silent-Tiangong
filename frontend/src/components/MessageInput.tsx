@@ -1103,37 +1103,49 @@ export function MessageInput({
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-1 shrink-0">
+              <div className="flex items-center gap-0.5 shrink-0">
                 <SessionInputPluginHost slot="session.input-status" />
-                <Cpu className="w-3 h-3" />
-                <select
-                  value={sessionModelRef ?? ''}
-                  onChange={(e) => { void handleSessionModelChange(e.target.value); }}
-                  disabled={modelSelectorDisabled}
-                  className="bg-transparent text-xs text-muted-foreground hover:text-foreground cursor-pointer outline-none border-none appearance-none pr-1 disabled:cursor-not-allowed disabled:opacity-50"
+                <label
+                  className={`flex h-6 items-center gap-1 rounded-md px-1.5 text-xs transition-colors cursor-pointer ${
+                    modelSelectorDisabled
+                      ? 'opacity-50 cursor-not-allowed text-muted-foreground'
+                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  }`}
                   title={modelSelectorTitle}
                 >
-                  <option value="">默认模型</option>
-                  {modelOptions.map((option) => (
-                    <option key={option.key} value={option.key}>{option.label}</option>
-                  ))}
-                  {modelUnavailable && (
-                    <option value={sessionModelRef}>{sessionModelRef}（不可用，当前使用默认）</option>
-                  )}
-                </select>
-                <Brain className="w-3 h-3" />
-                <select
-                  value={reasoningEffort}
-                  onChange={(e) => setReasoningEffort(e.target.value)}
-                  className="bg-transparent text-xs text-muted-foreground hover:text-foreground cursor-pointer outline-none border-none appearance-none pr-1"
+                  <Cpu className="w-3 h-3 shrink-0" />
+                  <select
+                    value={sessionModelRef ?? ''}
+                    onChange={(e) => { void handleSessionModelChange(e.target.value); }}
+                    disabled={modelSelectorDisabled}
+                    className="max-w-28 cursor-pointer truncate border-none bg-transparent text-xs outline-none appearance-none"
+                  >
+                    <option value="">默认模型</option>
+                    {modelOptions.map((option) => (
+                      <option key={option.key} value={option.key}>{option.label}</option>
+                    ))}
+                    {modelUnavailable && (
+                      <option value={sessionModelRef}>{sessionModelRef}（不可用，当前使用默认）</option>
+                    )}
+                  </select>
+                </label>
+                <label
+                  className="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors cursor-pointer hover:bg-accent hover:text-foreground"
                   title="思考强度"
                 >
-                  <option value="none">不思考</option>
-                  <option value="low">低强度</option>
-                  <option value="medium">中强度</option>
-                  <option value="high">高强度</option>
-                  <option value="max">最大强度</option>
-                </select>
+                  <Brain className="w-3 h-3 shrink-0" />
+                  <select
+                    value={reasoningEffort}
+                    onChange={(e) => setReasoningEffort(e.target.value)}
+                    className="cursor-pointer border-none bg-transparent text-xs outline-none appearance-none"
+                  >
+                    <option value="none">不思考</option>
+                    <option value="low">低强度</option>
+                    <option value="medium">中强度</option>
+                    <option value="high">高强度</option>
+                    <option value="max">最大强度</option>
+                  </select>
+                </label>
               </div>
             </div>
             <SessionInputPluginHost slot="session.before-input" />
