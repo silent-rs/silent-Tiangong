@@ -894,21 +894,24 @@ impl TiangongApp {
         })
     }
 
-    /// 投递消息前的配置交接：模型端点或插件声明（版本/启用集合）变化时，
-    /// 先经 core 既有手动压缩整理上下文，再让新配置接管（决策在宿主层，
-    /// core 只保留通用压缩能力——见 core_manager 层 `config_handoff` 模块）。
-    ///
-    /// 运行期是标记制：变化点（插件命令的 `notify_plugins_changed`、模型
-    /// 切换的 `sync_core_config_from_state`）已打标并尝试即时处理，这里只
-    /// 查内存标记；首检兜底每会话每进程一次，之后零指纹计算。会话忙
-    /// （turn 执行中）不打断；交接失败也放行消息（下一条消息前自动重试）。
+    /// 投递消息前的配置交接（编排见 `crate::config_handoff`）：待交接标记
+    /// 命中则执行交接；否则每会话每进程首检一次指纹兜底（防重启丢标记与
+    /// 漏报的变化点），指纹惰性求值——首检之外的投递路径零指纹计算。
     async fn handoff_config_if_changed(
         &self,
         session_id: &str,
         session_config: &tiangong_core::config::core::CoreConfig,
     ) {
         use tiangong_core_manager::core_manager::config_handoff::ConfigHandoffOutcome;
-        let report = |outcome: ConfigHandoffOutcome| match outcome {
+        let endpoint = session_config.llm.clone();
+        let outcome = crate::config_handoff::ensure_before_deliver(
+            &self.core_manager,
+            session_id,
+            // 惰性：仅首检兜底分支才会计算。
+            || self.compute_execution_fingerprint(&endpoint),
+        )
+        .await;
+        match outcome {
             ConfigHandoffOutcome::Aligned => {}
             ConfigHandoffOutcome::SkippedBusy => {
                 tracing::debug!(session_id, "会话执行中，配置交接延后到下一条消息");
@@ -916,26 +919,14 @@ impl TiangongApp {
             ConfigHandoffOutcome::Failed(reason) => {
                 tracing::warn!(session_id, reason, "配置交接压缩未完成，上下文未整理即继续");
             }
-        };
-        if self.core_manager.pending_handoff(session_id) {
-            report(self.core_manager.run_pending_handoff(session_id).await);
-            return;
-        }
-        if self.core_manager.handoff_bootstrap_needed(session_id) {
-            let fingerprint = self.compute_execution_fingerprint(&session_config.llm);
-            report(
-                self.core_manager
-                    .bootstrap_handoff_check(session_id, &fingerprint)
-                    .await,
-            );
         }
     }
 
-    /// 变化点打标：算当前执行指纹，对全部活跃会话标记待交接——manager
-    /// 后台立即处理空闲会话（识别即压），忙会话留标记等投递路径。
+    /// 变化点打标：算当前执行指纹，交编排层对全部活跃会话标记待交接并
+    /// 后台立即处理（空闲即压，忙则留标记等投递路径）。
     pub fn mark_config_handoff(&self, endpoint: &tiangong_llm::ModelEndpoint) {
         let fingerprint = self.compute_execution_fingerprint(endpoint);
-        self.core_manager.mark_sessions_for_handoff(&fingerprint);
+        crate::config_handoff::mark_and_process(&self.core_manager, &fingerprint);
     }
 
     /// 同 [`Self::mark_config_handoff`]，模型端点取全局模板（插件变化等

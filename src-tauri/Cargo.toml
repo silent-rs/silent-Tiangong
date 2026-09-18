@@ -58,6 +58,7 @@ objc2 = "0.6"
 
 [dev-dependencies]
 sha2 = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 hex = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
