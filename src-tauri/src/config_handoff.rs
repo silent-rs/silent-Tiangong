@@ -305,6 +305,31 @@ where
     ConfigHandoffOutcome::Aligned
 }
 
+/// 是否存在待交接标记（投递前快速判定，供延迟投递决策）。
+pub(crate) fn has_pending(store: &ConfigHandoffStore, session_id: &str) -> bool {
+    store.pending_handoff(session_id).is_some()
+}
+
+/// 首检是否会发现指纹不一致（有标记、或未做过首检且当前指纹与定档
+/// 不同）。只读判定，不写首检记录——真正的首检在随后的交接序列执行。
+pub(crate) fn bootstrap_mismatch<F>(
+    store: &ConfigHandoffStore,
+    session_id: &str,
+    fingerprint: F,
+) -> bool
+where
+    F: FnOnce() -> String,
+{
+    if store.pending_handoff(session_id).is_some() {
+        return true;
+    }
+    if !store.bootstrap_needed(session_id) {
+        return false;
+    }
+    let current = fingerprint();
+    !store.pinned_matches(session_id, &current)
+}
+
 /// 面向显式切换的幂等交接入口：目标指纹已定档（或已有标记在途）时按
 /// 标记语义处理，否则执行交接——重复设置同一模型不会引发无谓压缩。
 pub(crate) async fn handoff_to(

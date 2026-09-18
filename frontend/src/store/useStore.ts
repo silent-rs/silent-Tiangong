@@ -1521,7 +1521,7 @@ export const useStore = create<AppState>((set, get) => ({
         startsNewConversation ? initialCwd : undefined,
         startsNewConversation ? trustMode : undefined,
         startsNewConversation ? initialReasoningEffort : undefined,
-        startsNewConversation ? (modelRef ?? undefined) : undefined,
+        modelRef ?? undefined,
       );
 
       const shouldActivate = startsNewConversation

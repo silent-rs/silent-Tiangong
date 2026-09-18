@@ -99,6 +99,156 @@ pub(crate) struct EnsuredCore {
     pub(crate) is_new: bool,
 }
 
+/// 会话应然执行端点：model_ref 指向的模型优先（app_state 注册表解析），
+/// 未设置/失效回退路由默认。
+async fn session_effective_endpoint_at(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    manager: &tiangong_core_manager::CoreManager,
+    session_id: &str,
+) -> tiangong_llm::ModelEndpoint {
+    let (models, default_endpoint) = {
+        let guard = state.lock().await;
+        (
+            guard.config.models.clone(),
+            guard.config.to_core_config().llm,
+        )
+    };
+    manager
+        .load_session(session_id)
+        .ok()
+        .and_then(|session| session.model_ref)
+        .as_deref()
+        .and_then(|key| models.resolve_model_by_key(key))
+        .map(tiangong_llm::ModelEndpoint::from_resolved)
+        .unwrap_or(default_endpoint)
+}
+
+/// 分步切换会话模型（自由函数版，供后台投递序列复用）：
+/// ① 用当前（旧）端点完成上下文压缩交接（无历史直接定档）→
+/// ② 原子收尾（端点生效 + 引用持久化）。任一步失败保持旧值。
+async fn apply_session_model_at(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    store: &crate::config_handoff::ConfigHandoffStore,
+    manager: &tiangong_core_manager::CoreManager,
+    plugins_root: &std::path::Path,
+    session_id: &str,
+    model_ref: Option<String>,
+    endpoint: tiangong_llm::ModelEndpoint,
+) -> Result<(), String> {
+    use crate::config_handoff::ConfigHandoffOutcome;
+    let fingerprint = execution_fingerprint_at(plugins_root, &endpoint);
+    match crate::config_handoff::handoff_to(store, manager, session_id, &fingerprint).await {
+        ConfigHandoffOutcome::Aligned => {}
+        ConfigHandoffOutcome::SkippedBusy => {
+            return Err("会话正在执行，当前回合结束后可切换模型".to_string())
+        }
+        ConfigHandoffOutcome::Failed(reason) => {
+            return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
+        }
+    }
+    manager.set_core_session_model(session_id, model_ref, endpoint)
+}
+
+/// 会话端点校正（自由函数版）：应然端点与 Core 当前生效端点不一致时
+/// 分步切换（引用保持现值）。
+async fn reconcile_session_endpoint_at(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    store: &crate::config_handoff::ConfigHandoffStore,
+    manager: &tiangong_core_manager::CoreManager,
+    plugins_root: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    let expected = session_effective_endpoint_at(state, manager, session_id).await;
+    let current = {
+        let registry = manager.registry();
+        registry.get(session_id).map(|core| core.current_endpoint())
+    };
+    let Some(current) = current else {
+        return Ok(()); // 无活跃 Core：ensure 之后投递路径会再处理
+    };
+    let same = (expected.protocol, &expected.base_url, &expected.model)
+        == (current.protocol, &current.base_url, &current.model);
+    if same {
+        return Ok(());
+    }
+    let model_ref = manager
+        .load_session(session_id)
+        .ok()
+        .and_then(|session| session.model_ref);
+    apply_session_model_at(
+        state,
+        store,
+        manager,
+        plugins_root,
+        session_id,
+        model_ref,
+        expected,
+    )
+    .await
+}
+
+/// 投递消息前的完整交接序列：端点校正（模型维度）→ 标记/首检交接
+/// （插件维度）。失败只告警——消息照常继续（未整理即用当前配置，
+/// 标记保留重试）。
+async fn handoff_sequence(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    store: &crate::config_handoff::ConfigHandoffStore,
+    manager: &tiangong_core_manager::CoreManager,
+    plugins_root: &std::path::Path,
+    session_id: &str,
+) {
+    use crate::config_handoff::ConfigHandoffOutcome;
+    if let Err(error) =
+        reconcile_session_endpoint_at(state, store, manager, plugins_root, session_id).await
+    {
+        tracing::warn!(session_id, error, "会话端点校正未完成，本轮继续用当前端点");
+    }
+    let endpoint = session_effective_endpoint_at(state, manager, session_id).await;
+    let outcome = crate::config_handoff::ensure_before_deliver(store, manager, session_id, || {
+        execution_fingerprint_at(plugins_root, &endpoint)
+    })
+    .await;
+    match outcome {
+        ConfigHandoffOutcome::Aligned => {}
+        ConfigHandoffOutcome::SkippedBusy => {
+            tracing::debug!(session_id, "会话执行中，配置交接延后到下一条消息");
+        }
+        ConfigHandoffOutcome::Failed(reason) => {
+            tracing::warn!(session_id, reason, "配置交接压缩未完成，上下文未整理即继续");
+        }
+    }
+}
+
+/// 投递前是否需要先完成交接（端点漂移 / 待交接标记 / 首检将发现指纹
+/// 不一致）——用于把投递延迟到交接完成之后。
+async fn needs_handoff_before_deliver(
+    state: &AsyncMutex<tiangong_app_state::app_state::TiangongState>,
+    store: &crate::config_handoff::ConfigHandoffStore,
+    manager: &tiangong_core_manager::CoreManager,
+    plugins_root: &std::path::Path,
+    session_id: &str,
+) -> bool {
+    // 端点漂移：应然与 Core 当前生效端点不一致。
+    let expected = session_effective_endpoint_at(state, manager, session_id).await;
+    let drifted = {
+        let registry = manager.registry();
+        registry.get(session_id).is_some_and(|core| {
+            let current = core.current_endpoint();
+            (expected.protocol, &expected.base_url, &expected.model)
+                != (current.protocol, &current.base_url, &current.model)
+        })
+    };
+    if drifted {
+        return true;
+    }
+    if crate::config_handoff::has_pending(store, session_id) {
+        return true;
+    }
+    crate::config_handoff::bootstrap_mismatch(store, session_id, || {
+        execution_fingerprint_at(plugins_root, &expected)
+    })
+}
+
 /// 计算执行配置指纹（模型端点 + runtime 注册表启用插件 id@version）。
 fn execution_fingerprint_at(
     storage_root: &std::path::Path,
@@ -933,21 +1083,7 @@ impl TiangongApp {
     /// 会话的应然执行端点：model_ref 指向的模型优先（app_state 注册表
     /// 解析），未设置/失效回退路由默认。模型注册表只存在于宿主配置。
     async fn session_effective_endpoint(&self, session_id: &str) -> tiangong_llm::ModelEndpoint {
-        let (models, default_endpoint) = self
-            .with_state_read(|state| {
-                let config = state.config.to_core_config();
-                Ok((state.config.models.clone(), config.llm))
-            })
-            .await
-            .unwrap_or_default();
-        self.core_manager
-            .load_session(session_id)
-            .ok()
-            .and_then(|session| session.model_ref)
-            .as_deref()
-            .and_then(|key| models.resolve_model_by_key(key))
-            .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or(default_endpoint)
+        session_effective_endpoint_at(&self.state, &self.core_manager, session_id).await
     }
 
     /// 投递消息前的配置交接（状态与编排都在 `crate::config_handoff`）：
@@ -955,31 +1091,14 @@ impl TiangongApp {
     /// 重启丢标记与漏报的变化点），指纹惰性求值——首检之外的投递路径
     /// 零指纹计算。
     async fn handoff_config_if_changed(&self, session_id: &str) {
-        use crate::config_handoff::ConfigHandoffOutcome;
-        // 先做模型维度校正（应然端点 vs Core 当前生效端点）：不一致时
-        // 走分步切换（旧端点压缩→切端点+写引用）。校正完成后指纹的模型
-        // 部分已一致，后续首检若仍不一致只可能是插件维度。
-        if let Err(error) = self.reconcile_session_endpoint(session_id).await {
-            tracing::warn!(session_id, error, "会话端点校正未完成，本轮继续用当前端点");
-        }
-        let endpoint = self.session_effective_endpoint(session_id).await;
-        let outcome = crate::config_handoff::ensure_before_deliver(
+        handoff_sequence(
+            &self.state,
             &self.config_handoff_store,
             &self.core_manager,
+            &self.desktop_factory.storage_root,
             session_id,
-            // 惰性：仅首检兜底分支才会计算。
-            || self.compute_execution_fingerprint(&endpoint),
         )
-        .await;
-        match outcome {
-            ConfigHandoffOutcome::Aligned => {}
-            ConfigHandoffOutcome::SkippedBusy => {
-                tracing::debug!(session_id, "会话执行中，配置交接延后到下一条消息");
-            }
-            ConfigHandoffOutcome::Failed(reason) => {
-                tracing::warn!(session_id, reason, "配置交接压缩未完成，上下文未整理即继续");
-            }
-        }
+        .await
     }
 
     /// 分步切换会话模型：① 用当前（旧）端点完成上下文压缩交接（无历史
@@ -991,52 +1110,30 @@ impl TiangongApp {
         model_ref: Option<String>,
         endpoint: tiangong_llm::ModelEndpoint,
     ) -> Result<(), String> {
-        use crate::config_handoff::ConfigHandoffOutcome;
-        let fingerprint = self.compute_execution_fingerprint(&endpoint);
-        match crate::config_handoff::handoff_to(
+        apply_session_model_at(
+            &self.state,
             &self.config_handoff_store,
             &self.core_manager,
+            &self.desktop_factory.storage_root,
             session_id,
-            &fingerprint,
+            model_ref,
+            endpoint,
         )
         .await
-        {
-            ConfigHandoffOutcome::Aligned => {}
-            ConfigHandoffOutcome::SkippedBusy => {
-                return Err("会话正在执行，当前回合结束后可切换模型".to_string())
-            }
-            ConfigHandoffOutcome::Failed(reason) => {
-                return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
-            }
-        }
-        self.core_manager
-            .set_core_session_model(session_id, model_ref, endpoint)
     }
 
     /// 会话端点校正：应然端点（model_ref 解析）与 Core 当前生效端点
     /// 不一致时分步切换（引用保持现值）。覆盖三类漂移——懒重建 Core 后
     /// 的自持端点恢复、跟随默认会话的默认变化、失效引用的回退。
     async fn reconcile_session_endpoint(&self, session_id: &str) -> Result<(), String> {
-        let expected = self.session_effective_endpoint(session_id).await;
-        let current = {
-            let registry = self.core_manager.registry();
-            registry.get(session_id).map(|core| core.current_endpoint())
-        };
-        let Some(current) = current else {
-            return Ok(()); // 无活跃 Core：ensure 之后投递路径会再处理
-        };
-        let same = (expected.protocol, &expected.base_url, &expected.model)
-            == (current.protocol, &current.base_url, &current.model);
-        if same {
-            return Ok(());
-        }
-        let model_ref = self
-            .core_manager
-            .load_session(session_id)
-            .ok()
-            .and_then(|session| session.model_ref);
-        self.apply_session_model(session_id, model_ref, expected)
-            .await
+        reconcile_session_endpoint_at(
+            &self.state,
+            &self.config_handoff_store,
+            &self.core_manager,
+            &self.desktop_factory.storage_root,
+            session_id,
+        )
+        .await
     }
 
     /// 插件集合/版本变化的变化点打标（notify_plugins_changed 调用）：对
@@ -1106,7 +1203,37 @@ impl TiangongApp {
         if !self.core_manager.has_live_core(session_id) {
             return Err("会话 Core 不存在".to_string());
         }
-        self.handoff_config_if_changed(session_id).await;
+        // 需要交接（端点漂移/待交接标记/首检不一致）时不在发送命令里
+        // 同步等待——后台完成「压缩→切换」后自动继续投递，发送命令立即
+        // 返回；压缩期间前端经 ContextCompressing 事件持续显示压缩中。
+        // 交接失败也继续投递（未整理即用当前配置，标记保留重试）。
+        let needs_handoff = needs_handoff_before_deliver(
+            &self.state,
+            &self.config_handoff_store,
+            &self.core_manager,
+            &self.desktop_factory.storage_root,
+            session_id,
+        )
+        .await;
+        if needs_handoff {
+            let state = self.state.clone();
+            let store = self.config_handoff_store.clone();
+            let manager = self.core_manager.clone();
+            let plugins_root = self.desktop_factory.storage_root.clone();
+            let sid = session_id.to_string();
+            tracing::info!(session_id, "发送前需要配置交接，消息将在交接完成后继续");
+            tauri::async_runtime::spawn(async move {
+                handoff_sequence(&state, &store, &manager, &plugins_root, &sid).await;
+                let delivered = manager.deliver_to_core_if_live(
+                    &sid,
+                    AgentInputKind::prepared_with_id(message_id, prepared),
+                );
+                if !delivered {
+                    tracing::warn!(session_id = %sid, "交接完成后的消息投递失败");
+                }
+            });
+            return Ok(());
+        }
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,

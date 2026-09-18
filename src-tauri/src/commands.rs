@@ -713,6 +713,21 @@ async fn send_message_inner(
         }
         Some(cwd)
     };
+    // 发送时把当前所选模型持久化到会话（幂等）：新会话由 ensure 的初始
+    // 引用写入，既有会话在此补写——发送后 session 必定记录当前模型。
+    // 失败仅告警不阻断（Append 到运行中会话时 core 忙拒绝写，模型保持
+    // 运行中的值不变）。
+    if let Some(model_ref) = initial_model_ref
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+    {
+        if let Err(error) = state
+            .core_manager
+            .set_core_model_ref(&session_id, Some(model_ref))
+        {
+            tracing::warn!(session_id = %session_id, error, "发送时写入会话模型引用失败");
+        }
+    }
     let ensured = state
         .ensure_core(
             &session_id,
