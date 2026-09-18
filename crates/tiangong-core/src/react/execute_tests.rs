@@ -864,7 +864,7 @@ async fn cancel_interrupts_manual_context_compression() {
 
     tokio::time::timeout(
         Duration::from_secs(10),
-        crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx, None),
+        crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx),
     )
     .await
     .expect("取消手动压缩后任务应及时结束");

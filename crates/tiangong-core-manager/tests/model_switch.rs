@@ -564,17 +564,24 @@ async fn 切换在压缩进入终态后才发生() {
     manager.retire_core("await-terminal", true).await.unwrap();
 }
 
-/// 切换前压缩使用目标模型的上下文窗口。
+/// 上下文窗口跟随当前模型：切换模型后窗口必须同步变化。
 ///
-/// 压缩产物最终交给目标模型，按目标窗口裁剪更贴合；目标未声明窗口时
-/// 回落到会话配置的通用限制。
+/// 这是把 `context_window` 从 `CoreConfig` 迁到 `ModelEndpoint` 的原因——
+/// `CoreConfig.context_limit` 由**路由默认模型**推导，会话切到别的模型后
+/// 不会变；若继续沿用，换到小窗口模型仍按旧窗口判断自动压缩，请求会被
+/// Provider 拒绝。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn 目标模型的上下文窗口透传到端点() {
+async fn 上下文窗口随模型切换同步生效() {
     let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(summary_reply())
+        .mount(&server)
+        .await;
     let config = serde_json::json!({
         "providers": {
             "p": {
-                "base_url": "http://unused.invalid",
+                "base_url": server.uri(),
                 "api_key": "test-key",
                 "timeout_ms": 60000,
                 "protocol": "openai_chat_completions",
@@ -582,37 +589,76 @@ async fn 目标模型的上下文窗口透传到端点() {
             }
         },
         "models": {
+            "wide": {
+                "provider": "p",
+                "model": "wide-model",
+                "capabilities": ["chat"],
+                "context_window": 400000
+            },
             "narrow": {
                 "provider": "p",
                 "model": "narrow-model",
                 "capabilities": ["chat"],
                 "context_window": 32768
-            },
-            "unspecified": {"provider": "p", "model": "plain-model", "capabilities": ["chat"]}
+            }
         },
-        "routing": {"chat": "narrow"}
+        "routing": {"chat": "wide"}
     });
     std::fs::write(
         dir.path().join("models.json"),
         serde_json::to_string_pretty(&config).unwrap(),
     )
     .unwrap();
-    let manager = manager_at(&dir);
+    seed_session(&dir, "window-follow", Some("wide"));
 
-    let narrow = manager.resolve_turn_model(Some("narrow")).unwrap();
+    let manager = manager_at(&dir);
+    make_core(&manager, "window-follow").await;
+
+    let before = {
+        let registry = manager.registry();
+        registry.get("window-follow").unwrap().current_endpoint()
+    };
+    assert_eq!(before.context_window, Some(400_000), "初始窗口来自当前模型");
+
+    // 切到小窗口模型。
+    let target = manager.resolve_turn_model(Some("narrow")).unwrap();
+    assert_eq!(target.context_window, Some(32_768));
+    manager
+        .switch_model_if_needed("window-follow", target)
+        .await
+        .expect("切换应成功");
+
+    let after = {
+        let registry = manager.registry();
+        registry.get("window-follow").unwrap().current_endpoint()
+    };
     assert_eq!(
-        narrow.context_window,
-        Some(32768),
-        "注册表声明的窗口必须透传到端点，供切换前压缩使用"
+        after.context_window,
+        Some(32_768),
+        "切换后窗口必须同步为新模型的窗口，而不是沿用路由默认模型的窗口"
     );
     // 窗口不属于模型身份：仅窗口不同不触发切换。
-    let mut same_model_wider = narrow.clone();
-    same_model_wider.context_window = Some(200_000);
-    assert!(narrow.is_same_model(&same_model_wider));
+    let mut same_model_wider = after.clone();
+    same_model_wider.context_window = Some(400_000);
+    assert!(after.is_same_model(&same_model_wider));
+    // 往返不丢失。
+    assert_eq!(after.to_resolved().context_window, Some(32_768));
+    manager.retire_core("window-follow", true).await.unwrap();
+}
 
-    let unspecified = manager.resolve_turn_model(Some("unspecified")).unwrap();
+/// 未在 models.json 中声明窗口时端点留空，由 turn 回落到 CoreConfig 兜底。
+///
+/// 真实窗口存在 `models.json` 的模型条目上；`context_windows.json` 只是前端
+/// 编辑模型时的预填预设，运行期不回查，避免预设值覆盖用户未设置的语义。
+#[test]
+fn 未声明窗口的模型端点留空() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_models(&dir, "http://unused.invalid", "model-a");
+    let manager = manager_at(&dir);
+
+    let endpoint = manager.resolve_turn_model(Some("model-a")).unwrap();
     assert_eq!(
-        unspecified.context_window, None,
-        "未声明窗口时留空，由调用方回落到会话配置"
+        endpoint.context_window, None,
+        "未声明窗口时留空，由调用方回落到 CoreConfig.context_limit"
     );
 }

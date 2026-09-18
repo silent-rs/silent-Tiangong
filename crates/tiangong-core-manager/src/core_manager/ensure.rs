@@ -17,14 +17,6 @@ use tiangong_types::StreamEvent;
 use crate::CoreManager;
 use crate::core_manager::EnsuredCore;
 
-/// 路由 Chat 槽位的默认模型端点。
-fn default_chat_model(models: &tiangong_llm::models_config::ModelsConfig) -> ModelEndpoint {
-    models
-        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-        .map(ModelEndpoint::from_resolved)
-        .unwrap_or_default()
-}
-
 impl CoreManager {
     /// 确保 registry 中存在该会话的 Core，返回是否新建。
     ///
@@ -102,10 +94,36 @@ impl CoreManager {
             .and_then(|session| session.model_ref);
         match session_ref {
             Some(key) => self.resolve_turn_model(Some(&key)).unwrap_or_default(),
-            None => default_chat_model(&tiangong_config::io::load_models_config_at(
-                &self.storage_root,
-            )),
+            None => tiangong_config::default_chat_endpoint_at(
+                &tiangong_config::io::load_models_config_at(&self.storage_root),
+            )
+            .unwrap_or_default(),
         }
+    }
+
+    /// 会话当前生效的上下文窗口（token 统计分母、压缩阈值的依据）。
+    ///
+    /// 优先取活跃 Core 的当前端点——它随模型切换同步变化；Core 未建时按
+    /// 会话的模型选择解析。都解析不出时返回 `None`，由调用方兜底。
+    pub fn session_context_limit(&self, session_id: &str) -> Option<usize> {
+        let live = {
+            let registry = self.registry();
+            registry
+                .get(session_id)
+                .map(|core| core.current_endpoint())
+                .filter(|endpoint| endpoint.is_usable())
+        };
+        let endpoint = match live {
+            Some(endpoint) => endpoint,
+            None => {
+                let model_ref = self
+                    .load_session(session_id)
+                    .ok()
+                    .and_then(|session| session.model_ref);
+                self.resolve_turn_model(model_ref.as_deref()).ok()?
+            }
+        };
+        endpoint.context_window.filter(|window| *window > 0)
     }
 
     /// 解析本轮的目标模型端点（`None` 表示跟随当前 Chat 默认）。
@@ -154,7 +172,7 @@ impl CoreManager {
                 ))
             }
             None => {
-                let target = default_chat_model(&models);
+                let target = tiangong_config::default_chat_endpoint_at(&models).unwrap_or_default();
                 if !target.is_usable() {
                     return Err("未配置可用的对话模型，请先在设置中配置模型".to_string());
                 }
@@ -197,12 +215,7 @@ impl CoreManager {
         // 无法发请求的端点压缩必然失败，白等一轮。此时历史也从未被该模型
         // 处理过，直接切换即可。
         if current.is_usable() {
-            // 压缩产物最终交给目标模型，按目标模型的窗口裁剪更贴合；
-            // 目标未声明窗口时回落到会话配置的通用限制。
-            let context_limit = target
-                .context_window
-                .unwrap_or_else(|| self.config().snapshot().context_limit);
-            if let Err(error) = core.compact_context(context_limit).await {
+            if let Err(error) = core.compact_context().await {
                 tracing::warn!(
                     session_id,
                     %error,

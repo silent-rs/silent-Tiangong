@@ -287,11 +287,14 @@ pub async fn load_session(
     state: State<'_, TiangongApp>,
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
-    let context_limit = if config.context_limit == 0 {
-        tiangong_core::config::core::default_context_limit()
-    } else {
-        config.context_limit
-    };
+    // token 统计的分母跟随会话实际模型：有活跃 Core 时取其当前端点的窗口，
+    // 否则按会话的模型选择解析；都拿不到才回落配置兜底。
+    let context_limit = state
+        .core_manager
+        .session_context_limit(&session_id)
+        .filter(|limit| *limit > 0)
+        .or(Some(config.context_limit).filter(|limit| *limit > 0))
+        .unwrap_or_else(tiangong_core::config::core::default_context_limit);
     let default_reasoning_effort = config.reasoning_effort;
     let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();

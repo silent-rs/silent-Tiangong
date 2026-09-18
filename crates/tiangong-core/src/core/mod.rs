@@ -145,16 +145,12 @@ impl TiangongCore {
     /// 实现，区别只在于本方法等待压缩任务进入终态（成功 / 失败 / 取消）后
     /// 才返回，便于宿主据此决定下一步。
     ///
-    /// `context_limit` 为本次压缩使用的上下文窗口（通常取目标模型的窗口）：
-    /// 压缩产物最终交给目标模型，用目标窗口裁剪更贴合。它只影响本次压缩，
-    /// 不写回 `CoreConfig`。
-    ///
     /// 返回 `Ok(())` 表示压缩已成功应用或无可压缩历史；`Err` 表示压缩未能
     /// 完成（模型调用失败、被取消、worker 退出等）。**返回 Err 时压缩任务
     /// 同样已进入终态**，调用方可以安全地继续后续操作。
-    pub async fn compact_context(&self, context_limit: usize) -> Result<(), CoreError> {
+    pub async fn compact_context(&self) -> Result<(), CoreError> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-        self.spawn_context_compression(Some(context_limit), Some(completion_tx))?;
+        self.spawn_context_compression(Some(completion_tx))?;
         // 任务在任何终态下都会发送一次通知；发送端被丢弃（worker 异常退出）
         // 时 recv 返回 Err，同样结束等待，不会悬挂。
         match completion_rx.await {
@@ -385,7 +381,10 @@ impl TiangongCore {
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
-            .context_limit(config.context_limit)
+            // 上下文窗口跟随当前实际模型：会话切换模型后窗口必须同步变化，
+            // 否则换到小窗口模型仍按旧窗口判断自动压缩，请求会被 Provider
+            // 拒绝。端点未声明窗口时回落到配置值（路由默认模型推导而来）。
+            .context_limit(endpoint.context_window.unwrap_or(config.context_limit))
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
@@ -534,12 +533,10 @@ impl TiangongCore {
     /// 起轮（压缩可随时重新发起）；其余信号（插件可用性广播等）不接受，
     /// 不打断压缩。运行中调用返回 `Busy`。
     ///
-    /// `context_limit` 覆盖本次压缩使用的上下文窗口（`None` 用会话配置值）；
     /// `completion_tx` 在压缩进入任一终态时收到一次结果，供等待方结束等待。
     /// 任务结束路径上必然发送（发送端随任务一起释放，接收端不会悬挂）。
     fn spawn_context_compression(
         &self,
-        context_limit: Option<usize>,
         completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), CoreError>>>,
     ) -> Result<(), CoreError> {
         if self.is_busy() {
@@ -561,12 +558,9 @@ impl TiangongCore {
             );
             Ok(async move {
                 use crate::react::compression::ManualCompressionOutcome as Outcome;
-                let outcome = crate::react::compression::run_manual_context_compression(
-                    ctx,
-                    &mut cmd_rx,
-                    context_limit,
-                )
-                .await;
+                let outcome =
+                    crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
+                        .await;
                 let interrupted_by_message = matches!(
                     outcome,
                     Outcome::Interrupted(crate::react::compression::CompressionInterrupt::Command(
@@ -612,7 +606,7 @@ impl TiangongCore {
 
     /// 用户手动触发的上下文压缩（`CommandInput::CompressContext`）。
     fn compress_context(&self) -> Result<(), CoreError> {
-        self.spawn_context_compression(None, None)
+        self.spawn_context_compression(None)
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -846,7 +840,7 @@ mod model_endpoint_tests {
         let root = tempfile::tempdir().unwrap();
         let core = test_core(root.path(), "compact-empty");
         // 空会话（无对话历史）：压缩任务判定 Noop 并立即给出终态，不触发模型请求。
-        core.compact_context(200_000)
+        core.compact_context()
             .await
             .expect("无历史时整理上下文应直接成功");
     }
@@ -885,13 +879,11 @@ mod model_endpoint_tests {
         }
         session.try_persist_to_disk().unwrap();
 
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            core.compact_context(200_000),
-        )
-        .await
-        .expect("压缩失败必须及时结束等待，不得挂到固定超时")
-        .expect_err("端点不可达时压缩应失败");
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(30), core.compact_context())
+                .await
+                .expect("压缩失败必须及时结束等待，不得挂到固定超时")
+                .expect_err("端点不可达时压缩应失败");
         assert!(matches!(error, CoreError::ContextCompactionFailed(_)));
         // 终态已到达：任务槽已释放，后续切换不会撞 Busy。
         assert!(!core.is_busy(), "压缩返回时任务槽必须已释放");

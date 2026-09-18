@@ -313,16 +313,12 @@ pub(crate) enum ManualCompressionOutcome {
 ///
 /// 只接受引导消息与取消类命令：引导消息取消压缩并立即起新轮；其余
 /// 信号在压缩状态下不接受（忽略），压缩照常收敛。
-///
-/// `context_limit` 为 `None` 时使用 `ctx.context_limit`（会话配置的通用
-/// 回退限制）；模型切换前的压缩传入目标模型的上下文窗口。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    context_limit: Option<usize>,
 ) -> ManualCompressionOutcome {
     let observed_tokens = ctx.session.current_tokens;
-    let organizer = ContextOrganizer::new(context_limit.unwrap_or(ctx.context_limit));
+    let organizer = ContextOrganizer::new(ctx.context_limit);
 
     let compressor = ContextCompressor::new(
         ctx.session.clone(),

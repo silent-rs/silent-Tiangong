@@ -175,39 +175,26 @@ impl TiangongConfig {
     ///
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
+    ///
+    /// `context_limit` 只是没有端点信息时的通用兜底（core 默认 200k）：会话
+    /// 实际使用的窗口由 `ModelEndpoint.context_window` 承载，切换模型时同步
+    /// 变化，不再从路由默认模型推导。
     pub fn to_core_config(&self) -> CoreConfig {
-        use tiangong_llm::models_config::RoutingSlot;
-
-        let context_limit = self
-            .models
-            .routing
-            .get(&RoutingSlot::Chat)
-            .filter(|chat| !chat.model.trim().is_empty())
-            .map(|chat| {
-                crate::io::resolve_context_limit_with_override(
-                    &self.storage_root,
-                    &chat.model,
-                    chat.context_window,
-                )
-            })
-            .unwrap_or_else(tiangong_core::config::core::default_context_limit);
         CoreConfig {
             trust_mode: self.default_trust_mode,
             default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: tiangong_llm::request::ReasoningEffort::Medium,
-            context_limit,
+            context_limit: tiangong_core::config::core::default_context_limit(),
         }
     }
 
-    /// 解析路由 Chat 槽位的默认模型端点。
+    /// 解析路由 Chat 槽位的默认模型端点（含解析后的上下文窗口）。
     ///
     /// 模型端点不再属于 `CoreConfig`——会话实际模型由宿主解析后交给 Core。
     /// 本方法供宿主在「用户未指定模型」时确定目标端点。
     pub fn default_chat_endpoint(&self) -> Option<tiangong_llm::ModelEndpoint> {
-        self.models
-            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-            .map(tiangong_llm::ModelEndpoint::from_resolved)
+        default_chat_endpoint_at(&self.models)
     }
 
     /// 路由 Chat 槽位当前指向的模型注册表 key（未配置或不在注册表时 None）。
@@ -227,6 +214,20 @@ impl TiangongConfig {
     pub fn into_core_config_provider(self) -> tiangong_core::config::core::CoreConfigProvider {
         tiangong_core::config::core::CoreConfigProvider::new(self.to_core_config())
     }
+}
+
+/// 解析路由 Chat 槽位的默认模型端点。
+///
+/// 供只持有 `ModelsConfig` 与存储根的调用方（如 CoreManager）使用，避免各自
+/// 重复解析 Chat 槽位。`context_window` 由 `ModelEntry` 原样透传——真实值存在
+/// `models.json` 的模型条目上，`context_windows.json` 只是前端编辑模型时的
+/// 预填预设，运行期不再回查。
+pub fn default_chat_endpoint_at(
+    models: &tiangong_llm::models_config::ModelsConfig,
+) -> Option<tiangong_llm::ModelEndpoint> {
+    models
+        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+        .map(tiangong_llm::ModelEndpoint::from_resolved)
 }
 
 #[cfg(test)]
@@ -344,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn to_core_config_uses_chat_context_window() {
+    fn 默认端点携带上下文窗口而核心配置只保留通用兜底() {
         use tiangong_llm::model::ProviderProtocol;
         use tiangong_llm::models_config::{
             ModelCapability, ModelEntry, ProviderConfig, RoutingSlot,
@@ -372,7 +373,17 @@ mod tests {
             },
         );
 
-        assert_eq!(config.to_core_config().context_limit, 131_072);
+        // 窗口跟随端点：切换模型时随之变化。
+        assert_eq!(
+            config.default_chat_endpoint().unwrap().context_window,
+            Some(131_072)
+        );
+        // CoreConfig 只保留与模型无关的通用兜底，不再从路由默认模型推导——
+        // 否则会话切到别的模型后它不会变，仍按旧窗口判断自动压缩。
+        assert_eq!(
+            config.to_core_config().context_limit,
+            tiangong_core::config::core::default_context_limit()
+        );
     }
 
     #[test]
