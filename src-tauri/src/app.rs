@@ -99,6 +99,31 @@ pub(crate) struct EnsuredCore {
     pub(crate) is_new: bool,
 }
 
+/// 计算执行配置指纹（模型端点 + runtime 注册表启用插件 id@version）。
+fn execution_fingerprint_at(
+    storage_root: &std::path::Path,
+    endpoint: &tiangong_llm::ModelEndpoint,
+) -> String {
+    let statuses = tiangong_plugin_runtime::registry::list_plugins(
+        storage_root,
+        tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+    );
+    let plugins: Vec<(String, String)> = statuses
+        .iter()
+        .filter(|status| status.enabled)
+        .map(|status| {
+            (
+                status.id.clone(),
+                status
+                    .loaded_version
+                    .clone()
+                    .unwrap_or_else(|| status.manifest_version.clone()),
+            )
+        })
+        .collect();
+    crate::config_handoff::execution_fingerprint(endpoint, &plugins)
+}
+
 fn merge_agent_output_messages(
     view: &mut Vec<tiangong_types::Message>,
     agent_id: &str,
@@ -899,20 +924,16 @@ impl TiangongApp {
     /// 会话的实际执行端点：model_ref 指向的模型优先（Core 现持注册表
     /// 解析），未设置/失效回退路由默认——与 core 创建 turn context 的
     /// 解析策略一致，供交接指纹（须与实际请求端点一致）与切换命令使用。
-    fn session_effective_endpoint(&self, session_id: &str) -> tiangong_llm::ModelEndpoint {
-        let (models, default) = {
-            let registry = self.core_manager.registry();
-            match registry.get(session_id) {
-                Some(core) => {
-                    let snapshot = core.config_snapshot();
-                    (snapshot.models, snapshot.llm)
-                }
-                None => {
-                    let snapshot = self.core_manager.config().snapshot();
-                    ((*snapshot).clone().models, snapshot.llm.clone())
-                }
-            }
-        };
+    /// 会话的应然执行端点：model_ref 指向的模型优先（app_state 注册表
+    /// 解析），未设置/失效回退路由默认。模型注册表只存在于宿主配置。
+    async fn session_effective_endpoint(&self, session_id: &str) -> tiangong_llm::ModelEndpoint {
+        let (models, default_endpoint) = self
+            .with_state_read(|state| {
+                let config = state.config.to_core_config();
+                Ok((state.config.models.clone(), config.llm))
+            })
+            .await
+            .unwrap_or_default();
         self.core_manager
             .load_session(session_id)
             .ok()
@@ -920,7 +941,7 @@ impl TiangongApp {
             .as_deref()
             .and_then(|key| models.resolve_model_by_key(key))
             .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or(default)
+            .unwrap_or(default_endpoint)
     }
 
     /// 投递消息前的配置交接（状态与编排都在 `crate::config_handoff`）：
@@ -929,7 +950,13 @@ impl TiangongApp {
     /// 零指纹计算。
     async fn handoff_config_if_changed(&self, session_id: &str) {
         use crate::config_handoff::ConfigHandoffOutcome;
-        let endpoint = self.session_effective_endpoint(session_id);
+        // 先做模型维度校正（应然端点 vs Core 当前生效端点）：不一致时
+        // 走分步切换（旧端点压缩→切端点+写引用）。校正完成后指纹的模型
+        // 部分已一致，后续首检若仍不一致只可能是插件维度。
+        if let Err(error) = self.reconcile_session_endpoint(session_id).await {
+            tracing::warn!(session_id, error, "会话端点校正未完成，本轮继续用当前端点");
+        }
+        let endpoint = self.session_effective_endpoint(session_id).await;
         let outcome = crate::config_handoff::ensure_before_deliver(
             &self.config_handoff_store,
             &self.core_manager,
@@ -949,20 +976,98 @@ impl TiangongApp {
         }
     }
 
+    /// 分步切换会话模型：① 用当前（旧）端点完成上下文压缩交接（无历史
+    /// 直接定档）→ ② 成功后原子收尾（端点生效 + 引用持久化，经 manager）。
+    /// 任一步失败则端点与引用都保持旧值——不谎称切换完成。
+    pub(crate) async fn apply_session_model(
+        &self,
+        session_id: &str,
+        model_ref: Option<String>,
+        endpoint: tiangong_llm::ModelEndpoint,
+    ) -> Result<(), String> {
+        use crate::config_handoff::ConfigHandoffOutcome;
+        let fingerprint = self.compute_execution_fingerprint(&endpoint);
+        match crate::config_handoff::handoff_to(
+            &self.config_handoff_store,
+            &self.core_manager,
+            session_id,
+            &fingerprint,
+        )
+        .await
+        {
+            ConfigHandoffOutcome::Aligned => {}
+            ConfigHandoffOutcome::SkippedBusy => {
+                return Err("会话正在执行，当前回合结束后可切换模型".to_string())
+            }
+            ConfigHandoffOutcome::Failed(reason) => {
+                return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
+            }
+        }
+        self.core_manager
+            .set_core_session_model(session_id, model_ref, endpoint)
+    }
+
+    /// 会话端点校正：应然端点（model_ref 解析）与 Core 当前生效端点
+    /// 不一致时分步切换（引用保持现值）。覆盖三类漂移——懒重建 Core 后
+    /// 的自持端点恢复、跟随默认会话的默认变化、失效引用的回退。
+    async fn reconcile_session_endpoint(&self, session_id: &str) -> Result<(), String> {
+        let expected = self.session_effective_endpoint(session_id).await;
+        let current = {
+            let registry = self.core_manager.registry();
+            registry.get(session_id).map(|core| core.current_endpoint())
+        };
+        let Some(current) = current else {
+            return Ok(()); // 无活跃 Core：ensure 之后投递路径会再处理
+        };
+        let same = (expected.protocol, &expected.base_url, &expected.model)
+            == (current.protocol, &current.base_url, &current.model);
+        if same {
+            return Ok(());
+        }
+        let model_ref = self
+            .core_manager
+            .load_session(session_id)
+            .ok()
+            .and_then(|session| session.model_ref);
+        self.apply_session_model(session_id, model_ref, expected)
+            .await
+    }
+
     /// 插件集合/版本变化的变化点打标（notify_plugins_changed 调用）：对
     /// 每个活跃会话按其**自身执行端点**算指纹标记待交接并后台立即处理
     /// ——会话可自持模型，同一插件变化对各会话的指纹影响一致但端点各异。
     pub fn mark_all_sessions_for_plugin_change(&self) {
-        crate::config_handoff::mark_all_sessions(
-            &self.config_handoff_store,
-            &self.core_manager,
-            |session_id| {
-                // 会话实际执行端点（model_ref 解析，与 core turn context
-                // 策略一致）；无 Core 的会话不在打标范围（由首检兜底发现）。
-                let endpoint = self.session_effective_endpoint(session_id);
-                self.compute_execution_fingerprint(&endpoint)
-            },
-        );
+        // 指纹端点须逐会话解析（含注册表读取与会话文件），在异步任务中
+        // 完成后打标；notify_plugins_changed 的同步上下文只负责发起。
+        let store = self.config_handoff_store.clone();
+        let manager = self.core_manager.clone();
+        let state = self.state.clone();
+        let plugins_root = self.desktop_factory.storage_root.clone();
+        tauri::async_runtime::spawn(async move {
+            let session_ids: Vec<String> = {
+                let registry = manager.registry();
+                registry.iter().map(|(id, _)| id.clone()).collect()
+            };
+            for session_id in session_ids {
+                let (models, default_endpoint) = {
+                    let guard = state.lock().await;
+                    (
+                        guard.config.models.clone(),
+                        guard.config.to_core_config().llm,
+                    )
+                };
+                let endpoint = manager
+                    .load_session(&session_id)
+                    .ok()
+                    .and_then(|session| session.model_ref)
+                    .as_deref()
+                    .and_then(|key| models.resolve_model_by_key(key))
+                    .map(tiangong_llm::ModelEndpoint::from_resolved)
+                    .unwrap_or(default_endpoint);
+                let fingerprint = execution_fingerprint_at(&plugins_root, &endpoint);
+                crate::config_handoff::mark_session(&store, &manager, &session_id, &fingerprint);
+            }
+        });
     }
 
     /// 计算执行配置指纹：模型端点 + plugin-runtime 注册表启用插件的
@@ -972,24 +1077,7 @@ impl TiangongApp {
         &self,
         endpoint: &tiangong_llm::ModelEndpoint,
     ) -> String {
-        let statuses = tiangong_plugin_runtime::registry::list_plugins(
-            &self.desktop_factory.storage_root,
-            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
-        );
-        let plugins: Vec<(String, String)> = statuses
-            .iter()
-            .filter(|status| status.enabled)
-            .map(|status| {
-                (
-                    status.id.clone(),
-                    status
-                        .loaded_version
-                        .clone()
-                        .unwrap_or_else(|| status.manifest_version.clone()),
-                )
-            })
-            .collect();
-        crate::config_handoff::execution_fingerprint(endpoint, &plugins)
+        execution_fingerprint_at(&self.desktop_factory.storage_root, endpoint)
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。

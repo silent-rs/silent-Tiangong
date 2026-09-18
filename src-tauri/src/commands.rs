@@ -1271,68 +1271,61 @@ pub async fn get_session_model(
 
 /// 切换会话级对话模型（models 注册表 key；None 恢复跟随路由默认）。
 ///
-/// 编排：会话边界锁 → 交接压缩（app 的 config_handoff，指纹端点按待写入
-/// 引用解析——与 core turn context 策略一致）→ 成功才经 manager 写入
-/// model_ref；实际端点生效由 core 创建 turn context 时解析。切换失败/
-/// 会话忙时引用保持旧值。
+/// 分步编排（app）：解析新端点 → ① 用旧端点完成上下文压缩交接 →
+/// ② 端点生效 + 引用持久化（经 manager 原子收尾）。失败/会话忙时
+/// 端点与引用都保持旧值；运行中不切换。
 #[tauri::command]
 pub async fn set_session_model(
     session_id: String,
     model_ref: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    use crate::config_handoff::{handoff_to, ConfigHandoffOutcome};
-
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
     let (stream_tx, _stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
     state
         .ensure_core(&session_id, None, None, None, stream_tx)
         .await?;
-    // 按待写入引用解析新端点（模型注册表取该会话 Core 现持快照）。
-    let new_endpoint = {
-        let registry = state.core_manager.registry();
-        let core = registry
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| "会话 Core 不存在".to_string())?;
-        let snapshot = core.config_snapshot();
-        model_ref
-            .as_deref()
-            .and_then(|key| snapshot.models.resolve_model_by_key(key))
-            .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or_else(|| snapshot.llm.clone())
-    };
-    // 交接压缩用会话当前（旧）模型——Core 现持 model_ref 即旧值。
-    let fingerprint = state.compute_execution_fingerprint(&new_endpoint);
-    match handoff_to(
-        &state.config_handoff_store,
-        &state.core_manager,
-        &session_id,
-        &fingerprint,
-    )
-    .await
-    {
-        ConfigHandoffOutcome::Aligned => {}
-        ConfigHandoffOutcome::SkippedBusy => {
-            return Err("会话正在执行，当前回合结束后可切换模型".to_string())
-        }
-        ConfigHandoffOutcome::Failed(reason) => {
-            return Err(format!("上下文交接未完成，模型切换未生效：{reason}"))
-        }
+    let has_live = state.core_manager.has_live_core(&session_id);
+    if !has_live {
+        return Err("会话 Core 不存在".to_string());
     }
+    // 按待写入引用解析新端点（app_state 注册表；None/失效回退默认）。
+    let (models, default_endpoint) = state
+        .with_state_read(|core_state| {
+            let config = core_state.config.to_core_config();
+            Ok((core_state.config.models.clone(), config.llm))
+        })
+        .await?;
+    let endpoint = model_ref
+        .as_deref()
+        .and_then(|key| models.resolve_model_by_key(key))
+        .map(tiangong_llm::ModelEndpoint::from_resolved)
+        .unwrap_or(default_endpoint);
     state
-        .core_manager
-        .set_core_session_model(&session_id, model_ref)
+        .inner()
+        .apply_session_model(&session_id, model_ref, endpoint)
+        .await
 }
 
-/// 列出会话可切换的 Chat 模型（key + 模型名，数据源与会话注册表同源）。
+/// 列出会话可切换的 Chat 模型（key + 模型名，数据源为宿主模型注册表）。
 #[tauri::command]
 pub async fn list_session_chat_models(
-    session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<(String, String)>, String> {
-    Ok(state.core_manager.core_chat_models(&session_id))
+    let models = state
+        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
+        .await?;
+    Ok(models
+        .models
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .capabilities
+                .contains(&tiangong_llm::models_config::ModelCapability::Chat)
+        })
+        .map(|(key, entry)| (key.clone(), entry.model.clone()))
+        .collect())
 }
 
 /// 手动触发上下文压缩

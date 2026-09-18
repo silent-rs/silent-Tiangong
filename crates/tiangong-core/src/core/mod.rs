@@ -14,6 +14,7 @@ use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::ModelEndpoint;
 use tiangong_llm::SingleProviderClient;
 use tiangong_types::StreamEvent;
 
@@ -39,6 +40,10 @@ pub use storage_location::CoreStorageLocation;
 /// 驱动）预检与写回校验，避免覆盖用户已手动改过的标题。
 pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
+}
+
+fn default_active_endpoint() -> Arc<std::sync::Mutex<Option<ModelEndpoint>>> {
+    Arc::new(std::sync::Mutex::new(None))
 }
 
 /// 天工智能体核心
@@ -72,6 +77,13 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
+    /// 当前生效的执行端点（会话实际发请求用的模型）。
+    ///
+    /// 初始取 CoreConfig.llm（构造时默认），之后只由 [`Self::switch_endpoint`]
+    /// 变更——先用旧端点完成上下文压缩、成功才切换，失败保持旧端点继续
+    /// 执行。会话自持模型的解析归宿主：宿主把解析好的端点交给这里。
+    #[builder(default = default_active_endpoint())]
+    active_endpoint: Arc<std::sync::Mutex<Option<ModelEndpoint>>>,
     /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
     #[cfg(test)]
     #[builder(default, setter(strip_option))]
@@ -112,6 +124,30 @@ impl TiangongCore {
     /// 是否正在执行 turn（对外 `Running`）。
     pub fn is_busy(&self) -> bool {
         crate::shared_runtime::is_running(&self.session_id)
+    }
+
+    /// 当前生效的执行端点：显式切换过用切换值，否则跟随配置默认（热更）。
+    pub fn current_endpoint(&self) -> ModelEndpoint {
+        let switched = self
+            .active_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        switched.unwrap_or_else(|| self.config.snapshot().llm.clone())
+    }
+
+    /// 切换执行端点（原子）：运行中不切换（忙即拒绝），设置后下一轮
+    /// 请求即用新端点。压缩交接等前置编排由宿主分步完成（先用旧端点
+    /// 压缩、成功后调本方法收尾）——core 不内嵌压缩，保持机制单一。
+    pub fn switch_endpoint(&self, new: ModelEndpoint) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        *self
+            .active_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(new);
+        Ok(())
     }
 
     /// 设置会话信任模式。
@@ -264,24 +300,10 @@ impl TiangongCore {
         session.trust_mode = trust_mode;
 
         let config = self.config.snapshot();
-        // 会话自持模型（创建 turn context 的解析策略）：model_ref 指向的
-        // 模型优先，未设置或失效（key/provider 已删）回退路由默认端点——
-        // 回退不写回会话，模型加回配置后自动恢复使用。每轮解析，宿主的
-        // 配置热更只更新注册表快照，不经会话。
-        let session_model = session
-            .model_ref
-            .as_ref()
-            .and_then(|key| config.models.resolve_model_by_key(key));
-        // 窗口随所选模型：会话模型带声明窗口时使用之，否则沿用默认解析
-        // 值（默认路径仍含宿主的 override 表精细化）。
-        let context_limit = session_model
-            .as_ref()
-            .and_then(|resolved| resolved.context_window)
-            .filter(|window| *window > 0)
-            .unwrap_or(config.context_limit);
-        let endpoint = session_model
-            .map(tiangong_llm::ModelEndpoint::from_resolved)
-            .unwrap_or_else(|| config.llm.clone());
+        // 执行端点 = 当前生效端点（switch 过为会话自持值，否则动态跟随
+        // 路由默认）；模型注册表与 model_ref 的解析都在宿主，core 只经
+        // [`Self::switch_endpoint`] 接收结果。
+        let endpoint = self.current_endpoint();
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
         let on_retry: tiangong_llm::OnRetryCallback =
@@ -313,7 +335,7 @@ impl TiangongCore {
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
-            .context_limit(context_limit)
+            .context_limit(config.context_limit)
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,

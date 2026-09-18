@@ -202,16 +202,12 @@ export function MessageInput({
     } else {
       setSessionModelRef(null);
     }
-    if (activeSessionId) {
-      api.listSessionChatModels(activeSessionId)
-        .then((models) => {
-          if (cancelled) return;
-          setModelOptions(models.map(([key, label]) => ({ key, label: label || key })));
-        })
-        .catch(console.error);
-    } else {
-      setModelOptions([]);
-    }
+    api.listSessionChatModels()
+      .then((models) => {
+        if (cancelled) return;
+        setModelOptions(models.map(([key, label]) => ({ key, label: label || key })));
+      })
+      .catch(console.error);
     return () => { cancelled = true; };
   }, [activeSessionId]);
   const modelUnavailable = sessionModelRef != null

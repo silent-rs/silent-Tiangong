@@ -809,8 +809,8 @@ export const api = {
   getSessionModel: (sessionId: string): Promise<string | null> =>
     invoke('get_session_model', { sessionId }),
 
-  listSessionChatModels: (sessionId: string): Promise<[string, string][]> =>
-    invoke('list_session_chat_models', { sessionId }),
+  listSessionChatModels: (): Promise<[string, string][]> =>
+    invoke('list_session_chat_models'),
 
   setSessionModel: (sessionId: string, modelRef: string | null): Promise<void> =>
     invoke('set_session_model', { sessionId, modelRef }),
