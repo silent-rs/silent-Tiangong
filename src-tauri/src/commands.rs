@@ -263,7 +263,7 @@ pub async fn switch_session(
     if !state.core_manager.has_live_core(&session_id) {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
@@ -486,6 +486,7 @@ struct UserMessageDeliveryRequest {
     workspace_dir: Option<String>,
     initial_trust_mode: Option<tiangong_types::TrustMode>,
     initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+    initial_model_ref: Option<String>,
     delivery_kind: UserMessageDeliveryKind,
     requires_input_claim: bool,
 }
@@ -501,6 +502,7 @@ pub async fn send_message(
     cwd: Option<String>,
     trust_mode: Option<tiangong_types::TrustMode>,
     reasoning_effort: Option<String>,
+    model_ref: Option<String>,
     app: AppHandle,
     _window: Window,
     state: State<'_, TiangongApp>,
@@ -516,6 +518,7 @@ pub async fn send_message(
             initial_reasoning_effort: reasoning_effort
                 .as_deref()
                 .map(tiangong_llm::request::ReasoningEffort::parse_flexible),
+            initial_model_ref: model_ref,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: true,
         },
@@ -559,6 +562,7 @@ pub async fn send_message_with_media(
             workspace_dir: None,
             initial_trust_mode: None,
             initial_reasoning_effort: None,
+            initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: false,
         },
@@ -584,6 +588,7 @@ async fn send_message_inner(
         workspace_dir,
         initial_trust_mode,
         initial_reasoning_effort,
+        initial_model_ref,
         delivery_kind,
         requires_input_claim,
     } = request;
@@ -714,6 +719,7 @@ async fn send_message_inner(
             workspace_dir,
             initial_trust_mode,
             initial_reasoning_effort,
+            initial_model_ref,
             stream_tx,
         )
         .await;
@@ -1094,7 +1100,7 @@ pub async fn edit_and_resend(
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
-        .ensure_core(&session_id, None, None, None, stream_tx)
+        .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await;
     let ensured = match ensured {
         Ok(ensured) => ensured,
@@ -1241,7 +1247,7 @@ async fn run_context_slash_command(
         let session_id = current_session_id;
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
@@ -1271,9 +1277,10 @@ pub async fn get_session_model(
 
 /// 切换会话级对话模型（models 注册表 key；None 恢复跟随路由默认）。
 ///
-/// 分步编排（app）：解析新端点 → ① 用旧端点完成上下文压缩交接 →
-/// ② 端点生效 + 引用持久化（经 manager 原子收尾）。失败/会话忙时
-/// 端点与引用都保持旧值；运行中不切换。
+/// 轻量切换：只写入引用（缓存住所选模型），**不压缩对话、不切端点**——
+/// 压缩与端点切换推迟到下一次发消息（投递前的端点校正按引用分步
+/// 完成）；用户切走又切回时端点从未变化，发送时无需压缩。运行中不
+/// 切换（写引用被拒绝）。
 #[tauri::command]
 pub async fn set_session_model(
     session_id: String,
@@ -1284,28 +1291,11 @@ pub async fn set_session_model(
     let _send_guard = session_lock.lock_owned().await;
     let (stream_tx, _stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
     state
-        .ensure_core(&session_id, None, None, None, stream_tx)
+        .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await?;
-    let has_live = state.core_manager.has_live_core(&session_id);
-    if !has_live {
-        return Err("会话 Core 不存在".to_string());
-    }
-    // 按待写入引用解析新端点（app_state 注册表；None/失效回退默认）。
-    let (models, default_endpoint) = state
-        .with_state_read(|core_state| {
-            let config = core_state.config.to_core_config();
-            Ok((core_state.config.models.clone(), config.llm))
-        })
-        .await?;
-    let endpoint = model_ref
-        .as_deref()
-        .and_then(|key| models.resolve_model_by_key(key))
-        .map(tiangong_llm::ModelEndpoint::from_resolved)
-        .unwrap_or(default_endpoint);
     state
-        .inner()
-        .apply_session_model(&session_id, model_ref, endpoint)
-        .await
+        .core_manager
+        .set_core_model_ref(&session_id, model_ref)
 }
 
 /// 列出会话可切换的 Chat 模型（key + 模型名，数据源为宿主模型注册表）。
@@ -1376,6 +1366,7 @@ pub async fn append_message(
             workspace_dir: None,
             initial_trust_mode: None,
             initial_reasoning_effort: None,
+            initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::Append,
             requires_input_claim: true,
         },

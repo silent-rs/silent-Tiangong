@@ -716,6 +716,7 @@ export const api = {
     cwd?: string,
     trustMode?: string,
     reasoningEffort?: string,
+    modelRef?: string | null,
   ): Promise<void> =>
     invoke('send_message', {
       sessionId,
@@ -725,6 +726,7 @@ export const api = {
       cwd,
       trustMode,
       reasoningEffort,
+      modelRef,
     }),
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>

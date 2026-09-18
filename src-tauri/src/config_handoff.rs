@@ -546,6 +546,7 @@ mod handoff_e2e_tests {
                 id,
                 config_for(base_url),
                 "/tmp".to_string(),
+                None,
                 stream_tx,
                 Vec::new,
             )

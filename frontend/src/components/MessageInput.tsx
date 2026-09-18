@@ -199,8 +199,6 @@ export function MessageInput({
       api.getSessionModel(activeSessionId)
         .then((ref) => { if (!cancelled) setSessionModelRef(ref); })
         .catch(console.error);
-    } else {
-      setSessionModelRef(null);
     }
     api.listSessionChatModels()
       .then((models) => {
@@ -212,17 +210,22 @@ export function MessageInput({
   }, [activeSessionId]);
   const modelUnavailable = sessionModelRef != null
     && !modelOptions.some((option) => option.key === sessionModelRef);
-  const modelSelectorDisabled = !activeSessionId || currentRunStatus !== 'idle' || modelSwitching;
-  const modelSelectorTitle = !activeSessionId
-    ? '发送首条消息后可切换会话模型'
-    : currentRunStatus !== 'idle'
-      ? '会话正在执行，当前回合结束后可切换模型'
-      : modelSwitching
-        ? '正在整理上下文并切换模型…'
-        : '会话模型';
+  // 新对话也可选择（随首条消息作为初始值写入会话；已有会话立即写引用，
+  // 压缩与端点切换推迟到下一次发消息——切走又切回无需压缩）。
+  const modelSelectorDisabled = currentRunStatus !== 'idle' || modelSwitching;
+  const modelSelectorTitle = currentRunStatus !== 'idle'
+    ? '会话正在执行，当前回合结束后可切换模型'
+    : modelSwitching
+      ? '正在切换模型…'
+      : '会话模型（发送消息时生效，切换上下文会先整理）';
   const handleSessionModelChange = async (value: string) => {
-    if (!activeSessionId || modelSwitching) return;
+    if (modelSwitching || currentRunStatus !== 'idle') return;
     const nextRef = value === '' ? null : value;
+    // 新对话：仅缓存选择，随首条消息作为初始引用写入会话。
+    if (!activeSessionId) {
+      setSessionModelRef(nextRef);
+      return;
+    }
     setModelSwitching(true);
     try {
       await api.setSessionModel(activeSessionId, nextRef);
@@ -781,6 +784,7 @@ export function MessageInput({
         inputSnapshot.attachments,
         inputSnapshot.revision,
         trustMode,
+        sessionModelRef,
       );
     } else {
       // 执行中：追加消息到正在执行的 turn

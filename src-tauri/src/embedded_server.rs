@@ -436,6 +436,7 @@ async fn send_message_and_wait(
             workspace_dir,
             (!session_exists).then_some(TrustMode::FullTrust),
             None,
+            None,
             stream_tx,
         )
         .await;

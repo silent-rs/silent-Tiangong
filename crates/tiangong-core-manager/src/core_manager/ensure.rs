@@ -33,6 +33,7 @@ impl CoreManager {
         session_id: &str,
         session_config: CoreConfig,
         workspace_dir: String,
+        initial_model_ref: Option<String>,
         stream_tx: Sender<StreamEvent>,
         build_plugins: F,
     ) -> Result<EnsuredCore, String>
@@ -69,6 +70,13 @@ impl CoreManager {
             .plugins(plugins)
             .build();
         let id = core.session_id().to_string();
+        // 新会话带初始模型引用时立即写入（新 Core 必空闲）；执行端点由
+        // 投递前的端点校正按引用切换——新会话无历史，零成本直切。
+        if let Some(model_ref) = initial_model_ref.filter(|key| !key.trim().is_empty()) {
+            if let Err(error) = core.set_model_ref(Some(model_ref)) {
+                tracing::warn!(session_id = %id, %error, "新会话写入初始模型引用失败，使用默认模型");
+            }
+        }
         self.registry().insert(id.clone(), core);
         Ok(EnsuredCore {
             session_id: id,
@@ -142,6 +150,28 @@ impl CoreManager {
             self.spawn_title_generation_if_needed(session_id, &text);
         }
         delivered
+    }
+
+    /// 写入会话级模型引用（轻量切换：只写引用，不压缩不切端点）。
+    ///
+    /// 实际端点切换与上下文压缩推迟到**下一次发消息**（投递前的端点
+    /// 校正按引用分步完成）——切走又切回时端点从未变化，无需压缩。
+    /// 运行中不切换（core 忙即拒绝写）。
+    pub fn set_core_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<String>,
+    ) -> Result<(), String> {
+        let registry = self.registry();
+        let core = registry
+            .get(session_id)
+            .ok_or_else(|| "会话无活跃 Core".to_string())?;
+        core.set_model_ref(model_ref).map_err(|error| match error {
+            tiangong_core::core::CoreError::Busy => {
+                "会话正在执行，当前回合结束后可切换模型".to_string()
+            }
+            other => format!("写入会话模型失败：{other}"),
+        })
     }
 
     /// 切换会话级对话模型（原子收尾）：端点生效 + 引用持久化。

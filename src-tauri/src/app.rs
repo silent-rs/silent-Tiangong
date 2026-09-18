@@ -518,7 +518,7 @@ impl TiangongApp {
                 use std::sync::mpsc;
                 let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
-                    .ensure_core(&session_id, None, None, None, stream_tx)
+                    .ensure_core(&session_id, None, None, None, None, stream_tx)
                     .await;
                 let ensured = match ensured {
                     Ok(ensured) => ensured,
@@ -854,6 +854,7 @@ impl TiangongApp {
         workspace_dir: Option<String>,
         initial_trust_mode: Option<tiangong_types::TrustMode>,
         initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+        initial_model_ref: Option<String>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> Result<EnsuredCore, String> {
         self.wait_plugin_preload().await?;
@@ -877,9 +878,14 @@ impl TiangongApp {
         let models = app_config.models.clone();
         let ensured = self
             .core_manager
-            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
-                factory.build_plugins_sync(models)
-            })
+            .ensure_core(
+                session_id,
+                session_config,
+                workspace_dir,
+                initial_model_ref,
+                stream_tx,
+                || factory.build_plugins_sync(models),
+            )
             .await
             .expect("ensure_core 不应失败");
         Ok(EnsuredCore {
