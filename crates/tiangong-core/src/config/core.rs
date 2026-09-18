@@ -36,8 +36,13 @@ pub fn default_context_limit() -> usize {
 /// （lite 的现行消费者是 core-manager 的标题生成）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// 主 Chat 模型端点
+    /// 主 Chat 模型端点（路由默认；会话自持 model_ref 时仅作回退）
     pub llm: ModelEndpoint,
+    /// 模型注册表快照：core 创建 turn context 时按会话的 model_ref 解析
+    /// 实际执行端点（失效回退 llm 默认）。解析在 core 每轮进行，宿主只
+    /// 负责在配置变化时热更此快照——会话自持模型的切换不经过配置热更。
+    #[serde(default)]
+    pub models: tiangong_llm::models_config::ModelsConfig,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -56,6 +61,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             llm: ModelEndpoint::default(),
+            models: tiangong_llm::models_config::ModelsConfig::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),

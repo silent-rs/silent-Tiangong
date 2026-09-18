@@ -3,7 +3,7 @@ import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
-import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle } from 'lucide-react';
+import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Brain, Clock, Unlock, AlertTriangle, Cpu } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -188,6 +188,55 @@ export function MessageInput({
   const currentRunStatus = isNewConversation
     ? 'idle'
     : currentSessionRunStatus || runStatus;
+
+  // 会话级模型选择：引用来自会话（null=跟随设置默认）；选项来自模型注册表。
+  const [sessionModelRef, setSessionModelRef] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<{ key: string; label: string }[]>([]);
+  const [modelSwitching, setModelSwitching] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (activeSessionId) {
+      api.getSessionModel(activeSessionId)
+        .then((ref) => { if (!cancelled) setSessionModelRef(ref); })
+        .catch(console.error);
+    } else {
+      setSessionModelRef(null);
+    }
+    if (activeSessionId) {
+      api.listSessionChatModels(activeSessionId)
+        .then((models) => {
+          if (cancelled) return;
+          setModelOptions(models.map(([key, label]) => ({ key, label: label || key })));
+        })
+        .catch(console.error);
+    } else {
+      setModelOptions([]);
+    }
+    return () => { cancelled = true; };
+  }, [activeSessionId]);
+  const modelUnavailable = sessionModelRef != null
+    && !modelOptions.some((option) => option.key === sessionModelRef);
+  const modelSelectorDisabled = !activeSessionId || currentRunStatus !== 'idle' || modelSwitching;
+  const modelSelectorTitle = !activeSessionId
+    ? '发送首条消息后可切换会话模型'
+    : currentRunStatus !== 'idle'
+      ? '会话正在执行，当前回合结束后可切换模型'
+      : modelSwitching
+        ? '正在整理上下文并切换模型…'
+        : '会话模型';
+  const handleSessionModelChange = async (value: string) => {
+    if (!activeSessionId || modelSwitching) return;
+    const nextRef = value === '' ? null : value;
+    setModelSwitching(true);
+    try {
+      await api.setSessionModel(activeSessionId, nextRef);
+      setSessionModelRef(nextRef);
+    } catch (error) {
+      console.error('切换会话模型失败：', error);
+    } finally {
+      setModelSwitching(false);
+    }
+  };
   const displayTokens = tokenStats?.current_tokens ?? 0;
   const compressionThreshold = tokenStats?.compression_threshold_tokens ?? 0;
   const compressionProgress = compressionThreshold > 0
@@ -1060,6 +1109,22 @@ export function MessageInput({
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <SessionInputPluginHost slot="session.input-status" />
+                <Cpu className="w-3 h-3" />
+                <select
+                  value={sessionModelRef ?? ''}
+                  onChange={(e) => { void handleSessionModelChange(e.target.value); }}
+                  disabled={modelSelectorDisabled}
+                  className="bg-transparent text-xs text-muted-foreground hover:text-foreground cursor-pointer outline-none border-none appearance-none pr-1 disabled:cursor-not-allowed disabled:opacity-50"
+                  title={modelSelectorTitle}
+                >
+                  <option value="">默认模型</option>
+                  {modelOptions.map((option) => (
+                    <option key={option.key} value={option.key}>{option.label}</option>
+                  ))}
+                  {modelUnavailable && (
+                    <option value={sessionModelRef}>{sessionModelRef}（不可用，当前使用默认）</option>
+                  )}
+                </select>
                 <Brain className="w-3 h-3" />
                 <select
                   value={reasoningEffort}

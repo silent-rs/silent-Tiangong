@@ -806,6 +806,15 @@ export const api = {
   getReasoningEffort: (sessionId?: string): Promise<string> =>
     invoke('get_reasoning_effort', { sessionId }),
 
+  getSessionModel: (sessionId: string): Promise<string | null> =>
+    invoke('get_session_model', { sessionId }),
+
+  listSessionChatModels: (sessionId: string): Promise<[string, string][]> =>
+    invoke('list_session_chat_models', { sessionId }),
+
+  setSessionModel: (sessionId: string, modelRef: string | null): Promise<void> =>
+    invoke('set_session_model', { sessionId, modelRef }),
+
   setReasoningEffort: (effort: string, sessionId?: string): Promise<void> =>
     invoke('set_reasoning_effort', { effort, sessionId }),
 

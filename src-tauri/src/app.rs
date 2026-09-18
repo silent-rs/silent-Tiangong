@@ -777,15 +777,12 @@ impl TiangongApp {
         template.trust_mode = app_config.default_trust_mode;
         template.default_trust_mode = app_config.default_trust_mode;
         template.reasoning_effort = agent_config.reasoning_effort;
-        // 会话自持模型：每个会话按自己的 model_ref 解析（None 跟随默认、
-        // 失效回退默认）——路由默认变化只影响实际解析结果变化的会话。
         let session_configs = self
             .core_manager
             .list_session_metadata()
             .iter()
             .map(|metadata| {
-                let mut config =
-                    app_config.to_core_config_for_session(metadata.model_ref.as_deref());
+                let mut config = template.clone();
                 config.trust_mode = metadata.trust_mode;
                 config.reasoning_effort = metadata
                     .reasoning_effort
@@ -793,37 +790,10 @@ impl TiangongApp {
                 (metadata.id.clone(), config)
             })
             .collect::<HashMap<_, _>>();
-        // 热更前记录各活跃 Core 的实际执行端点（Core 现持配置即该会话的
-        // 实际执行配置），热更后比对——只给「实际执行模型变了」的会话打
-        // 交接标记（判据是实际端点变化而非配置动作：改路由默认不影响自持
-        // 模型的会话，失效回退与跟随默认的变化则命中）。
-        let endpoint_of = |llm: &tiangong_llm::ModelEndpoint| {
-            (llm.protocol, llm.base_url.clone(), llm.model.clone())
-        };
-        let previous: Vec<(String, (_, _, _))> = {
-            let registry = self.core_manager.registry();
-            registry
-                .iter()
-                .map(|(id, core)| (id.clone(), endpoint_of(&core.config_snapshot().llm)))
-                .collect()
-        };
-        // 总是热更存活 Core 的配置(replace_config + set_trust_mode)。
-        // 能力集合变化时,存活 Core 的插件列表不变(构造时固定),
-        // 但 endpoint/trust 等配置会热更——这是期望行为。
+        // 热更存活 Core 的配置快照（含模型注册表）。会话自持模型
+        // （model_ref）的实际端点由 core 创建 turn context 时按注册表
+        // 解析，不经此热更：改路由默认不影响自持会话，失效引用自然回退。
         self.core_manager.sync_config(template, &session_configs);
-        for (session_id, prev) in previous {
-            if let Some(config) = session_configs.get(&session_id) {
-                if endpoint_of(&config.llm) != prev {
-                    let fingerprint = self.compute_execution_fingerprint(&config.llm);
-                    crate::config_handoff::mark_session(
-                        &self.config_handoff_store,
-                        &self.core_manager,
-                        &session_id,
-                        &fingerprint,
-                    );
-                }
-            }
-        }
         Ok(())
     }
 
@@ -872,7 +842,6 @@ impl TiangongApp {
                 workspace_dir,
                 initial_trust_mode,
                 initial_reasoning_effort,
-                None,
             )
             .await;
         let workspace_dir = workspace_dir.unwrap_or(default_workspace_dir);
@@ -905,21 +874,15 @@ impl TiangongApp {
         workspace_dir: Option<String>,
         initial_trust_mode: Option<tiangong_types::TrustMode>,
         initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
-        model_ref_override: Option<&str>,
     ) -> (tiangong_core::config::core::CoreConfig, Option<String>) {
         let (app_config, agent_config) = self
             .with_state_read(|state| Ok((state.config.clone(), state.agent_config.clone())))
             .await
             .unwrap_or_default();
+        let mut session_config = app_config.to_core_config();
+        session_config.default_trust_mode = app_config.default_trust_mode;
         let workspace_dir = workspace_dir.filter(|cwd| !cwd.trim().is_empty());
         let existing_session = self.core_manager.load_session(session_id).ok();
-        // 会话自持模型：盘上引用优先（None 跟随路由默认），调用方可显式覆盖
-        // （模型切换命令用待写入的新值预解析）。失效引用由解析层回退默认。
-        let model_ref = model_ref_override
-            .map(|value| (!value.trim().is_empty()).then(|| value.to_string()))
-            .unwrap_or_else(|| existing_session.as_ref().and_then(|s| s.model_ref.clone()));
-        let mut session_config = app_config.to_core_config_for_session(model_ref.as_deref());
-        session_config.default_trust_mode = app_config.default_trust_mode;
         if let Some(session) = existing_session {
             session_config.trust_mode = session.trust_mode;
             session_config.reasoning_effort = session
@@ -933,17 +896,40 @@ impl TiangongApp {
         (session_config, workspace_dir)
     }
 
+    /// 会话的实际执行端点：model_ref 指向的模型优先（Core 现持注册表
+    /// 解析），未设置/失效回退路由默认——与 core 创建 turn context 的
+    /// 解析策略一致，供交接指纹（须与实际请求端点一致）与切换命令使用。
+    fn session_effective_endpoint(&self, session_id: &str) -> tiangong_llm::ModelEndpoint {
+        let (models, default) = {
+            let registry = self.core_manager.registry();
+            match registry.get(session_id) {
+                Some(core) => {
+                    let snapshot = core.config_snapshot();
+                    (snapshot.models, snapshot.llm)
+                }
+                None => {
+                    let snapshot = self.core_manager.config().snapshot();
+                    ((*snapshot).clone().models, snapshot.llm.clone())
+                }
+            }
+        };
+        self.core_manager
+            .load_session(session_id)
+            .ok()
+            .and_then(|session| session.model_ref)
+            .as_deref()
+            .and_then(|key| models.resolve_model_by_key(key))
+            .map(tiangong_llm::ModelEndpoint::from_resolved)
+            .unwrap_or(default)
+    }
+
     /// 投递消息前的配置交接（状态与编排都在 `crate::config_handoff`）：
     /// 待交接标记命中则执行交接；否则每会话每进程首检一次指纹兜底（防
     /// 重启丢标记与漏报的变化点），指纹惰性求值——首检之外的投递路径
     /// 零指纹计算。
-    async fn handoff_config_if_changed(
-        &self,
-        session_id: &str,
-        session_config: &tiangong_core::config::core::CoreConfig,
-    ) {
+    async fn handoff_config_if_changed(&self, session_id: &str) {
         use crate::config_handoff::ConfigHandoffOutcome;
-        let endpoint = session_config.llm.clone();
+        let endpoint = self.session_effective_endpoint(session_id);
         let outcome = crate::config_handoff::ensure_before_deliver(
             &self.config_handoff_store,
             &self.core_manager,
@@ -971,15 +957,9 @@ impl TiangongApp {
             &self.config_handoff_store,
             &self.core_manager,
             |session_id| {
-                // Core 现持配置即该会话的实际执行配置；无 Core 的会话不在
-                // 打标范围（由首检兜底发现）。
-                let endpoint = {
-                    let registry = self.core_manager.registry();
-                    registry
-                        .get(session_id)
-                        .map(|core| core.config_snapshot().llm)
-                }
-                .unwrap_or_else(|| self.core_manager.config().snapshot().llm.clone());
+                // 会话实际执行端点（model_ref 解析，与 core turn context
+                // 策略一致）；无 Core 的会话不在打标范围（由首检兜底发现）。
+                let endpoint = self.session_effective_endpoint(session_id);
                 self.compute_execution_fingerprint(&endpoint)
             },
         );
@@ -1032,11 +1012,7 @@ impl TiangongApp {
         if !self.core_manager.has_live_core(session_id) {
             return Err("会话 Core 不存在".to_string());
         }
-        let (session_config, _) = self
-            .resolve_session_context(session_id, None, None, None, None)
-            .await;
-        self.handoff_config_if_changed(session_id, &session_config)
-            .await;
+        self.handoff_config_if_changed(session_id).await;
         self.core_manager
             .deliver_to_core_if_live(
                 session_id,

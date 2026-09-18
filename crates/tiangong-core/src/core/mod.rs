@@ -264,6 +264,24 @@ impl TiangongCore {
         session.trust_mode = trust_mode;
 
         let config = self.config.snapshot();
+        // 会话自持模型（创建 turn context 的解析策略）：model_ref 指向的
+        // 模型优先，未设置或失效（key/provider 已删）回退路由默认端点——
+        // 回退不写回会话，模型加回配置后自动恢复使用。每轮解析，宿主的
+        // 配置热更只更新注册表快照，不经会话。
+        let session_model = session
+            .model_ref
+            .as_ref()
+            .and_then(|key| config.models.resolve_model_by_key(key));
+        // 窗口随所选模型：会话模型带声明窗口时使用之，否则沿用默认解析
+        // 值（默认路径仍含宿主的 override 表精细化）。
+        let context_limit = session_model
+            .as_ref()
+            .and_then(|resolved| resolved.context_window)
+            .filter(|window| *window > 0)
+            .unwrap_or(config.context_limit);
+        let endpoint = session_model
+            .map(tiangong_llm::ModelEndpoint::from_resolved)
+            .unwrap_or_else(|| config.llm.clone());
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
         let on_retry: tiangong_llm::OnRetryCallback =
@@ -278,10 +296,10 @@ impl TiangongCore {
         let client = if let Some(test_client) = self.test_client.clone() {
             test_client.with_on_retry(on_retry.clone())
         } else {
-            SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone())
+            SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
-        let client = SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone());
+        let client = SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone());
         let plugins = self
             .plugins
             .lock()
@@ -295,7 +313,7 @@ impl TiangongCore {
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
-            .context_limit(config.context_limit)
+            .context_limit(context_limit)
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,

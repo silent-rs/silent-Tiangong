@@ -144,6 +144,52 @@ impl CoreManager {
         delivered
     }
 
+    /// 列出会话可切换的 Chat 模型（模型注册表 key + 模型名）。
+    ///
+    /// 数据源是该会话 Core 现持的模型注册表快照——与会话实际解析端点
+    /// 同源；无活跃 Core 时返回空（列表与会话绑定，先 ensure 再列）。
+    pub fn core_chat_models(&self, session_id: &str) -> Vec<(String, String)> {
+        let registry = self.registry();
+        registry
+            .get(session_id)
+            .map(|core| {
+                let snapshot = core.config_snapshot();
+                snapshot
+                    .models
+                    .models
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry
+                            .capabilities
+                            .contains(&tiangong_llm::models_config::ModelCapability::Chat)
+                    })
+                    .map(|(key, entry)| (key.clone(), entry.model.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 切换会话级对话模型（models 注册表 key；None 恢复跟随路由默认）。
+    ///
+    /// 会话资源的原子操作：忙校验 + 写入 model_ref。实际执行端点由 core
+    /// 创建 turn context 时按注册表解析（切换策略在 core）；调用方（切换
+    /// 命令）应先完成上下文交接再调本方法。
+    pub fn set_core_session_model(
+        &self,
+        session_id: &str,
+        model_ref: Option<String>,
+    ) -> Result<(), String> {
+        let registry = self.registry();
+        let core = registry
+            .get(session_id)
+            .ok_or_else(|| "会话无活跃 Core".to_string())?;
+        if core.is_busy() {
+            return Err("会话正在执行，当前回合结束后可切换模型".to_string());
+        }
+        core.set_model_ref(model_ref)
+            .map_err(|_| "写入会话模型失败".to_string())
+    }
+
     /// 设置指定会话 core 的信任模式（实时生效）。
     pub fn set_core_trust_mode(&self, session_id: &str, mode: tiangong_types::TrustMode) {
         let registry = self.registry();
