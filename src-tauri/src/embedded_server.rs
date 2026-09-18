@@ -447,8 +447,9 @@ async fn send_message_and_wait(
         }
     };
     let waiter = state.register_remote_turn_waiter(&session_id, &message_id);
-    if let Err(error) =
-        state.deliver_prepared_if_live(&ensured.session_id, message_id.clone(), prepared)
+    if let Err(error) = state
+        .deliver_prepared_if_live(&ensured.session_id, message_id.clone(), prepared)
+        .await
     {
         rollback_failed_delivery(state, &session_id, &message_id, created_paths).await;
         return Err(format!("消息投递失败：{error}"));

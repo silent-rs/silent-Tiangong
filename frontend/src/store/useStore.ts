@@ -905,6 +905,7 @@ export interface AppState {
     attachments: RawAttachment[],
     revision: number,
     trustMode?: string,
+    modelRef?: string | null,
   ) => Promise<boolean>;
   appendMessage: (
     sessionId: string,
@@ -1485,7 +1486,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 普通发送：新对话和已有会话都直接向目标 Core 投递。
-  sendMessage: async (cacheKey, content, attachments, revision, trustMode) => {
+  sendMessage: async (cacheKey, content, attachments, revision, trustMode, modelRef) => {
     let deliveryAttachments = attachments.map((attachment) => ({ ...attachment }));
     const startsNewConversation = get().newConversationId === cacheKey;
     const initialCwd = get().sessionCwd || get().workspaceDir;
@@ -1520,6 +1521,7 @@ export const useStore = create<AppState>((set, get) => ({
         startsNewConversation ? initialCwd : undefined,
         startsNewConversation ? trustMode : undefined,
         startsNewConversation ? initialReasoningEffort : undefined,
+        modelRef ?? undefined,
       );
 
       const shouldActivate = startsNewConversation

@@ -144,6 +144,52 @@ impl CoreManager {
         delivered
     }
 
+    /// 写入会话级对话模型引用（models 注册表 key；None 恢复跟随默认）。
+    ///
+    /// 轻量写入：只改引用不动执行端点——端点由投递前的端点校正按引用
+    /// 切换，切走又切回时端点从未变化。运行中不写（core 忙即拒绝）。
+    pub fn set_core_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<String>,
+    ) -> Result<(), String> {
+        let registry = self.registry();
+        let core = registry
+            .get(session_id)
+            .ok_or_else(|| "会话无活跃 Core".to_string())?;
+        core.set_model_ref(model_ref).map_err(|error| match error {
+            tiangong_core::core::CoreError::Busy => {
+                "会话正在执行，当前回合结束后可切换模型".to_string()
+            }
+            other => format!("写入会话模型失败：{other}"),
+        })
+    }
+
+    /// 切换会话级对话模型（原子）：端点生效 + 引用持久化。
+    ///
+    /// 端点由宿主按模型注册表解析后传入，core 不知道注册表。运行中不
+    /// 切换（core 忙即拒绝）。
+    pub fn set_core_session_model(
+        &self,
+        session_id: &str,
+        model_ref: Option<String>,
+        endpoint: tiangong_llm::ModelEndpoint,
+    ) -> Result<(), String> {
+        let registry = self.registry();
+        let core = registry
+            .get(session_id)
+            .ok_or_else(|| "会话无活跃 Core".to_string())?;
+        core.switch_endpoint(endpoint)
+            .map_err(|error| match error {
+                tiangong_core::core::CoreError::Busy => {
+                    "会话正在执行，当前回合结束后可切换模型".to_string()
+                }
+                other => format!("切换执行端点失败：{other}"),
+            })?;
+        core.set_model_ref(model_ref)
+            .map_err(|_| "写入会话模型失败".to_string())
+    }
+
     /// 设置指定会话 core 的信任模式（实时生效）。
     pub fn set_core_trust_mode(&self, session_id: &str, mode: tiangong_types::TrustMode) {
         let registry = self.registry();

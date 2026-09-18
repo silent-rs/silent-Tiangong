@@ -14,6 +14,7 @@ use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::ModelEndpoint;
 use tiangong_llm::SingleProviderClient;
 use tiangong_types::StreamEvent;
 
@@ -39,6 +40,10 @@ pub use storage_location::CoreStorageLocation;
 /// 驱动）预检与写回校验，避免覆盖用户已手动改过的标题。
 pub fn is_default_title(title: &str) -> bool {
     title == "新对话" || title.starts_with("会话 ")
+}
+
+fn default_active_endpoint() -> Arc<std::sync::Mutex<Option<ModelEndpoint>>> {
+    Arc::new(std::sync::Mutex::new(None))
 }
 
 /// 天工智能体核心
@@ -72,6 +77,14 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
+    /// 当前生效的执行端点（会话实际发请求用的模型）。
+    ///
+    /// `None` 表示「跟随路由默认」——配置默认变化时自动跟随（热更）；
+    /// 用户显式切换过才写入具体端点。会话自持模型的解析归宿主：宿主把
+    /// 解析好的端点经 [`Self::switch_endpoint`] 交给这里，core 不知道
+    /// 模型注册表。
+    #[builder(default = default_active_endpoint())]
+    active_endpoint: Arc<std::sync::Mutex<Option<ModelEndpoint>>>,
     /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
     #[cfg(test)]
     #[builder(default, setter(strip_option))]
@@ -106,6 +119,29 @@ impl TiangongCore {
     /// 是否正在执行 turn（对外 `Running`）。
     pub fn is_busy(&self) -> bool {
         crate::shared_runtime::is_running(&self.session_id)
+    }
+
+    /// 当前生效的执行端点：显式切换过用切换值，否则跟随配置默认（热更）。
+    pub fn current_endpoint(&self) -> ModelEndpoint {
+        let switched = self
+            .active_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        switched.unwrap_or_else(|| self.config.snapshot().llm.clone())
+    }
+
+    /// 切换执行端点（原子）：运行中不切换（忙即拒绝），设置后下一轮
+    /// 请求即用新端点。已发出的请求不受影响。
+    pub fn switch_endpoint(&self, new: ModelEndpoint) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        *self
+            .active_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(new);
+        Ok(())
     }
 
     /// 设置会话信任模式。
@@ -190,6 +226,27 @@ impl TiangongCore {
         Ok(())
     }
 
+    /// 设置会话级对话模型引用（models 注册表 key；None 表示跟随路由默认）。
+    ///
+    /// 与 set_title 同构的会话字段设置器：只在空闲期写盘，忙时返回 Busy
+    /// 不投递命令——运行中的 turn 不得中途换模型。同值直接返回，避免为
+    /// 无变化的写入承担整份 session 的读改写窗口。
+    pub fn set_model_ref(&self, model_ref: Option<String>) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        let mut session = self.load_session()?;
+        if session.model_ref == model_ref {
+            return Ok(());
+        }
+        session.model_ref = model_ref;
+        session.updated_at = tiangong_types::now_text();
+        session
+            .try_persist_to_disk()
+            .map_err(|_| CoreError::WorkerStopped)?;
+        Ok(())
+    }
+
     fn load_session(&self) -> Result<Session, CoreError> {
         match Session::load_from_storage(&self.storage_root, &self.session_id) {
             Ok(session) => Ok(session),
@@ -240,6 +297,10 @@ impl TiangongCore {
         session.trust_mode = trust_mode;
 
         let config = self.config.snapshot();
+        // 执行端点 = 当前生效端点（switch 过为会话自持值，否则动态跟随
+        // 路由默认）；模型注册表与 model_ref 的解析都在宿主，core 只经
+        // [`Self::switch_endpoint`] 接收结果。
+        let endpoint = self.current_endpoint();
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
         let on_retry: tiangong_llm::OnRetryCallback =
@@ -254,10 +315,10 @@ impl TiangongCore {
         let client = if let Some(test_client) = self.test_client.clone() {
             test_client.with_on_retry(on_retry.clone())
         } else {
-            SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone())
+            SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
-        let client = SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone());
+        let client = SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone());
         let plugins = self
             .plugins
             .lock()
@@ -570,6 +631,93 @@ impl Drop for TiangongCore {
         // Agent 被父轮释放的场景）。显式取消与关闭由 Cancel 命令、shutdown_join
         // / CoreManager 承担；不在此发 Cancel，避免任务闭包持有的 Core 克隆在
         // 释放时误杀自己启动的后继任务。
+    }
+}
+
+#[cfg(test)]
+mod endpoint_switch_tests {
+    use super::*;
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
+
+    fn endpoint(model: &str) -> ModelEndpoint {
+        ModelEndpoint {
+            model: model.to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn test_core(root: &std::path::Path, session_id: &str) -> TiangongCore {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let config = CoreConfig {
+            llm: endpoint("default-model"),
+            ..Default::default()
+        };
+        TiangongCore::builder()
+            .session_id(session_id)
+            .config(CoreConfigProvider::new(config))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root)
+            .workspace_dir(root.to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(vec![])
+            .build()
+    }
+
+    #[test]
+    fn 未切换时端点跟随配置默认() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "follow-default");
+        assert_eq!(core.current_endpoint().model, "default-model");
+
+        // 配置默认变化后自动跟随（热更）——未显式切换的会话不锁定端点。
+        let next = CoreConfig {
+            llm: endpoint("changed-default"),
+            ..Default::default()
+        };
+        core.replace_config(next).unwrap();
+        assert_eq!(core.current_endpoint().model, "changed-default");
+    }
+
+    #[test]
+    fn 切换后端点自持不再跟随默认() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "self-held");
+        core.switch_endpoint(endpoint("picked-model")).unwrap();
+        assert_eq!(core.current_endpoint().model, "picked-model");
+
+        // 已自持端点的会话不受路由默认变化影响。
+        let next = CoreConfig {
+            llm: endpoint("changed-default"),
+            ..Default::default()
+        };
+        core.replace_config(next).unwrap();
+        assert_eq!(
+            core.current_endpoint().model,
+            "picked-model",
+            "切换过的会话不应跟随默认变化"
+        );
+    }
+
+    #[test]
+    fn 模型引用写入落盘且同值幂等() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "ref-persist");
+        core.set_model_ref(Some("key-a".to_string())).unwrap();
+        let loaded = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert_eq!(loaded.model_ref.as_deref(), Some("key-a"));
+        let first_updated = loaded.updated_at.clone();
+
+        // 同值写入直接返回，不改 updated_at（不承担整份 session 读改写）。
+        core.set_model_ref(Some("key-a".to_string())).unwrap();
+        let again = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert_eq!(again.updated_at, first_updated, "同值写入不应刷新时间戳");
+
+        // None 恢复跟随默认。
+        core.set_model_ref(None).unwrap();
+        let cleared = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert!(cleared.model_ref.is_none());
     }
 }
 
