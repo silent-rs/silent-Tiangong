@@ -32,6 +32,13 @@ fn main() {
         )
         .stream_tx(tx)
         .plugins(Vec::new())
+        // Core 构造即需持有实际模型（宿主解析模型注册表后传入）。
+        .model_endpoint(tiangong_llm::ModelEndpoint {
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-example".to_string(),
+            model: "example-model".to_string(),
+            ..Default::default()
+        })
         .build();
 
     println!("=== 发送: 你好 ===");

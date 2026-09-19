@@ -308,6 +308,7 @@ fn endpoint_with_protocol(server: &MockServer, protocol: ProviderProtocol) -> Mo
         protocol,
         timeout_ms: 5_000,
         options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
     }
 }
 

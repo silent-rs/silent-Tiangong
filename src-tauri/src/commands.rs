@@ -287,11 +287,13 @@ pub async fn load_session(
     state: State<'_, TiangongApp>,
 ) -> Result<crate::view::LoadedSessionView, String> {
     let config = state.core_manager.config().snapshot();
-    let context_limit = if config.context_limit == 0 {
-        tiangong_core::config::core::default_context_limit()
-    } else {
-        config.context_limit
-    };
+    // token 统计的分母跟随会话实际模型：有活跃 Core 时取其当前端点的窗口，
+    // 否则按会话的模型选择解析；都拿不到才回落默认窗口。
+    let context_limit = state
+        .core_manager
+        .session_context_limit(&session_id)
+        .filter(|limit| *limit > 0)
+        .unwrap_or_else(tiangong_core::config::core::default_context_limit);
     let default_reasoning_effort = config.reasoning_effort;
     let manager = state.core_manager.clone();
     let session_id_for_load = session_id.clone();
@@ -480,6 +482,7 @@ struct UserMessageDeliveryRequest {
     workspace_dir: Option<String>,
     initial_trust_mode: Option<tiangong_types::TrustMode>,
     initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+    initial_model_ref: Option<String>,
     delivery_kind: UserMessageDeliveryKind,
     requires_input_claim: bool,
 }
@@ -495,6 +498,7 @@ pub async fn send_message(
     cwd: Option<String>,
     trust_mode: Option<tiangong_types::TrustMode>,
     reasoning_effort: Option<String>,
+    model_ref: Option<String>,
     app: AppHandle,
     _window: Window,
     state: State<'_, TiangongApp>,
@@ -510,6 +514,7 @@ pub async fn send_message(
             initial_reasoning_effort: reasoning_effort
                 .as_deref()
                 .map(tiangong_llm::request::ReasoningEffort::parse_flexible),
+            initial_model_ref: model_ref,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: true,
         },
@@ -553,6 +558,7 @@ pub async fn send_message_with_media(
             workspace_dir: None,
             initial_trust_mode: None,
             initial_reasoning_effort: None,
+            initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
             requires_input_claim: false,
         },
@@ -578,6 +584,7 @@ async fn send_message_inner(
         workspace_dir,
         initial_trust_mode,
         initial_reasoning_effort,
+        initial_model_ref,
         delivery_kind,
         requires_input_claim,
     } = request;
@@ -722,8 +729,17 @@ async fn send_message_inner(
         }
     };
     let sid = ensured.session_id.clone();
-    if let Err(error) =
-        state.deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
+    // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
+    // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
+    let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
+    if let Err(error) = state
+        .deliver_prepared_if_live(
+            &sid,
+            user_message_id.clone(),
+            prepared.clone(),
+            turn_model_ref.as_deref(),
+        )
+        .await
     {
         shutdown_join_core_if_current(state, &sid).await;
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
@@ -1086,6 +1102,12 @@ pub async fn edit_and_resend(
     // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
     // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
+    // 编辑重发不改变模型：沿用会话已记录的选择策略。
+    let session_model_ref = state
+        .core_manager
+        .load_session(&session_id)
+        .ok()
+        .and_then(|session| session.model_ref);
     let ensured = state
         .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
@@ -1102,7 +1124,16 @@ pub async fn edit_and_resend(
         }
     };
     let sid = ensured.session_id.clone();
-    if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
+    if let Err(error) = state
+        .deliver_prepared_if_live(
+            &sid,
+            message_id.clone(),
+            prepared.clone(),
+            // 编辑重发沿用会话已记录的模型选择，不改变模型。
+            session_model_ref.as_deref(),
+        )
+        .await
+    {
         // 复用 Core 时不销毁 Core（它仍可能被其它流程持有）。deliver 失败时尚未启动
         // 新 turn，只需把磁盘 session 恢复到编辑前状态，Core 下次读取即为正确内容。
         restore_edited_session(state.inner(), &session_id, original_session).await;
@@ -1294,6 +1325,7 @@ pub async fn append_message(
             workspace_dir: None,
             initial_trust_mode: None,
             initial_reasoning_effort: None,
+            initial_model_ref: None,
             delivery_kind: UserMessageDeliveryKind::Append,
             requires_input_claim: true,
         },
@@ -1863,6 +1895,91 @@ pub async fn set_sandbox_disabled(
         tracing::info!("用户已重新开启沙箱：所有按需 sidecar 将恢复系统沙箱");
     }
     Ok(())
+}
+
+/// 查询会话级对话模型引用（None 表示跟随路由默认）。
+#[tauri::command]
+pub async fn get_session_model(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Option<String>, String> {
+    Ok(state
+        .core_manager
+        .load_session(&session_id)
+        .ok()
+        .and_then(|session| session.model_ref))
+}
+
+/// 会话可切换的 Chat 模型列表与路由默认模型引用。
+#[derive(serde::Serialize)]
+pub struct SessionChatModelsView {
+    /// 注册表 key + 模型名（仅 Chat 能力）。
+    pub models: Vec<(String, String)>,
+    /// 路由 Chat 槽位当前指向的注册表 key（未配置或不在注册表时 None）。
+    pub default_ref: Option<String>,
+}
+
+/// 列出会话可切换的 Chat 模型（数据源为宿主模型注册表与路由表）。
+#[tauri::command]
+pub async fn list_session_chat_models(
+    state: State<'_, TiangongApp>,
+) -> Result<SessionChatModelsView, String> {
+    use tiangong_llm::models_config::{ModelCapability, RoutingSlot};
+    let models = state
+        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
+        .await?;
+    let mut chat_models: Vec<(String, String)> = models
+        .models
+        .iter()
+        .filter(|(_, entry)| entry.capabilities.contains(&ModelCapability::Chat))
+        .map(|(key, entry)| (key.clone(), entry.model.clone()))
+        .collect();
+    // HashMap 迭代顺序不稳定，按 key 排序保证选择器顺序固定。
+    chat_models.sort_by(|left, right| left.0.cmp(&right.0));
+    let default_ref = models.routing.get(&RoutingSlot::Chat).and_then(|routed| {
+        models
+            .models
+            .iter()
+            .find(|(_, entry)| entry.provider == routed.provider && entry.model == routed.model)
+            .map(|(key, _)| key.clone())
+    });
+    Ok(SessionChatModelsView {
+        models: chat_models,
+        default_ref,
+    })
+}
+
+/// 切换会话级对话模型（models 注册表 key；None 恢复跟随路由默认）。
+///
+/// 轻量切换：只写入引用，**不切换执行端点**——端点切换推迟到下一次
+/// 发消息（投递前的端点校正按引用完成）。这样用户切走又切回时端点
+/// 从未变化。运行中不切换（core 忙即拒绝）。
+#[tauri::command]
+pub async fn set_session_model(
+    session_id: String,
+    model_ref: Option<String>,
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let session_lock = state.session_send_lock(&session_id);
+    let _send_guard = session_lock.lock_owned().await;
+    // 选择时即校验：失效引用直接拒绝，不写进会话（切回「跟随默认」的
+    // None 不需要校验，这是用户从失效状态自救的出口）。
+    if let Some(key) = model_ref.as_deref().filter(|key| !key.trim().is_empty()) {
+        state.core_manager.resolve_turn_model(Some(key))?;
+    }
+    // 与其他 ensure_core 调用点一致：新建 Core 必须启动流消费者，否则
+    // 该会话的全部流式事件发不出去、界面哑掉。
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+    let ensured = state
+        .ensure_core(&session_id, None, None, None, stream_tx)
+        .await?;
+    if ensured.is_new {
+        start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
+    }
+    state
+        .core_manager
+        .set_core_model_ref(&ensured.session_id, model_ref)
 }
 
 #[tauri::command]
@@ -4070,6 +4187,7 @@ pub async fn fetch_provider_models(
             .unwrap_or_default(),
         timeout_ms: timeout_ms.unwrap_or(60_000),
         options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
     };
     SingleProviderClient::list_models_async(&endpoint)
         .await

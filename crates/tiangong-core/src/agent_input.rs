@@ -60,6 +60,7 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared: vec![tiangong_types::ContentBlock::text(content)],
             message_id: None,
+            model_ref: None,
         })
     }
 
@@ -68,6 +69,7 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: None,
+            model_ref: None,
         })
     }
 
@@ -79,7 +81,22 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: Some(message_id.into()),
+            model_ref: None,
         })
+    }
+
+    /// 为用户消息附加模型选择（models 注册表 key；`None` 跟随默认）。
+    ///
+    /// 宿主把用户在界面上选的模型附在消息上即可，解析与切换由
+    /// `CoreManager` 在投递路径内部完成。非用户消息不受影响。
+    pub fn with_model_ref(mut self, model_ref: Option<String>) -> Self {
+        if let AgentInputKind::Message(MessageInput::UserMessage {
+            model_ref: slot, ..
+        }) = &mut self
+        {
+            *slot = model_ref.filter(|key| !key.trim().is_empty());
+        }
+        self
     }
 
     /// 便捷构造：取消当前执行（cancel_flag 由 deliver 内部设置）。
@@ -107,6 +124,11 @@ pub enum MessageInput {
         prepared: Vec<tiangong_types::ContentBlock>,
         /// 前端预生成的消息 ID（用于流式复用），None 则由后端生成。
         message_id: Option<String>,
+        /// 本条消息使用的模型（models 注册表 key）。
+        ///
+        /// `None` = 跟随当前 Chat 默认。由 `CoreManager` 在投递前解析成实际
+        /// 端点并按需切换——宿主只需把用户的选择附在消息上，不参与编排。
+        model_ref: Option<String>,
     },
 }
 

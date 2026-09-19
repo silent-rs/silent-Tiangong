@@ -21,6 +21,10 @@ pub enum CoreError {
     Busy,
     /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
+    /// 模型切换前的上下文整理未完成（模型调用失败或超时）。
+    ContextCompactionFailed(String),
+    /// 模型切换失败（目标端点不可用等）。
+    ModelSwitchFailed(String),
 }
 
 impl fmt::Display for CoreError {
@@ -32,6 +36,10 @@ impl fmt::Display for CoreError {
             CoreError::WorkerStopped => write!(f, "worker 已停止，命令通道已关闭"),
             CoreError::Busy => write!(f, "Core 正在执行，当前操作仅允许在空闲时进行"),
             CoreError::WorkerPanicked => write!(f, "worker 线程 panic，会话不可恢复"),
+            CoreError::ContextCompactionFailed(reason) => {
+                write!(f, "整理上下文未完成：{reason}")
+            }
+            CoreError::ModelSwitchFailed(reason) => write!(f, "模型切换失败：{reason}"),
         }
     }
 }

@@ -37,6 +37,11 @@ pub struct ModelEndpoint {
     pub timeout_ms: u64,
     #[serde(default)]
     pub options: Value,
+    /// 模型上下文窗口（透传自模型注册表；None 表示用通用回退限制）。
+    ///
+    /// 不属于模型身份（见 [`Self::model_key`]）：窗口变化不触发切换前压缩。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -53,6 +58,7 @@ impl Default for ModelEndpoint {
             protocol: ProviderProtocol::default(),
             timeout_ms: DEFAULT_TIMEOUT_MS,
             options: Value::Object(serde_json::Map::new()),
+            context_window: None,
         }
     }
 }
@@ -71,7 +77,35 @@ impl ModelEndpoint {
             protocol: resolved.protocol,
             timeout_ms: resolved.timeout_ms,
             options: resolved.options,
+            context_window: resolved.context_window,
         }
+    }
+
+    /// 端点是否可用于实际请求（base_url 与 model 均非空）。
+    pub fn is_usable(&self) -> bool {
+        !self.base_url.trim().is_empty() && !self.model.trim().is_empty()
+    }
+
+    /// 端点的模型标识：`base_url + model`（含协议）派生，**不落盘、不入配置**。
+    ///
+    /// 用途只有一个：判断两个端点是否指向同一个模型。不能只比 `model`——
+    /// 不同平台常有同名 model id（如多家 OpenAI 兼容服务都叫 `qwen3-max`），
+    /// 漏判会让切换后仍用旧端点、且跳过切换前的上下文整理。
+    ///
+    /// 与 `Session.model_ref`（用户在 `models` 注册表中选的条目名）是两回事：
+    /// 后者是用户的选择策略并需要落盘，这里只是运行时端点身份。
+    pub fn model_key(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.protocol.as_str(),
+            self.base_url.trim_end_matches('/'),
+            self.model
+        )
+    }
+
+    /// 是否指向同一个模型（判断「是否需要切换」的唯一依据）。
+    pub fn is_same_model(&self, other: &Self) -> bool {
+        self.model_key() == other.model_key()
     }
 
     /// 转为 [`crate::models_config::ResolvedModel`]，供 media facade 等需要路由解析结果的调用方使用。
@@ -88,7 +122,93 @@ impl ModelEndpoint {
             protocol: self.protocol,
             model: self.model.clone(),
             options: self.options.clone(),
-            context_window: None,
+            context_window: self.context_window,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn endpoint(base_url: &str, model: &str) -> ModelEndpoint {
+        ModelEndpoint {
+            base_url: base_url.to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 同一服务端同一模型视为同一模型() {
+        let a = endpoint("https://api.example.com/v1", "gpt-4o");
+        let b = endpoint("https://api.example.com/v1", "gpt-4o");
+        assert!(a.is_same_model(&b));
+
+        // 凭据、超时、headers 不属于模型身份，变化不应触发切换。
+        let mut c = b.clone();
+        c.api_key = "sk-rotated".to_string();
+        c.timeout_ms = 5_000;
+        assert!(a.is_same_model(&c));
+
+        // 末尾斜杠只是书写差异。
+        assert!(a.is_same_model(&endpoint("https://api.example.com/v1/", "gpt-4o")));
+    }
+
+    #[test]
+    fn 同名模型不同服务端不得视为同一模型() {
+        // 不同平台常有同名 model id：只比模型名会漏判切换，导致新端点
+        // 未生效且跳过切换前的上下文整理。
+        let a = endpoint("https://a.example.com/v1", "qwen3-max");
+        let b = endpoint("https://b.example.com/v1", "qwen3-max");
+        assert!(!a.is_same_model(&b));
+        assert_ne!(a.model_key(), b.model_key());
+    }
+
+    #[test]
+    fn 协议不同不得视为同一模型() {
+        let mut a = endpoint("https://api.example.com/v1", "claude-sonnet");
+        let mut b = a.clone();
+        a.protocol = ProviderProtocol::OpenAiChatCompletions;
+        b.protocol = ProviderProtocol::Anthropic;
+        assert!(!a.is_same_model(&b));
+    }
+
+    #[test]
+    fn 模型标识可直接从端点派生() {
+        let endpoint = endpoint("https://api.example.com/v1", "gpt-4o");
+        let key = endpoint.model_key();
+        assert!(key.contains("https://api.example.com/v1"), "{key}");
+        assert!(key.contains("gpt-4o"), "{key}");
+        assert!(key.contains(endpoint.protocol.as_str()), "{key}");
+        // 空端点也有稳定标识，不 panic。
+        assert!(!ModelEndpoint::default().model_key().is_empty());
+    }
+
+    #[test]
+    fn 端点可用性只取决于地址与模型名() {
+        assert!(endpoint("https://api.example.com/v1", "m").is_usable());
+        assert!(!endpoint("", "m").is_usable());
+        assert!(!endpoint("https://api.example.com/v1", "  ").is_usable());
+        assert!(!ModelEndpoint::default().is_usable());
+    }
+
+    #[test]
+    fn 路由解析结果原样转为端点() {
+        let resolved = crate::models_config::ResolvedModel {
+            headers: Default::default(),
+            provider: "p".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            timeout_ms: 60_000,
+            protocol: ProviderProtocol::default(),
+            model: "gpt-4o".to_string(),
+            options: Value::Object(serde_json::Map::new()),
+            context_window: None,
+        };
+        let endpoint = ModelEndpoint::from_resolved(resolved);
+        assert_eq!(endpoint.base_url, "https://api.example.com/v1");
+        assert_eq!(endpoint.model, "gpt-4o");
     }
 }

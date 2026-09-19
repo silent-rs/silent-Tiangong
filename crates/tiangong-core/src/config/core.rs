@@ -11,33 +11,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::permission::TrustMode;
-use tiangong_llm::ProviderProtocol;
 
 /// 模型端点配置（定义已迁移至 `tiangong-llm`，此处仅做 re-export 保持外部路径稳定）。
 pub use tiangong_llm::ModelEndpoint;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// 默认 context_window（模型名无法解析时的回退值）。
+/// 模型端点未声明上下文窗口时的兜底值。
+///
+/// `ModelEndpoint.context_window` 虽是 `Option`，实际路径上均由模型注册表
+/// 填充；这里只是类型上的兜底，不构成配置项。
 pub fn default_context_limit() -> usize {
     DEFAULT_CONTEXT_LIMIT
 }
 
-/// LLM 配置 — TiangongCore 运行所需的模型端点
+/// LLM 配置 — TiangongCore 运行所需的最小配置
 ///
-/// TiangongCore 运行所需的最小配置
-///
-/// 直接消费的端点仅主 Chat（[`ModelEndpoint`]）；lite、image/video/tts 等
-/// 其他能力由消费方自行从 `ModelsConfig` 路由解析，不经此配置中转
-/// （lite 的现行消费者是 core-manager 的标题生成）。
+/// 模型端点**不在**此配置中：会话实际使用的模型由宿主（CoreManager）解析
+/// 模型注册表后经 `TiangongCore::switch_model` 交给 Core，Core 以
+/// `ModelEndpoint` 持有运行时唯一真相。这里只保留与模型无关的运行参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
-    /// 主 Chat 模型端点
-    pub llm: ModelEndpoint,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -48,19 +44,15 @@ pub struct CoreConfig {
     #[serde(default = "default_reasoning_effort")]
     #[serde(deserialize_with = "tiangong_llm::request::deserialize_reasoning_effort_flexible")]
     pub reasoning_effort: tiangong_llm::ReasoningEffort,
-    /// 上下文窗口大小（token 数）
-    pub context_limit: usize,
 }
 
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            llm: ModelEndpoint::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             reasoning_effort: tiangong_llm::ReasoningEffort::Medium,
-            context_limit: DEFAULT_CONTEXT_LIMIT,
         }
     }
 }
@@ -79,26 +71,6 @@ pub struct CoreConfigBuilder {
 }
 
 impl CoreConfigBuilder {
-    /// 设置 Chat 端点（最常用的快捷方式）
-    pub fn with_chat(mut self, base_url: &str, api_key: &str, model: &str) -> Self {
-        self.config.llm = ModelEndpoint {
-            headers: Default::default(),
-            base_url: base_url.to_string(),
-            api_key: api_key.to_string(),
-            model: model.to_string(),
-            protocol: ProviderProtocol::default(),
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            options: Value::Object(serde_json::Map::new()),
-        };
-        self
-    }
-
-    /// 设置完整的 LLM 端点
-    pub fn with_llm_config(mut self, llm: ModelEndpoint) -> Self {
-        self.config.llm = llm;
-        self
-    }
-
     /// 设置信任模式
     pub fn with_trust_mode(mut self, mode: TrustMode) -> Self {
         self.config.trust_mode = mode;
@@ -112,12 +84,6 @@ impl CoreConfigBuilder {
 
     pub fn with_custom_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.config.custom_system_prompt = prompt.into();
-        self
-    }
-
-    /// 设置上下文窗口大小
-    pub fn with_context_limit(mut self, limit: usize) -> Self {
-        self.config.context_limit = limit;
         self
     }
 
@@ -196,7 +162,7 @@ mod tests {
 
         assert_eq!(provider.generation(), 1);
         let snap = provider.snapshot();
-        assert_eq!(snap.context_limit, DEFAULT_CONTEXT_LIMIT);
+        assert!(snap.custom_system_prompt.is_empty());
     }
 
     #[test]
@@ -204,11 +170,11 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         assert_eq!(provider.generation(), 1);
 
-        provider.update(|c| c.context_limit = 65536);
+        provider.update(|c| c.custom_system_prompt = "改写".to_string());
         assert_eq!(provider.generation(), 2);
 
         let snap = provider.snapshot();
-        assert_eq!(snap.context_limit, 65536);
+        assert_eq!(snap.custom_system_prompt, "改写");
     }
 
     #[test]
@@ -216,23 +182,19 @@ mod tests {
         let provider = CoreConfigProvider::new(CoreConfig::default());
         let cloned = provider.clone();
 
-        provider.update(|c| c.context_limit = 16384);
+        provider.update(|c| c.custom_system_prompt = "共享".to_string());
         assert_eq!(cloned.generation(), 2);
-        assert_eq!(cloned.snapshot().context_limit, 16384);
+        assert_eq!(cloned.snapshot().custom_system_prompt, "共享");
     }
 
     #[test]
     fn builder_basic() {
         let config = CoreConfig::builder()
-            .with_chat("https://api.example.com/v1", "sk-test", "gpt-4o")
             .with_trust_mode(TrustMode::FullTrust)
-            .with_context_limit(65536)
+            .with_custom_system_prompt("提示")
             .build();
 
-        assert_eq!(config.llm.base_url, "https://api.example.com/v1");
-        assert_eq!(config.llm.model, "gpt-4o");
-        assert!(!config.llm.base_url.is_empty());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
-        assert_eq!(config.context_limit, 65536);
+        assert_eq!(config.custom_system_prompt, "提示");
     }
 }

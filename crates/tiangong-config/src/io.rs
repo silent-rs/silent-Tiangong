@@ -253,9 +253,12 @@ pub fn resolve_context_limit_with_override(
     resolve_context_limit_at(dir, model_name)
 }
 
-/// 根据模型名称从映射表解析 context_window。
+/// 根据模型名称从预设映射表解析 context_window。
 ///
-/// 读取 `dir/context_windows.json`（不存在则用内嵌默认表），
+/// 读取 `dir/context_windows.json`（不存在则用内嵌默认表）。这是**前端编辑
+/// 模型时的预填预设**，不是运行期真相——会话实际使用的窗口来自 `models.json`
+/// 中该模型条目的 `context_window`（经 `ModelEndpoint` 随模型切换同步）。
+///
 /// 精确匹配 > 最长键匹配（无 `*` 的键按前缀匹配，含 `*` 的键按通配符匹配）
 /// > `DEFAULT_CONTEXT_LIMIT`。
 pub fn resolve_context_limit_at(dir: &Path, model_name: &str) -> usize {

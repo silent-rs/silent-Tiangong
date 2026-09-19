@@ -122,6 +122,13 @@ pub struct Session {
     /// 工具调用批次闭合前收到的外部工具输入；下一安全边界按顺序注入。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tool_injections: Vec<DeferredToolInjection>,
+    /// 会话级对话模型（models 注册表 key）；None 表示跟随路由默认。
+    ///
+    /// 只由用户显式切换改写，系统行为一律不动它。存引用不存端点：
+    /// ModelEndpoint 含 api_key，落盘即泄密。引用失效（key 或其 provider
+    /// 已删）时由宿主在选择与投递入口给出明确报错，不静默回退默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ref: Option<String>,
     /// 当前 Session 独立的持久化根，仅用于运行时，不写入会话 JSON。
     #[serde(skip)]
     storage_root: Option<PathBuf>,
@@ -157,6 +164,7 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
+            model_ref: None,
             storage_root: None,
         }
     }
@@ -191,6 +199,7 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
+            model_ref: None,
             storage_root: None,
         }
     }

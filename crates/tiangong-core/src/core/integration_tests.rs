@@ -75,11 +75,16 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
     session.try_persist_to_disk().unwrap();
     let tool = RecordingTool::succeed("probe");
     let build = || {
-        let mut config = CoreConfig::builder()
-            .with_chat(&server.uri(), "test", "glm-5.3-flash")
+        let config = CoreConfig::builder()
             .with_trust_mode(TrustMode::FullTrust)
             .build();
-        config.llm.protocol = ProviderProtocol::Anthropic;
+        let endpoint = tiangong_llm::ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test".to_string(),
+            model: "glm-5.3-flash".to_string(),
+            protocol: ProviderProtocol::Anthropic,
+            ..Default::default()
+        };
         let (tx, _rx) = std::sync::mpsc::channel();
         super::TiangongCore::builder()
             .session_id(sid.clone())
@@ -92,6 +97,7 @@ async fn anthropic_continuations_truncation_compression_and_reload_keep_usage_ba
                 id: "usage-probe",
                 tool: tool.clone(),
             })])
+            .model_endpoint(endpoint)
             .build()
     };
     let assert_totals = |expected_inputs: &[usize], expected_outputs: &[usize]| {
@@ -261,7 +267,6 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             .session_id(sid.clone())
             .config(CoreConfigProvider::new(
                 CoreConfig::builder()
-                    .with_chat(&server.uri(), "test-key", "test-model")
                     .with_trust_mode(TrustMode::FullTrust)
                     .build(),
             ))
@@ -270,6 +275,7 @@ async fn plugin_and_tool_order_survives_core_recreation_and_followup_turns() {
             .workspace_dir(env.root.to_string_lossy())
             .stream_tx(event_tx)
             .plugins(plugins)
+            .model_endpoint(crate::core::test_support::test_model(&server.uri()))
             .build();
         for round in 0..2 {
             let id = format!("msg-{generation}-{round}");

@@ -143,7 +143,6 @@ fn core(
     session.bind_storage_root(root);
     session.try_persist_to_disk().unwrap();
     let config = CoreConfig::builder()
-        .with_chat(&server.uri(), "test", "test-model")
         .with_trust_mode(TrustMode::FullTrust)
         .build();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -155,8 +154,19 @@ fn core(
         .config(CoreConfigProvider::new(config.clone()))
         .stream_tx(tx)
         .plugins(vec![plugin])
+        .model_endpoint(turn_model(&server.uri()))
         .build();
     (core, config, rx, session.id)
+}
+
+/// 测试用运行时模型：Core 构造时必须持有实际模型端点。
+fn turn_model(base_url: &str) -> tiangong_llm::ModelEndpoint {
+    tiangong_llm::ModelEndpoint {
+        base_url: base_url.to_string(),
+        api_key: "test".to_string(),
+        model: "test-model".to_string(),
+        ..Default::default()
+    }
 }
 
 async fn send(
@@ -258,6 +268,7 @@ async fn declaration_jitter_is_absorbed_by_process_cache_across_core_recreation(
             .config(CoreConfigProvider::new(config))
             .stream_tx(tx)
             .plugins(vec![plugin(id, state.clone()) as Arc<dyn Plugin>])
+            .model_endpoint(turn_model(&server.uri()))
             .build();
         send(&restored, &rx, "重建后继续").await;
         let requests = server.received_requests().await.unwrap();
@@ -363,6 +374,7 @@ async fn missing_plugin_after_recreation_drops_tools_and_reports_execution_failu
         .config(CoreConfigProvider::new(config))
         .stream_tx(tx)
         .plugins(Vec::new())
+        .model_endpoint(turn_model(&server.uri()))
         .build();
     send(&restored, &rx, "调用原工具").await;
     let requests = server.received_requests().await.unwrap();

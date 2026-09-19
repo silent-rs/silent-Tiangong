@@ -14,6 +14,7 @@ use crate::config::core::{CoreConfig, CoreConfigProvider};
 use crate::react::turn::run_turn;
 use crate::session::Session;
 use crate::turn_context::TurnContext;
+use tiangong_llm::ModelEndpoint;
 use tiangong_llm::SingleProviderClient;
 use tiangong_types::StreamEvent;
 
@@ -72,6 +73,15 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
+    /// 当前**实际已应用**的模型端点（运行时唯一真相）。
+    ///
+    /// 与 `Session.model_ref`（用户选择策略，None 表示跟随默认）不同，这里
+    /// 是 Core 真正在用的模型；身份由端点自身派生（见 `ModelEndpoint::model_key`），
+    /// 宿主据此判断是否需要切换。构造时由宿主按注册表解析后传入；之后只由
+    /// [`Self::switch_model`] 在切换成功时更新——切换失败保持旧值，下一次
+    /// 发送仍会识别出差异并重新走压缩+切换。
+    #[builder(setter(transform = |endpoint: ModelEndpoint| Arc::new(std::sync::Mutex::new(endpoint))))]
+    model_endpoint: Arc<std::sync::Mutex<ModelEndpoint>>,
     /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
     #[cfg(test)]
     #[builder(default, setter(strip_option))]
@@ -106,6 +116,81 @@ impl TiangongCore {
     /// 是否正在执行 turn（对外 `Running`）。
     pub fn is_busy(&self) -> bool {
         crate::shared_runtime::is_running(&self.session_id)
+    }
+
+    /// 当前实际已应用模型的身份标识（运行时唯一真相）。
+    ///
+    /// 由端点的 `base_url + model + protocol` 派生，宿主据此判断本轮是否
+    /// 需要切换模型——不要用 `Session.model_ref` 代替：后者是用户的选择
+    /// 策略（None 表示跟随默认），不是实际状态。
+    pub fn current_model_key(&self) -> String {
+        self.model_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .model_key()
+    }
+
+    /// 当前实际执行端点。
+    pub fn current_endpoint(&self) -> ModelEndpoint {
+        self.model_endpoint
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// 整理上下文：对既有历史执行一次手动压缩，并等待其进入终态。
+    ///
+    /// 供宿主在模型切换前调用——用**旧模型**把历史折叠成摘要，新模型接手
+    /// 的是整理后的上下文。复用 `CommandInput::CompressContext` 的同一份压缩
+    /// 实现，区别只在于本方法等待压缩任务进入终态（成功 / 失败 / 取消）后
+    /// 才返回，便于宿主据此决定下一步。
+    ///
+    /// 返回 `Ok(())` 表示压缩已成功应用或无可压缩历史；`Err` 表示压缩未能
+    /// 完成（模型调用失败、被取消、worker 退出等）。**返回 Err 时压缩任务
+    /// 同样已进入终态**，调用方可以安全地继续后续操作。
+    pub async fn compact_context(&self) -> Result<(), CoreError> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.spawn_context_compression(Some(completion_tx))?;
+        // 任务在任何终态下都会发送一次通知；发送端被丢弃（worker 异常退出）
+        // 时 recv 返回 Err，同样结束等待，不会悬挂。
+        match completion_rx.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(CoreError::ContextCompactionFailed(
+                "压缩任务未给出结果（worker 已退出）".to_string(),
+            )),
+        }
+    }
+
+    /// 切换当前模型（原子）：运行中不切换（忙即拒绝）。
+    ///
+    /// 只有切换成功才更新当前模型；失败保持旧值，宿主下一次
+    /// 发送仍会识别出差异并重新编排。切换后的请求使用新模型，已发出的
+    /// 请求不受影响。
+    pub fn switch_model(&self, target: ModelEndpoint) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        if !target.is_usable() {
+            return Err(CoreError::ModelSwitchFailed(format!(
+                "目标模型 {} 的端点配置不完整",
+                target.model_key()
+            )));
+        }
+        let _ = self.stream_tx.send(StreamEvent::ModelSwitchStarted {
+            model_name: target.model.clone(),
+        });
+        let model_name = target.model.clone();
+        {
+            let mut current = self
+                .model_endpoint
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *current = target;
+        }
+        let _ = self
+            .stream_tx
+            .send(StreamEvent::ModelSwitched { model_name });
+        Ok(())
     }
 
     /// 设置会话信任模式。
@@ -190,6 +275,27 @@ impl TiangongCore {
         Ok(())
     }
 
+    /// 设置会话级对话模型引用（models 注册表 key；None 表示跟随路由默认）。
+    ///
+    /// 与 set_title 同构的会话字段设置器：只在空闲期写盘，忙时返回 Busy
+    /// 不投递命令——运行中的 turn 不得中途换模型。同值直接返回，避免为
+    /// 无变化的写入承担整份 session 的读改写窗口。
+    pub fn set_model_ref(&self, model_ref: Option<String>) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+        let mut session = self.load_session()?;
+        if session.model_ref == model_ref {
+            return Ok(());
+        }
+        session.model_ref = model_ref;
+        session.updated_at = tiangong_types::now_text();
+        session
+            .try_persist_to_disk()
+            .map_err(|_| CoreError::WorkerStopped)?;
+        Ok(())
+    }
+
     fn load_session(&self) -> Result<Session, CoreError> {
         match Session::load_from_storage(&self.storage_root, &self.session_id) {
             Ok(session) => Ok(session),
@@ -240,6 +346,10 @@ impl TiangongCore {
         session.trust_mode = trust_mode;
 
         let config = self.config.snapshot();
+        // 执行端点 = 当前生效端点（switch 过为会话自持值，否则动态跟随
+        // 路由默认）；模型注册表与 model_ref 的解析都在宿主，core 只经
+        // [`Self::switch_endpoint`] 接收结果。
+        let endpoint = self.current_endpoint();
         let stream_tx = self.stream_tx.clone();
         let retry_tx = stream_tx.clone();
         let on_retry: tiangong_llm::OnRetryCallback =
@@ -254,10 +364,10 @@ impl TiangongCore {
         let client = if let Some(test_client) = self.test_client.clone() {
             test_client.with_on_retry(on_retry.clone())
         } else {
-            SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone())
+            SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone())
         };
         #[cfg(not(test))]
-        let client = SingleProviderClient::new(config.llm.clone()).with_on_retry(on_retry.clone());
+        let client = SingleProviderClient::new(endpoint.clone()).with_on_retry(on_retry.clone());
         let plugins = self
             .plugins
             .lock()
@@ -271,7 +381,14 @@ impl TiangongCore {
             .session(session)
             .stream_tx(stream_tx)
             .plugins(prepared_plugins.plugins)
-            .context_limit(config.context_limit)
+            // 上下文窗口跟随当前实际模型：会话切换模型后窗口必须同步变化，
+            // 否则换到小窗口模型仍按旧窗口判断自动压缩，请求会被 Provider
+            // 拒绝。端点未声明窗口时回落到配置值（路由默认模型推导而来）。
+            .context_limit(
+                endpoint
+                    .context_window
+                    .unwrap_or_else(crate::config::core::default_context_limit),
+            )
             .agent_config(crate::config::agent::AgentConfig {
                 trust_mode,
                 default_trust_mode: config.default_trust_mode,
@@ -419,7 +536,13 @@ impl TiangongCore {
     /// 压缩状态下只接受引导消息与取消类命令：用户消息取消压缩并直接
     /// 起轮（压缩可随时重新发起）；其余信号（插件可用性广播等）不接受，
     /// 不打断压缩。运行中调用返回 `Busy`。
-    fn compress_context(&self) -> Result<(), CoreError> {
+    ///
+    /// `completion_tx` 在压缩进入任一终态时收到一次结果，供等待方结束等待。
+    /// 任务结束路径上必然发送（发送端随任务一起释放，接收端不会悬挂）。
+    fn spawn_context_compression(
+        &self,
+        completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), CoreError>>>,
+    ) -> Result<(), CoreError> {
         if self.is_busy() {
             return Err(CoreError::Busy);
         }
@@ -438,23 +561,56 @@ impl TiangongCore {
                 &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
             );
             Ok(async move {
-                if let Some(crate::react::compression::CompressionInterrupt::Command(
-                    Command::InjectUserMessage {
-                        message_id,
-                        content,
-                    },
-                )) = crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
-                    .await
-                {
-                    // 压缩已被引导消息终止且未应用任何结果。腾出任务槽后
-                    // 起新轮；取消类终止无需接续。
+                use crate::react::compression::ManualCompressionOutcome as Outcome;
+                let outcome =
+                    crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
+                        .await;
+                let interrupted_by_message = matches!(
+                    outcome,
+                    Outcome::Interrupted(crate::react::compression::CompressionInterrupt::Command(
+                        Command::InjectUserMessage { .. }
+                    ))
+                );
+                // 等待方被唤醒后往往立刻切换模型，而 spawn_turn 的 wrapper 要等
+                // 本 future 返回才注销任务槽——必须先腾出槽位再通知，否则等待方
+                // 读到的仍是 Busy，切换会被拒绝。引导消息分支同样需要空槽位起新轮。
+                if completion_tx.is_some() || interrupted_by_message {
                     crate::shared_runtime::release_agent(&session_id);
+                }
+                if let Some(tx) = completion_tx {
+                    let result = match &outcome {
+                        Outcome::Succeeded | Outcome::Noop => Ok(()),
+                        Outcome::Failed(reason) => {
+                            Err(CoreError::ContextCompactionFailed(reason.clone()))
+                        }
+                        Outcome::Interrupted(_) => Err(CoreError::ContextCompactionFailed(
+                            "整理上下文被中断".to_string(),
+                        )),
+                    };
+                    let _ = tx.send(result);
+                }
+                if let Outcome::Interrupted(
+                    crate::react::compression::CompressionInterrupt::Command(
+                        Command::InjectUserMessage {
+                            message_id,
+                            content,
+                        },
+                    ),
+                ) = outcome
+                {
+                    // 压缩已被引导消息终止且未应用任何结果；槽位已腾出，
+                    // 直接起新轮。取消类终止无需接续。
                     if let Err(error) = core.start_user_turn(message_id, content) {
                         tracing::warn!(%error, session_id = %session_id, "压缩中断后起新轮失败");
                     }
                 }
             })
         })
+    }
+
+    /// 用户手动触发的上下文压缩（`CommandInput::CompressContext`）。
+    fn compress_context(&self) -> Result<(), CoreError> {
+        self.spawn_context_compression(None)
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -521,6 +677,9 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
+                // 模型选择由 CoreManager 在投递前消费（解析并按需切换），
+                // Core 只负责执行；到这里已无需再看。
+                model_ref: _,
             }) => {
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
                 if self.is_busy() {
@@ -570,6 +729,179 @@ impl Drop for TiangongCore {
         // Agent 被父轮释放的场景）。显式取消与关闭由 Cancel 命令、shutdown_join
         // / CoreManager 承担；不在此发 Cancel，避免任务闭包持有的 Core 克隆在
         // 释放时误杀自己启动的后继任务。
+    }
+}
+
+#[cfg(test)]
+mod model_endpoint_tests {
+    use super::*;
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
+
+    fn endpoint(base_url: &str, model: &str) -> ModelEndpoint {
+        ModelEndpoint {
+            base_url: base_url.to_string(),
+            api_key: "sk-test".to_string(),
+            model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn target(model: &str) -> ModelEndpoint {
+        endpoint("https://api.example.com/v1", model)
+    }
+
+    fn test_core(root: &std::path::Path, session_id: &str) -> TiangongCore {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        TiangongCore::builder()
+            .session_id(session_id)
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root)
+            .workspace_dir(root.to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(vec![])
+            .model_endpoint(target("initial-model"))
+            .build()
+    }
+
+    #[test]
+    fn 构造时即持有实际模型() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "runtime-init");
+        assert_eq!(core.current_endpoint().model, "initial-model");
+        assert_eq!(
+            core.current_model_key(),
+            target("initial-model").model_key(),
+            "模型标识直接从端点派生"
+        );
+    }
+
+    #[test]
+    fn 切换成功后当前模型更新并发出事件() {
+        let root = tempfile::tempdir().unwrap();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let core = TiangongCore::builder()
+            .session_id("runtime-switch")
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root.path())
+            .workspace_dir(root.path().to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(vec![])
+            .model_endpoint(target("initial-model"))
+            .build();
+
+        core.switch_model(target("picked-model")).unwrap();
+        assert_eq!(core.current_endpoint().model, "picked-model");
+        assert_eq!(core.current_model_key(), target("picked-model").model_key());
+
+        let events: Vec<StreamEvent> = event_rx.try_iter().collect();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ModelSwitchStarted { model_name } if model_name == "picked-model"
+            )),
+            "应发出 ModelSwitchStarted"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ModelSwitched { model_name } if model_name == "picked-model"
+            )),
+            "应发出 ModelSwitched"
+        );
+    }
+
+    #[test]
+    fn 端点不完整时切换失败且保持旧模型() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "runtime-invalid");
+        let broken = endpoint("", "");
+        let error = core.switch_model(broken).expect_err("不完整端点应拒绝切换");
+        assert!(matches!(error, CoreError::ModelSwitchFailed(_)));
+        assert_eq!(
+            core.current_endpoint().model,
+            "initial-model",
+            "切换失败必须保持旧模型，下一次发送才会重新编排"
+        );
+    }
+
+    #[test]
+    fn 模型引用写入落盘且同值幂等() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "ref-persist");
+        core.set_model_ref(Some("key-a".to_string())).unwrap();
+        let loaded = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert_eq!(loaded.model_ref.as_deref(), Some("key-a"));
+        let first_updated = loaded.updated_at.clone();
+
+        // 同值写入直接返回，不改 updated_at（不承担整份 session 读改写）。
+        core.set_model_ref(Some("key-a".to_string())).unwrap();
+        let again = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert_eq!(again.updated_at, first_updated, "同值写入不应刷新时间戳");
+
+        // None 恢复跟随默认（用户选择策略，不影响 Core 当前实际模型）。
+        core.set_model_ref(None).unwrap();
+        let cleared = Session::load_from_storage(root.path(), "ref-persist").unwrap();
+        assert!(cleared.model_ref.is_none());
+        assert_eq!(
+            core.current_endpoint().model,
+            "initial-model",
+            "清除用户选择不改变 Core 已应用的实际模型"
+        );
+    }
+
+    #[tokio::test]
+    async fn 无可整理历史时不调用模型() {
+        let root = tempfile::tempdir().unwrap();
+        let core = test_core(root.path(), "compact-empty");
+        // 空会话（无对话历史）：压缩任务判定 Noop 并立即给出终态，不触发模型请求。
+        core.compact_context()
+            .await
+            .expect("无历史时整理上下文应直接成功");
+    }
+
+    /// 旧模型不可达时压缩必然失败，但等待必须结束（不能挂到超时）。
+    ///
+    /// 回归：早期实现靠轮询 `is_busy()` + 180s 上限判断收敛，端点不可用
+    /// 会把用户卡在一次长等待里。现在由压缩任务主动通知终态。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 压缩失败时等待立即结束并返回错误() {
+        let root = tempfile::tempdir().unwrap();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let core = TiangongCore::builder()
+            .session_id("compact-unreachable")
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root.path())
+            .workspace_dir(root.path().to_string_lossy())
+            .stream_tx(event_tx)
+            // 指向必然连接失败的地址，且超时很短。
+            .model_endpoint(ModelEndpoint {
+                timeout_ms: 300,
+                ..endpoint("http://127.0.0.1:1", "dead-model")
+            })
+            .plugins(vec![])
+            .build();
+
+        // 预置可压缩历史，确保真的会发起模型请求。
+        let mut session = Session::new("失败压缩");
+        session.id = "compact-unreachable".to_string();
+        session.bind_storage_root(root.path().to_path_buf());
+        for round in [("第一问", "第一答"), ("第二问", "第二答")] {
+            session.append_message(crate::session::MessageRole::User, round.0);
+            session.append_message(crate::session::MessageRole::Assistant, round.1);
+        }
+        session.try_persist_to_disk().unwrap();
+
+        let error =
+            tokio::time::timeout(std::time::Duration::from_secs(30), core.compact_context())
+                .await
+                .expect("压缩失败必须及时结束等待，不得挂到固定超时")
+                .expect_err("端点不可达时压缩应失败");
+        assert!(matches!(error, CoreError::ContextCompactionFailed(_)));
+        // 终态已到达：任务槽已释放，后续切换不会撞 Busy。
+        assert!(!core.is_busy(), "压缩返回时任务槽必须已释放");
     }
 }
 
@@ -625,6 +957,7 @@ mod shared_runtime_tests {
                     values: vec![candidate("@two")],
                 }),
             ])
+            .model_endpoint(crate::core::test_support::test_model("http://test.invalid"))
             .build();
 
         let values = core
@@ -655,6 +988,7 @@ mod shared_runtime_tests {
                     .workspace_dir(root.path().to_string_lossy())
                     .stream_tx(event_tx)
                     .plugins(vec![])
+                    .model_endpoint(crate::core::test_support::test_model("http://test.invalid"))
                     .build()
             })
             .collect();

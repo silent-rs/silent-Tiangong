@@ -873,27 +873,28 @@ impl TiangongApp {
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     ///
-    /// 含 host 专属的远端 turn 所有权检查（`remote_turn_allows_message`），
-    /// Core 操作本身经 `core_manager`（issue #245）。
-    pub fn deliver_prepared_if_live(
+    /// app 层只做 host 专属的远端 turn 所有权检查，然后把消息交给
+    /// `CoreManager`：模型选择随消息携带（`with_model_ref`），解析、上下文
+    /// 整理与切换都是 Manager 投递路径的内部步骤，app 层不感知也不介入。
+    ///
+    /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型。
+    pub async fn deliver_prepared_if_live(
         &self,
         session_id: &str,
         message_id: String,
         prepared: Vec<tiangong_types::ContentBlock>,
+        model_ref: Option<&str>,
     ) -> Result<(), String> {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
-        if !self.core_manager.has_live_core(session_id) {
-            return Err("会话 Core 不存在".to_string());
-        }
         self.core_manager
-            .deliver_to_core_if_live(
+            .deliver_user_message(
                 session_id,
-                AgentInputKind::prepared_with_id(message_id, prepared),
+                AgentInputKind::prepared_with_id(message_id, prepared)
+                    .with_model_ref(model_ref.map(str::to_string)),
             )
-            .then_some(())
-            .ok_or_else(|| "会话 Core 投递失败".to_string())
+            .await
     }
 
     /// 启动嵌入式 Server（共享 app 的 state 和 config）
@@ -1090,6 +1091,12 @@ mod tests {
             .storage_root(storage_root.path())
             .workspace_dir(storage_root.path().to_string_lossy())
             .trust_mode(session.trust_mode)
+            .model_endpoint(tiangong_llm::ModelEndpoint {
+                base_url: "http://test.invalid".to_string(),
+                api_key: "test-key".to_string(),
+                model: "test-model".to_string(),
+                ..Default::default()
+            })
             .build();
         assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");
         // 直接经 core_manager registry 插入(issue #245:不再有 TiangongApp.lock_cores)。

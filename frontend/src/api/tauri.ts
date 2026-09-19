@@ -264,6 +264,8 @@ export interface StreamEvent {
   path?: string;
   /** title_changed 事件携带的新标题。 */
   title?: string;
+  /** model_switch_started / model_switched 携带的模型名（用于展示）。 */
+  model_name?: string;
 }
 
 export interface SessionStreamEvent {
@@ -716,6 +718,7 @@ export const api = {
     cwd?: string,
     trustMode?: string,
     reasoningEffort?: string,
+    modelRef?: string | null,
   ): Promise<void> =>
     invoke('send_message', {
       sessionId,
@@ -725,6 +728,7 @@ export const api = {
       cwd,
       trustMode,
       reasoningEffort,
+      modelRef,
     }),
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
@@ -802,6 +806,15 @@ export const api = {
   getBuiltinEnvBlocklist: (): Promise<BuiltinEnvBlocklist> =>
     invoke('get_builtin_env_blocklist'),
 
+
+  getSessionModel: (sessionId: string): Promise<string | null> =>
+    invoke('get_session_model', { sessionId }),
+
+  listSessionChatModels: (): Promise<{ models: [string, string][]; default_ref: string | null }> =>
+    invoke('list_session_chat_models'),
+
+  setSessionModel: (sessionId: string, modelRef: string | null): Promise<void> =>
+    invoke('set_session_model', { sessionId, modelRef }),
 
   getReasoningEffort: (sessionId?: string): Promise<string> =>
     invoke('get_reasoning_effort', { sessionId }),
