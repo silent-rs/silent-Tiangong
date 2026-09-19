@@ -187,6 +187,35 @@ impl TiangongCore {
                 .unwrap_or_else(|error| error.into_inner());
             *current = target;
         }
+        // 切换留痕：写入会话消息列表，让用户在历史里查证「这一段之后换了
+        // 模型」。仅发流事件不够——那只驱动顶部状态栏文案，刷新或切换会话
+        // 后就消失，而模型变化是理解后续回复的重要上下文。
+        //
+        // 用 Notice：角色本身保证排除出模型上下文与压缩范围（见
+        // Session::context 与 is_compressible），不污染 prompt。
+        // 此处 is_busy 已为 false（函数入口已校验），无活跃 turn 会并发写
+        // 会话文件；落盘失败只告警，不因留痕失败而让切换回退。
+        match self.load_session() {
+            Ok(mut session) => {
+                let record = crate::session::Message::new(
+                    crate::session::MessageRole::Notice,
+                    format!("[上下文管理] 已切换模型：{model_name}"),
+                );
+                let snapshot = record.clone();
+                session.messages.push(record);
+                if let Err(error) = session.try_persist_to_disk() {
+                    tracing::warn!(%error, session_id = %self.session_id, "模型切换留痕落盘失败");
+                } else {
+                    let _ = self.stream_tx.send(StreamEvent::SessionMessageUpsert {
+                        message: snapshot,
+                        deferred_tool_injections: None,
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, session_id = %self.session_id, "模型切换留痕读取会话失败");
+            }
+        }
         let _ = self
             .stream_tx
             .send(StreamEvent::ModelSwitched { model_name });
@@ -809,6 +838,77 @@ mod model_endpoint_tests {
                 StreamEvent::ModelSwitched { model_name } if model_name == "picked-model"
             )),
             "应发出 ModelSwitched"
+        );
+    }
+
+    /// 模型切换必须在会话消息列表留痕，而不只是发流事件。
+    ///
+    /// 回归：早期实现只发 ModelSwitchStarted/ModelSwitched，那只驱动顶部
+    /// 状态栏文案，刷新或切换会话后就消失——用户回看历史时无从得知某段
+    /// 对话之后换过模型。
+    #[test]
+    fn 切换模型在消息列表留痕且不进模型上下文() {
+        let root = tempfile::tempdir().unwrap();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let core = TiangongCore::builder()
+            .session_id("switch-record")
+            .config(CoreConfigProvider::new(CoreConfig::default()))
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .storage_root(root.path())
+            .workspace_dir(root.path().to_string_lossy())
+            .stream_tx(event_tx)
+            .plugins(vec![])
+            .model_endpoint(target("initial-model"))
+            .build();
+
+        // 预置一轮对话，确保切换留痕写入的是既有会话。
+        use crate::session::MessageRole;
+        let mut session = Session::new("切换留痕");
+        session.id = "switch-record".to_string();
+        session.bind_storage_root(root.path().to_path_buf());
+        session.append_message(MessageRole::User, "问题");
+        session.append_message(MessageRole::Assistant, "回答");
+        session.try_persist_to_disk().unwrap();
+
+        core.switch_model(target("picked-model")).unwrap();
+
+        let saved = Session::load_from_storage(root.path(), "switch-record").unwrap();
+        let record = saved
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .text_content()
+                    .starts_with("[上下文管理] 已切换模型")
+            })
+            .expect("切换应在消息列表留痕");
+        assert_eq!(
+            record.role,
+            MessageRole::Notice,
+            "留痕用 Notice：按角色排除出模型上下文与压缩范围"
+        );
+        assert!(
+            record.text_content().contains("picked-model"),
+            "留痕应说明切换到哪个模型：{}",
+            record.text_content()
+        );
+        assert!(
+            !saved
+                .context()
+                .iter()
+                .any(|message| message.text_content().starts_with("[上下文管理]")),
+            "留痕不得进入模型上下文"
+        );
+
+        // 留痕同时推送前端，无需等切换会话重新读盘。
+        let events: Vec<StreamEvent> = event_rx.try_iter().collect();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::SessionMessageUpsert { message, .. }
+                    if message.text_content().starts_with("[上下文管理] 已切换模型")
+            )),
+            "应推送留痕消息到前端"
         );
     }
 

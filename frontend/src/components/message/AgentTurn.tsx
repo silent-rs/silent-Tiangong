@@ -198,7 +198,7 @@ function AgentTurnView({
       } else if (msg.role === "system" && textOf(msg).startsWith("[重试]")) {
         flushTools();
         fragments.push({ type: "retry_system", msg });
-      } else if (msg.role === "system" && textOf(msg).startsWith("[上下文管理]")) {
+      } else if ((msg.role === "system" || msg.role === "notice") && textOf(msg).startsWith("[上下文管理]")) {
         if (textOf(msg).includes("正在压缩")) continue;
         flushTools();
         fragments.push({ type: "context_management", msg });

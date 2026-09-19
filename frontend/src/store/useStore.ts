@@ -1504,7 +1504,19 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => {
       const inputCaches = setInputCacheSending(state.inputCaches, cacheKey, true);
       sendingCache = inputCaches[cacheKey];
-      return { inputCaches };
+      const isCurrent = state.activeSessionId === cacheKey;
+      // 投递前即进入执行态：后端 send_message 内部可能先做「整理上下文 →
+      // 切换模型」再投递，这段同步等待可达数十秒。若等 await 返回才置位，
+      // 用户点发送后会看到输入框清空、界面却毫无动静，误以为应用卡死。
+      return {
+        inputCaches,
+        runStatus: isCurrent ? 'executing' : state.runStatus,
+        runSummary: isCurrent ? '正在发送...' : state.runSummary,
+        sessionRunStatuses: {
+          ...state.sessionRunStatuses,
+          [cacheKey]: 'executing',
+        },
+      };
     });
 
     try {
@@ -1579,7 +1591,17 @@ export const useStore = create<AppState>((set, get) => ({
           false,
         );
         settledCache = inputCaches[cacheKey];
-        return { inputCaches };
+        // 投递失败：回滚发送前置的执行态，否则界面会永久停在「执行中」
+        // ——本轮没有 Core 事件流，不会有 done/error 事件来收尾。
+        const isCurrent = state.activeSessionId === cacheKey;
+        const sessionRunStatuses = { ...state.sessionRunStatuses };
+        delete sessionRunStatuses[cacheKey];
+        return {
+          inputCaches,
+          runStatus: isCurrent ? 'idle' : state.runStatus,
+          runSummary: isCurrent ? '' : state.runSummary,
+          sessionRunStatuses,
+        };
       });
       if (settledCache) {
         syncInputCacheInBackground(get().syncInputCache(cacheKey, settledCache));
