@@ -381,6 +381,31 @@ impl CoreManager {
         delivered
     }
 
+    /// 手动整理会话上下文，并等待压缩进入终态。
+    ///
+    /// 与模型切换前的整理（见 [`Self::switch_model_if_needed`]）走**同一条**
+    /// 实现：都经 `TiangongCore::compact_context` 等待压缩任务的终态通知，而
+    /// 不是投递命令后即发即走。区别只在失败处理——切换场景失败只告警并继续
+    /// 切换（模型已由用户选定，不能因整理失败卡住），手动整理则把失败如实
+    /// 回报给调用方，由用户决定是否重试。
+    ///
+    /// 返回 `Ok(())` 表示压缩已应用或无可压缩历史；`Err` 表示未能完成。
+    pub async fn compact_session_context(&self, session_id: &str) -> Result<(), String> {
+        let core = {
+            let registry = self.registry();
+            registry.get(session_id).cloned()
+        };
+        let Some(core) = core else {
+            return Err("会话无活跃 Core".to_string());
+        };
+        core.compact_context().await.map_err(|error| match error {
+            tiangong_core::core::CoreError::Busy => {
+                "会话正在执行，当前回合结束后可整理上下文".to_string()
+            }
+            other => other.to_string(),
+        })
+    }
+
     /// 记录会话级对话模型选择（models 注册表 key；None 恢复跟随默认）。
     ///
     /// 只写 `Session.model_ref` 这一**选择策略**，不触碰执行端点：实际切换
