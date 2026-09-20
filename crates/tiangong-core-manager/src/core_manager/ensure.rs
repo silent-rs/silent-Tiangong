@@ -26,6 +26,12 @@ impl CoreManager {
     /// - 命中既有 Core：替换配置并同步会话级运行配置，返回 `is_new=false`
     /// - 未命中：调用 `build_plugins` 构造插件集合，构造全新 TiangongCore 并插入 registry
     ///
+    /// `initial_model_ref` 是本次发送携带的模型选择（新对话首条消息场景：
+    /// Core 正是在这次发送中才创建）。提供时新 Core 直接以该目标模型
+    /// 初始化，投递路径的模型比较判定一致、不触发切换编排；为 `None` 时
+    /// 按 `Session.model_ref` / 路由默认解析（见 [`Self::resolve_initial_model`]）。
+    /// 引用失效或凭据缺失时解析失败直接返回错误，不静默落到路由默认。
+    ///
     /// `build_plugins` 是**按需回调**：只有 Core 不存在（需要新建）时才会被调用。
     /// 这样命中分支不会浪费一次完整的插件构造（含 WASM 实例化）。
     /// session 真相源是磁盘，Core 内部按需 `load_from_storage`。
@@ -34,6 +40,7 @@ impl CoreManager {
         session_id: &str,
         session_config: CoreConfig,
         workspace_dir: String,
+        initial_model_ref: Option<&str>,
         stream_tx: Sender<StreamEvent>,
         build_plugins: F,
     ) -> Result<EnsuredCore, String>
@@ -58,10 +65,16 @@ impl CoreManager {
             }
         }
 
-        // 未命中：Core 构造即需持有实际模型——按 Session.model_ref 与当前
-        // 模型注册表解析；失效或未设置时回退路由默认。解析不出任何可用
-        // 模型时不静默兜底，由发送路径给出明确错误。
-        let initial_model = self.resolve_initial_model(session_id);
+        // 未命中：Core 构造即需持有实际模型。优先使用本次发送携带的模型
+        // 选择（新对话首条消息选择了非默认模型的场景），使新 Core 一次到位，
+        // 投递路径的模型比较判定一致、不触发切换；未携带时按 Session.model_ref
+        // 与当前模型注册表解析，失效或未设置时回退路由默认（见
+        // `resolve_initial_model`）。解析不出任何可用模型时不静默兜底，由
+        // 发送路径给出明确错误。
+        let initial_model = match initial_model_ref {
+            Some(model_ref) => self.resolve_turn_model(Some(model_ref))?,
+            None => self.resolve_initial_model(session_id),
+        };
         let plugins = build_plugins();
         let core = TiangongCore::builder()
             .session_id(session_id.to_string())

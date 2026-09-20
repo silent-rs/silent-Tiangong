@@ -263,7 +263,7 @@ pub async fn switch_session(
     if !state.core_manager.has_live_core(&session_id) {
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
@@ -709,12 +709,17 @@ async fn send_message_inner(
         }
         Some(cwd)
     };
+    // 本次发送携带的模型选择提前交给 ensure_core：新对话的 Core 正是在
+    // 这次发送中创建，直接以目标模型初始化，投递时模型比较判定一致，
+    // 不触发多余的切换流程。
+    let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
     let ensured = state
         .ensure_core(
             &session_id,
             workspace_dir,
             initial_trust_mode,
             initial_reasoning_effort,
+            turn_model_ref.as_deref(),
             stream_tx,
         )
         .await;
@@ -741,7 +746,8 @@ async fn send_message_inner(
     }
     // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
     // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
-    let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
+    // 新建 Core 时已用该选择初始化，此处比较通常一致、直接投递；既有 Core
+    // 模型不符时仍按原流程切换。
     if let Err(error) = state
         .deliver_prepared_if_live(
             &sid,
@@ -1139,7 +1145,7 @@ pub async fn edit_and_resend(
         .ok()
         .and_then(|session| session.model_ref);
     let ensured = state
-        .ensure_core(&session_id, None, None, None, stream_tx)
+        .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await;
     let ensured = match ensured {
         Ok(ensured) => ensured,
@@ -1292,7 +1298,7 @@ async fn run_context_slash_command(
         let session_id = current_session_id;
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, None, None, None, stream_tx)
+            .ensure_core(&session_id, None, None, None, None, stream_tx)
             .await?;
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
@@ -2021,7 +2027,7 @@ pub async fn set_session_model(
     // 该会话的全部流式事件发不出去、界面哑掉。
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
-        .ensure_core(&session_id, None, None, None, stream_tx)
+        .ensure_core(&session_id, None, None, None, None, stream_tx)
         .await?;
     if ensured.is_new {
         start_stream_consumer(app, ensured.session_id.clone(), stream_rx);

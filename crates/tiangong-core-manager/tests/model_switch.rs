@@ -84,6 +84,7 @@ async fn make_core(manager: &CoreManager, id: &str) {
                 .with_trust_mode(TrustMode::FullTrust)
                 .build(),
             "/tmp".to_string(),
+            None,
             stream_tx,
             Vec::<Arc<dyn Plugin>>::new,
         )
@@ -841,4 +842,274 @@ async fn 执行中的引导消息跳过模型编排且投递成功() {
     };
     assert_eq!(current, "model-a", "执行中沿用当前模型，不做切换");
     manager.retire_core("busy-inject", true).await.unwrap();
+}
+/// 轮询事件流直到本轮完成（`Done`），收集全部事件；出错或超时即 panic。
+fn collect_events_until_done(
+    stream_rx: &std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
+) -> Vec<tiangong_types::StreamEvent> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut events = Vec::new();
+    loop {
+        match stream_rx.try_recv() {
+            Ok(event) => {
+                let is_done = matches!(event, tiangong_types::StreamEvent::Done { .. });
+                let is_error = matches!(event, tiangong_types::StreamEvent::Error { .. });
+                events.push(event);
+                if is_done {
+                    return events;
+                }
+                if is_error {
+                    panic!("turn 执行出错：{events:?}");
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待 turn 完成超时，已收到事件：{events:?}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("流通道提前关闭，已收到事件：{events:?}");
+            }
+        }
+    }
+}
+
+fn chat_reply(content: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    }))
+}
+
+/// 从 mock server 收到的请求中提取全部请求体里的 model 字段。
+async fn requested_models(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap()
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// 新对话首次发送携带非默认模型选择时不触发切换编排（回归）。
+///
+/// 曾缺陷：ensure 创建的新 Core 按路由默认模型（model-a）初始化，首条
+/// 消息携带 model-b 投递时被判定为「切换」，发出 ModelSwitchStarted /
+/// ModelSwitched 并写入切换留痕，前端显示「正在切换模型」。新对话的
+/// Core 正是在首次发送中创建，修复为把本次选择传入 ensure_core，
+/// Core 出生即目标模型。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 新对话首次选定模型不触发切换编排() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(chat_reply("你好，我是助手。"))
+        .mount(&server)
+        .await;
+    seed_models(&dir, &server.uri(), "model-a");
+    // 新对话：空会话、Session.model_ref = None、Core 未创建。
+    let mut session = Session::new("新对话");
+    session.id = "first-send".to_string();
+    session.bind_storage_root(dir.path().to_path_buf());
+    session.try_persist_to_disk().unwrap();
+    let manager = manager_at(&dir);
+
+    // 模拟完整发送流程：ensure 携带本次选择的 model-b 创建 Core →
+    // deliver 同样携带 model-b。
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    let ensured = manager
+        .ensure_core(
+            "first-send",
+            CoreConfig::builder()
+                .with_trust_mode(TrustMode::FullTrust)
+                .build(),
+            "/tmp".to_string(),
+            Some("model-b"),
+            stream_tx,
+            Vec::<Arc<dyn Plugin>>::new,
+        )
+        .await
+        .expect("ensure_core 失败");
+    assert!(ensured.is_new, "新对话的 Core 应在首次发送时创建");
+
+    // 新 Core 出生即目标模型，投递前比较已经一致。
+    {
+        let registry = manager.registry();
+        let current = registry.get("first-send").unwrap().current_endpoint();
+        assert_eq!(
+            current.model, "model-b",
+            "新 Core 应直接以本次发送的目标模型初始化"
+        );
+    }
+
+    manager
+        .deliver_user_message(
+            "first-send",
+            AgentInputKind::prepared_with_id(
+                "m1".to_string(),
+                vec![tiangong_types::ContentBlock::text("你好")],
+            )
+            .with_model_ref(Some("model-b".to_string())),
+        )
+        .await
+        .expect("投递应成功");
+
+    // 全程无切换事件；首次请求即用目标模型。
+    // （无 ModelSwitchStarted 事件即证明未进入切换编排——压缩调用只
+    // 存在于该编排内。若收到 model-a 请求，那是投递后的标题自动生成：
+    // 它走 Lite/Chat 路由槽，独立于会话模型选择，不属于本回归范围。）
+    let events = collect_events_until_done(&stream_rx);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            tiangong_types::StreamEvent::ModelSwitchStarted { .. }
+        )),
+        "新对话首次选定模型不得发出 ModelSwitchStarted：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, tiangong_types::StreamEvent::ModelSwitched { .. })),
+        "新对话首次选定模型不得发出 ModelSwitched：{events:?}"
+    );
+    let models = requested_models(&server).await;
+    assert!(
+        models.iter().any(|model| model == "model-b"),
+        "首次请求应使用目标模型 model-b，实际：{models:?}"
+    );
+
+    // 3. 会话无切换留痕，且选择已正确记录。
+    let session = manager.load_session("first-send").unwrap();
+    assert!(
+        !session.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                block
+                    .as_text()
+                    .is_some_and(|text| text.contains("已切换模型"))
+            })
+        }),
+        "首次选定模型不得写入切换留痕：{:?}",
+        session.messages
+    );
+    assert_eq!(
+        session.model_ref.as_deref(),
+        Some("model-b"),
+        "本次选择应记录到 Session.model_ref"
+    );
+    manager.retire_core("first-send", true).await.unwrap();
+}
+
+/// 有回复历史后首次显式选定模型仍走完整切换编排（防误伤）。
+///
+/// 已产生回复的会话中，默认模型已实际参与对话，用户首次显式选模型是
+/// 一次真正的切换：先整理上下文、再切换、留痕，事件齐全。ensure 未
+/// 携带模型选择（既有 Core 场景下也无处使用），投递路径编排不变。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 有回复历史后首次选定模型仍走切换编排() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(summary_reply())
+        .mount(&server)
+        .await;
+    seed_models(&dir, &server.uri(), "model-a");
+    // 会话一直用默认模型（Session.model_ref = None）但已有两轮问答。
+    seed_session(&dir, "late-select", None);
+    let manager = manager_at(&dir);
+
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+    manager
+        .ensure_core(
+            "late-select",
+            CoreConfig::builder()
+                .with_trust_mode(TrustMode::FullTrust)
+                .build(),
+            "/tmp".to_string(),
+            None,
+            stream_tx,
+            Vec::<Arc<dyn Plugin>>::new,
+        )
+        .await
+        .expect("ensure_core 失败");
+
+    manager
+        .deliver_user_message(
+            "late-select",
+            AgentInputKind::prepared_with_id(
+                "m1".to_string(),
+                vec![tiangong_types::ContentBlock::text("换模型")],
+            )
+            .with_model_ref(Some("model-b".to_string())),
+        )
+        .await
+        .expect("投递应成功");
+
+    let events = collect_events_until_done(&stream_rx);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            tiangong_types::StreamEvent::ModelSwitchStarted { .. }
+        )),
+        "有历史后的首次显式选定是真正的切换，应发出事件：{events:?}"
+    );
+    let session = manager.load_session("late-select").unwrap();
+    assert!(session.summary_up_to > 0, "切换前应先由旧模型整理上下文");
+    assert!(
+        session.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                block
+                    .as_text()
+                    .is_some_and(|text| text.contains("已切换模型"))
+            })
+        }),
+        "真正的切换应写入留痕"
+    );
+    let current = {
+        let registry = manager.registry();
+        registry
+            .get("late-select")
+            .unwrap()
+            .current_endpoint()
+            .model
+    };
+    assert_eq!(current, "model-b");
+    manager.retire_core("late-select", true).await.unwrap();
+}
+
+/// ensure 携带失效模型引用时直接报错，不创建 Core、不静默落到路由默认。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure携带失效模型引用时报错不建core() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_models(&dir, "http://unused.invalid", "model-a");
+    let manager = manager_at(&dir);
+    let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+
+    let error = manager
+        .ensure_core(
+            "stale-ensure",
+            CoreConfig::builder()
+                .with_trust_mode(TrustMode::FullTrust)
+                .build(),
+            "/tmp".to_string(),
+            Some("deleted-model"),
+            stream_tx,
+            Vec::<Arc<dyn Plugin>>::new,
+        )
+        .await
+        .expect_err("失效引用应直接报错");
+    assert!(error.contains("已不在配置中"), "{error}");
+    assert!(
+        manager.registry().get("stale-ensure").is_none(),
+        "报错时不得创建 Core"
+    );
 }
