@@ -31,6 +31,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   groupMessages,
+  liveRunStartIndex,
   workerContentMessages,
   UserMessageGroup,
   AgentTurn,
@@ -249,6 +250,15 @@ export function MessageList() {
     }
     return map;
   }, [filteredGroups]);
+
+  // 当前执行链的起始组下标：引导消息注入不结束轮次，执行中发送的引导
+  // 消息与先前过程同属一次执行。执行期间该链上的 agent_turn 全部保持
+  // 活跃（过程展开），执行整体结束（runStatus 回 idle）后统一收缩，
+  // 而不是引导消息一出现就收缩前序过程。
+  const liveRunStart = useMemo(
+    () => (isThinking ? liveRunStartIndex(completedGroups) : completedGroups.length),
+    [isThinking, completedGroups],
+  );
 
   // 流式轮的终态：本轮最后一条用户消息的 elapsed_ms/turn_status。
   const streamingTurnResult = useMemo(() => {
@@ -938,11 +948,11 @@ export function MessageList() {
                   }
 
                   // agent_turn
-                  // 末尾轮次且无单独的 streamingGroup、整轮仍在进行中时，视为当前活动轮（工具调用阶段）
+                  // 当前执行链内的轮次视为同一活跃执行（含引导消息前的过程）：
+                  // 执行期间过程保持展开，全部完成后统一收缩。
                   const isLiveTurn =
                     isThinking
-                    && !streamingGroup
-                    && virtualItem.index === completedGroups.length - 1;
+                    && virtualItem.index >= liveRunStart;
                   return (
                     <div
                       key={virtualItem.key}
