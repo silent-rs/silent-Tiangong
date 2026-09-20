@@ -262,6 +262,11 @@ impl CoreManager {
     ///
     /// 宿主不应再单独调用模型切换相关接口——切换全程是本方法的内部步骤。
     /// 非用户消息（命令等）不做编排，直接投递。
+    ///
+    /// **会话执行中不做任何模型编排**：此时消息是引导消息，由活跃 turn 接管，
+    /// 本轮沿用当前模型。整理上下文与切换模型在运行中都会被拒绝（`Busy`），
+    /// 若据此判定投递失败，宿主的失败回滚会关闭 Core——正在进行的对话被直接
+    /// 打断并显示为失败。
     pub async fn deliver_user_message(
         &self,
         session_id: &str,
@@ -275,6 +280,13 @@ impl CoreManager {
                 .map(str::to_string),
             _ => None,
         };
+        if self.is_core_busy(session_id) {
+            tracing::info!(session_id, "会话执行中：引导消息沿用当前模型，跳过模型编排");
+            return self
+                .deliver_to_core_if_live(session_id, input)
+                .then_some(())
+                .ok_or_else(|| "会话 Core 投递失败".to_string());
+        }
         // 先记录用户选择：忙时拒写仅告警（运行中不换模型，本轮沿用当前模型）。
         if let Some(key) = model_ref.clone()
             && let Err(error) = self.set_core_model_ref(session_id, Some(key))
