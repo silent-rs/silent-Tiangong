@@ -97,6 +97,7 @@ function AgentTurnView({
     userFrag,
     mergedFragments,
     summaryFrags,
+    processSections,
     processFrags,
     errorFrags,
     usageAnchorId,
@@ -228,7 +229,12 @@ function AgentTurnView({
     // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
     // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
     const summaryFrags: Fragment[] = [];
-    const processFrags: Fragment[] = [];
+    // 过程按「通知」切分成段：通知（上下文管理/模型切换等 Notice 类）是
+    // 需要用户看见的状态变化，不能随过程一起折叠，也不能被挪到过程之外
+    // ——那样会丢失它与前后步骤的时序关系。因此过程区渲染为
+    // [过程段, 通知, 过程段, 通知, ...]，每段各自独立折叠，通知始终可见。
+    const processSections: { frags: Fragment[]; notice: Fragment | null }[] = [];
+    let currentSection: Fragment[] = [];
     // 错误通知不随过程折叠：失败轮次往往没有其他可见输出，错误原因必须始终可见。
     const errorFrags: Fragment[] = [];
     let userFrag: Fragment | null = null;
@@ -239,10 +245,19 @@ function AgentTurnView({
         errorFrags.push(frag);
       } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
         summaryFrags.push(frag);
+      } else if (frag.type === "context_management" || frag.type === "other_system") {
+        // 通知落点即时序位置：关掉当前过程段，通知挂在段尾。
+        processSections.push({ frags: currentSection, notice: frag });
+        currentSection = [];
       } else {
-        processFrags.push(frag);
+        currentSection.push(frag);
       }
     }
+    if (currentSection.length > 0) {
+      processSections.push({ frags: currentSection, notice: null });
+    }
+    // 折叠统计与「是否有可折叠内容」按全部过程段合计。
+    const processFrags: Fragment[] = processSections.flatMap((section) => section.frags);
 
     // 同一轮的合计只挂在最后一个带操作栏的回复上。
     const usageAnchor = [...summaryFrags].reverse().find((frag) =>
@@ -263,6 +278,7 @@ function AgentTurnView({
       userFrag,
       mergedFragments,
       summaryFrags,
+      processSections,
       processFrags,
       errorFrags,
       usageAnchorId,
@@ -470,7 +486,7 @@ function AgentTurnView({
           </span>
         </button>
       )}
-      {(!collapseProcess || showProcess) && processFrags.length > 0 && (
+      {(!collapseProcess || showProcess) && processSections.length > 0 && (
         <div className="space-y-1.5">
           {collapseProcess && showProcess && (
             <button
@@ -482,9 +498,21 @@ function AgentTurnView({
               <span>收起过程</span>
             </button>
           )}
-          {processFrags.map((frag, i) => renderFragment(frag, i))}
+          {processSections.map((section, sectionIndex) => (
+            <div key={`sec-${sectionIndex}`} className="space-y-1.5">
+              {section.frags.map((frag, i) => renderFragment(frag, sectionIndex * 1000 + i))}
+              {section.notice && renderFragment(section.notice, sectionIndex * 1000 + section.frags.length)}
+            </div>
+          ))}
         </div>
       )}
+      {/* 过程折叠时通知仍按时序单独渲染：Notice 是需要用户看见的状态变化
+          （上下文已压缩、已切换模型等），折叠过程不应把它们一起藏起来。 */}
+      {collapseProcess && !showProcess && processSections.map((section, sectionIndex) => (
+        section.notice
+          ? <div key={`notice-${sectionIndex}`}>{renderFragment(section.notice, sectionIndex)}</div>
+          : null
+      ))}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
       {turnStatusMeta && !isActive && (
