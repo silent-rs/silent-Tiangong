@@ -751,7 +751,11 @@ async fn send_message_inner(
         )
         .await
     {
-        shutdown_join_core_if_current(state, &sid).await;
+        // 追加消息（引导消息）失败时不得关闭 Core：当前 turn 仍在正常执行，
+        // 关闭会直接打断这段对话并让它显示为失败。只有新起轮次失败才回滚 Core。
+        if matches!(delivery_kind, UserMessageDeliveryKind::NewTurn) {
+            shutdown_join_core_if_current(state, &sid).await;
+        }
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
         cleanup_unreferenced_input_attachments(state, raw_attachments_for_paths(created_paths))
             .await;

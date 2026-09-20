@@ -778,3 +778,67 @@ fn 模型选择随用户消息携带() {
     let command = AgentInputKind::cancel().with_model_ref(Some("model-b".to_string()));
     assert!(matches!(command, AgentInputKind::Command(_)));
 }
+
+/// 执行中投递用户消息（引导消息）：跳过模型编排，直接交给活跃 turn。
+///
+/// 回归（对话被打断并显示失败）：运行中整理上下文与切换模型都会被拒绝
+/// （`Busy`）。若投递路径仍走编排并把 `Busy` 当成投递失败返回，宿主的失败
+/// 回滚会关闭 Core，正在进行的对话被直接打断并显示为失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn 执行中的引导消息跳过模型编排且投递成功() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    // 慢响应：占住 Core，保证投递时仍在执行中。
+    Mock::given(method("POST"))
+        .respond_with(summary_reply().set_delay(std::time::Duration::from_secs(30)))
+        .mount(&server)
+        .await;
+    seed_models(&dir, &server.uri(), "model-a");
+    seed_session(&dir, "busy-inject", Some("model-a"));
+    let manager = manager_at(&dir);
+    make_core(&manager, "busy-inject").await;
+
+    manager
+        .deliver_user_message(
+            "busy-inject",
+            AgentInputKind::prepared_with_id(
+                "m-first".to_string(),
+                vec![tiangong_types::ContentBlock::text("占用")],
+            )
+            .with_model_ref(Some("model-a".to_string())),
+        )
+        .await
+        .expect("首轮投递应成功");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    {
+        let registry = manager.registry();
+        assert!(
+            registry.get("busy-inject").unwrap().is_busy(),
+            "首轮应仍在执行中"
+        );
+    }
+
+    // 执行中追加引导消息，并且界面上还选了另一个模型：不得因为切换被拒而失败。
+    manager
+        .deliver_user_message(
+            "busy-inject",
+            AgentInputKind::prepared_with_id(
+                "m-guide".to_string(),
+                vec![tiangong_types::ContentBlock::text("换个方向")],
+            )
+            .with_model_ref(Some("model-b".to_string())),
+        )
+        .await
+        .expect("执行中的引导消息必须投递成功，不能被模型编排判定为失败");
+
+    let current = {
+        let registry = manager.registry();
+        registry
+            .get("busy-inject")
+            .unwrap()
+            .current_endpoint()
+            .model
+    };
+    assert_eq!(current, "model-a", "执行中沿用当前模型，不做切换");
+    manager.retire_core("busy-inject", true).await.unwrap();
+}

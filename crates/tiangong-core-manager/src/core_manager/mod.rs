@@ -363,6 +363,16 @@ impl CoreManager {
     pub fn has_live_core(&self, session_id: &str) -> bool {
         self.registry().contains_key(session_id)
     }
+
+    /// 会话是否有正在执行的 turn（Core 不存在时为 false）。
+    ///
+    /// 运行中的会话拒绝一切需要空闲态的操作（整理上下文、切换模型、写
+    /// `Session.model_ref`），投递路径据此跳过模型编排。
+    pub fn is_core_busy(&self, session_id: &str) -> bool {
+        self.registry()
+            .get(session_id)
+            .is_some_and(|core| core.is_busy())
+    }
 }
 
 impl std::fmt::Debug for CoreManager {
