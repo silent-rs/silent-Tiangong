@@ -1,4 +1,4 @@
-import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
@@ -8,7 +8,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { api, textContent } from '@/api/tauri';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
@@ -196,7 +196,7 @@ export function MessageInput({
   // 会话级模型选择：引用来自会话（null=跟随路由默认）；选项来自模型注册表。
   // Radix Select 不允许空字符串 value，「跟随默认」用哨兵值表示。
   const [sessionModelRef, setSessionModelRef] = useState<string | null>(null);
-  const [modelOptions, setModelOptions] = useState<{ key: string; label: string }[]>([]);
+  const [modelOptions, setModelOptions] = useState<{ key: string; label: string; provider: string }[]>([]);
   const [defaultModelLabel, setDefaultModelLabel] = useState<string>('默认');
   const [modelSwitching, setModelSwitching] = useState(false);
   useEffect(() => {
@@ -209,11 +209,15 @@ export function MessageInput({
     api.listSessionChatModels()
       .then((result) => {
         if (cancelled) return;
-        setModelOptions(result.models.map(([key, label]) => ({ key, label: label || key })));
+        setModelOptions(result.models.map((item) => ({
+          key: item.key,
+          label: item.label || item.key,
+          provider: item.provider,
+        })));
         // 跟随默认时显示路由配置的实际模型名。
         setDefaultModelLabel(
           result.default_ref
-            ? (result.models.find(([key]) => key === result.default_ref)?.[1] ?? '默认')
+            ? (result.models.find((item) => item.key === result.default_ref)?.label ?? '默认')
             : '默认',
         );
       })
@@ -225,6 +229,21 @@ export function MessageInput({
   const modelDisplay = modelUnavailable
     ? `${sessionModelRef}（不可用）`
     : (modelOptions.find((option) => option.key === sessionModelRef)?.label ?? defaultModelLabel);
+  // 按服务提供方分组：同名模型可能来自不同提供方（如各平台都有的开源
+  // 模型），只列模型名无从区分。后端已按 provider→key 排序，这里顺序
+  // 聚合即可保持稳定分组。
+  const modelGroups = useMemo(() => {
+    const groups: { provider: string; options: typeof modelOptions }[] = [];
+    for (const option of modelOptions) {
+      const last = groups[groups.length - 1];
+      if (last && last.provider === option.provider) {
+        last.options.push(option);
+      } else {
+        groups.push({ provider: option.provider, options: [option] });
+      }
+    }
+    return groups;
+  }, [modelOptions]);
   // 新对话也可选择（随首条消息作为初始引用写入会话）；已有会话立即写
   // 引用，执行端点在下一次发送时按引用校正——切走又切回时端点不变。
   const modelSelectorDisabled = currentRunStatus !== 'idle' || modelSwitching;
@@ -1141,10 +1160,17 @@ export function MessageInput({
                   </SelectTrigger>
                   <SelectContent className="min-w-max">
                     <SelectItem value={MODEL_DEFAULT_VALUE} className="text-xs">{defaultModelLabel}</SelectItem>
-                    {modelOptions.map((option) => (
-                      <SelectItem key={option.key} value={option.key} className="text-xs">
-                        {option.label}
-                      </SelectItem>
+                    {modelGroups.map((group) => (
+                      <SelectGroup key={group.provider}>
+                        <SelectLabel className="text-[11px] text-muted-foreground/70">
+                          {group.provider}
+                        </SelectLabel>
+                        {group.options.map((option) => (
+                          <SelectItem key={option.key} value={option.key} className="text-xs">
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
                     ))}
                     {modelUnavailable && sessionModelRef != null && (
                       <SelectItem value={sessionModelRef} className="text-xs">

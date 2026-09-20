@@ -1939,10 +1939,21 @@ pub async fn get_session_model(
 /// 会话可切换的 Chat 模型列表与路由默认模型引用。
 #[derive(serde::Serialize)]
 pub struct SessionChatModelsView {
-    /// 注册表 key + 模型名（仅 Chat 能力）。
-    pub models: Vec<(String, String)>,
+    /// 仅 Chat 能力的模型项（含所属服务提供方，供前端按提供方分组）。
+    pub models: Vec<SessionChatModelItem>,
     /// 路由 Chat 槽位当前指向的注册表 key（未配置或不在注册表时 None）。
     pub default_ref: Option<String>,
+}
+
+/// 单个可选模型：注册表 key、模型显示名与所属服务提供方。
+#[derive(serde::Serialize)]
+pub struct SessionChatModelItem {
+    /// 注册表 key（会话 model_ref 存的就是它）。
+    pub key: String,
+    /// 模型显示名（models.json 的 model 字段，缺失时前端回落到 key）。
+    pub label: String,
+    /// 所属服务提供方名称（models.json 的 provider 字段）。
+    pub provider: String,
 }
 
 /// 列出会话可切换的 Chat 模型（数据源为宿主模型注册表与路由表）。
@@ -1954,14 +1965,22 @@ pub async fn list_session_chat_models(
     let models = state
         .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
-    let mut chat_models: Vec<(String, String)> = models
+    let mut chat_models: Vec<SessionChatModelItem> = models
         .models
         .iter()
         .filter(|(_, entry)| entry.capabilities.contains(&ModelCapability::Chat))
-        .map(|(key, entry)| (key.clone(), entry.model.clone()))
+        .map(|(key, entry)| SessionChatModelItem {
+            key: key.clone(),
+            label: entry.model.clone(),
+            provider: entry.provider.clone(),
+        })
         .collect();
-    // HashMap 迭代顺序不稳定，按 key 排序保证选择器顺序固定。
-    chat_models.sort_by(|left, right| left.0.cmp(&right.0));
+    // HashMap 迭代顺序不稳定：先按提供方再按 key 排序，保证分组与组内顺序固定。
+    chat_models.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.key.cmp(&right.key))
+    });
     let default_ref = models.routing.get(&RoutingSlot::Chat).and_then(|routed| {
         models
             .models
