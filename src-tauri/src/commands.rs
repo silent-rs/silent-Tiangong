@@ -729,6 +729,16 @@ async fn send_message_inner(
         }
     };
     let sid = ensured.session_id.clone();
+    // 消费者必须在投递**之前**启动：投递内部的「切换前整理上下文 + 切换
+    // 模型」是同步等待的，期间 core 会发出压缩/切换进度事件。若等投递返回
+    // 再起消费者，这些事件只能堆在 channel 缓冲里，等到被消费时早已过期，
+    // 用户在整段等待中看不到任何反馈。
+    //
+    // 提前启动是安全的：消费者只处理已发生的事件；投递失败时下方回滚路径
+    // 的 shutdown_join_core_if_current 会关闭 Core，消费者随通道关闭正常退出。
+    if ensured.is_new {
+        start_stream_consumer(app, sid.clone(), stream_rx);
+    }
     // 用户的模型选择交给 Manager：记录选择 → 解析目标 → 必要时整理上下文
     // 并切换 → 投递。app 层不参与编排，避免切换失败牵连会话 Core。
     let turn_model_ref = initial_model_ref.filter(|key| !key.trim().is_empty());
@@ -763,10 +773,6 @@ async fn send_message_inner(
         tracing::error!(session_id, revision, error = %error, "消息已发送，但输入缓存终态更新失败");
     }
     release_input_send_claim_and_cleanup(state, &session_id, revision).await;
-
-    if ensured.is_new {
-        start_stream_consumer(app, sid, stream_rx);
-    }
 
     Ok(())
 }
@@ -881,6 +887,26 @@ pub(crate) fn start_stream_consumer(
             // 前端收到 title_changed 后直接更新内存中对应会话标题，无需整表刷新。
             if matches!(&session_event, StreamEvent::TitleChanged { .. }) {
                 emit_session_stream_event(&app, &session_id, &session_event);
+                continue;
+            }
+
+            // 进度提示类事件走免锁快速通道：它们只驱动状态栏文案，不触碰
+            // pending、消息列表或任何应用状态。
+            //
+            // 必须免锁——发送路径（send_message_inner / 编辑重发 / 嵌入
+            // server）在投递期间全程持有同一把 session_send_lock，而投递
+            // 内部的「切换前整理上下文 + 切换模型」是同步等待的。若这些
+            // 事件也排队等锁，用户在整条链结束前看不到任何反馈，界面表现
+            // 为凭空卡住数十秒。
+            if matches!(
+                &session_event,
+                StreamEvent::ContextCompressing { .. }
+                    | StreamEvent::ModelSwitchStarted { .. }
+                    | StreamEvent::ModelSwitched { .. }
+            ) {
+                if app_state.core_manager.has_live_core(&session_id) {
+                    emit_session_stream_event(&app, &session_id, &session_event);
+                }
                 continue;
             }
 
@@ -1913,10 +1939,21 @@ pub async fn get_session_model(
 /// 会话可切换的 Chat 模型列表与路由默认模型引用。
 #[derive(serde::Serialize)]
 pub struct SessionChatModelsView {
-    /// 注册表 key + 模型名（仅 Chat 能力）。
-    pub models: Vec<(String, String)>,
+    /// 仅 Chat 能力的模型项（含所属服务提供方，供前端按提供方分组）。
+    pub models: Vec<SessionChatModelItem>,
     /// 路由 Chat 槽位当前指向的注册表 key（未配置或不在注册表时 None）。
     pub default_ref: Option<String>,
+}
+
+/// 单个可选模型：注册表 key、模型显示名与所属服务提供方。
+#[derive(serde::Serialize)]
+pub struct SessionChatModelItem {
+    /// 注册表 key（会话 model_ref 存的就是它）。
+    pub key: String,
+    /// 模型显示名（models.json 的 model 字段，缺失时前端回落到 key）。
+    pub label: String,
+    /// 所属服务提供方名称（models.json 的 provider 字段）。
+    pub provider: String,
 }
 
 /// 列出会话可切换的 Chat 模型（数据源为宿主模型注册表与路由表）。
@@ -1928,14 +1965,22 @@ pub async fn list_session_chat_models(
     let models = state
         .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
-    let mut chat_models: Vec<(String, String)> = models
+    let mut chat_models: Vec<SessionChatModelItem> = models
         .models
         .iter()
         .filter(|(_, entry)| entry.capabilities.contains(&ModelCapability::Chat))
-        .map(|(key, entry)| (key.clone(), entry.model.clone()))
+        .map(|(key, entry)| SessionChatModelItem {
+            key: key.clone(),
+            label: entry.model.clone(),
+            provider: entry.provider.clone(),
+        })
         .collect();
-    // HashMap 迭代顺序不稳定，按 key 排序保证选择器顺序固定。
-    chat_models.sort_by(|left, right| left.0.cmp(&right.0));
+    // HashMap 迭代顺序不稳定：先按提供方再按 key 排序，保证分组与组内顺序固定。
+    chat_models.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.key.cmp(&right.key))
+    });
     let default_ref = models.routing.get(&RoutingSlot::Chat).and_then(|routed| {
         models
             .models

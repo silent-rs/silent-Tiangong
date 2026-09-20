@@ -330,6 +330,14 @@ pub(crate) async fn run_manual_context_compression(
         notify_result(&ctx, ContextCompressAction::Noop);
         return ManualCompressionOutcome::Noop;
     }
+    // 边界之后虽有消息，但全部属于「最近一次完整交互」时没有可折叠的历史。
+    // 这不是错误：手动整理与模型切换前的整理都可能落在刚压缩过的会话上，
+    // 此时保持现状即为正确结果。自动压缩另走 start_task 的错误分支——那里
+    // 上下文确实已超限却压不动，必须如实报错。
+    if compression_split_point(&ctx.session).is_none() {
+        notify_result(&ctx, ContextCompressAction::Noop);
+        return ManualCompressionOutcome::Noop;
+    }
     let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
     compression.run_manual(&mut ctx, cmd_rx).await
 }
@@ -507,12 +515,31 @@ fn apply_compression(
     }
     let current_tokens = update.usage.completion_tokens;
     candidate.current_tokens = current_tokens;
+    // 用户可见的压缩记录：历史被折叠后仍能从消息列表查证发生过压缩。
+    //
+    // 插在**摘要边界处**而不是消息末尾：边界之后可能已经有属于上一轮的
+    // 助手回复（手动整理与切换前整理都发生在轮次之间），追加到末尾会让
+    // 前端按轮次归组时把标记算进上一轮，显示在该轮的工具调用堆里。
+    //
+    // 用 Notice 而非 System：Notice 是「系统发给用户的通知」通道，角色
+    // 本身保证排除出模型上下文与后续压缩范围；System 会被
+    // build_provider_messages 拼进 system prompt，污染 prompt 并破坏
+    // KV cache 前缀。
+    let record_id = {
+        let record = Message::new(MessageRole::Notice, "[上下文管理] 上下文已压缩");
+        let id = record.id.clone();
+        let at = candidate.summary_up_to.min(candidate.messages.len());
+        candidate.messages.insert(at, record);
+        id
+    };
     // 摘要段变化需要重建 system prompt（内容一致时保留原消息）。
     rebuild_system_prompt_for_session(&mut candidate, &ctx.plugins);
     candidate
         .try_persist_to_disk()
         .map_err(anyhow::Error::msg)?;
     ctx.session = candidate;
+    // 当轮即推送到前端，无需等切换会话重新读盘才显示。
+    crate::react::message::emit_session_message_upsert(ctx, &record_id);
     Ok(current_tokens)
 }
 
@@ -775,6 +802,56 @@ mod tests {
                 .iter()
                 .all(|message| message.phase != MessagePhase::CompressedResume),
             "压缩不注入合成续接消息"
+        );
+    }
+
+    /// 压缩记录必须落在摘要边界处，而不是消息末尾。
+    ///
+    /// 回归：早期实现用 `push` 追加到末尾。边界之后往往已有属于上一轮的
+    /// 助手回复（手动整理与切换前整理都发生在轮次之间），记录因此被前端
+    /// 按轮次归组时算进上一轮，显示在该轮的工具调用堆里而非压缩发生处。
+    #[test]
+    fn 压缩记录插入摘要边界而非末尾() {
+        let mut session = Session::new("记录位置");
+        for round in ["第一轮", "第二轮", "第三轮"] {
+            session.append_message(MessageRole::User, format!("{round}问题"));
+            session.append_message(MessageRole::Assistant, format!("{round}回答"));
+        }
+        let (mut ctx, _root) = test_context(session);
+
+        // 折叠前两轮，边界落在 index 4（第三轮问题之前）。
+        let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
+        apply_compression(&mut ctx, &update, false).expect("压缩应成功");
+
+        let record_index = ctx
+            .session
+            .messages
+            .iter()
+            .position(|message| message.text_content().starts_with("[上下文管理]"))
+            .expect("应写入压缩记录");
+        assert_eq!(
+            record_index, 4,
+            "记录应插在摘要边界处，实际落在 {record_index}"
+        );
+        assert_ne!(
+            record_index,
+            ctx.session.messages.len() - 1,
+            "记录不得追加到消息末尾"
+        );
+        assert_eq!(
+            ctx.session.messages[record_index].role,
+            MessageRole::Notice,
+            "记录用 Notice 角色，保证排除出模型上下文"
+        );
+
+        // Notice 不进模型上下文：保留区首条仍是第三轮问题。
+        let context = ctx.session.context();
+        assert_eq!(context[1].text_content(), "第三轮问题");
+        assert!(
+            !context
+                .iter()
+                .any(|message| message.text_content().starts_with("[上下文管理]")),
+            "压缩记录不得进入模型上下文"
         );
     }
 
