@@ -1,24 +1,24 @@
 //! 插件变化上下文交接：插件装卸/升级/启停后，先经 core 既有的手动压缩
 //! 能力整理上下文，再让新的插件集合接管。
 //!
-//! 状态记账与编排都在本模块（app 层）——manager 恪守记账定位（Core
-//! 注册表/会话文件/创建锁，issue #245），core 只保留通用压缩能力（手动
-//! 压缩命令），两者都不感知「交接」概念。runtime（plugin-runtime）同样
-//! 零改动：变化感知在 app 即全覆盖（app 依赖 runtime，插件装卸命令共用
-//! `notify_plugins_changed` 尾部）。
+//! **职责划分**：「插件是否发生变化」由 plugin-runtime 回答——它是插件
+//! 注册表的所有者，启用判定、版本回落与指纹算法都是它的内部知识（见
+//! `registry::enabled_plugin_fingerprint`）。本模块只消费那个指纹值，
+//! 负责「变化之后怎么办」：会话级状态记账与交接编排。
+//!
+//! 这条边界也是依赖关系决定的：runtime 不依赖 core-manager，够不到
+//! Core 注册表与会话文件，也不感知「会话」概念；而交接状态是按会话
+//! 记账的。app 是唯一同时持有两者的层，编排只能落在这里。
+//!
+//! manager 恪守记账定位（Core 注册表/会话文件/创建锁，issue #245），
+//! core 只保留通用压缩能力（手动压缩命令），两者都不感知「交接」概念。
 //!
 //! 运行期是**标记制**：变化发生的地方给活跃会话打标并立即尝试处理
 //! （空闲即压，忙则留标记）；投递消息路径只查内存标记。兜底是**首检
-//! 指纹比对**：每会话每进程首次投递前算一次插件指纹与落盘定档比对，
+//! 指纹比对**：每会话每进程首次投递前取一次插件指纹与落盘定档比对，
 //! 防两类漏报——进程重启丢内存标记、未走正常变化入口的变化。定档指纹
 //! 持久化在 storage_root 下（不进会话文件）——会话复制/导出后丢失定档
 //! 只会重新定档，不触发无谓交接。
-//!
-//! 指纹输入是插件的「声明态」：id@version + 启用集合，覆盖注册在
-//! plugin-runtime 的全部已安装插件（含 prompt 文案插件）——它们都是动态
-//! 注册的，装卸/升级/启停一律经 registry，天然全部参与指纹。加载顺序、
-//! 运行期抖动（如 sidecar 临时掉线）不改变指纹；反之插件升级即使工具名
-//! 不变也会触发交接——历史里按旧版本产生的调用与新版本行为可能已不一致。
 //!
 //! **压缩尽力而为一次**：交接压缩失败只告警并直接定档，不重试、不阻断
 //! 投递。对话一旦继续，KV 缓存已按当前上下文写入，反复重压既无意义又会
@@ -164,39 +164,6 @@ impl ConfigHandoffStore {
             tracing::warn!(%error, "定档指纹落盘失败，下次进程内仍可用，重启后丢失");
         }
     }
-}
-
-/// 计算插件配置指纹：启用的 runtime 注册插件（id@version）集合。
-///
-/// 插件输入应是 plugin-runtime 注册表启用集合的声明态——注册在 runtime
-/// 的插件都是动态注册的（含 prompt），装卸/升级/启停全部经 registry 变化，
-/// 因此无需任何特判。插件键排序去重后参与摘要（加载顺序不是能力变化）；
-/// 无版本的插件只记 id。凭据与运行参数（trust_mode/reasoning_effort）不
-/// 参与：前者绝不落盘，后者下一轮直接生效、无需交接。
-pub(crate) fn execution_fingerprint(plugins: &[(String, String)]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut plugin_keys: Vec<String> = plugins
-        .iter()
-        .map(|(id, version)| {
-            if version.is_empty() {
-                id.clone()
-            } else {
-                format!("{id}@{version}")
-            }
-        })
-        .collect();
-    plugin_keys.sort();
-    plugin_keys.dedup();
-    let mut hasher = Sha256::new();
-    for key in plugin_keys {
-        hasher.update(key.as_bytes());
-        hasher.update(b"\x1f");
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 /// 变化点入口（插件集合/版本变化）：对每个活跃会话打标并立即尝试处理
@@ -350,49 +317,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 顺序与重复不影响指纹() {
-        let base = execution_fingerprint(&[
-            ("fs".into(), "0.1.9".into()),
-            ("terminal".into(), "0.3.8".into()),
-        ]);
-        let reordered = execution_fingerprint(&[
-            ("terminal".into(), "0.3.8".into()),
-            ("fs".into(), "0.1.9".into()),
-            ("fs".into(), "0.1.9".into()),
-        ]);
-        assert_eq!(base, reordered, "加载顺序与重复项不应触发交接");
-    }
-
-    #[test]
-    fn 插件版本与集合变化改变指纹() {
-        let base = execution_fingerprint(&[("fs".into(), "0.1.9".into())]);
-        assert_ne!(
-            execution_fingerprint(&[("fs".into(), "0.2.0".into())]),
-            base,
-            "插件升级即使工具名不变也应触发交接"
-        );
-        assert_ne!(
-            execution_fingerprint(&[
-                ("fs".into(), "0.1.9".into()),
-                ("terminal".into(), "0.3.8".into()),
-            ]),
-            base,
-            "新增启用插件应触发交接"
-        );
-        assert_ne!(execution_fingerprint(&[]), base, "停用全部插件应触发交接");
-    }
-
-    #[test]
-    fn 相邻插件键不因拼接歧义碰撞() {
-        // 分隔符缺失时 ["ab","c"] 与 ["a","bc"] 会拼成同一串。
-        assert_ne!(
-            execution_fingerprint(&[("ab".into(), String::new()), ("c".into(), String::new())]),
-            execution_fingerprint(&[("a".into(), String::new()), ("bc".into(), String::new())]),
-            "不同插件集合不得产生相同指纹"
-        );
-    }
-
-    #[test]
     fn 标记与定档的状态记账roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigHandoffStore::new(dir.path().to_path_buf());
@@ -527,9 +451,12 @@ mod handoff_e2e_tests {
             .expect("ensure_core 失败");
     }
 
-    /// 目标指纹（插件集合变化后的新值）。
+    /// 目标指纹（模拟插件集合变化后的新值）。
+    ///
+    /// 交接编排只比较指纹是否相同，不关心它怎么算——真实取值由 runtime
+    /// 提供（见 `enabled_plugin_fingerprint`），此处用固定串即可。
     fn target_fingerprint() -> String {
-        execution_fingerprint(&[("fs".into(), "0.2.0".into())])
+        "fingerprint-after-plugin-change".to_string()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

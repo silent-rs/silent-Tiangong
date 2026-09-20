@@ -94,29 +94,13 @@ struct InputSendClaim {
     attachment_paths: Vec<String>,
 }
 
-/// 计算当前插件配置指纹（runtime 注册表中启用插件的 id@version）。
+/// 当前插件能力指纹（向 runtime 取值）。
 ///
-/// 注册在 runtime 的插件都是动态注册的（含 prompt），装卸/升级/启停全部
-/// 经 registry，天然全覆盖、无需特判。
-pub(crate) fn execution_fingerprint_at(storage_root: &std::path::Path) -> String {
-    let statuses = tiangong_plugin_runtime::registry::list_plugins(
-        storage_root,
-        tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
-    );
-    let plugins: Vec<(String, String)> = statuses
-        .iter()
-        .filter(|status| status.enabled)
-        .map(|status| {
-            (
-                status.id.clone(),
-                status
-                    .loaded_version
-                    .clone()
-                    .unwrap_or_else(|| status.manifest_version.clone()),
-            )
-        })
-        .collect();
-    crate::config_handoff::execution_fingerprint(&plugins)
+/// 「插件是否发生变化」由 runtime 回答——它是插件注册表的所有者，启用
+/// 判定、版本回落与摘要算法都属于它的内部知识。app 只消费这个值，据此
+/// 决定后续如何处理（整理上下文、打标、定档），不重复实现判定逻辑。
+pub(crate) fn execution_fingerprint() -> String {
+    tiangong_plugin_runtime::registry::enabled_plugin_fingerprint()
 }
 
 fn merge_agent_output_messages(
@@ -905,7 +889,7 @@ impl TiangongApp {
     /// 插件指纹与会话无关（同一进程内所有会话看到同一套 runtime 注册表），
     /// 因此只需算一次。不活跃会话（无 Core）不打标：由首检兜底发现。
     pub fn mark_all_sessions_for_plugin_change(&self) {
-        let fingerprint = execution_fingerprint_at(&self.desktop_factory.storage_root);
+        let fingerprint = execution_fingerprint();
         crate::config_handoff::mark_all_sessions(
             &self.config_handoff_store,
             &self.core_manager,
@@ -920,12 +904,11 @@ impl TiangongApp {
     /// 后的下一条消息会在空闲窗口补做。
     async fn handoff_before_deliver(&self, session_id: &str) {
         use crate::config_handoff::ConfigHandoffOutcome;
-        let storage_root = self.desktop_factory.storage_root.clone();
         let outcome = crate::config_handoff::ensure_before_deliver(
             &self.config_handoff_store,
             &self.core_manager,
             session_id,
-            || execution_fingerprint_at(&storage_root),
+            execution_fingerprint,
         )
         .await;
         match outcome {

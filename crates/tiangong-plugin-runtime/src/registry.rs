@@ -199,6 +199,62 @@ pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
         .collect()
 }
 
+/// 当前启用插件集合的能力指纹（id@version 的稳定摘要）。
+///
+/// 插件的装卸、升级、启停全部经本注册表，因此「插件是否发生变化」由
+/// runtime 自己回答最准确——调用方无需了解启用判定、版本字段回落顺序
+/// 或摘要算法，只比较两次取值是否相同即可。
+///
+/// 指纹输入是插件的**声明态**：启用集合的 id 与版本（加载态版本优先，
+/// 缺失时回落清单版本）。键排序去重后参与摘要——加载顺序与运行期抖动
+/// （如 sidecar 临时掉线）不构成能力变化；反之插件升级即使工具名不变
+/// 也会改变指纹，因为历史里按旧版本产生的调用与新版本行为可能已不一致。
+///
+/// 凭据与运行参数不参与：前者绝不落盘，后者不属于插件能力。
+pub fn enabled_plugin_fingerprint() -> String {
+    let Ok(plugins) = loaded_plugins().lock() else {
+        // 锁中毒时返回空集合指纹：调用方据此判定为「与任何已定档值不同」，
+        // 宁可多做一次处理也不要漏掉真实变化。
+        return fingerprint_of(&[]);
+    };
+    let keys: Vec<String> = plugins
+        .iter()
+        .filter(|(_, loaded)| loaded.enabled)
+        .map(|(id, loaded)| {
+            let version = loaded
+                .descriptor
+                .as_ref()
+                .map(|value| value.version.clone())
+                .unwrap_or_else(|| loaded.manifest.version.clone());
+            if version.is_empty() {
+                id.clone()
+            } else {
+                format!("{id}@{version}")
+            }
+        })
+        .collect();
+    fingerprint_of(&keys)
+}
+
+/// 插件键集合的稳定摘要：排序去重后以分隔符拼接求 SHA-256。
+fn fingerprint_of(plugin_keys: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut keys = plugin_keys.to_vec();
+    keys.sort();
+    keys.dedup();
+    let mut hasher = Sha256::new();
+    for key in keys {
+        hasher.update(key.as_bytes());
+        // 分隔符不可省略：否则 ["ab","c"] 与 ["a","bc"] 会拼成同一串。
+        hasher.update(b"\x1f");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// 依赖 server 回调的插件 ID 列表。
 ///
 /// 这些 sidecar 会在运行时经 HTTP 回调本机 server，server 连接信息变化时必须重启。
@@ -1195,6 +1251,52 @@ pub fn plugin_install_directory(plugin_id: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tiangong_core::MentionCandidate;
+
+    /// 指纹只反映插件能力的声明态：加载顺序与重复项不构成变化。
+    #[test]
+    fn 顺序与重复不影响指纹() {
+        let base = fingerprint_of(&["fs@0.1.9".into(), "terminal@0.3.8".into()]);
+        let reordered = fingerprint_of(&[
+            "terminal@0.3.8".into(),
+            "fs@0.1.9".into(),
+            "fs@0.1.9".into(),
+        ]);
+        assert_eq!(base, reordered, "加载顺序与重复项不应改变指纹");
+    }
+
+    /// 版本与集合的任何变化都必须改变指纹。
+    #[test]
+    fn 插件版本与集合变化改变指纹() {
+        let base = fingerprint_of(&["fs@0.1.9".into()]);
+        assert_ne!(
+            fingerprint_of(&["fs@0.2.0".into()]),
+            base,
+            "插件升级即使工具名不变也应改变指纹"
+        );
+        assert_ne!(
+            fingerprint_of(&["fs@0.1.9".into(), "terminal@0.3.8".into()]),
+            base,
+            "新增启用插件应改变指纹"
+        );
+        assert_ne!(fingerprint_of(&[]), base, "停用全部插件应改变指纹");
+    }
+
+    /// 分隔符缺失时 ["ab","c"] 与 ["a","bc"] 会拼成同一串。
+    #[test]
+    fn 相邻插件键不因拼接歧义碰撞() {
+        assert_ne!(
+            fingerprint_of(&["ab".into(), "c".into()]),
+            fingerprint_of(&["a".into(), "bc".into()]),
+            "不同插件集合不得产生相同指纹"
+        );
+    }
+
+    /// 无插件时仍给出确定值，调用方无需特判空集合。
+    #[test]
+    fn 空集合指纹稳定() {
+        assert_eq!(fingerprint_of(&[]), fingerprint_of(&[]));
+        assert!(!fingerprint_of(&[]).is_empty());
+    }
 
     /// 记录 stop 调用的桩连接：验证热加载清理连接缓存的行为，
     /// 可注入 stop 失败验证「先摘表再停」不被个别失败阻断。
