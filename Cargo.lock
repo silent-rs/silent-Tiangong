@@ -11747,6 +11747,7 @@ version = "0.3.8"
 dependencies = [
  "anyhow",
  "async-trait",
+ "libc",
  "portable-pty",
  "scru128",
  "serde",
