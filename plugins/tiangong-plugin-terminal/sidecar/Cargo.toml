@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-terminal-sidecar"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -22,3 +22,9 @@ scru128 = { workspace = true }
 tempfile = "3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# 读取 PTY 的 tty 模式（ICANON）判定前台是否为交互程序；
+# 直接用 libc 而非 portable-pty 暴露的 nix Termios，避免与其内部
+# nix 版本绑定（跨版本 Termios 是不同类型，无法互通）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

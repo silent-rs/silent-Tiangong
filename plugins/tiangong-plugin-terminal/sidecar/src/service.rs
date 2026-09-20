@@ -46,6 +46,11 @@ const SHELL_READY_TIMEOUT_SECS: u64 = 3;
 const SIDECAR_IDLE_EXIT_SECS: u64 = 5;
 /// 当前会话有前端标签时，等待隐藏页面完成事件订阅与精确附着的最长时间。
 const FRONTEND_ATTACH_WAIT_MS: u64 = 1_000;
+/// 非交互命令的静默挂起判定窗口：命令已写入 PTY 后持续无新输出、
+/// 前台被子程序占据、且该程序已把 tty 切成非规范模式（交互程序特征）
+/// 达到本时长，即认定它在等待用户按键。三个条件同时成立时信号很强，
+/// 窗口不需要很长——不必让调用方空等。
+const SILENT_INTERACTIVE_HANG_SECS: u64 = 5;
 /// 内部命令边界标记公共前缀；这些行不得显示给用户。
 const MARKER_PREFIX: &str = "__TIANGONG_";
 
@@ -138,6 +143,10 @@ struct PtySession {
     /// 本次执行为交互模式且命令已写入 PTY（程序真正启动）。取消据此
     /// 区分「程序已在前台须保留转交互」与「尚未启动只须释放预留」。
     interactive_started: bool,
+    /// 登录 shell 自身的进程号：前台进程组与其不同即说明 PTY 前台被
+    /// 子程序占据（交互程序在跑），用于识别「非交互命令实际拉起了
+    /// 交互程序并停在等待输入」的静默挂起。
+    shell_pid: Option<u32>,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
 }
@@ -736,6 +745,7 @@ impl TerminalService {
             .context("启动 PTY 子进程失败")?;
         drop(pair.slave);
 
+        let shell_pid = child.process_id();
         let killer = child.clone_killer();
         // 输出持久化（按 scope 分文件）：仅供运行诊断和关闭时清理
         let logger = request
@@ -779,6 +789,7 @@ impl TerminalService {
                 pending_ready_marker: None,
                 running_command: None,
                 interactive_started: false,
+                shell_pid,
                 logger,
             },
         );
@@ -1440,6 +1451,9 @@ impl TerminalService {
             .timeout
             .map(|timeout| Instant::now() + Duration::from_secs(timeout.max(1)));
         let mut exit_code_seen_at = None;
+        // 静默挂起检测基线：命令写入后输出停止增长的时刻。
+        let mut last_raw_total = start_offset;
+        let mut last_output_at = Instant::now();
         loop {
             // 会话状态先行：已被回收（手动关闭或选终端回收先一步出表）时
             // 给出明确错误，不再读输出撞「会话不存在」内部错误。
@@ -1452,6 +1466,12 @@ impl TerminalService {
             };
             let raw = self.raw_output_since(&request.session_id, start_offset)?;
             let parsed = parse_command_output(&raw, &markers);
+            // 输出仍在增长说明命令在正常推进，刷新静默基线。
+            let raw_total = start_offset.saturating_add(raw.len() as u64);
+            if raw_total != last_raw_total {
+                last_raw_total = raw_total;
+                last_output_at = Instant::now();
+            }
             // 完成判断优先于死亡收尾：结束标记已闭合时以命令结果为准，
             // shell 随后的退出只补「终端已退出」标记并回收，不覆盖命令
             // 退出码（命令带 exit 的组合、shell 自身异常退出等场景）。
@@ -1479,6 +1499,29 @@ impl TerminalService {
                     &markers,
                     false,
                 );
+            }
+            // 没有显式 timeout 的非交互命令：Agent 可能把交互程序
+            //（vi/ssh/python 等）当普通命令执行，程序停在等待输入，
+            // end marker 永不出现——原实现会在此无限轮询，工具调用
+            // 直到会话取消才结束，用户侧表现为"一直卡住"。
+            //
+            // 判据核心是 tty 模式而非静默时长：交互程序必然把 tty 切成
+            // 非规范模式逐键读取，而长时间的编译、测试从不碰 tty 模式，
+            // 因此跑多久都不会被误判打断（见 foreground_is_interactive）。
+            if deadline.is_none()
+                && last_output_at.elapsed() >= Duration::from_secs(SILENT_INTERACTIVE_HANG_SECS)
+                && self.foreground_is_interactive(&request.session_id) == Some(true)
+            {
+                tracing::info!(
+                    session_id = request.session_id,
+                    "命令静默且前台程序已切换 tty 为非规范模式，按交互程序收尾"
+                );
+                let mut response = parsed.into_response(false);
+                response.interactive_mode = true;
+                response.stderr =
+                    "命令长时间无输出，判定为交互程序正在等待输入；终端已转入交互状态，可用 terminal_send 继续操作"
+                        .to_string();
+                return Ok(response);
             }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 // 会话已在等待中死亡：不能再向其发送中断键，按死亡收尾。
@@ -1646,6 +1689,55 @@ impl TerminalService {
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
+    }
+
+    /// PTY 前台是否是一个正在等待按键的交互程序。
+    ///
+    /// 两个条件同时成立才算：
+    /// 1. 前台进程组不是登录 shell 自身（`tcgetpgrp`）——shell 把前台
+    ///    让给了子程序；
+    /// 2. tty 已被切成非规范模式（`ICANON` 被清除）——交互程序为了逐键
+    ///    读取必然这么做，而 `cargo build`、`pytest`、`sleep` 这类命令
+    ///    从不碰 tty 模式，ICANON 始终保持开启。
+    ///
+    /// 条件 1 单独不足以判定：任何前台命令都会占据前台进程组。条件 2
+    /// 才是区分「交互程序在等输入」与「普通命令在安静地跑」的依据，
+    /// 因此长时间编译、测试不会被误判。
+    ///
+    /// 取不到信息（非 Unix、fd 不可用）时返回 None，调用方按「无法判定」
+    /// 处理，保持原有等待行为。
+    #[cfg(unix)]
+    fn foreground_is_interactive(&self, session_id: &str) -> Option<bool> {
+        let (shell_pid, leader, raw_fd) = self
+            .with_session(session_id, |session| {
+                Ok((
+                    session.shell_pid,
+                    session.master.process_group_leader(),
+                    session.master.as_raw_fd(),
+                ))
+            })
+            .ok()?;
+        let shell_pid = shell_pid? as i64;
+        let leader = leader? as i64;
+        if leader == shell_pid {
+            // 前台是 shell 自身：没有命令在跑，谈不上等待输入。
+            return Some(false);
+        }
+        let fd = raw_fd?;
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
+        // SAFETY: fd 来自存活会话持有的 PTY master，tcgetattr 只读取属性。
+        if unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        // SAFETY: tcgetattr 返回 0 表示结构已被完整初始化。
+        let termios = unsafe { termios.assume_init() };
+        Some(termios.c_lflag & libc::ICANON == 0)
+    }
+
+    /// Windows（ConPTY）没有前台进程组与 termios，无法判定。
+    #[cfg(not(unix))]
+    fn foreground_is_interactive(&self, _session_id: &str) -> Option<bool> {
+        None
     }
 
     fn raw_output_since(&self, session_id: &str, offset: u64) -> Result<Vec<u8>> {
@@ -2639,6 +2731,17 @@ impl TerminalService {
             return ToolOutcome::fail(format!("终端面板操作失败：{error:#}"));
         }
         request_host_app_open(&scope.session_id, &instance_id, true).await;
+        // 打开面板后等待页面完成事件订阅与 PTY 附着再返回：调用方拿到
+        // 编号往往紧接着 terminal_send，附着未完成时输入会写在页面订阅
+        // 之前，用户在标签里看不到这段交互。等待有上限，前端未接应
+        //（后台会话等）不阻塞返回。
+        if !self.wait_for_frontend_attach(&instance_id).await {
+            tracing::debug!(
+                terminal_id = instance_id,
+                scope_id = scope.session_id,
+                "terminal_open 未等到前端附着，按无前台页面继续"
+            );
+        }
         ToolOutcome::ok(format!("已打开终端 {instance_id}"))
     }
 
@@ -3948,6 +4051,83 @@ mod tests {
                 session_id: terminal,
             })
             .expect("清理测试终端失败");
+    }
+
+    /// 判据必须能区分「交互程序在等按键」与「长命令在安静地跑」。
+    ///
+    /// 这是本修复的核心安全性质：长时间的编译、测试不能被误判打断。
+    /// 用 `sleep` 代表安静的长命令——它占据前台但不碰 tty 模式，
+    /// 与 `cargo build` / `pytest` 的 tty 行为一致。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 交互程序与静默长命令的前台判定必须可区分() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let workspace = cwd.path().to_string_lossy().to_string();
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(workspace.clone()),
+                scope_id: Some("session-hang".to_string()),
+                reserve: false,
+                cols: default_cols(),
+                rows: default_rows(),
+            })
+            .expect("创建终端失败");
+        let terminal = spawned.session_id;
+
+        let wait_until = |expected: bool| {
+            let service = &service;
+            let terminal = terminal.clone();
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if service.foreground_is_interactive(&terminal) == Some(expected) {
+                        return true;
+                    }
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
+        let write = |data: &'static [u8]| {
+            service
+                .with_session(&terminal, |session| {
+                    session.writer.write_all(data)?;
+                    session.writer.flush()?;
+                    Ok(())
+                })
+                .expect("写入终端失败");
+        };
+
+        // 空闲 shell：没有命令在跑。
+        assert!(wait_until(false).await, "空闲终端不应判定为交互等待");
+
+        // 安静的长命令：占据前台，但不改 tty 模式 —— 不得判为交互。
+        // 这一条挂掉就意味着长时间编译/测试会被错误打断。
+        write(b"sleep 30\r");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            service.foreground_is_interactive(&terminal),
+            Some(false),
+            "安静的长命令（编译/测试同类）不得被判定为交互等待"
+        );
+
+        // 交互程序：切换 tty 为非规范模式逐键读取 —— 应判为交互。
+        write(b"\x03");
+        assert!(wait_until(false).await, "中断后应回到 shell");
+        write(b"python3 -q\r");
+        assert!(wait_until(true).await, "交互 REPL 应被判定为正在等待输入");
+
+        write(b"exit()\r");
+        let _ = service.kill_session(SessionIdRequest {
+            session_id: terminal,
+        });
     }
 
     #[cfg(unix)]
