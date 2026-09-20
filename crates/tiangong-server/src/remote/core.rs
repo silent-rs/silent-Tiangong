@@ -369,6 +369,7 @@ impl ServerCoreManager {
                 &session_id,
                 session_config,
                 workspace_dir,
+                None,
                 stream_tx,
                 || plugins,
             )
@@ -1279,6 +1280,7 @@ mod tests {
                         &session_id,
                         CoreConfig::default(),
                         String::new(),
+                        None,
                         stream_tx,
                         Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )
@@ -1301,6 +1303,7 @@ mod tests {
                         &session_id,
                         CoreConfig::default(),
                         String::new(),
+                        None,
                         stream_tx,
                         Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )

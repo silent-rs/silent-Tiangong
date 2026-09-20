@@ -92,11 +92,6 @@ struct InputSendClaim {
     attachment_paths: Vec<String>,
 }
 
-pub(crate) struct EnsuredCore {
-    pub(crate) session_id: String,
-    pub(crate) is_new: bool,
-}
-
 fn merge_agent_output_messages(
     view: &mut Vec<tiangong_types::Message>,
     agent_id: &str,
@@ -488,7 +483,7 @@ impl TiangongApp {
                 use std::sync::mpsc;
                 let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
-                    .ensure_core(&session_id, None, None, None, stream_tx)
+                    .ensure_core(&session_id, None, None, None, None, stream_tx)
                     .await;
                 let ensured = match ensured {
                     Ok(ensured) => ensured,
@@ -818,14 +813,19 @@ impl TiangongApp {
     ///
     /// 构建 per-session 配置 → 构造桌面插件集合 → 调
     /// `core_manager.ensure_core`。命中既有 Core 则刷新配置；否则新建。
+    ///
+    /// `initial_model_ref` 是本次发送携带的模型选择：新建 Core 时直接以该
+    /// 模型初始化，避免新对话首条消息先按默认模型建 Core、投递时再触发一次
+    /// 多余切换。为 `None` 时沿用 Session.model_ref / 路由默认。
     pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
         workspace_dir: Option<String>,
         initial_trust_mode: Option<tiangong_types::TrustMode>,
         initial_reasoning_effort: Option<tiangong_llm::request::ReasoningEffort>,
+        initial_model_ref: Option<&str>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
-    ) -> Result<EnsuredCore, String> {
+    ) -> Result<tiangong_core_manager::EnsuredCore, String> {
         self.wait_plugin_preload().await?;
         let (app_config, agent_config, default_workspace_dir) = self
             .with_state_read(|state| {
@@ -838,7 +838,6 @@ impl TiangongApp {
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
-        session_config.default_trust_mode = app_config.default_trust_mode;
         let existing_session = self.core_manager.load_session(session_id).ok();
         let workspace_dir = workspace_dir
             .filter(|cwd| !cwd.trim().is_empty())
@@ -858,17 +857,16 @@ impl TiangongApp {
         // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
         let factory = self.desktop_factory.clone();
         let models = app_config.models.clone();
-        let ensured = self
-            .core_manager
-            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
-                factory.build_plugins_sync(models)
-            })
+        self.core_manager
+            .ensure_core(
+                session_id,
+                session_config,
+                workspace_dir,
+                initial_model_ref,
+                stream_tx,
+                || factory.build_plugins_sync(models),
+            )
             .await
-            .expect("ensure_core 不应失败");
-        Ok(EnsuredCore {
-            session_id: ensured.session_id,
-            is_new: ensured.is_new,
-        })
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
