@@ -95,13 +95,11 @@ function AgentTurnView({
     toolCallArgs,
     settledToolCallIds,
     userFrag,
-    mergedFragments,
-    summaryFrags,
-    processSections,
+    blocks,
     processFrags,
     errorFrags,
     usageAnchorId,
-    lastToolGroupIndex,
+    lastToolGroupKey,
   } = useMemo(() => {
     // 工具调用参数配对：assistant 消息携带 tool_calls（含参数），
     // role:'tool' 结果消息按 tool_call_id 反查参数，用于派生单行摘要与展开内容。
@@ -224,17 +222,29 @@ function AgentTurnView({
       mergedFragments.push(frag);
     }
 
-    // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/ 总结回复。
-    // 已完成轮次默认折叠「过程」仅保留总结可见；活跃轮次全部展示。
+    // 分组：用户消息（锚点）/ 过程片段（思考、解释、工具、ReAct 文本等）/
+    // 通知 / 总结回复。已完成轮次默认折叠「过程」，通知与总结始终可见。
+    //
+    // 渲染顺序严格按消息时序：轮次内容被切成「块」序列，通知与总结回复
+    // 各自成块，其余过程片段聚成可折叠块。这样通知出现在它实际发生的
+    // 位置——压缩/切换若发生在回复之后，就显示在回复之后，不会被统一
+    // 提前到总结之前。
+    //
     // summaryFrags 收集同一轮次内全部非 react 的助手回复（含总结阶段产出），
     // 全部渲染而非仅取最后一条，避免遗漏或互相覆盖。
+    type TurnBlock =
+      | { kind: "process"; frags: Fragment[] }
+      | { kind: "notice"; frag: Fragment }
+      | { kind: "summary"; frag: Fragment };
+    const blocks: TurnBlock[] = [];
     const summaryFrags: Fragment[] = [];
-    // 过程按「通知」切分成段：通知（上下文管理/模型切换等 Notice 类）是
-    // 需要用户看见的状态变化，不能随过程一起折叠，也不能被挪到过程之外
-    // ——那样会丢失它与前后步骤的时序关系。因此过程区渲染为
-    // [过程段, 通知, 过程段, 通知, ...]，每段各自独立折叠，通知始终可见。
-    const processSections: { frags: Fragment[]; notice: Fragment | null }[] = [];
     let currentSection: Fragment[] = [];
+    const flushSection = () => {
+      if (currentSection.length > 0) {
+        blocks.push({ kind: "process", frags: currentSection });
+        currentSection = [];
+      }
+    };
     // 错误通知不随过程折叠：失败轮次往往没有其他可见输出，错误原因必须始终可见。
     const errorFrags: Fragment[] = [];
     let userFrag: Fragment | null = null;
@@ -244,20 +254,21 @@ function AgentTurnView({
       } else if (frag.type === "error_system") {
         errorFrags.push(frag);
       } else if (frag.type === "assistant" && frag.msg.phase !== "react") {
+        flushSection();
         summaryFrags.push(frag);
+        blocks.push({ kind: "summary", frag });
       } else if (frag.type === "context_management" || frag.type === "other_system") {
-        // 通知落点即时序位置：关掉当前过程段，通知挂在段尾。
-        processSections.push({ frags: currentSection, notice: frag });
-        currentSection = [];
+        flushSection();
+        blocks.push({ kind: "notice", frag });
       } else {
         currentSection.push(frag);
       }
     }
-    if (currentSection.length > 0) {
-      processSections.push({ frags: currentSection, notice: null });
-    }
-    // 折叠统计与「是否有可折叠内容」按全部过程段合计。
-    const processFrags: Fragment[] = processSections.flatMap((section) => section.frags);
+    flushSection();
+    // 折叠统计与「是否有可折叠内容」按全部过程块合计。
+    const processFrags: Fragment[] = blocks.flatMap((block) =>
+      block.kind === "process" ? block.frags : []
+    );
 
     // 同一轮的合计只挂在最后一个带操作栏的回复上。
     const usageAnchor = [...summaryFrags].reverse().find((frag) =>
@@ -265,24 +276,24 @@ function AgentTurnView({
     );
     const usageAnchorId = usageAnchor?.type === "assistant" ? usageAnchor.msg.id : null;
     // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
-    const lastToolGroupIndex = (() => {
+    // 用工具组自身的 key 定位而非渲染下标——渲染按时序分块后下标不再连续。
+    const lastToolGroupKey = (() => {
       for (let i = mergedFragments.length - 1; i >= 0; i--) {
-        if (mergedFragments[i].type === "tool_group") return i;
+        const frag = mergedFragments[i];
+        if (frag.type === "tool_group") return frag.key;
       }
-      return -1;
+      return null;
     })();
 
     return {
       toolCallArgs,
       settledToolCallIds,
       userFrag,
-      mergedFragments,
-      summaryFrags,
-      processSections,
+      blocks,
       processFrags,
       errorFrags,
       usageAnchorId,
-      lastToolGroupIndex,
+      lastToolGroupKey,
     };
   }, [messages, streamingMessageId, agents]);
 
@@ -319,7 +330,7 @@ function AgentTurnView({
               tools={frag.tools}
               expansion={toolGroupExpansion}
               argsOf={argsOfToolMessage}
-              runningCalls={i === lastToolGroupIndex && runningToolCalls.length > 0 ? runningToolCalls : undefined}
+              runningCalls={frag.key === lastToolGroupKey && runningToolCalls.length > 0 ? runningToolCalls : undefined}
             />
           );
         }
@@ -473,48 +484,53 @@ function AgentTurnView({
   return (
     <div className="space-y-1.5">
       {userFrag && renderFragment(userFrag, 0)}
-      {collapseProcess && !showProcess && (
-        <button
-          type="button"
-          onClick={() => setShowProcess(true)}
-          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
-        >
-          <ChevronRight className="w-3 h-3" />
-          <span>展开过程</span>
-          <span className="opacity-60">
-            （{processStats.thinking > 0 ? `思考 ${processStats.thinking}·` : ""}{processStats.tools > 0 ? `工具 ${processStats.tools}` : ""}{processStats.thinking === 0 && processStats.tools === 0 ? `${processFrags.length} 条` : ""}）
-          </span>
-        </button>
-      )}
-      {(!collapseProcess || showProcess) && processSections.length > 0 && (
-        <div className="space-y-1.5">
-          {collapseProcess && showProcess && (
+      {/* 轮次内容严格按时序渲染：过程块可折叠，通知与总结回复始终可见。
+          通知因此出现在它实际发生的位置——压缩/切换若发生在回复之后就
+          显示在回复之后，不再被统一提前到总结之前。 */}
+      {blocks.map((block, blockIndex) => {
+        const base = blockIndex * 1000;
+        if (block.kind === "notice") {
+          return <div key={`notice-${blockIndex}`}>{renderFragment(block.frag, base)}</div>;
+        }
+        if (block.kind === "summary") {
+          return <div key={`summary-${blockIndex}`}>{renderFragment(block.frag, base)}</div>;
+        }
+        // 过程块：折叠态只在**第一个**过程块位置显示展开入口，避免多段
+        // 过程各出一个按钮把轮次切碎。
+        const isFirstProcess = blocks.findIndex((item) => item.kind === "process") === blockIndex;
+        if (collapseProcess && !showProcess) {
+          return isFirstProcess ? (
             <button
+              key={`toggle-${blockIndex}`}
               type="button"
-              onClick={() => setShowProcess(false)}
+              onClick={() => setShowProcess(true)}
               className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
             >
-              <ChevronDown className="w-3 h-3" />
-              <span>收起过程</span>
+              <ChevronRight className="w-3 h-3" />
+              <span>展开过程</span>
+              <span className="opacity-60">
+                （{processStats.thinking > 0 ? `思考 ${processStats.thinking}·` : ""}{processStats.tools > 0 ? `工具 ${processStats.tools}` : ""}{processStats.thinking === 0 && processStats.tools === 0 ? `${processFrags.length} 条` : ""}）
+              </span>
             </button>
-          )}
-          {processSections.map((section, sectionIndex) => (
-            <div key={`sec-${sectionIndex}`} className="space-y-1.5">
-              {section.frags.map((frag, i) => renderFragment(frag, sectionIndex * 1000 + i))}
-              {section.notice && renderFragment(section.notice, sectionIndex * 1000 + section.frags.length)}
-            </div>
-          ))}
-        </div>
-      )}
-      {/* 过程折叠时通知仍按时序单独渲染：Notice 是需要用户看见的状态变化
-          （上下文已压缩、已切换模型等），折叠过程不应把它们一起藏起来。 */}
-      {collapseProcess && !showProcess && processSections.map((section, sectionIndex) => (
-        section.notice
-          ? <div key={`notice-${sectionIndex}`}>{renderFragment(section.notice, sectionIndex)}</div>
-          : null
-      ))}
+          ) : null;
+        }
+        return (
+          <div key={`proc-${blockIndex}`} className="space-y-1.5">
+            {collapseProcess && showProcess && isFirstProcess && (
+              <button
+                type="button"
+                onClick={() => setShowProcess(false)}
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
+              >
+                <ChevronDown className="w-3 h-3" />
+                <span>收起过程</span>
+              </button>
+            )}
+            {block.frags.map((frag, i) => renderFragment(frag, base + i))}
+          </div>
+        );
+      })}
       {errorFrags.map((frag, i) => renderFragment(frag, i))}
-      {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}
       {turnStatusMeta && !isActive && (
         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80 tabular-nums">
           <span className={`inline-flex items-center gap-1 ${turnStatusMeta.className}`}>

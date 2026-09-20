@@ -94,4 +94,41 @@ describe('通知在消息列表中的可见性', () => {
 
     expect(container.textContent).toContain('已切换模型');
   });
+
+  /**
+   * 回归：通知原先被统一渲染在总结回复**之前**（summaryFrags 固定挂在
+   * 轮次末尾），导致发生在回复之后的压缩/切换被错误地显示在回复上方。
+   */
+  it('通知发生在回复之后时显示在回复之后', async () => {
+    const messages = [
+      msg('user', '用户问题'),
+      msg('tool', '工具结果', { tool_call_id: 'c1' }),
+      msg('assistant', '这是回复正文'),
+      // 压缩与切换发生在回复产出之后（切换模型前整理上下文的真实时序）。
+      msg('notice', '[上下文管理] 上下文已压缩'),
+      msg('notice', '[上下文管理] 已切换模型：glm-5.3'),
+    ];
+
+    for (const isActive of [true, false]) {
+      await render(messages, isActive);
+      const text = container.textContent ?? '';
+      const replyAt = text.indexOf('这是回复正文');
+      const compressedAt = text.indexOf('上下文已压缩');
+      const switchedAt = text.indexOf('已切换模型');
+      expect(replyAt).toBeGreaterThanOrEqual(0);
+      expect(compressedAt).toBeGreaterThan(replyAt);
+      expect(switchedAt).toBeGreaterThan(compressedAt);
+    }
+  });
+
+  it('通知发生在回复之前时显示在回复之前', async () => {
+    await render([
+      msg('user', '用户问题'),
+      msg('notice', '[上下文管理] 上下文已压缩'),
+      msg('assistant', '这是回复正文'),
+    ], false);
+
+    const text = container.textContent ?? '';
+    expect(text.indexOf('上下文已压缩')).toBeLessThan(text.indexOf('这是回复正文'));
+  });
 });
