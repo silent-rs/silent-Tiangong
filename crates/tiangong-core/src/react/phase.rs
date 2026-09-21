@@ -4,7 +4,7 @@
 //! 所有权模式（take/install）与取消方式已由任务 02 原型验证，
 //! 结论见 design.md 3.1；任务 04 起在此数据模型上接入正式 `ExecutionPhase` 驱动。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -60,14 +60,12 @@ pub(super) struct PreparedToolCall {
     pub(super) index: usize,
     pub(super) call: ToolCall,
     pub(super) args_summary: String,
-    pub(super) dedupe_key: String,
 }
 
 /// 一批工具调用的执行状态。
 pub(super) struct ToolBatchState {
     pub(super) calls: VecDeque<(usize, ToolCall)>,
     pub(super) ready_tools: Vec<PreparedToolCall>,
-    pub(super) prepared_keys: HashSet<String>,
     pub(super) invalid_tool_calls: Vec<InvalidToolCall>,
     pub(super) response_usage: TokenUsage,
     pub(super) needs_failure_recovery: bool,

@@ -60,7 +60,7 @@ describe('通知在消息列表中的可见性', () => {
   const turnWithNotice = (): MessageItem[] => [
     msg('user', '用户问题'),
     msg('tool', '工具结果一', { tool_call_id: 'c1' }),
-    msg('notice', '[上下文管理] 上下文已压缩'),
+    msg('notice', '[上下文管理] 上下文接近上限，已自动压缩'),
     msg('tool', '工具结果二', { tool_call_id: 'c2' }),
     msg('assistant', '最终回复'),
   ];
@@ -70,14 +70,14 @@ describe('通知在消息列表中的可见性', () => {
     await render(turnWithNotice(), false);
 
     expect(container.textContent).toContain('展开过程');
-    expect(container.textContent).toContain('上下文已压缩');
+    expect(container.textContent).toContain('已自动压缩');
   });
 
   it('展开过程时通知按时序位于两段过程之间', async () => {
     await render(turnWithNotice(), true);
 
     const text = container.textContent ?? '';
-    const noticeAt = text.indexOf('上下文已压缩');
+    const noticeAt = text.indexOf('已自动压缩');
     const replyAt = text.indexOf('最终回复');
     expect(noticeAt).toBeGreaterThanOrEqual(0);
     // 通知在过程区内，位于最终回复之前——未被挪到轮次末尾统一堆放。
@@ -105,7 +105,7 @@ describe('通知在消息列表中的可见性', () => {
       msg('tool', '工具结果', { tool_call_id: 'c1' }),
       msg('assistant', '这是回复正文'),
       // 压缩与切换发生在回复产出之后（切换模型前整理上下文的真实时序）。
-      msg('notice', '[上下文管理] 上下文已压缩'),
+      msg('notice', '[上下文管理] 上下文接近上限，已自动压缩'),
       msg('notice', '[上下文管理] 已切换模型：glm-5.3'),
     ];
 
@@ -113,7 +113,7 @@ describe('通知在消息列表中的可见性', () => {
       await render(messages, isActive);
       const text = container.textContent ?? '';
       const replyAt = text.indexOf('这是回复正文');
-      const compressedAt = text.indexOf('上下文已压缩');
+      const compressedAt = text.indexOf('已自动压缩');
       const switchedAt = text.indexOf('已切换模型');
       expect(replyAt).toBeGreaterThanOrEqual(0);
       expect(compressedAt).toBeGreaterThan(replyAt);
@@ -124,11 +124,11 @@ describe('通知在消息列表中的可见性', () => {
   it('通知发生在回复之前时显示在回复之前', async () => {
     await render([
       msg('user', '用户问题'),
-      msg('notice', '[上下文管理] 上下文已压缩'),
+      msg('notice', '[上下文管理] 上下文接近上限，已自动压缩'),
       msg('assistant', '这是回复正文'),
     ], false);
 
     const text = container.textContent ?? '';
-    expect(text.indexOf('上下文已压缩')).toBeLessThan(text.indexOf('这是回复正文'));
+    expect(text.indexOf('已自动压缩')).toBeLessThan(text.indexOf('这是回复正文'));
   });
 });

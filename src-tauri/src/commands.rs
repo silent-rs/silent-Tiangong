@@ -1303,13 +1303,30 @@ async fn run_context_slash_command(
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
         }
-        let input = match command {
-            ContextSlashCommand::Compress => AgentInputKind::compress_context(),
-            ContextSlashCommand::Reset => AgentInputKind::reset_context(),
+        return match command {
+            // 整理上下文与模型切换前的整理共用同一实现：等待压缩进入终态
+            // 后再返回，命令结果反映**压缩本身**的成败，而非"命令已投递"。
+            // 失败沿调用栈回报，前端据此提示用户，不再出现"提示成功但历史
+            // 没变"的中间态。
+            ContextSlashCommand::Compress => {
+                // 此 await 在 session_send_lock 内进行（压缩可达数十秒），
+                // 与切换模型链路（set_session_model → 切换前整理）同一口
+                // 径接受：压缩与后续写入共用一个临界区，顺序确定；代价是
+                // 同会话其他写入型命令在此期间排队。取消不受影响（cancel
+                // 先无锁试 cancel_core），进度事件走免锁快速通道（见
+                // start_stream_consumer）。
+                state
+                    .core_manager
+                    .compact_session_context(&ensured.session_id)
+                    .await
+                    .map(|()| true)
+            }
+            // 清理上下文是同步操作（只推进摘要边界、清空用量，不发模型
+            // 请求），维持即发即走。
+            ContextSlashCommand::Reset => Ok(state
+                .core_manager
+                .deliver_to_core_if_live(&ensured.session_id, AgentInputKind::reset_context())),
         };
-        return Ok(state
-            .core_manager
-            .deliver_to_core_if_live(&ensured.session_id, input));
     }
 }
 

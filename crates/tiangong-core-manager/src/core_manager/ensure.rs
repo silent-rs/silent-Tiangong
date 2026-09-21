@@ -229,7 +229,7 @@ impl CoreManager {
         // 无法发请求的端点压缩必然失败，白等一轮。此时历史也从未被该模型
         // 处理过，直接切换即可。
         if current.is_usable() {
-            if let Err(error) = core.compact_context().await {
+            if let Err(error) = core.compact_context("切换模型前已整理上下文").await {
                 tracing::warn!(
                     session_id,
                     %error,
@@ -379,6 +379,33 @@ impl CoreManager {
             self.spawn_title_generation_if_needed(session_id, &text);
         }
         delivered
+    }
+
+    /// 手动整理会话上下文，并等待压缩进入终态。
+    ///
+    /// 与模型切换前的整理（见 [`Self::switch_model_if_needed`]）走**同一条**
+    /// 实现：都经 `TiangongCore::compact_context` 等待压缩任务的终态通知，而
+    /// 不是投递命令后即发即走。区别只在失败处理——切换场景失败只告警并继续
+    /// 切换（模型已由用户选定，不能因整理失败卡住），手动整理则把失败如实
+    /// 回报给调用方，由用户决定是否重试。
+    ///
+    /// 返回 `Ok(())` 表示压缩已应用或无可压缩历史；`Err` 表示未能完成。
+    pub async fn compact_session_context(&self, session_id: &str) -> Result<(), String> {
+        let core = {
+            let registry = self.registry();
+            registry.get(session_id).cloned()
+        };
+        let Some(core) = core else {
+            return Err("会话无活跃 Core".to_string());
+        };
+        core.compact_context(tiangong_core::core::MANUAL_COMPACT_NOTICE)
+            .await
+            .map_err(|error| match error {
+                tiangong_core::core::CoreError::Busy => {
+                    "会话正在执行，当前回合结束后可整理上下文".to_string()
+                }
+                other => other.to_string(),
+            })
     }
 
     /// 记录会话级对话模型选择（models 注册表 key；None 恢复跟随默认）。

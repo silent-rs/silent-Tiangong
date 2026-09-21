@@ -1,7 +1,7 @@
 //! 工具执行流水线（ALR-301/302，任务 17）。
 //!
 //! 模型响应中的工具调用整批交给 [`execute_tool_batch`]：规范化与参数校验
-//! （去重/无效调用上下文）→ 有界并行执行 → 顺序提交结果并更新
+//! （无效调用上下文）→ 有界并行执行 → 顺序提交结果并更新
 //! [`TaskContract`](super::contract::TaskContract) → 闭合 Provider 工具协议。
 //! 取消/引导到达时批次收敛闭合后把命令交还执行驱动。
 
@@ -22,7 +22,7 @@ use super::compression::observed_total_tokens;
 use super::execute::{
     AgentLoopState, CompletedToolCall, ToolInjectionBuffer, ToolPreflightOutcome,
     append_failure_recovery_prompt, append_invalid_tool_calls_context, prepare_tool_call,
-    record_completed_tool_call, record_parallel_duplicate_tool_call, set_runtime_trust_mode,
+    record_completed_tool_call, set_runtime_trust_mode,
 };
 use super::helpers::record_plugin_usage;
 use super::message::append_tool_result_message;
@@ -76,26 +76,18 @@ pub(super) async fn execute_tool_batch(
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
 
     'pipeline: loop {
-        // ── 准备：逐个弹出待处理调用（校验/去重）──
+        // ── 准备：逐个弹出待处理调用（参数校验）──
         while let Some((index, call)) = batch.calls.pop_front() {
             match prepare_tool_call(ctx, &call, &mut state.tool_history) {
                 ToolPreflightOutcome::Skip { needs_recovery } => {
                     batch.needs_failure_recovery |= needs_recovery;
                     ctx.session.persist_to_disk();
                 }
-                ToolPreflightOutcome::Execute {
-                    args_summary,
-                    dedupe_key,
-                } => {
-                    if !batch.prepared_keys.insert(dedupe_key.clone()) {
-                        record_parallel_duplicate_tool_call(ctx, &call);
-                        continue;
-                    }
+                ToolPreflightOutcome::Execute { args_summary } => {
                     let tool = PreparedToolCall {
                         index,
                         call,
                         args_summary,
-                        dedupe_key,
                     };
                     batch.ready_tools.push(tool);
                 }
@@ -306,7 +298,6 @@ fn flush_ordered_results(
             CompletedToolCall {
                 call: &running_record.tool.call,
                 args_summary: &running_record.tool.args_summary,
-                dedupe_key: running_record.tool.dedupe_key,
                 result: &task_output.result,
                 duration_ms: task_output.duration_ms,
             },

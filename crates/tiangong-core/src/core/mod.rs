@@ -34,6 +34,21 @@ pub mod storage_location;
 pub use error::CoreError;
 pub use storage_location::CoreStorageLocation;
 
+/// 上下文管理留痕类别：所有压缩/切换模型类 Notice 的 [`Message::notice`]
+/// category 参数（前端按 `[类别] ` 前缀剥离后展示）。
+///
+/// 留痕构造统一走 `Message::notice`（`[类别] 内容` 单点形态）；Notice
+/// 角色本身被排除出模型上下文与压缩范围，文案不影响 KV cache 前缀。
+pub const CONTEXT_NOTICE_CATEGORY: &str = "上下文管理";
+
+/// 用户手动整理（`/compress` 指令与宿主手动入口）的留痕内容（不含
+/// 类别前缀，出口由 [`Message::notice`] 统一补全）。
+///
+/// 编排类整理（模型切换前、插件交接）的原因**不属于 core**——由各编排方
+/// 以内容形式注入（见 `compact_context` 的 `notice` 参数），core 只提供
+/// 留痕通道，不感知上游业务概念。
+pub const MANUAL_COMPACT_NOTICE: &str = "已按你的要求整理上下文";
+
 /// 判断标题是否仍是默认值（"新对话"/"会话 X"）。
 ///
 /// 用于标题自动生成（现由 core-manager 经 [`crate::TiangongCore::set_title`]
@@ -148,9 +163,9 @@ impl TiangongCore {
     /// 返回 `Ok(())` 表示压缩已成功应用或无可压缩历史；`Err` 表示压缩未能
     /// 完成（模型调用失败、被取消、worker 退出等）。**返回 Err 时压缩任务
     /// 同样已进入终态**，调用方可以安全地继续后续操作。
-    pub async fn compact_context(&self) -> Result<(), CoreError> {
+    pub async fn compact_context(&self, notice: &str) -> Result<(), CoreError> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-        self.spawn_context_compression(Some(completion_tx))?;
+        self.spawn_context_compression(Some(completion_tx), notice.to_string())?;
         // 任务在任何终态下都会发送一次通知；发送端被丢弃（worker 异常退出）
         // 时 recv 返回 Err，同样结束等待，不会悬挂。
         match completion_rx.await {
@@ -197,9 +212,9 @@ impl TiangongCore {
         // 会话文件；落盘失败只告警，不因留痕失败而让切换回退。
         match self.load_session() {
             Ok(mut session) => {
-                let record = crate::session::Message::new(
-                    crate::session::MessageRole::Notice,
-                    format!("[上下文管理] 已切换模型：{model_name}"),
+                let record = crate::session::Message::notice(
+                    CONTEXT_NOTICE_CATEGORY,
+                    format!("已切换模型：{model_name}"),
                 );
                 let snapshot = record.clone();
                 session.messages.push(record);
@@ -571,6 +586,7 @@ impl TiangongCore {
     fn spawn_context_compression(
         &self,
         completion_tx: Option<tokio::sync::oneshot::Sender<Result<(), CoreError>>>,
+        notice: String,
     ) -> Result<(), CoreError> {
         if self.is_busy() {
             return Err(CoreError::Busy);
@@ -591,9 +607,12 @@ impl TiangongCore {
             );
             Ok(async move {
                 use crate::react::compression::ManualCompressionOutcome as Outcome;
-                let outcome =
-                    crate::react::compression::run_manual_context_compression(ctx, &mut cmd_rx)
-                        .await;
+                let outcome = crate::react::compression::run_manual_context_compression(
+                    ctx,
+                    &mut cmd_rx,
+                    notice,
+                )
+                .await;
                 let interrupted_by_message = matches!(
                     outcome,
                     Outcome::Interrupted(crate::react::compression::CompressionInterrupt::Command(
@@ -639,7 +658,7 @@ impl TiangongCore {
 
     /// 用户手动触发的上下文压缩（`CommandInput::CompressContext`）。
     fn compress_context(&self) -> Result<(), CoreError> {
-        self.spawn_context_compression(None)
+        self.spawn_context_compression(None, MANUAL_COMPACT_NOTICE.to_string())
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
@@ -873,13 +892,13 @@ mod model_endpoint_tests {
         core.switch_model(target("picked-model")).unwrap();
 
         let saved = Session::load_from_storage(root.path(), "switch-record").unwrap();
+        let record_prefix = format!("[{CONTEXT_NOTICE_CATEGORY}] ");
         let record = saved
             .messages
             .iter()
             .find(|message| {
-                message
-                    .text_content()
-                    .starts_with("[上下文管理] 已切换模型")
+                message.text_content().starts_with(record_prefix.as_str())
+                    && message.text_content().contains("已切换模型")
             })
             .expect("切换应在消息列表留痕");
         assert_eq!(
@@ -896,7 +915,7 @@ mod model_endpoint_tests {
             !saved
                 .context()
                 .iter()
-                .any(|message| message.text_content().starts_with("[上下文管理]")),
+                .any(|message| message.text_content().starts_with(record_prefix.as_str())),
             "留痕不得进入模型上下文"
         );
 
@@ -956,7 +975,7 @@ mod model_endpoint_tests {
         let root = tempfile::tempdir().unwrap();
         let core = test_core(root.path(), "compact-empty");
         // 空会话（无对话历史）：压缩任务判定 Noop 并立即给出终态，不触发模型请求。
-        core.compact_context()
+        core.compact_context(MANUAL_COMPACT_NOTICE)
             .await
             .expect("无历史时整理上下文应直接成功");
     }
@@ -994,11 +1013,13 @@ mod model_endpoint_tests {
         }
         session.try_persist_to_disk().unwrap();
 
-        let error =
-            tokio::time::timeout(std::time::Duration::from_secs(30), core.compact_context())
-                .await
-                .expect("压缩失败必须及时结束等待，不得挂到固定超时")
-                .expect_err("端点不可达时压缩应失败");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            core.compact_context(MANUAL_COMPACT_NOTICE),
+        )
+        .await
+        .expect("压缩失败必须及时结束等待，不得挂到固定超时")
+        .expect_err("端点不可达时压缩应失败");
         assert!(matches!(error, CoreError::ContextCompactionFailed(_)));
         // 终态已到达：任务槽已释放，后续切换不会撞 Busy。
         assert!(!core.is_busy(), "压缩返回时任务槽必须已释放");

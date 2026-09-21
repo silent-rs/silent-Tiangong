@@ -621,6 +621,15 @@ impl<'de> Deserialize<'de> for Message {
 }
 
 impl Message {
+    /// 构造一条系统留痕消息：Notice 角色 + 统一的 `[类别] 内容` 形态。
+    ///
+    /// 供各类系统通知复用（上下文管理、插件管理等）：前端按 `[类别] `
+    /// 前缀剥离后展示正文；Notice 角色本身被排除出模型上下文与压缩
+    /// 范围，文案不影响 KV cache 前缀。
+    pub fn notice(category: &str, content: impl std::fmt::Display) -> Self {
+        Self::new(MessageRole::Notice, format!("[{category}] {content}"))
+    }
+
     pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
         Self {
             id: scru128::new().to_string(),
@@ -801,4 +810,23 @@ fn is_false(value: &bool) -> bool {
 /// 当前本地时间文本
 pub fn now_text() -> String {
     chrono::Local::now().naive_local().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 系统留痕统一形态：`[类别] 内容` + Notice 角色。
+    #[test]
+    fn notice构造统一类别前缀() {
+        let message = Message::notice("上下文管理", "已切换模型：test-model");
+        assert_eq!(message.role, MessageRole::Notice);
+        assert_eq!(
+            message.text_content(),
+            "[上下文管理] 已切换模型：test-model"
+        );
+        // 其他类别同一形态，适配后续不同类型的系统通知。
+        let other = Message::notice("插件管理", "已安装 demo");
+        assert_eq!(other.text_content(), "[插件管理] 已安装 demo");
+    }
 }
