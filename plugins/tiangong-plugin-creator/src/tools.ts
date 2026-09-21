@@ -136,8 +136,8 @@ export async function handleAgentTool(
         `插件 ${result.plugin_id} v${result.version} 已安装（状态 ${result.state}，` +
           `${result.enabled ? '已启用' : '未启用'}）。含 extension.tab 贡献时可在拓展区打开；` +
           '含 mention 声明时可在输入框 @plugin:<id> 点名调用。' +
-          '注意：插件工具自新会话起生效——当前已存在的会话不会动态纳入新装插件的工具，' +
-          '请告知用户新开会话使用。',
+          '注意：本机自制插件安装后当前会话即可使用：经固定工具 call_local_plugin 动态调用' +
+          '（清单由系统注入对话，已开启的会话在下一轮生效），无需新开会话。',
       );
     }
     return fail(`未知工具 ${name}`);
