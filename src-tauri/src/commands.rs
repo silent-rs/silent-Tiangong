@@ -2146,6 +2146,7 @@ pub async fn get_provider_balance(
     let url = format!("{origin}/user/balance");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent(concat!("tiangong/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
     let response = client
@@ -4315,6 +4316,7 @@ pub async fn probe_embedding_dimension(
     let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(60_000));
     let client = reqwest::Client::builder()
         .timeout(timeout)
+        .user_agent(concat!("tiangong/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|err| format!("创建 HTTP 客户端失败：{err}"))?;
     let payload = serde_json::json!({

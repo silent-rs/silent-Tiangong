@@ -308,6 +308,7 @@ impl OpenAiClient {
         });
         let client = reqwest::Client::builder()
             .timeout(self.config.timeout)
+            .default_headers(self.config.headers.clone())
             .build()
             .map_err(|err| LlmError::Transport(err.to_string()))?;
 
