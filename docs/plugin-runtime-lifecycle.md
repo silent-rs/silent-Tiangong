@@ -179,9 +179,13 @@ system prompt。纯 prompt 的自制插件同样出现在清单里（prompt 字�
 ### 指纹与上下文交接的口径
 
 `registry::enabled_plugin_fingerprint` 只计入**会进入模型请求前缀**的
-插件：local 发布者不计入（能力经固定工具 + 清单提供），无 tools 且无
-prompt 的纯 UI 插件不计入（与发布者无关）。因此自制插件的装卸/升级
-**不触发上下文交接**——开发场景反复迭代不再压缩会话。
+插件：local 发布者不计入（能力经固定工具 + 清单提供）；纯 UI 插件
+不计入，判据是「确定无逻辑层」的**充分条件**——manifest 无 wasm
+制品、无 sidecar、无 TS tools/prompt 声明（四者皆空才排除，与发布者
+无关）。注意 WASM 插件的工具声明在组件内（`tool-specs` 接缝），
+manifest 的 tools/prompt 恒为空，**不能**据此判其无能力——否则官方
+WASM 插件升级将漏出交接。因此自制插件的装卸/升级**不触发上下文
+交接**——开发场景反复迭代不再压缩会话。
 
 交接执行时机：插件变化点只打标（`mark_all_sessions`），压缩统一在该
 会话**下一条消息的投递路径**执行（`ensure_before_deliver`）——Agent
