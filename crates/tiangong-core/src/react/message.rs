@@ -183,7 +183,6 @@ pub(crate) fn append_runtime_tool_message_with_reasoning(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolFailureKind {
     Argument,
-    PermissionDenied,
     UserRejected,
     CommandFailed,
     Timeout,
@@ -196,7 +195,6 @@ impl ToolFailureKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Argument => "argument_error",
-            Self::PermissionDenied => "permission_denied",
             Self::UserRejected => "user_rejected",
             Self::CommandFailed => "command_failed",
             Self::Timeout => "timeout",
@@ -244,30 +242,6 @@ impl ToolFailureRecord {
             recommended_next_action,
             requires_user_input,
         }
-    }
-
-    pub(crate) fn repeated(
-        tool_name: &str,
-        tool_call_id: &str,
-        arguments_summary: impl Into<String>,
-        original_error: impl Into<String>,
-    ) -> Self {
-        let original_error = original_error.into();
-        let mut record = Self::new(
-            tool_name,
-            tool_call_id,
-            arguments_summary,
-            classify_failure_message(&original_error),
-            "",
-        );
-        record.error_message = original_error;
-        record.retryable = false;
-        record.same_failure_count = 2;
-        record.requires_user_input = false;
-        record.recommended_next_action =
-            "不要重复相同工具和参数；请修正参数、切换工具，或在缺少外部条件时询问用户。"
-                .to_string();
-        record
     }
 
     pub(crate) fn render_for_model(&self) -> String {
@@ -328,23 +302,6 @@ pub(crate) fn classify_tool_result_failure(
     }
 }
 
-fn classify_failure_message(message: &str) -> ToolFailureKind {
-    let lowered = message.to_lowercase();
-    if lowered.contains("__parse_error") || lowered.contains("参数") || lowered.contains("json") {
-        ToolFailureKind::Argument
-    } else if lowered.contains("权限") || lowered.contains("permission") {
-        ToolFailureKind::PermissionDenied
-    } else if lowered.contains("拒绝") || lowered.contains("rejected") {
-        ToolFailureKind::UserRejected
-    } else if lowered.contains("timeout") || lowered.contains("超时") {
-        ToolFailureKind::Timeout
-    } else if lowered.contains("network") || lowered.contains("网络") {
-        ToolFailureKind::Network
-    } else {
-        ToolFailureKind::ToolInternal
-    }
-}
-
 fn default_retryable(kind: ToolFailureKind) -> bool {
     matches!(
         kind,
@@ -353,10 +310,7 @@ fn default_retryable(kind: ToolFailureKind) -> bool {
 }
 
 fn default_requires_user_input(kind: ToolFailureKind) -> bool {
-    matches!(
-        kind,
-        ToolFailureKind::PermissionDenied | ToolFailureKind::UserRejected
-    )
+    matches!(kind, ToolFailureKind::UserRejected)
 }
 
 fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'static str {
@@ -367,9 +321,6 @@ fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'st
             } else {
                 "检查工具 schema 和参数类型，修正参数后再调用。"
             }
-        }
-        ToolFailureKind::PermissionDenied => {
-            "不要重复执行被拒绝的操作；改用安全方案或请求用户授权。"
         }
         ToolFailureKind::UserRejected => {
             "用户已拒绝该操作；不要重复请求同一操作，改用不需要该授权的方案。"
@@ -404,104 +355,6 @@ pub(crate) fn tool_result_provider_text(
     } else {
         tool_result_full_output(result)
     }
-}
-
-pub(crate) fn tool_call_dedupe_key(tool_name: &str, arguments: &serde_json::Value) -> String {
-    format!("{tool_name}\n{}", canonical_json(arguments))
-}
-
-pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(value) => value.to_string(),
-        serde_json::Value::Number(value) => value.to_string(),
-        serde_json::Value::String(value) => {
-            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-        }
-        serde_json::Value::Array(values) => {
-            let items = values.iter().map(canonical_json).collect::<Vec<_>>();
-            format!("[{}]", items.join(","))
-        }
-        serde_json::Value::Object(map) => {
-            let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by_key(|(key, _)| *key);
-            let items = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-                    format!("{key}:{}", canonical_json(value))
-                })
-                .collect::<Vec<_>>();
-            format!("{{{}}}", items.join(","))
-        }
-    }
-}
-
-pub(crate) fn append_duplicate_tool_result(
-    ctx: &mut crate::turn_context::TurnContext,
-    tool_call_id: &str,
-    tool_name: &str,
-) {
-    let message = format!(
-        "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。\
-        请查看上方历史消息中的工具执行结果，直接基于已有结果继续后续任务，不要再次发起相同调用。"
-    );
-    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-        name: tool_name.to_string(),
-        tool_call_id: Some(tool_call_id.to_string()),
-        ok: true,
-        output: message.clone(),
-        full_output: Some(message.clone()),
-        duration_ms: None,
-    });
-    append_tool_result_message(
-        &mut ctx.session,
-        tool_call_id,
-        tool_name,
-        message.clone(),
-        false,
-    );
-    append_runtime_tool_message(
-        &mut ctx.session,
-        tool_name,
-        format!("跳过重复工具调用 [{tool_name}]\n{message}"),
-    );
-}
-
-pub(crate) fn append_repeated_failed_tool_result(
-    ctx: &mut crate::turn_context::TurnContext,
-    tool_call_id: &str,
-    tool_name: &str,
-    original_error: &str,
-) {
-    let error_hint = if original_error.trim().is_empty() {
-        String::new()
-    } else {
-        format!("失败原因：{original_error}\n")
-    };
-    let message = format!(
-        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；如果失败原因包含 __parse_error，请重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数；也可以切换到其他可行方式。"
-    );
-    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-        name: tool_name.to_string(),
-        tool_call_id: Some(tool_call_id.to_string()),
-        ok: false,
-        output: message.clone(),
-        full_output: Some(message.clone()),
-        duration_ms: None,
-    });
-    append_tool_result_message(
-        &mut ctx.session,
-        tool_call_id,
-        tool_name,
-        message.clone(),
-        true,
-    );
-    append_runtime_tool_message(
-        &mut ctx.session,
-        tool_name,
-        format!("跳过重复失败工具调用 [{tool_name}]\n{message}"),
-    );
 }
 
 pub(crate) fn is_media_tool_name(tool_name: &str) -> bool {

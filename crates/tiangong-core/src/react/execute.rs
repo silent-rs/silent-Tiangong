@@ -3,7 +3,7 @@
 //! 本模块只负责从已构建的 TurnContext 执行模型请求、工具调用与总结阶段；
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -36,15 +36,13 @@ use super::tools;
 
 #[derive(Default)]
 pub(super) struct ToolCallHistory {
-    successful_keys: HashSet<String>,
-    failed_calls: HashMap<String, String>,
+    /// 本轮失败过的工具名（恢复提示引导用，非硬拦截——见
+    /// `append_failure_recovery_prompt`）。
     failed_names: HashSet<String>,
 }
 
 impl ToolCallHistory {
     pub(super) fn clear(&mut self) {
-        self.successful_keys.clear();
-        self.failed_calls.clear();
         self.failed_names.clear();
     }
 }
@@ -214,13 +212,8 @@ pub(super) fn append_invalid_tool_calls_context(
 }
 
 pub(super) enum ToolPreflightOutcome {
-    Execute {
-        args_summary: String,
-        dedupe_key: String,
-    },
-    Skip {
-        needs_recovery: bool,
-    },
+    Execute { args_summary: String },
+    Skip { needs_recovery: bool },
 }
 
 pub(super) fn prepare_tool_call(
@@ -262,69 +255,19 @@ pub(super) fn prepare_tool_call(
             &call.name,
             format!("工具参数无效 [{}]\n{provider_text}", call.name),
         );
-        let dedupe_key = tool_call_dedupe_key(&call.name, &call.arguments);
-        history.failed_calls.insert(dedupe_key, provider_text);
         history.failed_names.insert(call.name.clone());
         return ToolPreflightOutcome::Skip {
             needs_recovery: true,
         };
     }
 
+    // 不做「本轮已成功/已失败的完全相同调用」拦截：有副作用的操作
+    // （构建、安装、发布等）在两次调用之间外部世界可能已变化，重跑是
+    // 合法意图（改源码 → 重新构建/安装的迭代闭环）；模型自身的历史
+    // 中已包含先前调用的结果，循环重试由预算与失败恢复提示约束。
     let args_summary = format_tool_args_summary(call);
-    let dedupe_key = tool_call_dedupe_key(&call.name, &call.arguments);
-    if history.successful_keys.contains(&dedupe_key) {
-        append_duplicate_tool_result(ctx, &call.id, &call.name);
-        return ToolPreflightOutcome::Skip {
-            needs_recovery: false,
-        };
-    }
-    if let Some(original_error) = history.failed_calls.get(&dedupe_key).cloned() {
-        let repeated_failure =
-            ToolFailureRecord::repeated(&call.name, &call.id, args_summary, original_error);
-        append_repeated_failed_tool_result(
-            ctx,
-            &call.id,
-            &call.name,
-            &repeated_failure.render_for_model(),
-        );
-        history.failed_names.insert(call.name.clone());
-        return ToolPreflightOutcome::Skip {
-            needs_recovery: true,
-        };
-    }
 
-    ToolPreflightOutcome::Execute {
-        args_summary,
-        dedupe_key,
-    }
-}
-
-pub(super) fn record_parallel_duplicate_tool_call(ctx: &mut TurnContext, call: &ToolCall) {
-    let message = format!(
-        "同一批次已经安排了完全相同的 {} 工具调用，本次重复调用已跳过；请直接使用同批调用返回的结果。",
-        call.name
-    );
-    append_tool_result_message(
-        &mut ctx.session,
-        &call.id,
-        &call.name,
-        message.clone(),
-        false,
-    );
-    append_runtime_tool_message(
-        &mut ctx.session,
-        &call.name,
-        format!("跳过同批重复工具调用 [{}]\n{message}", call.name),
-    );
-    ctx.session.persist_to_disk();
-    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-        name: call.name.clone(),
-        tool_call_id: Some(call.id.clone()),
-        ok: true,
-        output: message.clone(),
-        full_output: Some(message),
-        duration_ms: None,
-    });
+    ToolPreflightOutcome::Execute { args_summary }
 }
 
 #[allow(dead_code)]
@@ -373,7 +316,6 @@ pub(super) fn record_rejected_tool_call(
 pub(super) struct CompletedToolCall<'a> {
     pub(super) call: &'a ToolCall,
     pub(super) args_summary: &'a str,
-    pub(super) dedupe_key: String,
     pub(super) result: &'a ToolResult,
     pub(super) duration_ms: u64,
 }
@@ -386,7 +328,6 @@ pub(super) fn record_completed_tool_call(
     let CompletedToolCall {
         call,
         args_summary,
-        dedupe_key,
         result,
         duration_ms,
     } = completion;
@@ -423,20 +364,9 @@ pub(super) fn record_completed_tool_call(
     );
 
     let needs_recovery = if result.ok {
-        history.failed_calls.remove(&dedupe_key);
         history.failed_names.remove(&call.name);
-        history.successful_keys.insert(dedupe_key);
         false
     } else {
-        let error_summary = ToolFailureRecord::new(
-            &call.name,
-            &call.id,
-            args_summary.to_string(),
-            classify_tool_result_failure(result),
-            tool_result_full_output(result),
-        )
-        .render_for_model();
-        history.failed_calls.insert(dedupe_key, error_summary);
         history.failed_names.insert(call.name.clone());
         true
     };
@@ -1122,7 +1052,6 @@ fn complete_llm_request(
                 NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),
                     ready_tools: Vec::new(),
-                    prepared_keys: HashSet::new(),
                     invalid_tool_calls: response.invalid_tool_calls,
                     response_usage: response.usage.clone(),
                     needs_failure_recovery: false,
