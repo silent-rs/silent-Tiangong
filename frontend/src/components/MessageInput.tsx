@@ -1148,7 +1148,8 @@ export function MessageInput({
                 )}
               </div>
               <div className="flex items-center gap-0.5 shrink-0">
-                <SessionInputPluginHost slot="session.input-status" />
+                {/* 会话区过窄时隐藏插件拓展 UI，把空间让给左侧运行状态。 */}
+                {!compact && <SessionInputPluginHost slot="session.input-status" />}
                 <Select
                   value={sessionModelRef ?? MODEL_DEFAULT_VALUE}
                   onValueChange={(value) => { void handleSessionModelChange(value); }}
