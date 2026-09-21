@@ -419,7 +419,10 @@ pub const INJECTION_TOOL_NAME: &str = "plugin_injection";
 ///
 /// tool_call name 统一用 `plugin_injection`（注册的注入工具），原始来源 tool_name
 /// 放入 payload 的 `source` 字段，让 Agent 知道数据来源。
-/// 去重：与上一条 plugin_injection 消息渲染文本完全相同则跳过。
+/// 去重：与**保留区**（`summary_up_to` 之后，模型仍可见）内最近一条
+/// plugin_injection 消息渲染文本完全相同则跳过。被压缩折叠的消息对模型
+/// 已不可见，不参与去重——否则折叠后必要的内容重注入（如自制插件清单
+/// 的压缩自愈）会被折叠区的旧消息静默拦截。
 pub fn inject_tool_to_messages(
     session: &mut Session,
     tool_name: &str,
@@ -437,8 +440,8 @@ pub fn inject_tool_to_messages(
     if output.trim().is_empty() {
         return false;
     }
-    let is_dup = session
-        .messages
+    let visible_from = session.summary_up_to.min(session.messages.len());
+    let is_dup = session.messages[visible_from..]
         .iter()
         .rev()
         .find(|msg| {
@@ -578,6 +581,51 @@ fn format_payload_value(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 注入去重只看保留区：折叠区的同内容注入不得拦截必要的内容重注入。
+    ///
+    /// 回归（自制插件清单压缩自愈被拦死）：清单注入 → 压缩把边界推进到
+    /// 越过该清单 → 下一轮自愈重注入同内容清单 —— 旧实现对全量数组做
+    /// 去重，找到折叠区里那条内容相同的旧清单并静默丢弃，自愈从未生效。
+    #[test]
+    fn inject_tool_dedup_ignores_folded_messages() {
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("inject-fold").with_storage_root(storage.path());
+        let payload = serde_json::json!({"plugins": [{"name": "demo"}]});
+
+        // 首次注入：成功。
+        assert!(inject_tool_to_messages(
+            &mut session,
+            "local_plugin_list",
+            &payload
+        ));
+        let len_after_first = session.messages.len();
+
+        // 未折叠时同内容再注入：去重生效（不刷屏）。
+        assert!(!inject_tool_to_messages(
+            &mut session,
+            "local_plugin_list",
+            &payload
+        ));
+        assert_eq!(session.messages.len(), len_after_first);
+
+        // 模拟压缩折叠：边界推进到越过清单注入消息对。
+        session.summary_up_to = session.messages.len();
+
+        // 同内容再注入：折叠区不参与去重 → 重新注入（压缩自愈的执行环节）。
+        assert!(
+            inject_tool_to_messages(&mut session, "local_plugin_list", &payload),
+            "折叠后的重注入不得被旧消息拦截"
+        );
+        assert!(session.messages.len() > len_after_first);
+        // 新注入落在保留区（对模型可见）。
+        let new_injection_at = session.messages.len() - 1;
+        assert!(new_injection_at >= session.summary_up_to);
+        assert_eq!(
+            session.messages[new_injection_at].tool_name.as_deref(),
+            Some(INJECTION_TOOL_NAME)
+        );
+    }
 
     #[test]
     fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
