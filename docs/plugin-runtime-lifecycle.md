@@ -121,3 +121,51 @@ ensure_core` 签名与改造前完全一致；桌面端 `build_plugins_sync` 返
 `permissions: ["tool.provide"]` + `capabilities: { "tools": true }`。
 测试进程调用 `core_plugin_ids` 前需 `tiangong_config::registry::init_from_dir`
 初始化全局配置（model_requirements 过滤依赖）。
+
+## 自制插件动态调用通道（local 签名 → 固定工具 + 对话内清单）
+
+**核心原则：固定 tools 的 description 恒定不变，工具清单走对话历史。**
+任何放进 `tools` 字段的内容变动都会打穿 KV cache 前缀；自制插件（开发场景
+反复装卸）的清单因此走 append-only 的注入通道。
+
+### 分流判据（安装时确定，终身不变）
+
+| 签名来源 | 通道 |
+|---|---|
+| `tiangong-official` / 三方登记表 / 未签名 | 独立工具声明（现状） |
+| `local`（用户密钥签名，创作链 `plugin_dev` 安装） | 固定通道 + 对话内清单 |
+
+判据在 `LoadedPlugin.signed_release.publisher`（`registry::is_local_plugin`）。
+
+### 固定工具与路由
+
+`RuntimeCorePlugin` 声明两个 description 恒定的工具：
+
+- `call_local_plugin`（plugin_name / function_name / args）——`handle` 同步段
+  实时路由（经差量交付表，不使用聚合缓存，两次聚合之间的装卸也能正确
+  路由或给出带清单的失败信息），转发到目标适配器执行；
+- `list_local_plugins`——返回当前清单 JSON。
+
+错误语义：插件不存在 / 方法不存在 / 参数缺失 → `ok:false` + 当前清单
+（或可用方法列表），模型一次纠正到位——补偿后移的 schema 校验。
+
+### 清单到达模型的路径
+
+1. **turn 内变化**（装完即用）：插件变化事件的宿主订阅者按
+   `is_local_plugin` 分流 → `ToolInjection`（`local_plugin_list`）→
+   `Command::InjectTool` → 工具批次收敛后的安全点注入消息对
+   （`PendingFinish` 阶段自动转 `NeedModel`，模型刚要收尾时装了新插件
+   会重新考虑）。
+2. **首轮基线 / 空闲期间的变化**：桥在 `on_turn_started` 比对清单内容
+   hash，变化才经自留的反馈通道注入（未送达则下轮重试）。
+
+清单内容与去重：`registry::local_plugin_inventory()`（纯 manifest 级，
+不实例化 WASM）+ 注入通道的连续相同去重——反复聚合但清单未变不刷屏。
+
+### 已知代价（实机观察项）
+
+1. schema 校验后移：错误从"发不出去"变成"一次失败回合"（错误带签名补偿）；
+2. 前端渲染：自制插件调用暂落 `other` 分类（可按 args.plugin_name 补）；
+3. 清单消息累积：压缩时正常折叠；长开发会话观察是否需要"仅保留最近一条"；
+4. cache 命中率：`context.rs` 的 `prompt_cache_hit_tokens` 日志按
+   source 观察反复 build 场景的 hit_ratio 稳定性。

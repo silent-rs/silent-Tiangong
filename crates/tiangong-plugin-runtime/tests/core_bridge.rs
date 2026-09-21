@@ -49,6 +49,7 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
     let _guard = REGISTRY_LOCK.lock().unwrap();
     ensure_config();
     let root = tempfile::TempDir::new().unwrap();
+
     stage_ts_tool_plugin(root.path(), "bridge-view-a", "bridge_a_tool");
     assert!(
         tiangong_plugin_runtime::registry::preload_installed_plugins(root.path()) >= 1,
@@ -56,20 +57,19 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
     );
 
     let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
-    assert_eq!(
-        tool_names(&bridge),
-        vec!["bridge_a_tool"],
+    // 固定通道工具（call_local_plugin/list_local_plugins）恒在声明中，
+    // 逐项断言插件工具的存在性而非全集相等。
+    let has = |names: &[String], expect: &str| names.iter().any(|n| n == expect);
+    assert!(
+        has(&tool_names(&bridge), "bridge_a_tool"),
         "首轮聚合应见 A 工具"
     );
 
     // 模拟新装插件 B：registry 出现新记录，下一次聚合即交付（无需通知）。
     stage_ts_tool_plugin(root.path(), "bridge-view-b", "bridge_b_tool");
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
-    assert_eq!(
-        tool_names(&bridge),
-        vec!["bridge_a_tool", "bridge_b_tool"],
-        "新装插件 B 下一次聚合可见"
-    );
+    let after_install = tool_names(&bridge);
+    assert!(has(&after_install, "bridge_a_tool") && has(&after_install, "bridge_b_tool"));
 
     // prompt 段落聚合为空（两个插件都不声明 prompt），不 panic。
     assert!(bridge.prompt_sections().is_empty());
@@ -77,9 +77,9 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
     // 模拟卸载 B：registry 记录消失，下一次聚合不再交付。
     tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "bridge-view-b", false)
         .expect("卸载测试插件 B");
-    assert_eq!(
-        tool_names(&bridge),
-        vec!["bridge_a_tool"],
+    let after_uninstall = tool_names(&bridge);
+    assert!(
+        has(&after_uninstall, "bridge_a_tool") && !has(&after_uninstall, "bridge_b_tool"),
         "卸载后 B 工具消失、其余不受影响"
     );
 }
@@ -90,6 +90,7 @@ fn 桥聚合_并发首见收敛() {
     let _guard = REGISTRY_LOCK.lock().unwrap();
     ensure_config();
     let root = tempfile::TempDir::new().unwrap();
+
     stage_ts_tool_plugin(root.path(), "bridge-view-c", "bridge_c_tool");
     tiangong_plugin_runtime::registry::preload_installed_plugins(root.path());
 
@@ -112,5 +113,216 @@ fn 桥聚合_并发首见收敛() {
     for handle in handles {
         handle.join().expect("并发聚合线程不得 panic 或卡死");
     }
-    assert_eq!(first, vec!["bridge_c_tool"]);
+    assert!(
+        first.iter().any(|n| n == "bridge_c_tool"),
+        "并发聚合应交付 C 工具（固定通道工具亦在声明中）：{first:?}"
+    );
+}
+
+// ── 自制插件动态调用通道（local 签名 → 固定工具 + 对话内清单）──
+
+use tiangong_core::session::Session;
+use tiangong_core::tools::extension::ToolOverrideHandler;
+use tiangong_llm::tool::ToolCall;
+use tiangong_plugin_runtime::registry::{
+    is_local_plugin, local_plugin_inventory, preload_installed_plugins,
+};
+use tiangong_plugin_runtime::signature::{
+    SIGNED_RELEASE_FILE, SIGNED_RELEASE_SCHEMA_VERSION, SignedArtifact, SignedPluginRelease,
+};
+use tiangong_plugin_runtime::trust::{
+    LOCAL_PUBLISHER, ensure_user_signing_key, sign_with_user_key,
+};
+
+fn sha256_of(path: &std::path::Path) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+/// 造一个 local 签名的纯 TS 工具插件（用户密钥签名，publisher=local）。
+fn stage_local_signed_plugin(root: &std::path::Path, id: &str, tool: &str) {
+    stage_ts_tool_plugin(root, id, tool);
+    let dir = root.join("plugins").join(id);
+    let manifest =
+        tiangong_plugin_runtime::manifest::PluginManifest::load(&dir.join("plugin.json")).unwrap();
+    ensure_user_signing_key(root).unwrap();
+    let release = SignedPluginRelease {
+        schema_version: SIGNED_RELEASE_SCHEMA_VERSION,
+        id: id.to_string(),
+        version: manifest.version.clone(),
+        publisher: LOCAL_PUBLISHER.to_string(),
+        permissions: manifest.permissions.clone(),
+        manifest: SignedArtifact {
+            path: "plugin.json".into(),
+            sha256: sha256_of(&dir.join("plugin.json")),
+        },
+        wasm: None,
+        ui: Vec::new(),
+        sidecar: None,
+        content_manifest: None,
+    };
+    std::fs::write(
+        dir.join(SIGNED_RELEASE_FILE),
+        serde_json::to_vec_pretty(&release).unwrap(),
+    )
+    .unwrap();
+    sign_with_user_key(root, &dir.join(SIGNED_RELEASE_FILE)).unwrap();
+}
+
+fn local_call(plugin: &str, function: &str) -> ToolCall {
+    ToolCall {
+        id: format!("t_{}", scru128::new()),
+        name: "call_local_plugin".to_string(),
+        arguments: serde_json::json!({
+            "plugin_name": plugin,
+            "function_name": function,
+            "args": {}
+        }),
+    }
+}
+
+#[test]
+fn 固定通道_自制插件不进声明_清单与判据正确() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    stage_local_signed_plugin(root.path(), "local-bridge-a", "local_a_tool");
+    stage_ts_tool_plugin(root.path(), "unsigned-bridge-b", "unsigned_b_tool");
+    assert!(
+        preload_installed_plugins(root.path()) >= 2,
+        "两个测试插件都应装入注册表"
+    );
+
+    // 判据：local 签名 vs 未签名。
+    assert!(
+        is_local_plugin("local-bridge-a"),
+        "local 签名插件应命中判据"
+    );
+    assert!(
+        !is_local_plugin("unsigned-bridge-b"),
+        "未签名插件不走固定通道"
+    );
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let names = tool_names(&bridge);
+    // 固定通道工具在声明中（description 恒定）。
+    assert!(names.iter().any(|n| n == "call_local_plugin"));
+    assert!(names.iter().any(|n| n == "list_local_plugins"));
+    // 自制插件的方法不进 tools 声明（保护 KV cache 前缀）。
+    assert!(
+        !names.iter().any(|n| n == "local_a_tool"),
+        "自制插件方法不得进入 tools 声明"
+    );
+    // 未签名插件保持逐个声明的现状。
+    assert!(
+        names.iter().any(|n| n == "unsigned_b_tool"),
+        "未签名插件保持独立声明"
+    );
+
+    // 清单：只含自制插件，含版本与方法签名。
+    let inventory = local_plugin_inventory();
+    let plugins = inventory["plugins"].as_array().unwrap();
+    assert_eq!(plugins.len(), 1, "清单只含自制插件：{inventory}");
+    assert_eq!(plugins[0]["name"], "local-bridge-a");
+    assert_eq!(plugins[0]["functions"][0]["name"], "local_a_tool");
+}
+
+#[tokio::test]
+// std 锁跨 await 是刻意的串行保护：同二进制内持锁者即本测试，
+// 运行路径无死锁；测试代码允许局部豁免。
+#[allow(clippy::await_holding_lock)]
+async fn 固定通道_方法不存在返回可用方法() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    stage_local_signed_plugin(root.path(), "local-bridge-c", "local_c_tool");
+    preload_installed_plugins(root.path());
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let mut session = Session::new("local-call-missing-fn");
+    let result = bridge
+        .handle(
+            &local_call("local-bridge-c", "no_such_fn"),
+            &mut session,
+            "test",
+        )
+        .await
+        .expect("固定通道应拦截并返回结果");
+    assert!(!result.ok);
+    assert!(
+        result.stderr.contains("无方法 no_such_fn"),
+        "{}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains("可用方法：local_c_tool"),
+        "错误信息应带可用方法：{}",
+        result.stderr
+    );
+}
+
+#[tokio::test]
+// std 锁跨 await 是刻意的串行保护：同二进制内持锁者即本测试，
+// 运行路径无死锁；测试代码允许局部豁免。
+#[allow(clippy::await_holding_lock)]
+async fn 固定通道_插件卸载后实时返回清单() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    stage_local_signed_plugin(root.path(), "local-bridge-d", "local_d_tool");
+    preload_installed_plugins(root.path());
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    // 卸载后路由实时感知（不依赖聚合缓存）。
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-bridge-d", false)
+        .unwrap();
+    let mut session = Session::new("local-call-gone");
+    let result = bridge
+        .handle(
+            &local_call("local-bridge-d", "local_d_tool"),
+            &mut session,
+            "test",
+        )
+        .await
+        .expect("固定通道应拦截并返回结果");
+    assert!(!result.ok);
+    assert!(
+        result.stderr.contains("local-bridge-d 已不存在"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[tokio::test]
+// std 锁跨 await 是刻意的串行保护：同二进制内持锁者即本测试，
+// 运行路径无死锁；测试代码允许局部豁免。
+#[allow(clippy::await_holding_lock)]
+async fn 固定通道_查询工具返回清单() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    stage_local_signed_plugin(root.path(), "local-bridge-e", "local_e_tool");
+    preload_installed_plugins(root.path());
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let mut session = Session::new("local-list");
+    let call = ToolCall {
+        id: "t_list".to_string(),
+        name: "list_local_plugins".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let result = bridge
+        .handle(&call, &mut session, "test")
+        .await
+        .expect("查询工具应返回结果");
+    assert!(result.ok);
+    assert!(
+        result.stdout.contains("local-bridge-e"),
+        "{}",
+        result.stdout
+    );
 }

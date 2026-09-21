@@ -29,6 +29,83 @@ use tiangong_llm::tool::{ToolCall, ToolSpec};
 
 use crate::registry::{self, RuntimeKind};
 
+/// 自制插件动态调用工具名（description 恒定，不含任何插件信息——
+/// 插件装卸不改变 tools 声明，KV cache 前缀保持稳定）。
+pub const CALL_LOCAL_PLUGIN_TOOL: &str = "call_local_plugin";
+/// 自制插件清单查询工具名。
+pub const LIST_LOCAL_PLUGINS_TOOL: &str = "list_local_plugins";
+
+/// 清单注入的 tool_name（注入通道使用，注册在固定声明中的解释见
+/// `CALL_LOCAL_PLUGIN_TOOL` 的 description）。
+pub const LOCAL_PLUGIN_LIST_INJECTION: &str = "local_plugin_list";
+
+/// `call_local_plugin` 的路由结果（同步段解析，异步段执行/返回错误）。
+enum LocalCallRouting {
+    /// 参数或目标无效：message 为主错误，inventory 为随附清单（None=不必附）。
+    Invalid {
+        message: String,
+        inventory: Option<serde_json::Value>,
+    },
+    /// 命中自制插件方法，转发执行。
+    Forwarded {
+        adapter: Arc<dyn Plugin>,
+        inner_call: ToolCall,
+    },
+}
+
+impl LocalCallRouting {
+    fn invalid(message: &str, inventory: Option<serde_json::Value>) -> Self {
+        Self::Invalid {
+            message: message.to_string(),
+            inventory,
+        }
+    }
+}
+
+/// 失败结果：ok:false 的提示（携带当前清单让模型一次纠正到位）。
+fn local_call_failure(message: &str, inventory: Option<serde_json::Value>) -> ToolResult {
+    let mut stderr = message.to_string();
+    if let Some(inventory) = inventory {
+        stderr.push_str(" 当前自制插件清单：");
+        stderr.push_str(&inventory.to_string());
+    }
+    ToolResult {
+        ok: false,
+        summary: message.to_string(),
+        stdout: String::new(),
+        stderr,
+        exit_code: 1,
+        execution: None,
+    }
+}
+
+fn call_local_plugin_spec() -> ToolSpec {
+    ToolSpec {
+        name: CALL_LOCAL_PLUGIN_TOOL.to_string(),
+        description: "调用本机自制插件的方法。可用插件与方法清单由系统在对话中以 [自制插件清单] 消息提供，请以最近一条清单为准。".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "plugin_name":   { "type": "string", "description": "自制插件名（清单中的 name）" },
+                "function_name": { "type": "string", "description": "要调用的方法名（清单中的 functions[].name）" },
+                "args":          { "type": "object",  "description": "方法参数，结构见清单中的 args_schema" }
+            },
+            "required": ["plugin_name", "function_name"]
+        }),
+    }
+}
+
+fn list_local_plugins_spec() -> ToolSpec {
+    ToolSpec {
+        name: LIST_LOCAL_PLUGINS_TOOL.to_string(),
+        description: "列出当前可用的自制插件及其方法签名。".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }
+}
+
 /// Core 侧的 runtime 聚合插件。
 pub struct RuntimeCorePlugin {
     storage_root: PathBuf,
@@ -38,6 +115,12 @@ pub struct RuntimeCorePlugin {
     /// 最近一次聚合构建的工具路由表（tool_name → 拥有者适配器）。
     /// `tool_specs` 聚合时重建；`handle` 只读查询。
     tool_routes: RwLock<HashMap<String, Arc<dyn Plugin>>>,
+    /// 本 Core 自留的反馈通道（turn 内有效）：自制插件清单变化时经
+    /// 注入通道追加到对话历史。
+    feedback_tx: RwLock<Option<tiangong_core::core::plugin::PluginFeedbackTx>>,
+    /// 最近一次注入的自制插件清单（序列化文本）：轮开始时比对，
+    /// 变化才注入——append-only，cache 前缀不受影响。
+    last_inventory: Mutex<Option<String>>,
 }
 
 impl RuntimeCorePlugin {
@@ -48,6 +131,8 @@ impl RuntimeCorePlugin {
             runtime: RuntimeKind::Desktop,
             delivered: Mutex::new(HashMap::new()),
             tool_routes: RwLock::new(HashMap::new()),
+            feedback_tx: RwLock::new(None),
+            last_inventory: Mutex::new(None),
         })
     }
 
@@ -89,11 +174,18 @@ impl RuntimeCorePlugin {
     }
 
     /// 用聚合结果重建工具路由表，返回聚合的工具声明（含去重）。
+    ///
+    /// 分流：自制插件（local 签名）不进声明——其能力经对话内清单 +
+    /// [`CALL_LOCAL_PLUGIN_TOOL`] 固定通道调用，装卸不改变 tools 字段；
+    /// 官方/三方/未签名插件保持逐个声明的现状。
     fn aggregate_tool_specs(&self) -> Vec<ToolSpec> {
         let adapters = self.adapters();
         let mut specs = Vec::new();
         let mut routes = HashMap::new();
         for adapter in &adapters {
+            if registry::is_local_plugin(adapter.id()) {
+                continue;
+            }
             for spec in adapter.tool_specs() {
                 if !routes.contains_key(&spec.name) {
                     routes.insert(spec.name.clone(), adapter.clone());
@@ -101,6 +193,10 @@ impl RuntimeCorePlugin {
                 }
             }
         }
+        // 固定通道工具（description 恒定）。路由表按函数名直查自制适配器，
+        // 不经过 routes 缓存。
+        specs.push(call_local_plugin_spec());
+        specs.push(list_local_plugins_spec());
         if let Ok(mut tool_routes) = self.tool_routes.write() {
             *tool_routes = routes;
         }
@@ -110,6 +206,103 @@ impl RuntimeCorePlugin {
     fn each_adapter(&self, mut apply: impl FnMut(&Arc<dyn Plugin>)) {
         for adapter in self.adapters() {
             apply(&adapter);
+        }
+    }
+
+    /// 轮开始时检查自制插件清单是否需要注入。
+    ///
+    /// 首轮（从未注入）且存在自制插件 → 注入基线清单；此后清单内容变化
+    /// （装卸/升级/启停自制插件）→ 注入新清单（note 标注早前作废）。
+    /// 全部卸载后的空清单仅在曾注入过时下发一次（明确作废）。
+    /// 经反馈通道走 `Command::InjectTool` → 工具批次收敛后的安全点注入，
+    /// 对话历史 append-only，KV cache 前缀不受影响。
+    fn maybe_inject_local_inventory(&self) {
+        let inventory = registry::local_plugin_inventory();
+        let text = inventory.to_string();
+        let empty = inventory["plugins"]
+            .as_array()
+            .is_some_and(std::vec::Vec::is_empty);
+        let needs_inject = {
+            let Ok(mut last) = self.last_inventory.lock() else {
+                return;
+            };
+            if last.as_deref() == Some(text.as_str()) {
+                false
+            } else if empty && last.is_none() {
+                // 从未有自制插件也从未注入：不发空清单，避免无谓消息。
+                false
+            } else {
+                *last = Some(text);
+                true
+            }
+        };
+        if !needs_inject {
+            return;
+        }
+        let sent = self
+            .feedback_tx
+            .read()
+            .ok()
+            .and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|tx| tx.inject_tool(LOCAL_PLUGIN_LIST_INJECTION, inventory))
+            })
+            .unwrap_or(false);
+        if !sent {
+            tracing::debug!("自制插件清单注入未送达（无活跃 turn），下轮重试");
+            // 回退记录，下轮重试（turn 未开/通道关闭时命令会丢）。
+            if let Ok(mut last) = self.last_inventory.lock() {
+                *last = None;
+            }
+        }
+    }
+
+    /// 解析并路由 `call_local_plugin`。
+    ///
+    /// 实时性：定位经 [`Self::adapters`]（每次实时差量同步注册表），
+    /// 不使用 `tool_routes` 缓存——自制插件的装卸在两次聚合之间也能
+    /// 正确路由或给出带清单的失败信息。
+    fn route_local_plugin_call(&self, call: &ToolCall) -> LocalCallRouting {
+        let arguments = &call.arguments;
+        let Some(plugin_name) = arguments.get("plugin_name").and_then(|v| v.as_str()) else {
+            return LocalCallRouting::invalid("缺少 plugin_name 参数", None);
+        };
+        let Some(function_name) = arguments.get("function_name").and_then(|v| v.as_str()) else {
+            return LocalCallRouting::invalid("缺少 function_name 参数", None);
+        };
+        let args = arguments
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let adapter = self
+            .adapters()
+            .into_iter()
+            .find(|adapter| adapter.id() == plugin_name && registry::is_local_plugin(adapter.id()));
+        let Some(adapter) = adapter else {
+            return LocalCallRouting::invalid(
+                &format!("插件 {plugin_name} 已不存在。"),
+                Some(registry::local_plugin_inventory()),
+            );
+        };
+        let declared = adapter.tool_specs();
+        let Some(_spec) = declared.iter().find(|spec| spec.name == function_name) else {
+            let available: Vec<&str> = declared.iter().map(|spec| spec.name.as_str()).collect();
+            return LocalCallRouting::invalid(
+                &format!(
+                    "插件 {plugin_name} 无方法 {function_name}。可用方法：{}",
+                    available.join("、")
+                ),
+                None,
+            );
+        };
+        LocalCallRouting::Forwarded {
+            adapter,
+            inner_call: ToolCall {
+                id: format!("local_{}", scru128::new()),
+                name: function_name.to_string(),
+                arguments: args,
+            },
         }
     }
 }
@@ -124,6 +317,10 @@ impl Plugin for RuntimeCorePlugin {
     }
 
     fn set_feedback_tx(&self, tx: tiangong_core::core::plugin::PluginFeedbackTx) {
+        // 自留一份：自制插件清单变化时经注入通道下发（turn 内有效）。
+        if let Ok(mut guard) = self.feedback_tx.write() {
+            *guard = Some(tx.clone());
+        }
         self.each_adapter(|adapter| adapter.set_feedback_tx(tx.clone()));
     }
 
@@ -169,6 +366,9 @@ impl Plugin for RuntimeCorePlugin {
 
     fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
         self.each_adapter(|adapter| adapter.on_turn_started(session, turn_start_idx));
+        // 轮开始注入/刷新自制插件清单：覆盖首轮基线与空闲期间发生的
+        // 装卸（变化事件的 turn 内注入由宿主订阅者另行投递）。
+        self.maybe_inject_local_inventory();
     }
 
     fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
@@ -193,16 +393,47 @@ impl ToolOverrideHandler for RuntimeCorePlugin {
         session: &mut Session,
         actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        let owner = self
-            .tool_routes
-            .read()
-            .ok()
-            .and_then(|routes| routes.get(&call.name).cloned());
-        match owner {
-            Some(adapter) => adapter.handle(call, session, actor_id),
-            // 路由表在 tool_specs 聚合时重建；未知工具名不拦截，
-            // 交回 core 默认逻辑。
-            None => Box::pin(async { None }),
+        // 自制插件固定通道：同步段实时路由（不使用聚合缓存），异步段
+        // 转发到目标适配器或返回带清单的失败信息。
+        match call.name.as_str() {
+            CALL_LOCAL_PLUGIN_TOOL => match self.route_local_plugin_call(call) {
+                LocalCallRouting::Forwarded {
+                    adapter,
+                    inner_call,
+                } => adapter.handle(&inner_call, session, actor_id),
+                LocalCallRouting::Invalid { message, inventory } => {
+                    let failure = local_call_failure(&message, inventory);
+                    Box::pin(async move { Some(failure) })
+                }
+            },
+            LIST_LOCAL_PLUGINS_TOOL => {
+                let inventory = registry::local_plugin_inventory();
+                let text = serde_json::to_string_pretty(&inventory)
+                    .unwrap_or_else(|_| inventory.to_string());
+                Box::pin(async move {
+                    Some(ToolResult {
+                        ok: true,
+                        summary: "当前自制插件清单".to_string(),
+                        stdout: text,
+                        stderr: String::new(),
+                        exit_code: 0,
+                        execution: None,
+                    })
+                })
+            }
+            _ => {
+                let owner = self
+                    .tool_routes
+                    .read()
+                    .ok()
+                    .and_then(|routes| routes.get(&call.name).cloned());
+                match owner {
+                    Some(adapter) => adapter.handle(call, session, actor_id),
+                    // 路由表在 tool_specs 聚合时重建；未知工具名不拦截，
+                    // 交回 core 默认逻辑。
+                    None => Box::pin(async { None }),
+                }
+            }
         }
     }
 }

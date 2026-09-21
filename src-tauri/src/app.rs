@@ -88,6 +88,23 @@ pub struct ToolInjection {
     pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
 }
 
+/// 自制插件清单注入（插件变化事件的订阅者投递）。
+///
+/// 经工具注入通道追加到对话历史（append-only，KV cache 前缀不受影响）：
+/// turn 活跃的会话在工具批次收敛后的安全点收到清单（PendingFinish 阶段
+/// 会转 NeedModel 重新分析）；空闲会话由聚合桥的轮开始清单检查补上。
+struct LocalPluginListInput;
+
+impl tiangong_core::agent_input::ToolInput for LocalPluginListInput {
+    fn tool_name(&self) -> &str {
+        tiangong_plugin_runtime::LOCAL_PLUGIN_LIST_INJECTION
+    }
+
+    fn render(&self) -> serde_json::Value {
+        tiangong_plugin_runtime::registry::local_plugin_inventory()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct InputSendClaim {
     revision: u64,
@@ -895,6 +912,29 @@ impl TiangongApp {
             &self.core_manager,
             fingerprint,
         );
+    }
+
+    /// 自制插件能力变化：向全部活跃会话经注入通道下发最新清单。
+    ///
+    /// 分流判据（publisher == local）由订阅者检查；本方法只做投递。
+    /// turn 活跃的会话经 `Command::InjectTool` 在工具批次收敛后的安全点
+    /// 注入（PendingFinish 阶段自动转 NeedModel 重新分析——开发场景
+    /// 「刚装完插件模型正要收尾」会重新考虑）；空闲会话本轮投递会因
+    /// 无活跃 turn 被丢弃，由聚合桥的轮开始清单检查在下一条消息补上。
+    pub fn broadcast_local_plugin_list(&self) {
+        let session_ids: Vec<String> = self
+            .core_manager
+            .registry()
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for session_id in session_ids {
+            let _ = self.tool_injection_tx.send(ToolInjection {
+                session_id: Some(session_id),
+                browser_source: None,
+                tool: Box::new(LocalPluginListInput),
+            });
+        }
     }
 
     /// 投递前的插件配置交接：待交接标记命中则执行，否则首检指纹兜底。

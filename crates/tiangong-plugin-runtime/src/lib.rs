@@ -52,7 +52,9 @@ pub use bridge::{
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
-pub use core_bridge::RuntimeCorePlugin;
+pub use core_bridge::{
+    CALL_LOCAL_PLUGIN_TOOL, LIST_LOCAL_PLUGINS_TOOL, LOCAL_PLUGIN_LIST_INJECTION, RuntimeCorePlugin,
+};
 pub use events::{
     PluginChangeEvent, PluginChangeKind, PluginsChangedListener, set_plugins_changed_listener,
 };

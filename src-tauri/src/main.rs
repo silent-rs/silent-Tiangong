@@ -161,6 +161,12 @@ fn run_gui() {
                         let _ = emitter_handle.emit("plugins_changed", &());
                         let app_state = state_handle.state::<tiangong_app::TiangongApp>();
                         app_state.mark_all_sessions_for_plugin_change(&event.fingerprint);
+                        // 自制插件（local 签名）的能力不进 tools 声明：
+                        // 清单经注入通道追加到活跃会话的对话历史，避免
+                        // 装卸打穿 KV cache 前缀。
+                        if tiangong_plugin_runtime::registry::is_local_plugin(&event.plugin_id) {
+                            app_state.broadcast_local_plugin_list();
+                        }
                     },
                 )));
             }

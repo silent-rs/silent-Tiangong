@@ -200,6 +200,79 @@ pub fn server_dependent_enabled_plugins() -> Vec<(String, String)> {
         .collect()
 }
 
+/// 判断插件是否为本机自制（创作链以用户密钥签名，publisher == local）。
+///
+/// 自制插件走「固定工具 + 对话内清单」的动态调用通道（见
+/// `core_bridge::RuntimeCorePlugin`）：不进 tools 声明，能力清单经注入
+/// 通道追加到对话历史，避免插件装卸打穿 KV cache 前缀。判据在安装时
+/// 验定（`signed_release.publisher`），终身不变。
+pub fn is_local_plugin(plugin_id: &str) -> bool {
+    loaded_plugins()
+        .lock()
+        .ok()
+        .and_then(|plugins| {
+            plugins.get(plugin_id).map(|loaded| {
+                loaded
+                    .signed_release
+                    .as_ref()
+                    .is_some_and(|release| release.publisher == crate::trust::LOCAL_PUBLISHER)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 本机自制插件的对话内能力清单（JSON）。
+///
+/// 纯 manifest 级信息（不实例化 WASM）：每个自制插件的版本与工具签名。
+/// 该清单经注入通道追加到会话历史（append-only，cache 前缀不受影响），
+/// 模型据此填写 `call_local_plugin` 的 plugin_name / function_name。
+pub fn local_plugin_inventory() -> serde_json::Value {
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return serde_json::json!({ "plugins": [], "note": LIST_NOTE });
+    };
+    let mut entries: Vec<serde_json::Value> = plugins
+        .iter()
+        .filter(|(_, loaded)| {
+            loaded.enabled
+                && loaded
+                    .signed_release
+                    .as_ref()
+                    .is_some_and(|release| release.publisher == crate::trust::LOCAL_PUBLISHER)
+        })
+        .map(|(id, loaded)| {
+            let functions: Vec<serde_json::Value> = loaded
+                .manifest
+                .tools
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|tool| {
+                    serde_json::json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "args_schema": tool.input_schema,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "name": id,
+                "version": loaded.manifest.version,
+                "functions": functions,
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["name"].as_str().unwrap_or_default())
+    });
+    serde_json::json!({ "plugins": entries, "note": LIST_NOTE })
+}
+
+/// 清单提示语：引导模型以最近一条清单为准（历史中早前清单已作废）。
+const LIST_NOTE: &str = "以本条清单为准，早前清单作废";
+
 /// 当前启用插件集合的能力指纹（id@version 的稳定摘要）。
 ///
 /// 插件的装卸、升级、启停全部经本注册表，因此「插件是否发生变化」由
@@ -422,6 +495,10 @@ pub(crate) struct InstalledPlugin {
 struct LoadedPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
+    /// 安装时验定的签名发布信息（None=未签名/本地信任）。
+    /// `publisher == local` 是自制插件动态调用通道的分流判据，
+    /// 安装时确定、终身不变。
+    signed_release: Option<SignedPluginRelease>,
     wasm_bytes: Option<Arc<Vec<u8>>>,
     component: Option<Arc<wasmtime::component::Component>>,
     ui_plugin: Option<Arc<Mutex<WasmPlugin>>>,
@@ -1417,6 +1494,7 @@ mod tests {
             LoadedPlugin {
                 directory: directory.clone(),
                 manifest: parse_manifest(),
+                signed_release: None,
                 wasm_bytes: None,
                 component: None,
                 ui_plugin: None,
@@ -1679,6 +1757,7 @@ mod tests {
         let record = LoadedPlugin {
             directory: PathBuf::from("/tmp/load-error-demo"),
             manifest,
+            signed_release: None,
             wasm_bytes: None,
             component: None,
             ui_plugin: None,
@@ -1733,6 +1812,7 @@ mod tests {
             LoadedPlugin {
                 directory: directory.clone(),
                 manifest,
+                signed_release: None,
                 wasm_bytes: None,
                 component: None,
                 ui_plugin: None,
@@ -2292,6 +2372,7 @@ fn load_plugin_record_with_prewarm(
 ) -> LoadedPlugin {
     // 连接构造失败（解释器不可发现、签名/信任/权限不合法）属于安装
     // 前提类错误：写入 load_error，安装路径据此回滚。
+    let signed_release = installed.signed_release.clone();
     let sidecar_result = resolve_sidecar(storage_root, &installed, false);
     let (sidecar, load_error) = match sidecar_result {
         Ok(connection) => (connection, None),
@@ -2339,6 +2420,7 @@ fn load_plugin_record_with_prewarm(
             LoadedPlugin {
                 directory: installed.directory,
                 manifest: installed.manifest,
+                signed_release,
                 wasm_bytes: bytes,
                 component,
                 ui_plugin: plugin.map(|plugin| Arc::new(Mutex::new(plugin))),
@@ -2358,6 +2440,7 @@ fn load_plugin_record_with_prewarm(
             LoadedPlugin {
                 directory: installed.directory,
                 manifest: installed.manifest,
+                signed_release,
                 wasm_bytes: None,
                 component: None,
                 ui_plugin: None,
