@@ -1,4 +1,7 @@
 use super::*;
+use crate::client::rerank_provider_from_config;
+use crate::embedding::{EmbeddingEndpointConfig, embedding_provider_from_config};
+use crate::rerank::{RerankEndpointConfig, RerankRequest};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -369,6 +372,73 @@ async fn session_headers_reach_streaming_and_non_streaming_openai_requests() {
         }
         server.verify().await;
     }
+}
+
+#[tokio::test]
+async fn rerank_request_carries_tiangong_user_agent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rerank"))
+        .and(header(
+            "user-agent",
+            concat!("tiangong/", env!("CARGO_PKG_VERSION")),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"results":[{"index":1,"relevance_score":0.87}]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = rerank_provider_from_config(&RerankEndpointConfig {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "rerank-probe".into(),
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        timeout: Duration::from_secs(10),
+    })
+    .unwrap();
+    let response = provider
+        .rerank(RerankRequest {
+            query: "天工".into(),
+            documents: vec!["甲".into(), "乙".into()],
+            top_n: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].index, 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn embedding_request_carries_tiangong_user_agent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(header(
+            "user-agent",
+            concat!("tiangong/", env!("CARGO_PKG_VERSION")),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data":[{"embedding":[0.25,0.5],"index":0}]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = embedding_provider_from_config(&EmbeddingEndpointConfig {
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        model: "embedding-probe".into(),
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        timeout: Duration::from_secs(10),
+        dimension: 2,
+    })
+    .unwrap();
+    let vectors = provider.embed(vec!["天工".into()]).await.unwrap();
+    assert_eq!(vectors, vec![vec![0.25, 0.5]]);
+    server.verify().await;
 }
 
 #[tokio::test]

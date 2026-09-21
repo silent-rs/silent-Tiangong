@@ -93,12 +93,16 @@ impl OpenAiEmbeddingProvider {
     /// - `dimension`: 向量维度（text-embedding-3-small=1536, ada-002=1536）
     pub fn new(base_url: &str, api_key: &str, model: &str, dimension: usize) -> Self {
         let base_url = normalize_embedding_base_url(base_url);
+        let client = reqwest::Client::builder()
+            .user_agent(crate::headers::TIANGONG_USER_AGENT)
+            .build()
+            .expect("创建 Embedding HTTP client 失败");
         Self {
             base_url,
             api_key: api_key.to_string(),
             model: model.to_string(),
             dimension,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -116,6 +120,7 @@ impl OpenAiEmbeddingProvider {
 
         let client = reqwest::Client::builder()
             .timeout(config.timeout)
+            .user_agent(crate::headers::TIANGONG_USER_AGENT)
             .build()
             .context("创建 Embedding HTTP client 失败")?;
         Ok(Self {

@@ -17,6 +17,7 @@ pub fn rerank_provider_from_config(
             let mut provider_config =
                 OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());
             provider_config.timeout = config.timeout;
+            provider_config.headers = crate::headers::tiangong_default_headers();
             Ok(Arc::new(OpenAiChatRerankProvider::new(
                 provider_config,
                 config.model.clone(),
