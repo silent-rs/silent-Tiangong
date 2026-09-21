@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tiangong_core::core::plugin::Plugin;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::session::Session;
+use tiangong_core::react::message::INJECTION_TOOL_NAME;
+use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tools::extension::{
     MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
@@ -214,21 +215,28 @@ impl RuntimeCorePlugin {
     /// 首轮（从未注入）且存在自制插件 → 注入基线清单；此后清单内容变化
     /// （装卸/升级/启停自制插件）→ 注入新清单（note 标注早前作废）。
     /// 全部卸载后的空清单仅在曾注入过时下发一次（明确作废）。
+    ///
+    /// **压缩自愈**：注入的清单与其他 Tool 消息一样可被压缩折叠；最近一条
+    /// 清单被折进摘要边界之前时，模型侧「以最近一条清单为准」的锚点已不
+    /// 存在——此时即使清单内容未变也重新注入一份（见
+    /// [`Self::inventory_injection_folded`]）。
+    ///
     /// 经反馈通道走 `Command::InjectTool` → 工具批次收敛后的安全点注入，
     /// 对话历史 append-only，KV cache 前缀不受影响。
-    fn maybe_inject_local_inventory(&self) {
+    fn maybe_inject_local_inventory(&self, session: &Session) {
         let inventory = registry::local_plugin_inventory();
         let text = inventory.to_string();
         let empty = inventory["plugins"]
             .as_array()
             .is_some_and(std::vec::Vec::is_empty);
+        let folded = Self::inventory_injection_folded(session);
         let needs_inject = {
             let Ok(mut last) = self.last_inventory.lock() else {
                 return;
             };
-            if last.as_deref() == Some(text.as_str()) {
+            if !folded && last.as_deref() == Some(text.as_str()) {
                 false
-            } else if empty && last.is_none() {
+            } else if empty && last.is_none() && !folded {
                 // 从未有自制插件也从未注入：不发空清单，避免无谓消息。
                 false
             } else {
@@ -256,6 +264,31 @@ impl RuntimeCorePlugin {
                 *last = None;
             }
         }
+    }
+
+    /// 最近一条清单注入消息是否已被压缩折叠出模型上下文。
+    ///
+    /// 清单注入产生 assistant(tool_call) + tool result 消息对（见
+    /// `react::message::inject_tool_to_messages`），与其他 Tool 消息一样
+    /// 可压缩；`summary_up_to` 边界之前的消息不再进入 `Session::context()`。
+    /// 检测：从后向前找最近一次清单注入的 assistant 消息（tool_call 的
+    /// source 标记为清单注入），其索引落在边界之前即已折叠。
+    fn inventory_injection_folded(session: &Session) -> bool {
+        session
+            .messages
+            .iter()
+            .rposition(|message| {
+                message.role == MessageRole::Assistant
+                    && message.tool_calls.iter().any(|call| {
+                        call.name == INJECTION_TOOL_NAME
+                            && call
+                                .arguments
+                                .get("source")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(LOCAL_PLUGIN_LIST_INJECTION)
+                    })
+            })
+            .is_some_and(|index| index < session.summary_up_to)
     }
 
     /// 解析并路由 `call_local_plugin`。
@@ -366,9 +399,10 @@ impl Plugin for RuntimeCorePlugin {
 
     fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
         self.each_adapter(|adapter| adapter.on_turn_started(session, turn_start_idx));
-        // 轮开始注入/刷新自制插件清单：覆盖首轮基线与空闲期间发生的
-        // 装卸（变化事件的 turn 内注入由宿主订阅者另行投递）。
-        self.maybe_inject_local_inventory();
+        // 轮开始注入/刷新自制插件清单：覆盖首轮基线、空闲期间发生的
+        // 装卸（变化事件的 turn 内注入由宿主订阅者另行投递），以及最近
+        // 一条清单被压缩折叠后的自愈重注入。
+        self.maybe_inject_local_inventory(session);
     }
 
     fn on_turn_finished(&self, session: &Session, turn_start_idx: usize) {
@@ -442,6 +476,12 @@ impl PromptSectionProvider for RuntimeCorePlugin {
     fn prompt_sections(&self) -> Vec<String> {
         let mut sections = Vec::new();
         for adapter in self.adapters() {
+            // 分流与 aggregate_tool_specs 一致：自制插件的 prompt 段落不进
+            // system prompt——装卸会打穿 KV cache 前缀。其内容随清单注入
+            // 对话历史（local_plugin_inventory 的 prompt 字段），两头一致。
+            if registry::is_local_plugin(adapter.id()) {
+                continue;
+            }
             sections.extend(adapter.prompt_sections());
         }
         sections
@@ -455,5 +495,76 @@ impl MentionCandidateProvider for RuntimeCorePlugin {
             candidates.extend(adapter.mention_candidates());
         }
         candidates
+    }
+}
+
+/// 清单折叠自愈判定的单元测试（完整注入链路见 tests/core_bridge.rs）。
+#[cfg(test)]
+mod inventory_fold_tests {
+    use super::*;
+    use tiangong_core::session::{Message, MessageRole, MessageToolCall};
+
+    /// 构造一条清单注入 assistant 消息（source 标记为清单注入）。
+    fn inventory_injection_message() -> Message {
+        let mut message = Message::new(MessageRole::Assistant, String::new());
+        message.tool_calls = vec![MessageToolCall {
+            id: format!("inj_{}", scru128::new()),
+            name: INJECTION_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({
+                "source": LOCAL_PLUGIN_LIST_INJECTION,
+            }),
+        }];
+        message
+    }
+
+    #[test]
+    fn 无清单注入时不判折叠() {
+        let mut session = Session::new("no-injection");
+        session.summary_up_to = 2;
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "问题"));
+        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
+    }
+
+    #[test]
+    fn 清单在保留区时不判折叠() {
+        let mut session = Session::new("kept");
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "早前问题"));
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "早前回答"));
+        session.messages.push(inventory_injection_message());
+        session.summary_up_to = 2; // 边界在清单消息之前 → 保留区可见。
+        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
+    }
+
+    #[test]
+    fn 清单被折叠时判折叠_多条取最近() {
+        let mut session = Session::new("folded");
+        session.messages.push(inventory_injection_message());
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "早前问题"));
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "早前回答"));
+        session.messages.push(inventory_injection_message()); // 最近一条
+        session.summary_up_to = 4; // 两条清单注入都在边界之前。
+        assert!(RuntimeCorePlugin::inventory_injection_folded(&session));
+    }
+
+    #[test]
+    fn 最近清单在保留区时旧清单折叠不判折叠() {
+        let mut session = Session::new("re-injected");
+        session.messages.push(inventory_injection_message()); // 旧的（已折叠）
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "早前问题"));
+        session.messages.push(inventory_injection_message()); // 最近（保留区）
+        session.summary_up_to = 2;
+        assert!(!RuntimeCorePlugin::inventory_injection_folded(&session));
     }
 }

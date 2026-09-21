@@ -141,8 +141,20 @@ fn sha256_of(path: &std::path::Path) -> String {
 
 /// 造一个 local 签名的纯 TS 工具插件（用户密钥签名，publisher=local）。
 fn stage_local_signed_plugin(root: &std::path::Path, id: &str, tool: &str) {
-    stage_ts_tool_plugin(root, id, tool);
+    stage_local_signed_manifest(
+        root,
+        id,
+        &format!(
+            r#"{{"schema_version":2,"id":"{id}","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{{"tools":true}},"tools":[{{"name":"{tool}","description":"测试工具","input_schema":{{"type":"object"}}}}]}}"#
+        ),
+    );
+}
+
+/// 造一个 local 签名插件，manifest 内容自定义（签名流程与上方一致）。
+fn stage_local_signed_manifest(root: &std::path::Path, id: &str, manifest_body: &str) {
     let dir = root.join("plugins").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plugin.json"), manifest_body).unwrap();
     let manifest =
         tiangong_plugin_runtime::manifest::PluginManifest::load(&dir.join("plugin.json")).unwrap();
     ensure_user_signing_key(root).unwrap();
@@ -324,5 +336,113 @@ async fn 固定通道_查询工具返回清单() {
         result.stdout.contains("local-bridge-e"),
         "{}",
         result.stdout
+    );
+}
+
+// ── 压缩链路口径回归：指纹只计入进入模型请求前缀的插件 ──
+
+use tiangong_plugin_runtime::registry::enabled_plugin_fingerprint;
+
+/// 未签名（官方/三方通道）纯 manifest 插件，内容自定义。
+fn stage_unsigned_manifest(root: &Path, id: &str, manifest_body: &str) {
+    let dir = root.join("plugins").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("plugin.json"), manifest_body).unwrap();
+}
+
+#[test]
+fn 指纹只计入进入模型前缀的插件() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // 基线：未签名带工具插件计入指纹。
+    stage_ts_tool_plugin(root.path(), "unsigned-fp-a", "unsigned_fp_tool");
+    preload_installed_plugins(root.path());
+    let base = enabled_plugin_fingerprint();
+
+    // local 签名工具插件：能力经对话内清单提供，不进 tools 声明与
+    // system prompt → 装卸不得改变交接指纹。
+    stage_local_signed_plugin(root.path(), "local-fp-b", "local_fp_tool");
+    preload_installed_plugins(root.path());
+    assert_eq!(
+        enabled_plugin_fingerprint(),
+        base,
+        "自制插件装卸不得触发上下文交接"
+    );
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-fp-b", false).unwrap();
+    assert_eq!(enabled_plugin_fingerprint(), base);
+
+    // 纯 UI 插件（无 tools 无 prompt，与发布者无关）：对模型请求零影响。
+    stage_unsigned_manifest(
+        root.path(),
+        "unsigned-fp-ui",
+        r#"{"schema_version":2,"id":"unsigned-fp-ui","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true},"tools":[]}"#,
+    );
+    preload_installed_plugins(root.path());
+    assert_eq!(
+        enabled_plugin_fingerprint(),
+        base,
+        "纯 UI 插件不得触发上下文交接"
+    );
+
+    // 对照：未签名工具插件的装卸仍如实改变指纹。
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "unsigned-fp-a", false)
+        .unwrap();
+    assert_ne!(
+        enabled_plugin_fingerprint(),
+        base,
+        "进入请求前缀的插件变化必须反映到指纹"
+    );
+}
+
+#[test]
+fn 自制插件prompt不进系统段落_随清单注入() {
+    let _guard = REGISTRY_LOCK.lock().unwrap();
+    ensure_config();
+    let root = tempfile::TempDir::new().unwrap();
+
+    // local 签名的 prompt-only 插件：prompt 段落不进 system prompt（装卸
+    // 会打穿 KV cache 前缀），内容随清单注入对话历史。
+    stage_local_signed_manifest(
+        root.path(),
+        "local-prompt-a",
+        r#"{"schema_version":2,"id":"local-prompt-a","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true,"prompt":true},"tools":[],"prompt":["自制插件专属段落"]}"#,
+    );
+    // 未签名的 prompt-only 插件：保持现状——prompt 进 system prompt、
+    // 计入指纹（官方/三方通道未变）。
+    stage_unsigned_manifest(
+        root.path(),
+        "unsigned-prompt-b",
+        r#"{"schema_version":2,"id":"unsigned-prompt-b","version":"0.1.0","entrypoints":["desktop"],"permissions":["tool.provide"],"capabilities":{"tools":true,"prompt":true},"tools":[],"prompt":["未签名插件段落"]}"#,
+    );
+    assert!(
+        preload_installed_plugins(root.path()) >= 2,
+        "两个 prompt 插件都应装入注册表"
+    );
+
+    let bridge = RuntimeCorePlugin::desktop(root.path().to_path_buf());
+    let sections = bridge.prompt_sections();
+    assert!(
+        !sections.iter().any(|s| s.contains("自制插件专属段落")),
+        "自制插件 prompt 不得进入 system prompt：{sections:?}"
+    );
+    assert!(
+        sections.iter().any(|s| s.contains("未签名插件段落")),
+        "未签名插件 prompt 保持现状进入 system prompt：{sections:?}"
+    );
+
+    // 清单携带 prompt 内容：纯 prompt 的自制插件也出现在清单里，
+    // 与「不进 system prompt」的分流两头一致。
+    let inventory = local_plugin_inventory();
+    let entry = inventory["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "local-prompt-a")
+        .expect("纯 prompt 自制插件应出现在清单");
+    assert_eq!(
+        entry["prompt"][0], "自制插件专属段落",
+        "清单应携带 prompt 内容：{entry}"
     );
 }

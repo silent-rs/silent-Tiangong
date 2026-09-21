@@ -13,12 +13,13 @@
 //! manager 恪守记账定位（Core 注册表/会话文件/创建锁，issue #245），
 //! core 只保留通用压缩能力（手动压缩命令），两者都不感知「交接」概念。
 //!
-//! 运行期是**标记制**：变化发生的地方给活跃会话打标并立即尝试处理
-//! （空闲即压，忙则留标记）；投递消息路径只查内存标记。兜底是**首检
-//! 指纹比对**：每会话每进程首次投递前取一次插件指纹与落盘定档比对，
-//! 防两类漏报——进程重启丢内存标记、未走正常变化入口的变化。定档指纹
-//! 持久化在 storage_root 下（不进会话文件）——会话复制/导出后丢失定档
-//! 只会重新定档，不触发无谓交接。
+//! 运行期是**标记制**：变化发生的地方给活跃会话打标，交接统一由**投递
+//! 消息路径**执行——变化当场不压缩（Agent 装插件时会话必然忙，「立即压」
+//! 几乎必然撞 Busy 落回投递路径，还可能与用户消息竞态白白作废一轮压缩）。
+//! 投递路径只查内存标记。兜底是**首检指纹比对**：每会话每进程首次投递前
+//! 取一次插件指纹与落盘定档比对，防两类漏报——进程重启丢内存标记、未走
+//! 正常变化入口的变化。定档指纹持久化在 storage_root 下（不进会话文件）
+//! ——会话复制/导出后丢失定档只会重新定档，不触发无谓交接。
 //!
 //! **压缩尽力而为一次**：交接压缩失败只告警并直接定档，不重试、不阻断
 //! 投递。对话一旦继续，KV 缓存已按当前上下文写入，反复重压既无意义又会
@@ -166,8 +167,8 @@ impl ConfigHandoffStore {
     }
 }
 
-/// 变化点入口（插件集合/版本变化）：对每个活跃会话打标并立即尝试处理
-/// ——空闲会话当场压缩，忙会话留标记等投递路径。
+/// 变化点入口（插件集合/版本变化）：对每个活跃会话打标，交接统一延后到
+/// 该会话下一条消息的投递路径执行。
 ///
 /// 不活跃会话（无 Core）不打标：其变化由首检兜底发现。
 pub(crate) fn mark_all_sessions(store: &ConfigHandoffStore, manager: &CoreManager, target: &str) {
@@ -180,32 +181,21 @@ pub(crate) fn mark_all_sessions(store: &ConfigHandoffStore, manager: &CoreManage
     }
     tracing::info!(
         sessions = session_ids.len(),
-        "插件配置已变化，活跃会话标记待交接并开始处理"
+        "插件配置已变化，活跃会话标记待交接（下一条消息投递时处理）"
     );
     for session_id in session_ids {
         mark_session(store, manager, &session_id, target);
     }
 }
 
-/// 单会话打标并立即尝试处理：空闲当场压缩，忙则留标记等投递路径。
+/// 单会话打标：交接由该会话下一条消息的投递路径执行。
 pub(crate) fn mark_session(
     store: &ConfigHandoffStore,
-    manager: &CoreManager,
+    _manager: &CoreManager,
     session_id: &str,
     target_fingerprint: &str,
 ) {
     store.set_pending_handoff(session_id, target_fingerprint);
-    // 有 runtime 上下文（含 tauri async runtime 线程）时立即处理；
-    // 否则只留标记，由投递路径处理。
-    let target = target_fingerprint.to_string();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        let store = store.clone();
-        let manager = manager.clone();
-        let id = session_id.to_string();
-        handle.spawn(async move {
-            run_handoff(&store, &manager, &id, &target).await;
-        });
-    }
 }
 
 /// 投递消息前的交接检查：待交接标记命中则执行交接；否则每会话每进程
@@ -271,6 +261,12 @@ async fn run_handoff_inner(
     session_id: &str,
     target: &str,
 ) -> ConfigHandoffOutcome {
+    // 定档比对短路：目标指纹与已定档一致（无实际变化的重复意图——如对已
+    // 启用插件再次启用）时直接放行，这是 events.rs 对订阅者承诺的语义。
+    if store.pinned_matches(session_id, target) {
+        store.complete_handoff(session_id, target);
+        return ConfigHandoffOutcome::Aligned;
+    }
     let session = match manager.load_session(session_id) {
         Ok(session) => session,
         Err(_) => {
@@ -289,13 +285,23 @@ async fn run_handoff_inner(
         return ConfigHandoffOutcome::SkippedBusy;
     };
     // core 的手动压缩会等待终态再返回（成功/失败/中断），无需轮询。
-    match core.compact_context().await {
-        Ok(()) => {
+    // notice 传内容（前缀由 core 出口统一补全）。墙钟上限兜底：模型端点
+    // 自身超时失效（如网络黑洞）时压缩任务可能长期不给终态，放行等待
+    // 会让用户的第一条消息无限挂起——超时按 Failed 定档放行；压缩任务
+    // 自身继续收敛，完成后自行释放任务槽。
+    const HANDOFF_COMPRESSION_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+    let compression = core.compact_context("插件变化后已整理上下文");
+    match tokio::time::timeout(HANDOFF_COMPRESSION_LIMIT, compression).await {
+        Ok(Ok(())) => {
             store.complete_handoff(session_id, target);
             ConfigHandoffOutcome::Aligned
         }
-        Err(CoreError::Busy) => ConfigHandoffOutcome::SkippedBusy,
-        Err(error) => ConfigHandoffOutcome::Failed(format!("交接压缩未完成：{error}")),
+        Ok(Err(CoreError::Busy)) => ConfigHandoffOutcome::SkippedBusy,
+        Ok(Err(error)) => ConfigHandoffOutcome::Failed(format!("交接压缩未完成：{error}")),
+        Err(_) => ConfigHandoffOutcome::Failed(format!(
+            "交接压缩等待超时（{}s），历史未经整理即定档",
+            HANDOFF_COMPRESSION_LIMIT.as_secs()
+        )),
     }
 }
 
@@ -592,6 +598,42 @@ mod handoff_e2e_tests {
         manager.retire_core("e2e-busy", true).await.unwrap();
     }
 
+    /// 定档与目标一致（无实际变化的重复意图——如对已启用插件再次启用）
+    /// 时必须短路放行，零模型调用：这是 events.rs 对订阅者承诺的语义。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 定档一致时短路零模型调用() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, manager) = make_pair(&dir);
+        let server = MockServer::start().await;
+        // 若短路失效走到压缩，500 响应会让测试以 Failed 暴露；
+        // 请求计数断言再兜一层。
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("must not compress"))
+            .mount(&server)
+            .await;
+        seed_session_with_stale_pin(&dir, &store, "e2e-shortcircuit");
+        seed_models(&dir, &server.uri());
+        make_core(&manager, "e2e-shortcircuit").await;
+
+        // 指纹已定档为当前值，但内存标记仍在（变化点无脑打标的场景）。
+        let fp = target_fingerprint();
+        store.complete_handoff("e2e-shortcircuit", &fp);
+        store.set_pending_handoff("e2e-shortcircuit", &fp);
+
+        let outcome = run_handoff(&store, &manager, "e2e-shortcircuit", &fp).await;
+        assert_eq!(outcome, ConfigHandoffOutcome::Aligned);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            0,
+            "指纹一致必须短路，不得发起压缩请求"
+        );
+        assert!(
+            store.pending_handoff("e2e-shortcircuit").is_none(),
+            "短路放行同样清除标记"
+        );
+        manager.retire_core("e2e-shortcircuit", true).await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn 无可交接历史时直接定档零模型调用() {
         let dir = tempfile::tempdir().unwrap();
@@ -630,20 +672,29 @@ mod handoff_e2e_tests {
         seed_models(&dir, &server.uri());
         make_core(&manager, "e2e-mark").await;
 
-        // 插件变化点：给全部活跃会话打标并后台立即处理。
+        // 变化点：只打标，不发起压缩（交接统一延后到投递路径执行——
+        // Agent 装插件时会话必然忙，「立即压」几乎必然撞 Busy 落回投递
+        // 路径，还可能与用户消息竞态白白作废一轮压缩）。
         let fp = target_fingerprint();
         mark_all_sessions(&store, &manager, &fp);
-        // 后台任务完成压缩后定档。
-        for _ in 0..40 {
-            if store.pinned_matches("e2e-mark", &fp) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
         assert!(
-            store.pinned_matches("e2e-mark", &fp),
-            "空闲会话应在变化点当场完成交接"
+            server.received_requests().await.unwrap().is_empty(),
+            "变化点当场不得压缩"
         );
+        assert_eq!(
+            store.pending_handoff("e2e-mark").as_deref(),
+            Some(fp.as_str()),
+            "变化点保留标记"
+        );
+        assert!(
+            !store.pinned_matches("e2e-mark", &fp),
+            "未到投递路径不得定档"
+        );
+
+        // 下一条消息的投递路径完成交接并定档。
+        let outcome = ensure_before_deliver(&store, &manager, "e2e-mark", || fp.clone()).await;
+        assert_eq!(outcome, ConfigHandoffOutcome::Aligned);
+        assert!(store.pinned_matches("e2e-mark", &fp), "投递时完成交接");
         assert!(
             store.pending_handoff("e2e-mark").is_none(),
             "完成后清除标记"

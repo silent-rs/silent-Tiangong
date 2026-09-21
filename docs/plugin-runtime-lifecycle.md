@@ -158,14 +158,45 @@ ensure_core` 签名与改造前完全一致；桌面端 `build_plugins_sync` 返
    会重新考虑）。
 2. **首轮基线 / 空闲期间的变化**：桥在 `on_turn_started` 比对清单内容
    hash，变化才经自留的反馈通道注入（未送达则下轮重试）。
+3. **压缩折叠自愈**：注入的清单与其他 Tool 消息一样会被压缩折叠；
+   最近一条清单落在 `summary_up_to` 边界之前时，即使内容未变也在下一轮
+   重新注入（`inventory_injection_folded`）——模型侧「以最近一条清单
+   为准」的锚点始终存在于可见历史。
 
 清单内容与去重：`registry::local_plugin_inventory()`（纯 manifest 级，
 不实例化 WASM）+ 注入通道的连续相同去重——反复聚合但清单未变不刷屏。
+清单 entry 含 `functions`（工具签名）与可选 `prompt`（prompt 段落原文，
+与下述 prompt 分流配套）。
+
+### prompt 分流（与 tools 同口径）
+
+自制插件的 `prompt` 段落**不进 system prompt**（`core_bridge` 的
+`prompt_sections` 按 `is_local_plugin` 过滤）——装卸会打穿 KV cache 前缀；
+内容随清单注入对话历史。官方/三方/未签名插件的 prompt 保持现状进
+system prompt。纯 prompt 的自制插件同样出现在清单里（prompt 字段），
+两头一致。
+
+### 指纹与上下文交接的口径
+
+`registry::enabled_plugin_fingerprint` 只计入**会进入模型请求前缀**的
+插件：local 发布者不计入（能力经固定工具 + 清单提供），无 tools 且无
+prompt 的纯 UI 插件不计入（与发布者无关）。因此自制插件的装卸/升级
+**不触发上下文交接**——开发场景反复迭代不再压缩会话。
+
+交接执行时机：插件变化点只打标（`mark_all_sessions`），压缩统一在该
+会话**下一条消息的投递路径**执行（`ensure_before_deliver`）——Agent
+装插件时会话必然忙，「立即压」几乎必然撞 Busy 落回投递路径，还可能与
+用户消息竞态白白作废一轮压缩。交接压缩带 180s 墙钟上限（超时按 Failed
+定档放行）。定档一致的重复意图（如对已启用插件再次启用）在交接入口
+按指纹短路，零模型调用。压缩留痕文案由编排方注入（core 不感知「模型
+切换」「插件交接」等上游概念）：模型切换前经 core-manager、插件交接经
+app 层各自传入完整文案。
 
 ### 已知代价（实机观察项）
 
 1. schema 校验后移：错误从"发不出去"变成"一次失败回合"（错误带签名补偿）；
 2. 前端渲染：自制插件调用暂落 `other` 分类（可按 args.plugin_name 补）；
-3. 清单消息累积：压缩时正常折叠；长开发会话观察是否需要"仅保留最近一条"；
+3. 清单消息累积：压缩折叠后由自愈重注入兜底（见上）；长开发会话观察
+   重注入频率是否可接受；
 4. cache 命中率：`context.rs` 的 `prompt_cache_hit_tokens` 日志按
    source 观察反复 build 场景的 hit_ratio 稳定性。
