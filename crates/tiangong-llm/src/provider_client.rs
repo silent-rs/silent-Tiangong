@@ -1094,12 +1094,9 @@ fn convert_provider_response(response: ProviderResponse) -> ModelResponse {
 
 fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
     if raw_args.trim().is_empty() {
-        return json!({
-            "__parse_error": format!(
-                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
-            ),
-            "__raw_args_preview": raw_args,
-        });
+        // 空参数按无参调用处理（与 tiangong_llm::tool 同语义）：无参工具
+        // 的合法调用形态，不构成解析错误。
+        return json!({});
     }
 
     serde_json::from_str(raw_args).unwrap_or_else(|err| {
@@ -1547,16 +1544,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_tool_arguments_become_parse_error() {
+    fn empty_tool_arguments_become_empty_object() {
         let arguments = parse_tool_arguments_or_error("run_shell", "call_empty", "");
-        let error = arguments
-            .get("__parse_error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-
-        assert!(error.contains("工具参数为空"));
-        assert!(error.contains("run_shell"));
-        assert!(error.contains("call_empty"));
+        assert_eq!(
+            arguments,
+            serde_json::json!({}),
+            "空参数应按无参调用处理（空对象），不再构成解析错误"
+        );
     }
 
     fn schema_tool(name: &str) -> ToolSpec {

@@ -338,11 +338,11 @@ fn install(
             manifest.id
         );
     }
-    // 统一签名信任：创作链安装免交互——宿主以本机用户密钥为解释器插件
-    // 自动签发签名清单（发布者 local），导入时经与官方/三方完全相同的
-    // 签名验证路径（内容清单全树校验）。原生安装确认随之退役（信任根
-    // 从「确认动作」转移到「用户密钥」，构建 → 签名 → 验证 → 安装全程
-    // 可自动化，远程 / Agent 创作闭环不再被弹窗阻塞）。
+    // 统一签名信任：创作链安装免交互——宿主以本机用户密钥为**全部自制
+    // 插件**（sidecar / 纯工具 / UI 模板）自动签发签名清单（发布者
+    // local），导入时经与官方/三方完全相同的签名验证路径（内容清单全树
+    // 校验）。签名也是自制插件动态调用通道的分流判据（is_local_plugin
+    // 按 publisher == local 判定）——漏签一类模板等于把它排除在通道外。
     // 受信构建指纹核验（全部模板产物，含纯 UI / 工具 / sidecar 形态）：
     // 暂存副本的内容清单哈希必须与构建登记一致——授权对象是「真实构建
     // 出的那份内容」，构建后替换 release/（哪怕重算内容清单）都无法安装。
@@ -356,9 +356,7 @@ fn install(
             );
         }
     }
-    if manifest.sidecar.is_some() {
-        sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
-    }
+    sign_staged_with_user_key(storage_root, staged.path(), &manifest)?;
     // 暂存/导入事务由安装链的 LOAD_OPERATION 全局锁串行化。
     let status = crate::registry::import_staged_plugin(storage_root, staged.path())?;
     tracing::info!(plugin = %status.id, version = %status.manifest_version, "plugin-dev 安装完成");
@@ -370,9 +368,11 @@ fn install(
     })
 }
 
-/// 以用户密钥为暂存的解释器插件签发签名清单：构造 `SignedPluginRelease`
+/// 以用户密钥为暂存的自制插件签发签名清单：构造 `SignedPluginRelease`
 /// （发布者 local，锚定内容清单）并签名落盘。导入链的
 /// `verify_signed_release` 会按 local 路由到用户公钥完成同款验证。
+/// 适用于全部模板形态（sidecar / 纯工具 / UI）：wasm 与 sidecar 条目
+/// 按实际制品填写（纯 TS 工具为 None），UI 制品逐条哈希。
 fn sign_staged_with_user_key(
     storage_root: &Path,
     staged_path: &Path,
@@ -598,8 +598,10 @@ mod tests {
         assert!(!result.exists);
     }
 
-    /// 安装完整链（功能验证）：确认桩 → 暂存（不可变副本）→ 导入 → 安装目录
-    /// 与注册表就位；确认信息（版本）来自暂存副本而非可变的 release/。
+    /// 安装完整链（功能验证）：确认桩 → 暂存（不可变副本）→ 用户密钥签名
+    /// → 导入 → 安装目录与注册表就位；确认信息（版本）来自暂存副本而非
+    /// 可变的 release/。无 sidecar 的纯 UI/工具模板同样获得 local 签名
+    /// （动态调用通道的分流判据，P0 回归）。
     #[test]
     #[serial_test::serial]
     fn install_完整链_暂存确认导入与注册表() {
@@ -618,6 +620,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(project.join("release/dist/index.html"), "<html></html>").unwrap();
+        write_content_manifest(&project.join("release"));
 
         let result = install(root.path(), "inst-demo", None).expect("安装完整链");
         assert_eq!(result.plugin_id, "inst-demo");
@@ -629,6 +632,15 @@ mod tests {
             root.path()
                 .join("plugins/inst-demo/dist/index.html")
                 .is_file()
+        );
+        // 无 sidecar 模板同样拿到 local 签名（动态调用通道判据）。
+        assert!(
+            root.path().join("plugins/inst-demo/release.json").is_file(),
+            "纯 UI/工具模板安装后应有签名清单"
+        );
+        assert!(
+            crate::registry::is_local_plugin("inst-demo"),
+            "无 sidecar 自制插件应命中 local 判据"
         );
         assert!(
             crate::registry::plugin_manifest("inst-demo").is_some(),

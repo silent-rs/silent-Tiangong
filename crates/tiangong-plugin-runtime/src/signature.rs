@@ -164,7 +164,19 @@ impl SignedPluginRelease {
                     );
                 }
             },
-            (None, None) => {}
+            (None, None) => {
+                // local 创作链（用户密钥）对全部模板形态锚定内容清单——
+                // 签名锚定清单本身，再按清单双向校验全树，与解释器 sidecar
+                // 形态同强度。官方/三方无 sidecar 形态不带该条目（下方
+                // 发布约定检查兜底）。
+                if let Some(signed_manifest) = self.content_manifest.as_ref() {
+                    signed_manifest.verify(directory, Path::new(CONTENT_MANIFEST_FILE))?;
+                    crate::sidecar::SidecarConfig::verify_integrity_manifest(
+                        &directory.join(CONTENT_MANIFEST_FILE),
+                        directory,
+                    )?;
+                }
+            }
             // 解释器官方形态：签名无二进制条目，信任锚是完整内容清单——
             // 先校验清单文件哈希与签名一致，再按清单双向校验全树。
             (None, Some(sidecar)) if sidecar.runtime != SidecarRuntime::Native => {
@@ -179,9 +191,11 @@ impl SignedPluginRelease {
             }
             _ => bail!("插件签名清单与 plugin.json 的 sidecar 声明不一致"),
         }
-        // 内容清单条目只属于解释器形态：无 sidecar 声明或 native 形态携带该条目
-        // 均不符合发布约定。
+        // 内容清单条目约定：非 local 发布者仅允许解释器形态携带（官方/
+        // 三方发布约定）；local 创作链（用户密钥）对全部模板形态锚定
+        // 内容清单——自制插件的信任根就是这份全树锚定。
         if self.content_manifest.is_some()
+            && self.publisher != crate::trust::LOCAL_PUBLISHER
             && plugin_manifest
                 .sidecar
                 .as_ref()

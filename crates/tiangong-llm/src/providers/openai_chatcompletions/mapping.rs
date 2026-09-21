@@ -692,11 +692,10 @@ mod tests {
             panic!("expected tool call");
         };
         assert_eq!(call.name, "run_shell");
-        assert!(
-            call.arguments
-                .get("__parse_error")
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.contains("工具参数为空"))
+        assert_eq!(
+            call.arguments,
+            serde_json::json!({}),
+            "空参数应按无参调用处理（空对象），不再构成解析错误"
         );
     }
 

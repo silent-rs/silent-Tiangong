@@ -82,6 +82,7 @@
     },
     {
       "name": "plugin_devkit",
+      "non_idempotent": true,
       "description": "对插件项目执行开发操作：validate（清单与结构校验）｜build（构建，工程模板需本机 yarn + Node ≥ 20）｜add（添加 npm 依赖，锁定精确版本，如 args [\"<id>\", \"yaml\"]）｜run（按 run.json 试运行）｜logs（读日志尾部，args 如 [\"dev:<id>\"] 或 [\"plugin:<id>\"]）。args 为 devkit 命令行参数数组（不含命令名）。",
       "input_schema": {
         "type": "object",
@@ -114,7 +115,8 @@
     },
     {
       "name": "plugin_install",
-      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物，须先经 plugin_devkit build 构建成功）。安装由宿主以本机用户密钥自动签名并验证，免确认（仅官方 Plugin Creator 可触发；构建后修改产物会被指纹核验拒绝）。迭代修改代码后需重新 build 再 install（每次构建只授予一次安装）。插件工具自新会话起生效（已存在会话不动态纳入），安装完成后提醒用户新开会话使用。",
+      "non_idempotent": true,
+      "description": "把开发目录中已构建的插件项目安装为天工可用插件（读取 ~/.tiangong/plugins-dev/<id>/release/ 构建产物，须先经 plugin_devkit build 构建成功）。安装由宿主以本机用户密钥自动签名并验证，免确认（仅官方 Plugin Creator 可触发；构建后修改产物会被指纹核验拒绝）。迭代修改代码后需重新 build 再 install（每次构建只授予一次安装）。安装后当前会话即可使用：本机自制插件经固定工具 call_local_plugin 动态调用（清单由系统注入对话），已开启的会话在下一轮生效，无需新开会话。",
       "input_schema": {
         "type": "object",
         "properties": {

@@ -412,6 +412,8 @@ pub async fn delete_sessions_by_cwd(
         let _ = state.release_any_input_send_claim(id);
         state.clear_agent_worker_view(id);
         state.remove_session_send_lock(id);
+        // 交接记账随会话一并清理（与单删路径一致），否则定档指纹泄漏。
+        state.config_handoff_store.forget(id);
     }
     drop(send_guards);
     drop(input_cache_guards);
