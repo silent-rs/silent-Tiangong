@@ -264,7 +264,10 @@ pub(super) fn prepare_tool_call(
     // 不做「本轮已成功/已失败的完全相同调用」拦截：有副作用的操作
     // （构建、安装、发布等）在两次调用之间外部世界可能已变化，重跑是
     // 合法意图（改源码 → 重新构建/安装的迭代闭环）；模型自身的历史
-    // 中已包含先前调用的结果，循环重试由预算与失败恢复提示约束。
+    // 中已包含先前调用的结果。防无限重复不设硬性轮次上限（任务 15
+    // 已移除 max_outer_iterations，ExecutionBudget 仅剩日志编号），
+    // 只靠失败恢复提示引导模型转向——这是有意的选择：宁可重跑有副
+    // 作用的合法操作，也不拦截「改了外部世界后必要的重试」。
     let args_summary = format_tool_args_summary(call);
 
     ToolPreflightOutcome::Execute { args_summary }

@@ -1153,7 +1153,7 @@ mod tests {
             task,
             kind: CompressionKind::Manual {
                 observed_tokens: 0,
-                notice: "[上下文管理] 测试整理".to_string(),
+                notice: "测试整理".to_string(),
             },
             call_id: call_id.clone(),
             cancelled_usage: TokenUsage::default(),
@@ -1203,7 +1203,7 @@ mod tests {
             task,
             kind: CompressionKind::Manual {
                 observed_tokens: 0,
-                notice: "[上下文管理] 测试整理".to_string(),
+                notice: "测试整理".to_string(),
             },
             call_id: call_id.clone(),
             cancelled_usage: TokenUsage::default(),
