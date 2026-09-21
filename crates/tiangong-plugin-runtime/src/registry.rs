@@ -282,8 +282,10 @@ pub fn local_plugin_inventory() -> serde_json::Value {
     serde_json::json!({ "plugins": entries, "note": LIST_NOTE })
 }
 
-/// 清单提示语：引导模型以最近一条清单为准（历史中早前清单已作废）。
-const LIST_NOTE: &str = "以本条清单为准，早前清单作废";
+/// 清单提示语：强调时效性（防翻旧清单）并指明权威查询通道——注入清单
+/// 是尽力而为的加速缓存，压缩后可能不再出现在模型可见历史里。
+const LIST_NOTE: &str =
+    "本条为截至当前的清单，早前清单作废；如需确认可用 list_local_plugins 重新查询";
 
 /// 当前会**进入模型请求前缀**的插件集合能力指纹（id@version 的稳定摘要）。
 ///
@@ -296,8 +298,12 @@ const LIST_NOTE: &str = "以本条清单为准，早前清单作废";
 /// - **本机自制插件（local 发布者）不计入**：其工具与 prompt 经固定工具
 ///   `call_local_plugin` + 对话内清单提供（见 `local_plugin_inventory`），
 ///   装卸迭代不改变 tools 声明与 system prompt 段落，不该触发上下文交接；
-/// - **纯 UI 插件（无 tools 且无 prompt）不计入**：对模型请求零影响，
-///   与发布者无关。
+/// - **纯 UI 插件不计入**：判据是「确定无逻辑层」的充分条件——manifest
+///   无 wasm 制品、无 sidecar、无 TS tools/prompt 声明（四者皆空才排除）。
+///   注意 WASM 插件的工具声明在组件内（`tool-specs` 接缝），manifest 的
+///   tools/prompt 恒为空，**不能**以 manifest 声明判其无能力——否则官方
+///   WASM 插件（coding/fs/memory 等）升级将漏出交接。宁可多计（纯 UI
+///   之外的形态一律计入）也不漏报，与下方锁中毒策略一致。
 ///
 /// 键排序去重后参与摘要——加载顺序与运行期抖动（如 sidecar 临时掉线）
 /// 不构成能力变化；反之插件升级即使工具名不变也会改变指纹，因为历史里
@@ -318,11 +324,13 @@ pub fn enabled_plugin_fingerprint() -> String {
                     .signed_release
                     .as_ref()
                     .is_some_and(|release| release.publisher == crate::trust::LOCAL_PUBLISHER)
-                && (loaded
-                    .manifest
-                    .tools
-                    .as_ref()
-                    .is_some_and(|tools| !tools.is_empty())
+                && (loaded.manifest.wasm.is_some()
+                    || loaded.manifest.sidecar.is_some()
+                    || loaded
+                        .manifest
+                        .tools
+                        .as_ref()
+                        .is_some_and(|tools| !tools.is_empty())
                     || loaded
                         .manifest
                         .prompt

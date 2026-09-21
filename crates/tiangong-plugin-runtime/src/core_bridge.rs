@@ -83,7 +83,7 @@ fn local_call_failure(message: &str, inventory: Option<serde_json::Value>) -> To
 fn call_local_plugin_spec() -> ToolSpec {
     ToolSpec {
         name: CALL_LOCAL_PLUGIN_TOOL.to_string(),
-        description: "调用本机自制插件的方法。可用插件与方法清单由系统在对话中以 [自制插件清单] 消息提供，请以最近一条清单为准。".to_string(),
+        description: "调用本机自制插件的方法。可用插件与方法名用 list_local_plugins 查询；对话中若有系统投递的自制插件清单（数据来源 local_plugin_list），可直接使用最近一条，无需重复查询。".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

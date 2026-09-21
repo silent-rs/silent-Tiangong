@@ -184,17 +184,12 @@ pub(crate) fn mark_all_sessions(store: &ConfigHandoffStore, manager: &CoreManage
         "插件配置已变化，活跃会话标记待交接（下一条消息投递时处理）"
     );
     for session_id in session_ids {
-        mark_session(store, manager, &session_id, target);
+        mark_session(store, &session_id, target);
     }
 }
 
 /// 单会话打标：交接由该会话下一条消息的投递路径执行。
-pub(crate) fn mark_session(
-    store: &ConfigHandoffStore,
-    _manager: &CoreManager,
-    session_id: &str,
-    target_fingerprint: &str,
-) {
+pub(crate) fn mark_session(store: &ConfigHandoffStore, session_id: &str, target_fingerprint: &str) {
     store.set_pending_handoff(session_id, target_fingerprint);
 }
 
