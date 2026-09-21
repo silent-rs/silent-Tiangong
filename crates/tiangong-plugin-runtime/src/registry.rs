@@ -13,6 +13,7 @@ use tiangong_core::core::Plugin;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
+use crate::events::PluginChangeKind;
 use crate::interpreter_env::{self, InterpreterKind};
 use crate::loader::{
     Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
@@ -795,16 +796,12 @@ fn remove_invalid_plugin_if_registered(
     Ok(true)
 }
 
-/// 为一个 Core 创建独立实例。实例使用注册表已接受的同一份 WASM 字节快照。
+/// 当前应进入 Core 的插件 id 列表（按 `load_installed_plugins` 同一套
+/// 可用性过滤与排序：入口声明、`model_requirements` 能力、prompt 置顶）。
 ///
-/// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
-/// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
-pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
-    let Ok(_operation) = LOAD_OPERATION.write() else {
-        tracing::warn!("插件加载操作锁已损坏");
-        return Vec::new();
-    };
-
+/// 供宿主的差量插件视图使用（`RuntimePluginSource`）：先取 id 集合做
+/// 增删判定，再对新增 id 调 [`load_core_plugin`] 创建适配器。
+pub fn core_plugin_ids(_storage_root: &Path, runtime: RuntimeKind) -> Vec<String> {
     let configured = configured_model_capabilities();
     let mut plugin_ids = {
         let Ok(plugins) = loaded_plugins().lock() else {
@@ -828,13 +825,25 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
             })
             .collect::<Vec<_>>()
     };
-
     plugin_ids.sort_by(|left, right| {
         (left != "prompt")
             .cmp(&(right != "prompt"))
             .then_with(|| left.cmp(right))
     });
     plugin_ids
+}
+
+/// 为一个 Core 创建独立实例。实例使用注册表已接受的同一份 WASM 字节快照。
+///
+/// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
+/// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
+pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
+    let Ok(_operation) = LOAD_OPERATION.write() else {
+        tracing::warn!("插件加载操作锁已损坏");
+        return Vec::new();
+    };
+
+    core_plugin_ids(_storage_root, runtime)
         .into_iter()
         .filter_map(|plugin_id| load_core_plugin(&plugin_id, runtime))
         .collect()
@@ -922,7 +931,14 @@ pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginSta
 }
 
 /// 从磁盘读取插件新版本。全部 UI/Core 实例成功创建后才切换。
+///
+/// 迁移成功（含制品未变化的幂等短路）即广播插件变化事件。
 pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
+    let result = reload_plugin_entry(storage_root, plugin_id);
+    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+}
+
+fn reload_plugin_entry(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
         .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -2380,7 +2396,12 @@ pub(crate) fn resident_sidecar_for_verification(
         .flatten()
 }
 
-fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
+/// 为指定插件创建一个 Core 适配器实例（WASM 或 Desktop TS 工具）。
+///
+/// 每次调用创建**新适配器**（per-Core 隔离 per-session 状态）并把 Weak
+/// 登记进注册表——此后该插件的启停/升级由 runtime 经 Weak 就地更新这个
+/// 适配器。创建失败（纯 UI 插件、WASM 实例化失败）返回 `None`。
+pub fn load_core_plugin(plugin_id: &str, runtime: RuntimeKind) -> Option<Arc<dyn Plugin>> {
     let (manifest, component, descriptor_id, sidecar, enabled, storage_access, verified_sidecar) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
@@ -2705,6 +2726,7 @@ fn install_staged_plugin_inner(
     };
     let target_lookup_ms = lookup_started.elapsed().as_millis() as u64;
 
+    let is_replacement = current.is_some();
     let switch_started = Instant::now();
     let status = (|| {
         if let Some(current) = current {
@@ -2742,7 +2764,13 @@ fn install_staged_plugin_inner(
         success = status.is_ok(),
         "插件安装运行时阶段完成"
     );
-    status
+    // 迁移成功即广播事实：kind 按是否已有同 ID 插件区分（全新安装/换代）。
+    let kind = if is_replacement {
+        PluginChangeKind::Upgraded
+    } else {
+        PluginChangeKind::Installed
+    };
+    crate::events::announced(kind, &plugin_id, status)
 }
 
 /// 安装/升级成功后的 sidecar 运行检查（尽力而为）：临时启动进程完成
@@ -2887,7 +2915,23 @@ fn prewarm_plugin_sidecar_blocking(storage_root: &Path, plugin_id: &str) -> Resu
 }
 
 /// 启用或停用插件，并立即同步所有存活 Core 实例。
+///
+/// 迁移成功（含无实际变化的幂等短路）即广播插件变化事件。
 pub fn set_plugin_enabled(
+    storage_root: &Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<PluginStatus> {
+    let result = set_plugin_enabled_inner(storage_root, plugin_id, enabled);
+    let kind = if enabled {
+        PluginChangeKind::Enabled
+    } else {
+        PluginChangeKind::Disabled
+    };
+    crate::events::announced(kind, plugin_id, result)
+}
+
+fn set_plugin_enabled_inner(
     storage_root: &Path,
     plugin_id: &str,
     enabled: bool,
@@ -3047,6 +3091,11 @@ pub fn reverify_plugin_sidecar(storage_root: &Path, plugin_id: &str) -> Result<P
 
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
+    let result = rollback_plugin_inner(storage_root, plugin_id);
+    crate::events::announced(PluginChangeKind::Upgraded, plugin_id, result)
+}
+
+fn rollback_plugin_inner(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
     let _operation = LOAD_OPERATION
         .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -3093,6 +3142,11 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 /// 无效插件目录（签名无效/沙箱越权/清单损坏）无法通过 `find_installed_plugin`
 /// 校验，先查无效插件登记表，命中则直接走同一删除路径后返回。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
+    let result = uninstall_plugin_inner(storage_root, plugin_id, keep_data);
+    crate::events::announced(PluginChangeKind::Uninstalled, plugin_id, result)
+}
+
+fn uninstall_plugin_inner(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
     let _operation = LOAD_OPERATION
         .write()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;

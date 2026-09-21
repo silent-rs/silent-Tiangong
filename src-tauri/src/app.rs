@@ -883,17 +883,17 @@ impl TiangongApp {
             .await
     }
 
-    /// 插件集合/版本变化的变化点打标（`notify_plugins_changed` 调用）：
+    /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
     /// 给每个活跃会话标记待交接并后台立即处理（空闲当场压缩，忙留标记）。
     ///
-    /// 插件指纹与会话无关（同一进程内所有会话看到同一套 runtime 注册表），
-    /// 因此只需算一次。不活跃会话（无 Core）不打标：由首检兜底发现。
-    pub fn mark_all_sessions_for_plugin_change(&self) {
-        let fingerprint = execution_fingerprint();
+    /// `fingerprint` 由事件携带（发布时刻快照），宿主不重算——回调内再取
+    /// runtime 注册表锁可能与迁移路径的锁序冲突。不活跃会话（无 Core）
+    /// 不打标：由首检兜底发现。
+    pub fn mark_all_sessions_for_plugin_change(&self, fingerprint: &str) {
         crate::config_handoff::mark_all_sessions(
             &self.config_handoff_store,
             &self.core_manager,
-            &fingerprint,
+            fingerprint,
         );
     }
 

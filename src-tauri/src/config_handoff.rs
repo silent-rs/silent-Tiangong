@@ -444,6 +444,8 @@ mod handoff_e2e_tests {
                 id,
                 trusted_config(),
                 "/tmp".to_string(),
+                // initial_model_ref：e2e 会话不指定初始模型，按路由默认解析。
+                None,
                 stream_tx,
                 Vec::new,
             )

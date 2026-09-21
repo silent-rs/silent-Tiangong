@@ -15,6 +15,8 @@ pub mod artifacts;
 pub mod bindings;
 pub mod bridge;
 pub mod config;
+pub mod core_bridge;
+pub mod events;
 mod execution;
 pub mod host_state;
 pub mod interpreter_env;
@@ -50,6 +52,10 @@ pub use bridge::{
 };
 pub use bridge::{SidecarResultObserver, set_sidecar_result_observer};
 pub use config::PluginRuntimeConfig;
+pub use core_bridge::RuntimeCorePlugin;
+pub use events::{
+    PluginChangeEvent, PluginChangeKind, PluginsChangedListener, set_plugins_changed_listener,
+};
 pub use interpreter_env::ensure_interpreter_env;
 pub use loader::{
     Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
