@@ -20,14 +20,33 @@ pub(super) type CompressionResult = std::result::Result<CompressionUpdate, Compr
 type CompressionTask = tokio::task::JoinHandle<CompressionResult>;
 
 /// 压缩种类：三种场景的全部差异都在这里参数化（启动参数、用量归属、通知文案）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompressionKind {
     /// 请求前压力压缩：含当前任务续接，用量计入 turn 累计。
     Auto { observed_tokens: usize },
     /// 上下文溢出强制压缩：从强制分割点开始，用量计入 turn 累计。
     Forced,
     /// 手动压缩：不含当前任务续接，用量计入 session 并显式落盘。
-    Manual { observed_tokens: usize },
+    /// `notice` 为留痕文案——core 自身入口（压缩命令）与外部编排（模型
+    /// 切换前、插件交接）各自注入，core 不感知上游业务概念。
+    Manual {
+        observed_tokens: usize,
+        notice: String,
+    },
+}
+
+/// 压缩留痕内容（不含类别前缀，由 [`Message::notice`] 统一补全）：按
+/// 来源区分，用户在历史里能查证「这次压缩为什么发生」。
+///
+/// Auto/Forced 由 core 内部区分；Manual 的内容由发起方注入（见
+/// [`CompressionKind::Manual`]）。Notice 角色本身被排除出模型上下文与
+/// 压缩范围（`is_compressible`），文案再详细也不影响 KV cache 前缀。
+fn notice_content(kind: &CompressionKind) -> String {
+    match kind {
+        CompressionKind::Auto { .. } => "上下文接近上限，已自动压缩".to_string(),
+        CompressionKind::Forced => "上下文超限，已强制压缩".to_string(),
+        CompressionKind::Manual { notice, .. } => notice.clone(),
+    }
 }
 
 /// 压缩会话的中断原因（`run` 返回；取消类命令已在内部分流）。
@@ -68,12 +87,20 @@ impl ContextCompression {
     }
 
     /// 发起手动压缩。
-    fn manual(ctx: &TurnContext, organizer: &ContextOrganizer, observed_tokens: usize) -> Self {
+    fn manual(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        notice: String,
+    ) -> Self {
         Self::start(
             ctx,
             organizer,
             observed_tokens,
-            CompressionKind::Manual { observed_tokens },
+            CompressionKind::Manual {
+                observed_tokens,
+                notice,
+            },
         )
     }
 
@@ -238,6 +265,7 @@ impl ContextCompression {
             Err(error) => (&error.usage, tiangong_types::TurnStatus::Failed),
         };
         super::context::record_call_usage(ctx, &call_id, usage, "context_summary", status);
+        let notice = notice_content(&kind);
         match kind {
             CompressionKind::Forced => {
                 let observed_tokens = ctx.context_limit;
@@ -246,6 +274,7 @@ impl ContextCompression {
                     turn_usage.expect("Forced 压缩必须提供 turn 用量"),
                     observed_tokens,
                     result,
+                    &notice,
                 );
                 ManualCompressionOutcome::Noop
             }
@@ -255,10 +284,11 @@ impl ContextCompression {
                     turn_usage.expect("Auto 压缩必须提供 turn 用量"),
                     observed_tokens,
                     result,
+                    &notice,
                 );
                 ManualCompressionOutcome::Noop
             }
-            CompressionKind::Manual { .. } => complete_manual(ctx, result),
+            CompressionKind::Manual { .. } => complete_manual(ctx, result, &notice),
         }
     }
 }
@@ -274,11 +304,12 @@ fn complete_with_turn_usage(
     turn_usage: &mut TokenUsage,
     observed_tokens: usize,
     result: CompressionResult,
+    notice: &str,
 ) {
     match result {
         Ok(update) => {
             turn_usage.accumulate(&update.usage);
-            match apply_compression(ctx, &update, false) {
+            match apply_compression(ctx, &update, false, notice) {
                 Ok(current_tokens) => {
                     notify_auto_success(ctx, &update, current_tokens, observed_tokens);
                 }
@@ -316,6 +347,7 @@ pub(crate) enum ManualCompressionOutcome {
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    notice: String,
 ) -> ManualCompressionOutcome {
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
@@ -338,7 +370,7 @@ pub(crate) async fn run_manual_context_compression(
         notify_result(&ctx, ContextCompressAction::Noop);
         return ManualCompressionOutcome::Noop;
     }
-    let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
+    let compression = ContextCompression::manual(&ctx, &organizer, observed_tokens, notice);
     compression.run_manual(&mut ctx, cmd_rx).await
 }
 
@@ -442,9 +474,13 @@ fn resolve_task_result(
 }
 
 /// 手动压缩提交：返回终态供等待方判断（成功 / 失败原因）。
-fn complete_manual(ctx: &mut TurnContext, result: CompressionResult) -> ManualCompressionOutcome {
+fn complete_manual(
+    ctx: &mut TurnContext,
+    result: CompressionResult,
+    notice: &str,
+) -> ManualCompressionOutcome {
     match result {
-        Ok(update) => match apply_compression(ctx, &update, true) {
+        Ok(update) => match apply_compression(ctx, &update, true, notice) {
             Ok(current_tokens) => {
                 notify_manual_success(ctx, &update, current_tokens);
                 ManualCompressionOutcome::Succeeded
@@ -471,6 +507,7 @@ fn apply_compression(
     ctx: &mut TurnContext,
     update: &CompressionUpdate,
     account_usage_in_session: bool,
+    notice: &str,
 ) -> Result<usize> {
     if ctx.session.summary_up_to != update.previous_summary_up_to {
         bail!(
@@ -526,7 +563,7 @@ fn apply_compression(
     // build_provider_messages 拼进 system prompt，污染 prompt 并破坏
     // KV cache 前缀。
     let record_id = {
-        let record = Message::new(MessageRole::Notice, "[上下文管理] 上下文已压缩");
+        let record = Message::notice(crate::core::CONTEXT_NOTICE_CATEGORY, notice);
         let id = record.id.clone();
         let at = candidate.summary_up_to.min(candidate.messages.len());
         candidate.messages.insert(at, record);
@@ -775,7 +812,7 @@ mod tests {
 
         // 模拟压缩分割点：保留第三轮（最近交互），折叠前两轮。
         let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
-        apply_compression(&mut ctx, &update, false).expect("压缩应成功");
+        apply_compression(&mut ctx, &update, false, "测试压缩留痕").expect("压缩应成功");
 
         assert_eq!(ctx.session.context_summary.as_deref(), Some("前两轮摘要"));
         assert_eq!(ctx.session.summary_up_to, 4);
@@ -821,7 +858,7 @@ mod tests {
 
         // 折叠前两轮，边界落在 index 4（第三轮问题之前）。
         let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
-        apply_compression(&mut ctx, &update, false).expect("压缩应成功");
+        apply_compression(&mut ctx, &update, false, "测试压缩留痕").expect("压缩应成功");
 
         let record_index = ctx
             .session
@@ -911,7 +948,7 @@ mod tests {
                 crate::core::test_support::fail_next_persistence_for_session(&ctx.session.id);
             }
             let update = update_for(&ctx.session, 0, "新的摘要", 2);
-            let result = apply_compression(&mut ctx, &update, false);
+            let result = apply_compression(&mut ctx, &update, false, "测试压缩留痕");
             let restored = Session::load_from_storage(root.path(), &ctx.session.id).unwrap();
             if fail_save {
                 assert!(result.is_err());
@@ -931,6 +968,26 @@ mod tests {
         }
     }
 
+    /// 压缩留痕内容按来源区分（不含类别前缀，形态由 Message::notice 统一）。
+    #[test]
+    fn 压缩留痕文案按来源区分() {
+        assert_eq!(
+            notice_content(&CompressionKind::Auto { observed_tokens: 1 }),
+            "上下文接近上限，已自动压缩"
+        );
+        assert_eq!(
+            notice_content(&CompressionKind::Forced),
+            "上下文超限，已强制压缩"
+        );
+        assert_eq!(
+            notice_content(&CompressionKind::Manual {
+                observed_tokens: 0,
+                notice: "切换模型前已整理上下文".to_string(),
+            }),
+            "切换模型前已整理上下文"
+        );
+    }
+
     /// 手动压缩保存标题但不中断任务；忽略工具注入，取消类立即终止。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_compression_ignores_non_steering_commands_and_finishes() {
@@ -941,7 +998,12 @@ mod tests {
         let (mut ctx, root) = test_context(session);
         let session_id = ctx.session.id.clone();
         let organizer = ContextOrganizer::new(ctx.context_limit);
-        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let compression = ContextCompression::manual(
+            &ctx,
+            &organizer,
+            ctx.session.current_tokens,
+            "测试整理".to_string(),
+        );
         let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
         // 压缩请求指向不可达端点，约 1 秒超时后任务收敛（失败也视为一次
         // 完整收敛闭合）；期间到达的广播一律不接受。
@@ -984,8 +1046,12 @@ mod tests {
                 let (stream_tx, stream_rx) = std::sync::mpsc::channel();
                 ctx.stream_tx = stream_tx;
                 let organizer = ContextOrganizer::new(ctx.context_limit);
-                let compression =
-                    ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+                let compression = ContextCompression::manual(
+                    &ctx,
+                    &organizer,
+                    ctx.session.current_tokens,
+                    "测试整理".to_string(),
+                );
                 let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
                 cmd_tx
                     .send(Command::SetTitle {
@@ -1046,7 +1112,12 @@ mod tests {
         }
         let (mut ctx, _root) = test_context(session);
         let organizer = ContextOrganizer::new(ctx.context_limit);
-        let compression = ContextCompression::manual(&ctx, &organizer, ctx.session.current_tokens);
+        let compression = ContextCompression::manual(
+            &ctx,
+            &organizer,
+            ctx.session.current_tokens,
+            "测试整理".to_string(),
+        );
         let (cmd_tx, mut cmd_rx) = tokio_mpsc::unbounded_channel();
         cmd_tx.send(Command::Cancel).unwrap();
         let interrupt = tokio::time::timeout(
@@ -1080,7 +1151,10 @@ mod tests {
         let call_id = scru128::new().to_string();
         ContextCompression {
             task,
-            kind: CompressionKind::Manual { observed_tokens: 0 },
+            kind: CompressionKind::Manual {
+                observed_tokens: 0,
+                notice: "[上下文管理] 测试整理".to_string(),
+            },
             call_id: call_id.clone(),
             cancelled_usage: TokenUsage::default(),
         }
@@ -1127,7 +1201,10 @@ mod tests {
         let call_id = scru128::new().to_string();
         let mut compression = ContextCompression {
             task,
-            kind: CompressionKind::Manual { observed_tokens: 0 },
+            kind: CompressionKind::Manual {
+                observed_tokens: 0,
+                notice: "[上下文管理] 测试整理".to_string(),
+            },
             call_id: call_id.clone(),
             cancelled_usage: TokenUsage::default(),
         };

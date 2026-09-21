@@ -229,7 +229,7 @@ impl CoreManager {
         // 无法发请求的端点压缩必然失败，白等一轮。此时历史也从未被该模型
         // 处理过，直接切换即可。
         if current.is_usable() {
-            if let Err(error) = core.compact_context().await {
+            if let Err(error) = core.compact_context("切换模型前已整理上下文").await {
                 tracing::warn!(
                     session_id,
                     %error,
@@ -398,12 +398,14 @@ impl CoreManager {
         let Some(core) = core else {
             return Err("会话无活跃 Core".to_string());
         };
-        core.compact_context().await.map_err(|error| match error {
-            tiangong_core::core::CoreError::Busy => {
-                "会话正在执行，当前回合结束后可整理上下文".to_string()
-            }
-            other => other.to_string(),
-        })
+        core.compact_context(tiangong_core::core::MANUAL_COMPACT_NOTICE)
+            .await
+            .map_err(|error| match error {
+                tiangong_core::core::CoreError::Busy => {
+                    "会话正在执行，当前回合结束后可整理上下文".to_string()
+                }
+                other => other.to_string(),
+            })
     }
 
     /// 记录会话级对话模型选择（models 注册表 key；None 恢复跟随默认）。
