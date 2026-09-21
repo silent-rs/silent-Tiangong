@@ -205,6 +205,9 @@ export function MessageInput({
       api.getSessionModel(activeSessionId)
         .then((ref) => { if (!cancelled) setSessionModelRef(ref); })
         .catch(console.error);
+    } else {
+      // 新建对话不沿用上一会话的模型选择，回到跟随路由默认。
+      setSessionModelRef(null);
     }
     api.listSessionChatModels()
       .then((result) => {
