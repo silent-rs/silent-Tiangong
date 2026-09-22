@@ -222,7 +222,7 @@ pub(crate) fn append_model_only_image_injections(
 
 /// 从工具结果 stdout 提取图片注入声明（RFC 0017 通用协议）。
 ///
-/// 约定：stdout 为 JSON 对象且含非空 `injected_images` 数组时，每项
+/// 协议约定见 `tiangong_types::ToolResultInjection`；本函数只消费图片
 /// 声明一张待注入图片（local_path/mime_type/original_name/size_bytes/
 /// source）。廉价字符串预检避免对大体积普通工具输出做 JSON 解析；
 /// 声明字段不合法的项跳过并记录告警，不让单条坏声明拖垮整个工具结果。
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(session.messages.len(), before);
     }
 
-    /// stdout 注入声明协议：仅含 `injected_images` 的 JSON 工具输出被解析；
+    /// stdout 注入声明协议：仅含 `injected_assets` 的 JSON 工具输出被解析；
     /// 普通输出（含恰好提到该字样的长文本）零开销跳过或安全失败。
     #[test]
     fn parse_injected_images_extracts_protocol_declarations_only() {
