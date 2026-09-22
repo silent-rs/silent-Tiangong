@@ -7,10 +7,9 @@ use tiangong_types::TokenUsage;
 pub(crate) fn is_compressible(message: &Message) -> bool {
     message.role != MessageRole::System
         && message.role != MessageRole::Notice
-        && !matches!(
-            message.phase,
-            MessagePhase::CompressedResume | MessagePhase::ModelOnly
-        )
+        // CompressedResume 是压缩阶段生成的恢复锚点，不能再次纳入摘要；
+        // ModelOnly 只是 UI 可见性语义，仍属于模型上下文，必须可被压缩覆盖。
+        && message.phase != MessagePhase::CompressedResume
 }
 
 /// 使用 Session 和客户端快照生成上下文摘要，不负责任务调度、持久化或通知。
@@ -321,6 +320,24 @@ mod tests {
         assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
         assert_eq!(request.context[1].text_content(), "上一轮续接状态");
         assert_eq!(request.context[2].text_content(), "后续交互");
+    }
+
+    /// ModelOnly 只是 UI 隐藏语义，压缩请求必须保留它的模型上下文内容，
+    /// 使其与普通历史一样可以被摘要覆盖。
+    #[test]
+    fn summary_request_includes_model_only_messages() {
+        let mut session = Session::new("test-model-only");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
+        let mut image = user("截图 provenance");
+        image.phase = MessagePhase::ModelOnly;
+        session.messages = vec![image, assistant("基于截图的后续回答")];
+
+        let request =
+            ContextCompressor::summary_request(&session, 2, 10_000, ReasoningEffort::None);
+        assert_eq!(request.context.len(), 4);
+        assert_eq!(request.context[1].phase, MessagePhase::ModelOnly);
+        assert_eq!(request.context[1].text_content(), "截图 provenance");
+        assert_eq!(request.context[2].text_content(), "基于截图的后续回答");
     }
 
     #[test]
