@@ -17,9 +17,7 @@ use std::path::Path;
 
 use crate::core::plugin::feedback::PluginFeedbackTx;
 use crate::permission::TrustMode;
-use crate::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-};
+use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
 /// 进程内插件：封装自己的全部能力，在 engine 创建/重建时自行注册。
 ///
@@ -40,9 +38,7 @@ use crate::tools::extension::{
 /// 此外，core 在 worker_loop 的关键生命周期节点遍历插件，回调下述生命周期钩子
 ///（均提供默认空实现），传入 `&mut Session` 供插件做必要处理（如维护索引、归档
 /// 记忆等）。插件按需覆写关心的节点即可。
-pub trait Plugin:
-    ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider + MentionCandidateProvider
-{
+pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider {
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
 

@@ -420,16 +420,15 @@ impl WasmPlugin {
             .collect())
     }
 
-    /// 返回插件贡献的 @提及候选。
+    /// @提及查询的单请求预算（含 sidecar 往返）：补全是交互路径，
+    /// 超时的来源返回空候选，不阻塞输入框。
+    const MENTION_QUERY_TIMEOUT_MS: u64 = 3000;
+    /// 按查询返回插件贡献的 @提及候选。
     ///
     /// 复用 0.1.0 world 已有的 plugin-ui 消息通道，避免给现有 world 增加强制导出：
     /// 旧插件收到未知方法会返回 plugin-error，此处按“不支持 Mention”降级为空列表；
-    /// 新插件返回 MentionCandidate JSON 数组。
-    pub fn mention_candidates(&mut self) -> Result<Vec<MentionCandidate>> {
-        self.query_mentions(&tiangong_types::MentionQuery::default())
-    }
-
-    /// 请求级上下文，不调用 set_workspace；错误返回时也清除宿主上下文。
+    /// 新插件返回 MentionCandidate JSON 数组。请求级上下文，不调用 set_workspace；
+    /// 错误返回时也清除宿主上下文。
     pub fn query_mentions(
         &mut self,
         query: &tiangong_types::MentionQuery,
@@ -454,7 +453,7 @@ impl WasmPlugin {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64
-                        + 3000,
+                        + Self::MENTION_QUERY_TIMEOUT_MS,
                 ),
             },
         ));

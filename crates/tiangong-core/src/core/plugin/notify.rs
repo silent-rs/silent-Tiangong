@@ -80,9 +80,7 @@ mod tests {
 
     use super::super::Plugin;
     use crate::session::Session;
-    use crate::tools::extension::{
-        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-    };
+    use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
     struct HookProbePlugin {
         id: &'static str,
@@ -93,7 +91,6 @@ mod tests {
     impl ToolSpecProvider for HookProbePlugin {}
     impl ToolOverrideHandler for HookProbePlugin {}
     impl PromptSectionProvider for HookProbePlugin {}
-    impl MentionCandidateProvider for HookProbePlugin {}
 
     impl Plugin for HookProbePlugin {
         fn id(&self) -> &str {
@@ -128,7 +125,6 @@ mod tests {
         impl ToolSpecProvider for SlowPlugin {}
         impl ToolOverrideHandler for SlowPlugin {}
         impl PromptSectionProvider for SlowPlugin {}
-        impl MentionCandidateProvider for SlowPlugin {}
         impl Plugin for SlowPlugin {
             fn id(&self) -> &str {
                 "slow-notify"
@@ -173,7 +169,6 @@ mod tests {
         impl ToolSpecProvider for PanickingPlugin {}
         impl ToolOverrideHandler for PanickingPlugin {}
         impl PromptSectionProvider for PanickingPlugin {}
-        impl MentionCandidateProvider for PanickingPlugin {}
         impl Plugin for PanickingPlugin {
             fn id(&self) -> &str {
                 "panicking-notify"

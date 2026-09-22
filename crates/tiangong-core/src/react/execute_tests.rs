@@ -14,9 +14,7 @@ use crate::observe::Observer;
 use crate::permission::TrustMode;
 use crate::prompt::SystemPromptConfig;
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use crate::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-};
+use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 use crate::tools::result::ToolResult;
 use crate::turn_context::TurnContext;
 use std::collections::HashMap;
@@ -278,7 +276,6 @@ struct TrustTrackingPlugin {
 impl ToolOverrideHandler for TrustTrackingPlugin {}
 impl ToolSpecProvider for TrustTrackingPlugin {}
 impl PromptSectionProvider for TrustTrackingPlugin {}
-impl MentionCandidateProvider for TrustTrackingPlugin {}
 
 impl Plugin for TrustTrackingPlugin {
     fn id(&self) -> &str {
@@ -1172,7 +1169,6 @@ struct LifecycleCountingPlugin {
 impl ToolOverrideHandler for LifecycleCountingPlugin {}
 impl ToolSpecProvider for LifecycleCountingPlugin {}
 impl PromptSectionProvider for LifecycleCountingPlugin {}
-impl MentionCandidateProvider for LifecycleCountingPlugin {}
 
 impl Plugin for LifecycleCountingPlugin {
     fn id(&self) -> &str {
@@ -1524,7 +1520,6 @@ struct CancelCountingPlugin {
 impl ToolOverrideHandler for CancelCountingPlugin {}
 impl ToolSpecProvider for CancelCountingPlugin {}
 impl PromptSectionProvider for CancelCountingPlugin {}
-impl MentionCandidateProvider for CancelCountingPlugin {}
 
 impl Plugin for CancelCountingPlugin {
     fn id(&self) -> &str {
@@ -2424,7 +2419,6 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
     impl crate::tools::extension::ToolSpecProvider for StallingFinishPlugin {}
     impl crate::tools::extension::ToolOverrideHandler for StallingFinishPlugin {}
     impl crate::tools::extension::PromptSectionProvider for StallingFinishPlugin {}
-    impl crate::tools::extension::MentionCandidateProvider for StallingFinishPlugin {}
     impl Plugin for StallingFinishPlugin {
         fn id(&self) -> &str {
             "stalling-finish"

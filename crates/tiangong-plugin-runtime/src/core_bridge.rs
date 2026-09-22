@@ -23,7 +23,7 @@ use tiangong_core::permission::TrustMode;
 use tiangong_core::react::message::INJECTION_TOOL_NAME;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
@@ -485,16 +485,6 @@ impl PromptSectionProvider for RuntimeCorePlugin {
             sections.extend(adapter.prompt_sections());
         }
         sections
-    }
-}
-
-impl MentionCandidateProvider for RuntimeCorePlugin {
-    fn mention_candidates(&self) -> Vec<tiangong_core::MentionCandidate> {
-        let mut candidates = Vec::new();
-        for adapter in self.adapters() {
-            candidates.extend(adapter.mention_candidates());
-        }
-        candidates
     }
 }
 

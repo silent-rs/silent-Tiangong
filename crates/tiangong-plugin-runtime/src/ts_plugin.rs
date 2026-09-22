@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
 use tiangong_core::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
 use tiangong_core::tools::result::ToolResult;
 use tiangong_llm::tool::{ToolCall, ToolSpec};
@@ -24,9 +24,6 @@ struct TsPluginState {
     prompts: Vec<String>,
     /// 旧版插件以此声明工具全部由 sidecar 执行，页面仅负责展示。
     legacy_tools_direct: bool,
-    /// @提及展示：候选 label（UI 贡献标题或插件 id）、副标题（mention.hint）
-    /// 与标记字符（mention.mark，可选）。
-    mention: Option<(String, String, String)>,
 }
 
 pub struct TsPluginAdapter {
@@ -75,7 +72,6 @@ impl TsPluginAdapter {
                     .sidecar
                     .as_ref()
                     .is_some_and(|s| s.tools_direct == Some(true)),
-                mention: mention_candidate_parts(manifest),
             }),
             enabled: AtomicBool::new(enabled),
             feedback_tx: RwLock::new(None),
@@ -99,7 +95,6 @@ impl TsPluginAdapter {
                 .sidecar
                 .as_ref()
                 .is_some_and(|s| s.tools_direct == Some(true)),
-            mention: mention_candidate_parts(manifest),
         };
         match self.state.write() {
             Ok(mut state) => *state = next,
@@ -494,29 +489,6 @@ impl PromptSectionProvider for TsPluginAdapter {
     }
 }
 
-impl MentionCandidateProvider for TsPluginAdapter {
-    fn mention_candidates(&self) -> Vec<tiangong_core::MentionCandidate> {
-        if !self.is_enabled() {
-            return Vec::new();
-        }
-        self.state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .mention
-            .as_ref()
-            .map(|(label, hint, mark)| {
-                vec![tiangong_core::MentionCandidate {
-                    value: format!("@plugin:{}", self.id),
-                    label: label.clone(),
-                    kind: "plugin".to_string(),
-                    hint: hint.clone(),
-                    mark: mark.clone(),
-                }]
-            })
-            .unwrap_or_default()
-    }
-}
-
 /// 按清单静态生成 @提及候选（未声明 mention 返回 None）。
 /// 供注册表实时聚合使用——TS 插件的候选是纯清单数据，不依赖适配器实例
 ///（适配器弱引用由会话 Core 构建时填充，安装后不存在）。
@@ -589,31 +561,23 @@ mod tests {
     }
 
     #[test]
-    fn mention候选_声明时生成_禁用时为空() {
-        let adapter =
-            TsPluginAdapter::from_manifest(&manifest_with_mention(Some("问候能力")), true, None);
-        let candidates = MentionCandidateProvider::mention_candidates(&adapter);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].value, "@plugin:demo");
-        assert_eq!(candidates[0].label, "演示插件");
-        assert_eq!(candidates[0].kind, "plugin");
-        assert_eq!(candidates[0].hint, "问候能力");
-
-        adapter.set_enabled(false);
-        assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
-
+    fn mention候选_声明时生成_未声明为空() {
+        // 静态候选只看清单：启停过滤由注册表查询句柄（MentionSource）负责。
+        let manifest = manifest_with_mention(Some("问候能力"));
+        let candidate = mention_candidate_from_manifest(&manifest).expect("声明 mention 应有候选");
+        assert_eq!(candidate.value, "@plugin:demo");
+        assert_eq!(candidate.label, "演示插件");
+        assert_eq!(candidate.kind, "plugin");
+        assert_eq!(candidate.hint, "问候能力");
         // 未声明 mention：无候选
-        let adapter = TsPluginAdapter::from_manifest(&manifest_with_mention(None), true, None);
-        assert!(MentionCandidateProvider::mention_candidates(&adapter).is_empty());
+        assert!(mention_candidate_from_manifest(&manifest_with_mention(None)).is_none());
     }
-
     #[test]
     fn mention候选_无ui标题时用插件id() {
         let mut manifest = manifest_with_mention(Some("能力"));
         manifest.ui = None;
-        let adapter = TsPluginAdapter::from_manifest(&manifest, true, None);
-        let candidates = MentionCandidateProvider::mention_candidates(&adapter);
-        assert_eq!(candidates[0].label, "demo");
+        let candidate = mention_candidate_from_manifest(&manifest).expect("声明 mention 应有候选");
+        assert_eq!(candidate.label, "demo");
     }
     #[test]
     fn 无界面sidecar插件_工具走直连_有界面走页面() {

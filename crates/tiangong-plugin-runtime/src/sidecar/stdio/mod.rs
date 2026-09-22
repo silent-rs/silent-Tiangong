@@ -907,6 +907,9 @@ impl StdioSidecarConnection {
         Ok(handshake)
     }
 
+    /// deadline 语义下的最小剩余等待（排队耗尽预算时兜底）。
+    const MIN_DEADLINE_REMAINING_MS: u64 = 100;
+
     /// 单请求往返：注册 pending → 写帧（新进程首帧前补 Auth）→ 循环收进度/响应。
     ///
     /// 等待策略由 `wait` 显式决定：握手类往返使用有限等待；业务 Handler
@@ -931,7 +934,12 @@ impl StdioSidecarConnection {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                ResponseWait::Bounded(Duration::from_millis(deadline.saturating_sub(now)))
+                // 排队可能吃掉全部预算：保留最小收响应窗口，让已写出的
+                // 请求有机会完成，而不是 0ms 立即超时。
+                let remaining = deadline
+                    .saturating_sub(now)
+                    .max(Self::MIN_DEADLINE_REMAINING_MS);
+                ResponseWait::Bounded(Duration::from_millis(remaining))
             })
             .unwrap_or(wait);
         let bounded_deadline = match wait {
