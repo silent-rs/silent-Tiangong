@@ -21,7 +21,8 @@ use tiangong_plugin_index_protocol::management::{
     RebuildWorkspaceIndexResponse,
 };
 use tiangong_plugin_index_protocol::search::{
-    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, SEARCH_CODE_OPERATION,
+    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_FILES_OPERATION,
+    MentionFileCandidate, MentionFilesRequest, MentionFilesResponse, SEARCH_CODE_OPERATION,
     SearchCodeRequest, SearchCodeResponse,
 };
 use tiangong_plugin_index_protocol::{
@@ -126,6 +127,18 @@ impl IndexService {
                         .with_context(|| "search_code 后台任务失败")?;
                 serde_json::to_value(resp).with_context(|| "序列化 search_code 响应失败")
             }
+            MENTION_FILES_OPERATION => {
+                let req: MentionFilesRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 mention_files 请求失败")?;
+                let manager = self.manager.clone();
+                let workspace = self.resolve_mention_workspace(req.workspace.clone());
+                let resp = tokio::task::spawn_blocking(move || {
+                    handle_mention_files_blocking(&manager, workspace.as_deref(), req)
+                })
+                .await
+                .with_context(|| "mention_files 后台任务失败")??;
+                serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
+            }
             SET_WORKSPACE_OPERATION => {
                 let req: SetWorkspaceRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 set_workspace 请求失败")?;
@@ -226,6 +239,20 @@ impl IndexService {
         request_workspace
             .map(PathBuf::from)
             .or_else(|| self.workspace())
+    }
+
+    /// mention 文件候选的工作区：请求注入优先（wasm 从宿主查询上下文读出），
+    /// 其次 `set_workspace` 注入的全局工作区，最后回落宿主权威调用上下文。
+    fn resolve_mention_workspace(&self, requested: Option<String>) -> Option<PathBuf> {
+        requested
+            .map(PathBuf::from)
+            .or_else(|| self.workspace())
+            .or_else(|| {
+                tiangong_plugin_sidecar::invocation_context()
+                    .map(|ctx| ctx.workspace)
+                    .filter(|workspace| !workspace.is_empty())
+                    .map(PathBuf::from)
+            })
     }
 
     // ── 生命周期 ─────────────────────────────────────────────
@@ -348,6 +375,64 @@ fn handle_index_search_blocking(
         session_hits,
         scanning,
     })
+}
+
+/// `@` 提及文件候选阻塞实现（在 spawn_blocking 线程内执行）。
+///
+/// 与 `index_search` 的分工：mention 只查 path 字段（用户要「指向某个文件」），
+/// 覆盖二进制/文档（它们只有 path 条目），多词 AND；索引未就绪时返回空候选并置
+/// `scanning`，由 UI 提示，不用 fs 遍历兜底——两套来源会互相覆盖同 kind 候选。
+fn handle_mention_files_blocking(
+    manager: &IndexManager,
+    workspace: Option<&Path>,
+    req: MentionFilesRequest,
+) -> Result<MentionFilesResponse> {
+    let Some(workspace) = workspace else {
+        return Ok(MentionFilesResponse::default());
+    };
+    if !workspace.is_dir() {
+        return Ok(MentionFilesResponse::default());
+    }
+    if manager.is_workspace_scanning(workspace) {
+        return Ok(MentionFilesResponse {
+            candidates: Vec::new(),
+            scanning: true,
+        });
+    }
+    let hits = manager.search_paths(workspace, &req.query, mention_limit(req.limit))?;
+    let candidates = hits
+        .into_iter()
+        .map(|hit| {
+            // label 取文件名（末段）；路径统一 `/` 分隔，跨平台可原样往返
+            let file_name = hit
+                .path
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&hit.path)
+                .to_string();
+            MentionFileCandidate {
+                relative_path: hit.path,
+                file_name,
+            }
+        })
+        .collect();
+    Ok(MentionFilesResponse {
+        candidates,
+        scanning: false,
+    })
+}
+
+/// mention 候选条数：请求未带 limit 时取默认值，否则收敛到 `[1, MAX]`。
+/// 上限比 index_search 严——mention 是交互路径，前端还有每组展示截断。
+fn mention_limit(requested: usize) -> usize {
+    const DEFAULT_MENTION_LIMIT: usize = 50;
+    const MAX_MENTION_LIMIT: usize = 200;
+    if requested == 0 {
+        DEFAULT_MENTION_LIMIT
+    } else {
+        requested.clamp(1, MAX_MENTION_LIMIT)
+    }
 }
 
 /// search_code 阻塞实现（在 spawn_blocking 线程内执行）。

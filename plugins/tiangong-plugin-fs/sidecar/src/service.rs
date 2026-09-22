@@ -10,9 +10,9 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_plugin_fs_protocol::tools::{
     APPLY_PATCH_OPERATION, ApplyPatchRequest, LIST_DIR_OPERATION, ListDirRequest,
-    MENTION_FILES_OPERATION, MentionFilesRequest, READ_FILE_OPERATION, REPLACE_IN_FILE_OPERATION,
-    ReadFileRequest, ReplaceInFileRequest, SET_WORKSPACE_OPERATION, SetWorkspaceRequest,
-    TREE_DIR_OPERATION, TreeDirRequest, WRITE_FILE_OPERATION, WriteFileRequest,
+    READ_FILE_OPERATION, REPLACE_IN_FILE_OPERATION, ReadFileRequest, ReplaceInFileRequest,
+    SET_WORKSPACE_OPERATION, SetWorkspaceRequest, TREE_DIR_OPERATION, TreeDirRequest,
+    WRITE_FILE_OPERATION, WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{
     Ack, FS_PROTOCOL_VERSION, FsAccessContext, PLUGIN_ID, PLUGIN_VERSION,
@@ -160,15 +160,6 @@ impl FsService {
                 .with_context(|| "apply_patch 后台任务失败")?;
                 let resp = handlers::annotate_workdir(resp, &access);
                 serde_json::to_value(resp).with_context(|| "序列化 apply_patch 响应失败")
-            }
-            MENTION_FILES_OPERATION => {
-                let req: MentionFilesRequest = serde_json::from_value(payload)
-                    .with_context(|| "解析 mention_files 请求失败")?;
-                // 只枚举路径、不读内容，但目录遍历仍是阻塞 IO。
-                let resp = tokio::task::spawn_blocking(move || handlers::handle_mention_files(req))
-                    .await
-                    .with_context(|| "mention_files 后台任务失败")?;
-                serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
             }
             SET_WORKSPACE_OPERATION => {
                 // 兼容保留：wasm 侧状态更新才是请求构造源；sidecar 无

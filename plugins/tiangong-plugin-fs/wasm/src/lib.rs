@@ -21,9 +21,9 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use bindings::tiangong::plugin::{clock, feedback};
 use tiangong_plugin_fs_protocol::tools::{
-    ApplyPatch, ApplyPatchRequest, FsToolResponse, ListDir, ListDirRequest, MentionFiles,
-    MentionFilesRequest, ReadFile, ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, TreeDir,
-    TreeDirRequest, WriteFile, WriteFileRequest,
+    ApplyPatch, ApplyPatchRequest, FsToolResponse, ListDir, ListDirRequest, ReadFile,
+    ReadFileRequest, ReplaceInFile, ReplaceInFileRequest, TreeDir, TreeDirRequest, WriteFile,
+    WriteFileRequest,
 };
 use tiangong_plugin_fs_protocol::{
     FsOperation, TOOL_APPLY_PATCH, TOOL_CURRENT_TIME, TOOL_LIST_DIR, TOOL_READ_FILE,
@@ -454,112 +454,10 @@ impl UiGuest for Component {
     }
 
     fn handle_view_message(
-        request: ViewMessageRequest,
+        _request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        // @提及文件候选：宿主经 plugin-ui 消息通道按会话上下文查询。
-        if request.method == "__tiangong.mention_candidates.v1" {
-            return Ok(ViewMessageResponse {
-                payload: mention_files_payload(&request.payload),
-            });
-        }
         Err(plugin_err("Fs 插件暂无页面消息"))
     }
 }
 
-/// 从宿主查询 payload 构造访问上下文：workspace 取查询自带上下文，
-/// 信任模式沿用实例状态（mention 只枚举路径，不受其影响）。
-fn query_access_context(query: &serde_json::Value) -> tiangong_plugin_fs_protocol::FsAccessContext {
-    tiangong_plugin_fs_protocol::FsAccessContext {
-        workspace: query
-            .pointer("/context/workspace")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        full_trust: state::full_trust(),
-    }
-}
-
-/// 按宿主查询构造文件候选 JSON（失败一律降级为空列表，不阻塞输入框补全）。
-fn mention_files_payload(payload: &str) -> String {
-    let query: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-    // 工作区取宿主随查询注入的请求级上下文（MentionQuery.context.workspace）：
-    // 本实例是注册表预加载的查询实例，不经 set_workspace 初始化，
-    // state 里的工作区恒为空。草稿/全局查询没有工作区，直接无候选。
-    let access = query_access_context(&query);
-    if access.workspace.is_none() {
-        return "[]".to_string();
-    }
-    let request = MentionFilesRequest {
-        query: query
-            .get("query")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        limit: query
-            .get("max_per_group")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0) as usize,
-        access,
-    };
-    let Ok(response) = sidecar_client::invoke::<MentionFiles>(&request) else {
-        return "[]".to_string();
-    };
-    let candidates: Vec<serde_json::Value> = response
-        .candidates
-        .into_iter()
-        .map(|candidate| {
-            // 路径含空白时用反引号包裹：前端 token 扫描到空白即止，
-            // 不包裹会把路径截断（跨平台统一 `/` 分隔，可原样往返）。
-            let token = if candidate
-                .relative_path
-                .chars()
-                .any(|character| character.is_whitespace())
-            {
-                format!("@file:`{}`", candidate.relative_path)
-            } else {
-                format!("@file:{}", candidate.relative_path)
-            };
-            serde_json::json!({
-                "value": token,
-                "label": candidate.file_name,
-                "kind": "file",
-                "hint": candidate.relative_path,
-                "mark": "F",
-            })
-        })
-        .collect();
-    serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".to_string())
-}
 bindings::export!(Component with_types_in bindings);
-
-#[cfg(test)]
-mod mention_query_tests {
-    use super::*;
-
-    /// 工作区必须来自查询上下文：查询实例的 state 恒无工作区，
-    /// 依赖 state 会让文件候选在真实链路上恒为空。
-    #[test]
-    fn workspace_comes_from_query_context_not_state() {
-        state::set_workspace(None);
-        let with_workspace = serde_json::json!({
-            "context": {"session_id": "s1", "workspace": "/tmp/demo"},
-            "query": "re",
-            "allowed_kinds": [],
-            "max_per_group": 50
-        });
-        let access = query_access_context(&with_workspace);
-        assert_eq!(access.workspace.as_deref(), Some("/tmp/demo"));
-
-        let without_workspace = serde_json::json!({
-            "context": {"session_id": null, "workspace": null},
-            "query": "",
-            "allowed_kinds": [],
-            "max_per_group": 50
-        });
-        assert!(query_access_context(&without_workspace).workspace.is_none());
-        // 无工作区查询直接短路为空候选，不会触达 sidecar。
-        assert_eq!(
-            mention_files_payload(without_workspace.to_string().as_str()),
-            "[]"
-        );
-    }
-}

@@ -51,7 +51,7 @@ impl IndexQuery {
     }
 }
 
-const WORKSPACE_SCHEMA_VERSION: u32 = 2;
+const WORKSPACE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexMeta {
@@ -198,6 +198,31 @@ impl IndexManager {
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
         let hits = guard.search(&query.text, query.limit)?;
+        Ok(hits
+            .into_iter()
+            .map(|h| IndexHit {
+                path: h.path,
+                language: h.language,
+                scope: IndexScope::Workspace,
+            })
+            .collect())
+    }
+
+    /// `@` 提及文件候选检索：只查 path 字段，多词 AND，浅优先。
+    ///
+    /// 与 {@link search} 分开：mention 要能指向二进制/文档（它们只有 path 条目），
+    /// 且查询词是自由文本（含空格），不需要内容与符号字段参与。
+    pub fn search_paths(
+        &self,
+        root: &Path,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<IndexHit>> {
+        let index = self.get_or_create_workspace_index(root)?;
+        let guard = index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
+        let hits = guard.search_paths(query_text, limit)?;
         Ok(hits
             .into_iter()
             .map(|h| IndexHit {
