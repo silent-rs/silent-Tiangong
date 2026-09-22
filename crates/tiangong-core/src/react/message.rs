@@ -222,12 +222,6 @@ pub(crate) fn append_model_only_image_injections(
 
 /// 从工具结果 stdout 提取图片注入声明（RFC 0017 通用协议）。
 ///
-/// 协议约定见 `tiangong_types::ToolResultInjection`；本函数只消费图片
-/// 声明一张待注入图片（local_path/mime_type/original_name/size_bytes/
-/// source）。廉价字符串预检避免对大体积普通工具输出做 JSON 解析；
-/// 声明字段不合法的项跳过并记录告警，不让单条坏声明拖垮整个工具结果。
-/// 从工具结果 stdout 提取图片注入声明（RFC 0017 通用协议）。
-///
 /// 协议类型与 JSON 解析由 `tiangong-types` 权威定义（`ToolResultInjection`）；
 /// 此处只做 core 侧语义加工：损坏声明告警、跳过非法项与非图片类型
 /// （文件/音视频注入是 Phase 2 扩展位）、生成全局唯一 asset_id。
@@ -835,6 +829,7 @@ mod tests {
         assert!(message.content[1].validate_stable_reference().is_ok());
     }
 
+    /// 注入去重只看保留区：折叠区的同内容注入不得拦截必要的内容重注入。
     ///
     /// 回归（自制插件清单压缩自愈被拦死）：清单注入 → 压缩把边界推进到
     /// 越过该清单 → 下一轮自愈重注入同内容清单 —— 旧实现对全量数组做

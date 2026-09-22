@@ -1081,3 +1081,191 @@ async fn queued_next_turn_runs_after_current_turn_completes() {
     routes["second-answer"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
 }
+
+/// RFC 0017 端到端：工具批次产出图片注入后，注入消息必须以原生图片
+/// 内容进入下一次模型请求（「看见」），且不得劫持轮次锚点——
+/// elapsed_ms/turn_status 必须落在真实用户消息上（review 问题 2 回归）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_message() {
+    use crate::config::core::{CoreConfig, CoreConfigProvider};
+    use crate::session::{MessagePhase, Session};
+    use crate::tools::extension::{ToolOverrideHandler, ToolSpecProvider};
+    use serde_json::{Value, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tiangong_llm::ProviderProtocol;
+    use wiremock::{Mock, ResponseTemplate, matchers::method};
+
+    let (env, sid) = TestEnv::new("model-only-anchor");
+    // provider 请求组装时会读取该文件并 base64 进模型请求。
+    let image_path = env.root.join("inject-shot.png");
+    std::fs::write(&image_path, [0x89_u8, b'P', b'N', b'G', 1, 2, 3, 4]).unwrap();
+
+    struct ScreenshotTool {
+        path: std::path::PathBuf,
+    }
+    impl ToolSpecProvider for ScreenshotTool {
+        fn tool_specs(&self) -> Vec<tiangong_llm::tool::ToolSpec> {
+            vec![tiangong_llm::tool::ToolSpec {
+                name: "desktop_screenshot".to_string(),
+                description: "测试截图工具".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+            }]
+        }
+    }
+    impl crate::core::plugin::Plugin for ScreenshotTool {
+        fn id(&self) -> &str {
+            "computer-use-screenshot-test"
+        }
+    }
+    impl ToolOverrideHandler for ScreenshotTool {
+        fn handle(
+            &self,
+            _call: &tiangong_llm::tool::ToolCall,
+            _session: &mut Session,
+            _actor_id: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Option<crate::tools::result::ToolResult>> + Send>,
+        > {
+            let stdout = json!({
+                "path": self.path,
+                "injected_assets": [{
+                    "local_path": self.path,
+                    "mime_type": "image/png",
+                    "original_name": "inject-shot.png",
+                    "size_bytes": 8,
+                    "kind": "image",
+                    "source": "desktop_screenshot"
+                }]
+            })
+            .to_string();
+            Box::pin(async move {
+                Some(crate::tools::result::ToolResult {
+                    ok: true,
+                    summary: "已截图".to_string(),
+                    stdout,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                })
+            })
+        }
+    }
+
+    impl crate::tools::extension::PromptSectionProvider for ScreenshotTool {}
+    impl crate::tools::extension::MentionCandidateProvider for ScreenshotTool {}
+
+    let server = MockServer::start().await;
+    let step = AtomicUsize::new(0);
+    Mock::given(method("POST"))
+        .respond_with(move |request: &wiremock::Request| {
+            let index = step.fetch_add(1, Ordering::SeqCst);
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if index == 1 {
+                // 「看见」判据：注入消息必须以原生图片部件进入第二次请求。
+                let text = String::from_utf8_lossy(&request.body).to_string();
+                assert!(
+                    text.contains("injected-images"),
+                    "第二次请求应包含注入 provenance，实际：{body}"
+                );
+                assert!(
+                    text.contains("\"base64\""),
+                    "第二次请求应包含原生图片数据，实际：{body}"
+                );
+            }
+            let usage = json!({"input_tokens": 10, "output_tokens": 5});
+            let block = if index == 0 {
+                json!({"type": "tool_use", "id": "shot-call", "name": "desktop_screenshot", "input": {}})
+            } else {
+                json!({"type": "text", "text": "已看到截图"})
+            };
+            let mut events = vec![
+                json!({"type": "message_start", "message": {"id": format!("m{index}"), "model": "glm-5.3-flash", "role": "assistant", "content": [], "usage": {"input_tokens": 0, "output_tokens": 0}}}),
+                json!({"type": "content_block_start", "index": 0, "content_block": block}),
+                json!({"type": "content_block_stop", "index": 0}),
+                json!({"type": "message_delta", "delta": {"stop_reason": if index == 0 { "tool_use" } else { "end_turn" }}, "usage": usage}),
+                json!({"type": "message_stop"}),
+            ];
+            if index == 0 {
+                events.insert(2, json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}}));
+            }
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    events
+                        .iter()
+                        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+                        .collect::<String>(),
+                )
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let mut session = Session::new("图片注入锚点验证");
+    session.id = sid.clone();
+    session.bind_storage_root(&env.root);
+    session.try_persist_to_disk().unwrap();
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let config = CoreConfig::builder()
+        .with_trust_mode(TrustMode::FullTrust)
+        .build();
+    let endpoint = tiangong_llm::ModelEndpoint {
+        base_url: server.uri(),
+        api_key: "test".to_string(),
+        model: "glm-5.3-flash".to_string(),
+        protocol: ProviderProtocol::Anthropic,
+        ..Default::default()
+    };
+    let core = super::TiangongCore::builder()
+        .session_id(sid.clone())
+        .storage_root(env.root.clone())
+        .workspace_dir(env.root.to_string_lossy())
+        .trust_mode(TrustMode::FullTrust)
+        .config(CoreConfigProvider::new(config))
+        .stream_tx(tx)
+        .plugins(vec![std::sync::Arc::new(ScreenshotTool {
+            path: image_path.clone(),
+        })])
+        .model_endpoint(endpoint)
+        .build();
+    send_message(&core, "msg-shot", "看看屏幕");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-shot").await,
+        TurnStatus::Success
+    );
+
+    let restored = env.load_session(&sid);
+    let user_message = restored
+        .messages
+        .iter()
+        .find(|m| m.id == "msg-shot")
+        .expect("用户消息必须存在");
+    assert_eq!(user_message.turn_status, Some(TurnStatus::Success));
+    assert!(
+        user_message.elapsed_ms.is_some(),
+        "轮次时长必须落在真实用户消息上"
+    );
+    let injected = restored
+        .messages
+        .iter()
+        .find(|m| m.phase == MessagePhase::ModelOnly)
+        .expect("图片注入消息必须存在");
+    assert_eq!(injected.role, MessageRole::User);
+    assert!(
+        injected.turn_status.is_none() && injected.elapsed_ms.is_none(),
+        "注入消息不得携带轮次记账字段"
+    );
+    assert!(
+        restored
+            .messages
+            .iter()
+            .position(|m| m.id == "msg-shot")
+            .unwrap()
+            < restored
+                .messages
+                .iter()
+                .position(|m| m.phase == MessagePhase::ModelOnly)
+                .unwrap(),
+        "注入消息应位于真实用户消息之后"
+    );
+}
