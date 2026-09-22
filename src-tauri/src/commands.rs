@@ -2236,7 +2236,7 @@ async fn query_mention_groups(
     let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || {
         // 查询入口刷新句柄，覆盖安装工具/后台升级等非 GUI 变更来源。
-        manager.set_mention_plugins(tiangong_plugin_runtime::registry::mention_plugins());
+        manager.set_mention_sources(tiangong_plugin_runtime::registry::mention_sources());
         manager.query_mentions(request)
     })
     .await

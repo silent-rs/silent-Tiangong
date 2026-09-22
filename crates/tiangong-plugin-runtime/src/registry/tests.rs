@@ -553,7 +553,7 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
 /// 且停用/卸载后立即从候选集合消失。
 #[test]
 #[serial_test::serial]
-fn mention_plugins_are_reachable_without_any_session_core() {
+fn mention_sources_are_reachable_without_any_session_core() {
     let manifest = |id: &str| -> PluginManifest {
         serde_json::from_str(&format!(
             r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"候选"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
@@ -583,10 +583,10 @@ fn mention_plugins_are_reachable_without_any_session_core() {
         plugins.insert("mention-disabled".into(), record("mention-disabled", false));
     }
     let query = tiangong_types::MentionQuery::default();
-    let values: Vec<String> = mention_plugins()
+    let values: Vec<String> = mention_sources()
         .into_iter()
-        // 注册表持有的句柄：没有任何 TiangongCore 存在，也不依赖适配器弱引用。
-        .flat_map(|plugin| plugin.query_mentions(&query).expect("查询不应失败"))
+        // 注册表持有的来源：没有任何 TiangongCore 存在，也不依赖适配器弱引用。
+        .flat_map(|source| source.query(&query).expect("查询不应失败"))
         .map(|candidate| candidate.value)
         .collect();
     assert!(
@@ -599,19 +599,16 @@ fn mention_plugins_are_reachable_without_any_session_core() {
             .any(|value| value.contains("mention-disabled")),
         "停用插件不应出现：{values:?}"
     );
-    // 卸载后同一句柄不得再返回候选（换代/移除保护）。
-    // 只取本测试自己的句柄：全局注册表可能残留其他测试插入的插件。
-    let handle = mention_plugins()
+    // 卸载后同一来源不得再返回候选（换代/移除保护）。
+    // 只取本测试自己的来源：全局注册表可能残留其他测试插入的插件。
+    let handle = mention_sources()
         .into_iter()
-        .find(|plugin| plugin.id() == "mention-enabled")
-        .expect("应取到本测试插件的查询句柄");
+        .find(|source| source.id() == "mention-enabled")
+        .expect("应取到本测试插件的候选来源");
     loaded_plugins().lock().unwrap().remove("mention-enabled");
     assert!(
-        handle
-            .query_mentions(&query)
-            .expect("查询不应失败")
-            .is_empty(),
-        "卸载后旧句柄必须返回空候选"
+        handle.query(&query).expect("查询不应失败").is_empty(),
+        "卸载后旧来源必须返回空候选"
     );
     loaded_plugins().lock().unwrap().remove("mention-disabled");
 }

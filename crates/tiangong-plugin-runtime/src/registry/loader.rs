@@ -355,8 +355,11 @@ pub fn invoke_sidecar_with_workspace(
     serde_json::from_str(&response).with_context(|| "解析插件响应失败")
 }
 
-/// 宿主注入 CoreManager 的通用查询句柄，不借用会话执行适配器。
-pub fn mention_plugins() -> Vec<Arc<dyn Plugin>> {
+/// 宿主注入 CoreManager 的 @提及候选来源。
+///
+/// 每个已启用插件一个来源，只用于候选查询：不实现 `Plugin`、不占插件位、
+/// 不进插件列表，也不借用会话执行适配器（不依赖活跃 Core）。
+pub fn mention_sources() -> Vec<Arc<dyn tiangong_core_manager::MentionSource>> {
     let Ok(plugins) = loaded_plugins().lock() else {
         return Vec::new();
     };
@@ -367,23 +370,22 @@ pub fn mention_plugins() -> Vec<Arc<dyn Plugin>> {
         .collect();
     ids.sort();
     ids.into_iter()
-        .map(|id| Arc::new(MentionPlugin { id }) as Arc<dyn Plugin>)
+        .map(|id| {
+            Arc::new(PluginMentionSource { id }) as Arc<dyn tiangong_core_manager::MentionSource>
+        })
         .collect()
 }
 
-struct MentionPlugin {
+struct PluginMentionSource {
     id: String,
 }
-impl tiangong_core::tools::extension::ToolSpecProvider for MentionPlugin {}
-impl tiangong_core::tools::extension::ToolOverrideHandler for MentionPlugin {}
-impl tiangong_core::tools::extension::PromptSectionProvider for MentionPlugin {}
-impl Plugin for MentionPlugin {
+
+impl tiangong_core_manager::MentionSource for PluginMentionSource {
     fn id(&self) -> &str {
         &self.id
     }
-}
-impl tiangong_core::tools::extension::MentionCandidateProvider for MentionPlugin {
-    fn query_mentions(
+
+    fn query(
         &self,
         query: &tiangong_types::MentionQuery,
     ) -> Result<Vec<tiangong_types::MentionCandidate>, String> {
