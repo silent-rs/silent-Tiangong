@@ -25,6 +25,7 @@ import {
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
+import { selectDisplayGroups } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -58,6 +59,7 @@ const MENTION_GROUP_TITLES: Record<string, string> = {
   skill: '技能',
   mcp: 'MCP 工具',
   agent: 'Agent',
+  file: '文件',
   index: '工作区搜索',
   plugin: '插件',
   command: '命令',
@@ -69,6 +71,7 @@ const MENTION_KIND_BADGE_CLASS: Record<string, string> = {
   mcp: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
   agent: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
   all: 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+  file: 'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
   index: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
   plugin: 'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
 };
@@ -403,9 +406,16 @@ export function MessageInput({
   );
   // 预热 @提及标记表：消息气泡从 token 重建 chip 时查表，需在用户打开
   // 补全面板前完成注册（面板查询命中时也会注册，这里覆盖未打开的场景）。
+  // 只取枚举型候选的 mark：file 组候选量随工作区规模增长，且 mark 固定为
+  // "F"，不该为它触发一次全量文件检索（会话切换/草稿目录变更都会重跑）。
   useEffect(() => {
     let cancelled = false;
-    api.getMentionGroups(undefined, undefined, { target: mentionTarget, query: '', max_per_group: 1000 })
+    api.getMentionGroups(undefined, undefined, {
+      target: mentionTarget,
+      query: '',
+      max_per_group: 1000,
+      allowed_kinds: ['skill', 'mcp', 'agent', 'plugin', 'index'],
+    })
       .then(groups => {
         if (!cancelled) registerMentionMarks(groups.flatMap(group => group.candidates));
       })
@@ -414,12 +424,7 @@ export function MessageInput({
   }, [mentionTarget]);
   const filteredGroups = completionMode === 'slash'
     ? []
-    // 渲染层截断：搜索已下推后端，每组最多展示 50 条防大列表撑爆 UI；
-    // 键盘导航的平铺数组基于截断后的结果，保证索引与可见项对齐。
-    : mentionGroups.map(group => ({
-        ...group,
-        candidates: group.candidates.slice(0, 50),
-      }));
+    : selectDisplayGroups(mentionGroups, mentionFilter);
 
   // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
   const filteredCandidates = completionMode === 'slash'

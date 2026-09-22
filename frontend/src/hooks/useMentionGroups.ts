@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type MentionRequest, type MentionTarget } from '@/api/tauri';
+import type { MentionGroup } from '@/utils/mentionGroups';
 import { registerMentionMarks } from '@/utils/mentionMarks';
 
-export type MentionGroup = {
-  kind: string;
-  label: string;
-  candidates: { value: string; label: string; kind: string; hint: string; mark?: string }[];
-};
-
+export type { MentionGroup };
 const DEBOUNCE_MS = 120;
 
 /**
