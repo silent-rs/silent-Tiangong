@@ -681,6 +681,13 @@ impl Backend for MacosBackend {
             }
         }
     }
+
+    async fn screenshot(
+        &self,
+        req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
+    ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ScreenshotResponse> {
+        capture_screenshot(req)
+    }
 }
 
 impl MacosBackend {
@@ -801,4 +808,131 @@ fn filter_nodes(
         })
         .cloned()
         .collect()
+}
+
+// ── desktop_screenshot（RFC 0017 图片注入的图源，Phase 1：主显示器全屏）──
+
+/// 截图落点：`<存储根>/media/screenshots`。存储根由宿主经
+/// `TIANGONG_STORAGE_ROOT` 注入；缺失时退回系统临时目录（截图仍可用，
+/// 但不参与媒体目录的统一管理）。
+fn screenshot_output_dir() -> std::path::PathBuf {
+    let root = std::env::var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    root.join("media").join("screenshots")
+}
+
+/// 执行截图：`screencapture` 由 sidecar（宿主直启、无 Seatbelt）调用，
+/// 屏幕录制 TCC 的责任进程归属天工 App。
+fn capture_screenshot(
+    req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
+) -> DesktopResult<tiangong_plugin_computer_use_protocol::ScreenshotResponse> {
+    use tiangong_plugin_computer_use_protocol::ScreenshotResponse;
+
+    let dir = screenshot_output_dir();
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        return DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: format!("创建截图目录失败 {}：{error}", dir.display()),
+        });
+    }
+    let path = dir.join(format!("desktop-{}.png", scru128::new()));
+
+    // -x 静音；-o 去除阴影边饰（全屏截图时无副作用）。
+    let output = match std::process::Command::new("/usr/sbin/screencapture")
+        .arg("-x")
+        .arg("-o")
+        .arg(&path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: format!("启动 screencapture 失败：{error}"),
+            });
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return DesktopResult::Err(DesktopError::PermissionDenied {
+            reason: format!(
+                "screencapture 退出码 {} {stderr}；请确认天工已获得屏幕录制授权（系统设置 → 隐私与安全性 → 屏幕录制）",
+                output.status.code().unwrap_or(-1),
+            ),
+        });
+    }
+
+    let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let (width, height) = png_dimensions(&path).unwrap_or((0, 0));
+    let app_name = screenshot_target_app_name(req);
+    let original_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("screenshot.png")
+        .to_string();
+    DesktopResult::Ok(ScreenshotResponse {
+        path: path.display().to_string(),
+        width,
+        height,
+        app_name,
+        size_bytes,
+        // 注入声明（RFC 0017）：core 读到此数组后在工具批次闭合处
+        // 落成仅模型可见的图片消息。
+        injected_images: vec![tiangong_plugin_computer_use_protocol::InjectedImage {
+            local_path: path.display().to_string(),
+            mime_type: "image/png".to_string(),
+            original_name: original_name.clone(),
+            size_bytes,
+            source: "desktop_screenshot".to_string(),
+        }],
+    })
+}
+
+/// 解析截图目标应用名：显式 app_name 优先，pid 次之（反查应用名），
+/// foreground_only 取前台应用；均未指定时为空（全屏截图）。
+fn screenshot_target_app_name(
+    req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
+) -> String {
+    if let Some(name) = req.app_name.as_deref().filter(|n| !n.trim().is_empty()) {
+        return name.trim().to_string();
+    }
+    let workspace = NSWorkspace::sharedWorkspace();
+    if let Some(pid) = req.pid.filter(|pid| *pid > 0) {
+        let apps = workspace.runningApplications();
+        if let Some(app) = apps
+            .iter()
+            .find(|app| app.processIdentifier() as u32 == pid)
+        {
+            return app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+        }
+    }
+    if req.foreground_only
+        && let Some(app) = workspace.frontmostApplication()
+    {
+        return app
+            .localizedName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+    }
+    String::new()
+}
+
+/// 用系统 `sips` 读取 PNG 像素尺寸（零第三方依赖）。
+fn png_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    let output = std::process::Command::new("/usr/bin/sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let dimension = |key: &str| {
+        text.lines()
+            .find(|line| line.trim_start().starts_with(key))
+            .and_then(|line| line.rsplit(':').next())
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    };
+    Some((dimension("pixelWidth")?, dimension("pixelHeight")?))
 }

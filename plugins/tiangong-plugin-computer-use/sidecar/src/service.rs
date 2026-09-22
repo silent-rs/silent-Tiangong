@@ -135,6 +135,13 @@ impl ComputerUseService {
                     .with_context(|| "序列化 desktop_wait 响应失败")
             }
 
+            ops::DESKTOP_SCREENSHOT_OPERATION => {
+                let req: ops::ScreenshotRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_screenshot 请求失败")?;
+                let result = self.backend.screenshot(&req).await;
+                serde_json::to_value(result).with_context(|| "序列化 desktop_screenshot 响应失败")
+            }
+
             SET_ACCESS_OPERATION => {
                 let req: SetAccessRequest =
                     serde_json::from_value(payload).with_context(|| "解析 set_access 请求失败")?;

@@ -13,8 +13,8 @@ pub mod ops;
 
 // 响应类型重新导出到 crate 根，便于 sidecar backend 以短路径引用。
 pub use ops::{
-    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, ListWindowsResponse,
-    SnapshotResponse, WaitResponse,
+    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, InjectedImage,
+    ListWindowsResponse, ScreenshotResponse, SnapshotResponse, WaitResponse,
 };
 
 pub const PLUGIN_ID: &str = "computer-use";
@@ -28,6 +28,7 @@ pub const TOOL_DESKTOP_SNAPSHOT: &str = "desktop_snapshot";
 pub const TOOL_DESKTOP_FIND: &str = "desktop_find";
 pub const TOOL_DESKTOP_ACTION: &str = "desktop_action";
 pub const TOOL_DESKTOP_WAIT: &str = "desktop_wait";
+pub const TOOL_DESKTOP_SCREENSHOT: &str = "desktop_screenshot";
 
 /// 一个类型化 Computer Use 业务操作。
 ///

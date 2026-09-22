@@ -332,6 +332,71 @@ impl ComputerUseOperation for Wait {
     type Response = DesktopResult<WaitResponse>;
 }
 
+// ── desktop_screenshot（RFC 0017 图片注入的图源）────────────────
+
+pub const DESKTOP_SCREENSHOT_OPERATION: &str = "computer_use.desktop_screenshot";
+
+/// `desktop_screenshot` 工具请求。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScreenshotRequest {
+    /// 截取指定应用的窗口（包含匹配）；缺省截取整个主显示器。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// 仅截取前台窗口。
+    #[serde(default)]
+    pub foreground_only: bool,
+    #[serde(flatten)]
+    pub access: AccessContext,
+}
+
+/// 工具结果 stdout 中的图片注入声明（RFC 0017 通用协议）。
+///
+/// 任何插件的工具结果 stdout 若为 JSON 对象且含非空 `injected_images`
+/// 数组，core 在工具批次闭合后把每项落成 `MessagePhase::ModelOnly`
+/// 注入消息（像素直达模型）。这是跨插件形态（Rust wasm / TS / 自制）
+/// 的统一通道，不依赖 WIT 结构化字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedImage {
+    /// 图片文件绝对路径；provider 层请求组装时读取编码。
+    pub local_path: String,
+    pub mime_type: String,
+    /// 展示与审计用的文件名。
+    #[serde(default)]
+    pub original_name: String,
+    pub size_bytes: u64,
+    /// 产生来源（工具名），进入 provenance 文本。
+    #[serde(default)]
+    pub source: String,
+}
+
+/// `desktop_screenshot` 工具响应：图片落盘后的引用信息。
+///
+/// 工具结果文本只携带本结构（「知道」）；`injected_images` 数组触发
+/// core 的注入落地（「看见」，RFC 0017）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScreenshotResponse {
+    /// 截图文件绝对路径（PNG）。
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    /// 截图目标应用名（全屏截图时为空或前台应用名）。
+    #[serde(default)]
+    pub app_name: String,
+    pub size_bytes: u64,
+    /// 注入声明：非空时 core 落成仅模型可见的图片消息。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_images: Vec<InjectedImage>,
+}
+
+pub struct Screenshot;
+impl ComputerUseOperation for Screenshot {
+    const NAME: &'static str = DESKTOP_SCREENSHOT_OPERATION;
+    type Request = ScreenshotRequest;
+    type Response = DesktopResult<ScreenshotResponse>;
+}
+
 // ── 生命周期 ──────────────────────────────────────────────────
 
 pub const SET_ACCESS_OPERATION: &str = "computer_use.set_access";

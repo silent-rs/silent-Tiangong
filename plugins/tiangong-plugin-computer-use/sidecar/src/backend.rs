@@ -7,11 +7,11 @@
 use async_trait::async_trait;
 
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindRequest, ListWindowsRequest, SnapshotRequest, WaitRequest,
+    ActionRequest, FindRequest, ListWindowsRequest, ScreenshotRequest, SnapshotRequest, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
-    AccessibilityCapability, ActionKind, DesktopResult, DesktopSession, ListWindowsResponse,
-    Platform,
+    AccessibilityCapability, ActionKind, DesktopError, DesktopResult, DesktopSession,
+    ListWindowsResponse, Platform, ScreenshotResponse,
 };
 
 /// 平台无障碍后端能力。
@@ -40,6 +40,14 @@ pub trait Backend: Send + Sync {
 
     /// 等待条件满足。
     async fn wait(&self, req: &WaitRequest) -> DesktopResult<WaitResult>;
+
+    /// 截取屏幕或指定应用窗口的截图（RFC 0017 图片注入的图源）。
+    ///
+    /// 默认返回平台不支持：尚未实现原生截图的平台保持能力缺失的
+    /// 明确失败，而不是静默空图。
+    async fn screenshot(&self, _req: &ScreenshotRequest) -> DesktopResult<ScreenshotResponse> {
+        DesktopResult::Err(unsupported_screenshot(self.platform()))
+    }
 }
 
 /// `desktop_status` 返回信息。
@@ -96,6 +104,13 @@ pub fn all_supported_actions() -> Vec<ActionKind> {
         Collapse,
         ScrollIntoView,
     ]
+}
+
+/// 未实现原生截图平台的统一错误。
+pub fn unsupported_screenshot(platform: Platform) -> DesktopError {
+    DesktopError::UnsupportedPlatform {
+        platform: format!("{platform:?}"),
+    }
 }
 
 /// macOS 实际能执行的动作子集。

@@ -19,13 +19,13 @@ use serde::Serialize;
 use serde_json::json;
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
-    FindConditions, FindRequest, ListWindows, ListWindowsRequest, SetAccess, SetAccessRequest,
-    Snapshot, SnapshotRequest, Wait, WaitRequest,
+    FindConditions, FindRequest, ListWindows, ListWindowsRequest, Screenshot, ScreenshotRequest,
+    SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
-    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_SNAPSHOT, TOOL_DESKTOP_STATUS,
-    TOOL_DESKTOP_WAIT,
+    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_SNAPSHOT,
+    TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT,
 };
 
 mod descriptor {
@@ -183,6 +183,19 @@ impl Guest for Component {
                     "required": ["condition", "timeout_ms"]
                 })),
             },
+            ToolSpec {
+                name: TOOL_DESKTOP_SCREENSHOT.to_string(),
+                description: "截取当前屏幕的截图（可按 app_name/pid/foreground_only 标注目标应用）。截图会以原生图片内容自动注入到对话中供你直接阅读（不占用工具结果文本），无需 OCR。需要天工已获得屏幕录制授权。"
+                    .to_string(),
+                input_schema: schema_string(json!({
+                    "type": "object",
+                    "properties": {
+                        "app_name": { "type": "string", "description": "目标应用名称（包含匹配），记录到截图元数据" },
+                        "pid": { "type": "integer", "description": "目标进程编号", "minimum": 0 },
+                        "foreground_only": { "type": "boolean", "description": "仅针对前台应用" }
+                    }
+                })),
+            },
         ])
     }
 
@@ -190,6 +203,7 @@ impl Guest for Component {
         Ok(vec![
             "桌面应用控制优先使用 computer-use 插件：先 desktop_status 确认能力，再 desktop_list_windows 定位窗口，desktop_snapshot 读取控件树，desktop_find 精确匹配控件后用 desktop_action 执行动作，动作后用 desktop_wait 确认状态。网页内容继续优先交给浏览器插件。".to_string(),
             "桌面控件以语义定位为主：优先用稳定标识（automation_id）与控件类型（role）匹配，名称仅作补充；同名控件返回多个候选时不得默认操作第一个，需进一步限定。控件引用只在本次快照内有效，动作前必须重新确认目标。".to_string(),
+            "需要看屏幕内容（截图、OCR、阅读界面文字）时用 desktop_screenshot：图片会以原生视觉内容注入对话，直接阅读即可，不要试图用终端执行 screencapture（沙箱限制不可达 WindowServer）。".to_string(),
         ])
     }
 
@@ -201,6 +215,7 @@ impl Guest for Component {
             TOOL_DESKTOP_FIND => handle_find(call.arguments),
             TOOL_DESKTOP_ACTION => handle_action(call.arguments),
             TOOL_DESKTOP_WAIT => handle_wait(call.arguments),
+            TOOL_DESKTOP_SCREENSHOT => handle_screenshot(call.arguments),
             other => Err(plugin_err(format!("未知的 Computer Use 工具: {other}"))),
         }
     }
@@ -473,6 +488,69 @@ fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
         access: state::access_context(),
     };
     run_desktop_op::<Wait, _>(&request, "desktop_wait")
+}
+
+/// desktop_screenshot：图源工具（RFC 0017）。响应 JSON 里的
+/// `injected_images` 数组是注入声明：core 在工具批次闭合后据此落成
+/// 仅模型可见的注入消息——工具文本只留引用与元数据。
+fn handle_screenshot(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_screenshot", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let pid = args.get("pid").and_then(as_u32_bounded).filter(|p| *p > 0);
+    if args
+        .get("pid")
+        .is_some_and(|value| value.as_u64().is_none_or(|p| p > u32::MAX as u64))
+    {
+        return Ok(tool_failure(
+            "desktop_screenshot 的 pid 超出有效范围",
+            "pid out of range",
+        ));
+    }
+    let request = ScreenshotRequest {
+        app_name: args.get("app_name").and_then(as_str_owned),
+        pid,
+        foreground_only: args
+            .get("foreground_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        access: state::access_context(),
+    };
+    let result = sidecar_client::invoke::<Screenshot>(&request)
+        .map_err(|e| plugin_err(format!("desktop_screenshot 调用 sidecar 失败: {e}")))?;
+    match result {
+        DesktopResult::Ok(resp) => {
+            let stdout = serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".to_string());
+            let app_label = if resp.app_name.is_empty() {
+                "屏幕".to_string()
+            } else {
+                resp.app_name.clone()
+            };
+            Ok(ToolResult {
+                ok: true,
+                summary: format!(
+                    "已截取{app_label}（{}×{}，{} 字节）；图片将以原生视觉内容注入对话，直接阅读即可",
+                    resp.width, resp.height, resp.size_bytes
+                ),
+                stdout,
+                stderr: String::new(),
+                exit_code: 0,
+                execution: None,
+            })
+        }
+        DesktopResult::Err(error) => {
+            let message = error.agent_message();
+            Ok(ToolResult {
+                ok: false,
+                summary: message.clone(),
+                stdout: String::new(),
+                stderr: message,
+                exit_code: 1,
+                execution: None,
+            })
+        }
+    }
 }
 
 /// 统一执行一个桌面操作：调 sidecar，把 DesktopResult<T> 转 ToolResult。
