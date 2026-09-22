@@ -82,7 +82,6 @@ impl CoreManager {
         let mut groups: Vec<MentionGroup> = Vec::new();
         let mut group_index: HashMap<String, usize> = HashMap::new();
         let mut seen = HashSet::new();
-        let needle = query.query.to_lowercase();
         for source in sources {
             // 单个来源失败只跳过它：mention 是输入辅助，不阻塞补全。
             let candidates = match source.query(&query) {
@@ -98,11 +97,8 @@ impl CoreManager {
                     continue;
                 }
                 // 兜底匹配：来源未按 query 过滤时在此收敛（匹配先于截断）。
-                if !needle.is_empty()
-                    && ![&candidate.label, &candidate.value, &candidate.hint]
-                        .iter()
-                        .any(|value| value.to_lowercase().contains(&needle))
-                {
+                // 与来源侧（含静态清单候选）共用同一判定，避免两层语义不一致。
+                if !tiangong_types::mention::candidate_matches_query(&candidate, &query.query) {
                     continue;
                 }
                 if !seen.insert((candidate.kind.clone(), candidate.value.clone())) {

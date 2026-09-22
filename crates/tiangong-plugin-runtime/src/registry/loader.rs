@@ -420,7 +420,11 @@ impl tiangong_core_manager::MentionSource for PluginMentionSource {
                 Err(error) => tracing::warn!(plugin_id = %self.id, %error, "mention 查询失败"),
             }
         }
-        if let Some(candidate) = crate::ts_plugin::mention_candidate_from_manifest(&manifest) {
+        // 静态清单候选也按本次查询词过滤（不过滤会列出全部声明了 mention
+        // 的插件），判定与宿主兜底同一函数。
+        if let Some(candidate) =
+            crate::ts_plugin::mention_candidate_from_manifest(&manifest, &query.query)
+        {
             candidates.push(candidate);
         }
         let plugins = loaded_plugins().lock().map_err(|e| e.to_string())?;

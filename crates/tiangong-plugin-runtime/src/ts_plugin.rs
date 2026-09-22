@@ -489,20 +489,27 @@ impl PromptSectionProvider for TsPluginAdapter {
     }
 }
 
-/// 按清单静态生成 @提及候选（未声明 mention 返回 None）。
+/// 按清单静态生成 @提及候选（未声明 mention 返回 None，查询词不命中返回 None）。
+///
 /// 供注册表实时聚合使用——TS 插件的候选是纯清单数据，不依赖适配器实例
 ///（适配器弱引用由会话 Core 构建时填充，安装后不存在）。
+///
+/// 静态候选同样必须按 query 过滤：不过滤会让输入任何字符都列出全部声明了
+/// mention 的插件。判定与宿主兜底共用
+/// {@link tiangong_types::mention::candidate_matches_query}，两层语义一致。
 pub(crate) fn mention_candidate_from_manifest(
     manifest: &PluginManifest,
+    query: &str,
 ) -> Option<tiangong_core::MentionCandidate> {
     let (label, hint, mark) = mention_candidate_parts(manifest)?;
-    Some(tiangong_core::MentionCandidate {
+    let candidate = tiangong_core::MentionCandidate {
         value: format!("@plugin:{}", manifest.id),
         label,
         kind: "plugin".to_string(),
         hint,
         mark,
-    })
+    };
+    tiangong_types::mention::candidate_matches_query(&candidate, query).then_some(candidate)
 }
 
 /// 从清单推导 @提及候选的展示字段：label 取首个 UI 贡献标题（缺省插件 id），
@@ -564,20 +571,39 @@ mod tests {
     fn mention候选_声明时生成_未声明为空() {
         // 静态候选只看清单：启停过滤由注册表查询句柄（MentionSource）负责。
         let manifest = manifest_with_mention(Some("问候能力"));
-        let candidate = mention_candidate_from_manifest(&manifest).expect("声明 mention 应有候选");
+        // 空查询不过滤：刚唤出面板时枚举型候选照常返回。
+        let candidate =
+            mention_candidate_from_manifest(&manifest, "").expect("声明 mention 应有候选");
         assert_eq!(candidate.value, "@plugin:demo");
         assert_eq!(candidate.label, "演示插件");
         assert_eq!(candidate.kind, "plugin");
         assert_eq!(candidate.hint, "问候能力");
         // 未声明 mention：无候选
-        assert!(mention_candidate_from_manifest(&manifest_with_mention(None)).is_none());
+        assert!(mention_candidate_from_manifest(&manifest_with_mention(None), "").is_none());
     }
     #[test]
     fn mention候选_无ui标题时用插件id() {
         let mut manifest = manifest_with_mention(Some("能力"));
         manifest.ui = None;
-        let candidate = mention_candidate_from_manifest(&manifest).expect("声明 mention 应有候选");
+        let candidate =
+            mention_candidate_from_manifest(&manifest, "").expect("声明 mention 应有候选");
         assert_eq!(candidate.label, "demo");
+    }
+    #[test]
+    fn mention候选_按查询词过滤() {
+        let manifest = manifest_with_mention(Some("问候能力"));
+        // 命中 label（UI 标题）
+        assert!(mention_candidate_from_manifest(&manifest, "演示").is_some());
+        // 命中 hint
+        assert!(mention_candidate_from_manifest(&manifest, "问候").is_some());
+        // 命中 value 剥离 kind 前缀后的插件 id
+        assert!(mention_candidate_from_manifest(&manifest, "demo").is_some());
+        // kind 前缀本身不参与匹配：输入 plugin 不应命中 @plugin:demo
+        assert!(mention_candidate_from_manifest(&manifest, "plugin").is_none());
+        // 词间 AND：两个词分属 label 与 hint 时仍应命中
+        assert!(mention_candidate_from_manifest(&manifest, "演示 问候").is_some());
+        // 缺一个词即不命中
+        assert!(mention_candidate_from_manifest(&manifest, "演示 不存在").is_none());
     }
     #[test]
     fn 无界面sidecar插件_工具走直连_有界面走页面() {
