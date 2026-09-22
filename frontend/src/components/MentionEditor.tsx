@@ -5,6 +5,7 @@ import {
   useImperativeHandle,
   useRef,
   type ClipboardEvent,
+  type FocusEvent,
   type FormEvent,
   type KeyboardEvent,
   type MouseEvent,
@@ -61,7 +62,8 @@ interface MentionEditorProps {
   onPaste?: (e: ClipboardEvent<HTMLDivElement>) => void;
   onCompositionStart?: () => void;
   onCompositionEnd?: () => void;
-  onBlur?: () => void;
+  /** 失焦回调：带原生事件，调用方可用 relatedTarget 判断焦点去向 */
+  onBlur?: (e: FocusEvent<HTMLDivElement>) => void;
   /** mention 输入态活跃区（`@` 到光标）：区内的 mention 块降级为纯文本 */
   activeRange?: ActiveRange | null;
   /** 光标偏移变化通知：供外层判定「光标移出活跃区」退出输入态 */

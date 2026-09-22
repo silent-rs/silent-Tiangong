@@ -23,7 +23,7 @@ import {
   estimatedBase64Size,
   resolveAttachmentUrl,
 } from '@/utils/attachments';
-import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
+import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
 import { selectDisplayGroups } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
@@ -146,8 +146,12 @@ export function MessageInput({
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
+  // 待替换区间末端：触发 mention 时 `@` 到光标的范围。过滤词由面板内的独立
+  // 搜索框承载（不写入消息文本），选中候选时整段替换为 chip token。
+  const [mentionEnd, setMentionEnd] = useState(-1);
   const [completionMode, setCompletionMode] = useState<'mention' | 'slash'>('mention');
   const mentionRef = useRef<HTMLDivElement>(null);
+  const mentionSearchRef = useRef<HTMLInputElement>(null);
   const candidateRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // 信任模式
@@ -425,44 +429,29 @@ export function MessageInput({
     ? []
     : selectDisplayGroups(mentionGroups, mentionFilter);
 
-  // 退出 mention 输入态：关闭面板并清空锚点。文本原样保留（含用户已输入的
-  // 过滤词），不删字；Escape / Tab / 无候选时 Enter / 兜底条件都走这里。
-  const exitMentionInput = useCallback(() => {
+  // 关闭 mention 面板并清空锚点。文本原样保留（含触发时的 `@` 与已打字符），
+  // 不删字；焦点回消息框、光标落在 `@` 之后，用户可继续编辑。
+  const closeMentionPanel = useCallback(() => {
+    const caret = mentionStart >= 0 ? mentionStart + 1 : null;
     setMentionOpen(false);
-    setMentionStart(-1);
     setMentionFilter('');
+    setMentionStart(-1);
+    setMentionEnd(-1);
     setMentionIndex(0);
-  }, []);
-
-  // 输入态活跃区：`@` 位置到光标。编辑器据此把区内的 mention 块降级为纯文本，
-  // 避免未确认的 `@ab` 被渲染成 chip 打断继续输入。
-  const mentionActiveRange = useMemo(() => {
-    if (!mentionOpen || completionMode !== 'mention' || mentionStart < 0) return null;
-    return { start: mentionStart, end: mentionStart + 1 + mentionFilter.length };
-  }, [mentionOpen, completionMode, mentionStart, mentionFilter]);
-
-  // 光标移出活跃区（点击、方向键、Home/End）即退出输入态；仍在区内则按新
-  // 光标重算过滤词。`@` 被删掉同样退出。
-  const handleCaretChange = useCallback((offset: number) => {
-    if (!mentionOpen || completionMode !== 'mention' || mentionStart < 0) return;
-    if (inputContent[mentionStart] !== '@') {
-      exitMentionInput();
-      return;
+    const editor = editorRef.current;
+    if (editor && caret != null) {
+      editor.focus();
+      editor.setSelection(caret);
     }
-    const activeEnd = mentionStart + 1 + mentionFilter.length;
-    if (offset < mentionStart || offset > activeEnd) {
-      exitMentionInput();
-      return;
-    }
-    setMentionFilter(inputContent.slice(mentionStart + 1, offset));
-  }, [
-    mentionOpen,
-    completionMode,
-    mentionStart,
-    mentionFilter,
-    inputContent,
-    exitMentionInput,
-  ]);
+  }, [mentionStart]);
+
+  // 面板打开时把焦点移到面板内的独立搜索框：此后所有键入都进搜索框，消息
+  // 文本不再被输入态污染——因此不需要活跃区降级、光标越界判定那一套机制。
+  useEffect(() => {
+    if (!mentionOpen || completionMode !== 'mention') return;
+    mentionSearchRef.current?.focus();
+    mentionSearchRef.current?.select();
+  }, [mentionOpen, completionMode]);
 
   // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
   const filteredCandidates = completionMode === 'slash'
@@ -523,46 +512,28 @@ export function MessageInput({
     const beforeCursor = value.slice(0, cursorPos);
     if (beforeCursor.startsWith('/') && !/\s/.test(beforeCursor)) {
       setMentionStart(0);
+      setMentionEnd(cursorPos);
       setMentionFilter(beforeCursor);
       setMentionIndex(0);
       setCompletionMode('slash');
       setMentionOpen(true);
       return;
     }
-    // 离开 slash 模式：清掉它遗留的锚点，避免被下面的输入态维持分支误用
-    // （slash 模式同样写 mentionStart=0 且开着面板）。
-    if (completionMode === 'slash') {
-      setCompletionMode('mention');
-      setMentionStart(-1);
-      setMentionFilter('');
-    }
 
-    // 输入态维持：以 mentionStart 为锚点，过滤词**含空格**，不每次回扫重算。
-    // 这是与旧实现的根本区别——旧逻辑遇空白即停，`@设计 文档` 这类查询无法输入。
-    if (completionMode === 'mention' && mentionOpen && mentionStart >= 0) {
-      // `@` 被删掉，或光标退到 `@` 之前：退出输入态，文本保留
-      if (value[mentionStart] !== '@' || cursorPos <= mentionStart) {
-        exitMentionInput();
-        return;
-      }
-      const filter = value.slice(mentionStart + 1, cursorPos);
-      // mention 不跨行
-      if (filter.includes('\n')) {
-        exitMentionInput();
-        return;
-      }
-      setMentionFilter(filter);
-      setMentionIndex(0);
+    // 面板已开（mention）：消息文本的变化只可能是用户回到编辑器继续打字，
+    // 视为取消——过滤词从此由面板搜索框承载，不再从消息文本推导。
+    if (completionMode === 'mention' && mentionOpen) {
+      closeMentionPanel();
       return;
     }
 
-    // 进入输入态：从光标回扫找 `@`，**允许空格**（空格是过滤词的一部分），
-    // 不允许换行；`@` 必须位于行首或前置空白，避免邮箱 `user@example.com`
-    // 误触发。
+    // 进入 mention：从光标回扫找 `@`（遇空白/换行即止），须位于行首或前置
+    // 空白，避免邮箱 `user@example.com` 误触发。过滤词初值取自消息文本里
+    // `@` 之后已输入的部分，随后交由面板搜索框接管。
     let atPos = -1;
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = value[i];
-      if (ch === '\n') break;
+      if (ch === '\n' || /\s/.test(ch)) break;
       if (ch === '@') {
         if (i === 0 || /\s/.test(value[i - 1])) { atPos = i; }
         break;
@@ -570,6 +541,7 @@ export function MessageInput({
     }
     if (atPos >= 0) {
       setMentionStart(atPos);
+      setMentionEnd(cursorPos);
       setMentionFilter(value.slice(atPos + 1, cursorPos));
       setMentionIndex(0);
       setCompletionMode('mention');
@@ -582,22 +554,24 @@ export function MessageInput({
   const selectCandidate = (candidate: MentionCandidate) => {
     if (mentionStart < 0) return;
     if (candidate.kind === 'command') {
-      exitMentionInput();
+      closeMentionPanel();
       void executeSlashCommand(candidate.value);
       return;
     }
     const editor = editorRef.current;
-    const cursorPos = editor?.getSelection()?.start ?? inputContent.length;
+    // 替换区间是 `@` 到触发时的光标（mentionEnd）：过滤词在面板搜索框里，
+    // 不在消息文本中，因此不能用当前光标位置当区间末端。
+    const replaceEnd = mentionReplaceEnd(mentionStart, mentionEnd);
     const replacement = replaceMentionCompletion(
       inputContent,
       mentionStart,
-      cursorPos,
+      replaceEnd,
       candidate.value,
     );
     if (!replacement) return;
     setInputContent(replacement.value);
-    // 选中即退出输入态：清掉锚点，避免残留状态影响后续输入判定
-    exitMentionInput();
+    // 选中即关闭面板并清空锚点，避免残留状态影响后续输入判定
+    closeMentionPanel();
     setTimeout(() => {
       if (editor) {
         editor.focus();
@@ -825,33 +799,12 @@ export function MessageInput({
     }
   };
 
+  // 面板打开时键盘由面板内的独立搜索框处理（见 handleMentionSearchKeyDown），
+  // 消息框只在焦点意外留在编辑器时兜底关闭面板。
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const inMentionInput = mentionOpen && completionMode === 'mention';
-    // 方向键导航只在有候选时生效（空列表取模会得到 NaN）
-    if (mentionOpen && filteredCandidates.length > 0) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % filteredCandidates.length); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + filteredCandidates.length) % filteredCandidates.length); return; }
-    }
-    if (mentionOpen && e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+    if (mentionOpen && completionMode === 'mention' && e.key === 'Escape') {
       e.preventDefault();
-      if (filteredCandidates.length > 0) {
-        selectCandidate(filteredCandidates[mentionIndex]);
-      } else if (inMentionInput) {
-        // 输入态无候选：退出输入态、文本留作普通文字、不发送——再按一次
-        // Enter 才发送。输入态下 Enter 的语义稳定为「确认 mention」，不因
-        // 候选有无跳变成发送。
-        exitMentionInput();
-      } else {
-        setMentionOpen(false);
-      }
-      return;
-    }
-    if (mentionOpen && (e.key === 'Escape' || e.key === 'Tab')) {
-      e.preventDefault();
-      // Esc 与 Tab 都只关闭面板；Tab 不选取候选（选取只用 Enter 与鼠标点击），
-      // 同时避免焦点被移出编辑器。mention 输入态额外清掉锚点。
-      if (inMentionInput) exitMentionInput();
-      else setMentionOpen(false);
+      closeMentionPanel();
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
@@ -862,6 +815,37 @@ export function MessageInput({
       } else {
         void handleEnqueue();
       }
+    }
+  };
+
+  // 面板搜索框键盘：选取仅 Enter 与鼠标点击，Tab 不选取；方向键导航高亮项；
+  // Esc 关闭并退出，焦点回消息框。
+  const handleMentionSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (completionMode !== 'mention') return;
+    const count = filteredCandidates.length;
+    if (e.key === 'ArrowDown' && count > 0) {
+      e.preventDefault();
+      setMentionIndex(i => (i + 1) % count);
+      return;
+    }
+    if (e.key === 'ArrowUp' && count > 0) {
+      e.preventDefault();
+      setMentionIndex(i => (i - 1 + count) % count);
+      return;
+    }
+    if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (count > 0) {
+        selectCandidate(filteredCandidates[mentionIndex]);
+      } else {
+        // 无候选：关闭面板、文本留作普通文字，不发送
+        closeMentionPanel();
+      }
+      return;
+    }
+    if (e.key === 'Escape' || e.key === 'Tab') {
+      e.preventDefault();
+      closeMentionPanel();
     }
   };
 
@@ -1277,13 +1261,31 @@ export function MessageInput({
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
             >
-              {/* @提及补全下拉列表 */}
-              {mentionOpen && filteredCandidates.length > 0 && (
+              {/* @提及补全面板：过滤词由面板内独立搜索框承载，不复用消息输入框 */}
+              {mentionOpen && (
                 <div
                   ref={mentionRef}
                   className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
-                  {completionMode === 'slash' ? (
+                  {completionMode === 'mention' && (
+                    <div className="border-b px-3 py-2">
+                      <input
+                        ref={mentionSearchRef}
+                        type="text"
+                        value={mentionFilter}
+                        onChange={(e) => { setMentionFilter(e.target.value); setMentionIndex(0); }}
+                        onKeyDown={handleMentionSearchKeyDown}
+                        placeholder="搜索技能 / 工具 / Agent / 文件…"
+                        aria-label="提及候选过滤"
+                        className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                      />
+                    </div>
+                  )}
+                  {filteredCandidates.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-sm text-muted-foreground">
+                      无匹配 · Enter 或 Esc 关闭
+                    </div>
+                  ) : completionMode === 'slash' ? (
                     // slash 命令：平铺渲染
                     filteredCandidates.map((c, i) => (
                       <button
@@ -1412,13 +1414,16 @@ export function MessageInput({
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                activeRange={mentionActiveRange}
-                onCaretChange={handleCaretChange}
                 onCompositionStart={() => { isComposingRef.current = true; }}
                 onCompositionEnd={() => {
                   setTimeout(() => { isComposingRef.current = false; }, 0);
                 }}
-                onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
+                onBlur={(e) => {
+                  // 焦点移进面板（搜索框/候选按钮）不关闭；移到别处才关。
+                  const next = e.relatedTarget as Node | null;
+                  if (next && mentionRef.current?.contains(next)) return;
+                  setTimeout(() => setMentionOpen(false), 150);
+                }}
                 disabled={!cacheKey}
                 placeholder={
                   isIdle

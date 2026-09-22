@@ -6,6 +6,7 @@ import {
   deleteMentionSelection,
   getMentionBoundaries,
   insertTextAtMentionBoundary,
+  mentionReplaceEnd,
   normalizePastedText,
   replaceMentionCompletion,
   resolveMentionKeyAction,
@@ -104,6 +105,30 @@ describe('提及编辑规则', () => {
   it('拒绝越界的候选替换位置', () => {
     expect(replaceMentionCompletion('@de', -1, 3, '@dev')).toBeNull();
     expect(replaceMentionCompletion('@de', 2, 1, '@dev')).toBeNull();
+  });
+
+  it('选中替换用触发时记录的区间末端，而非当前光标', () => {
+    // 过滤词在面板搜索框里，消息文本中只有 `@` 本身
+    expect(mentionReplaceEnd(0, 1)).toBe(1);
+    // 触发时已打了 `@ab`（mentionEnd=3）：选中后整段替换，不留游离字符
+    expect(mentionReplaceEnd(0, 3)).toBe(3);
+    // mentionEnd 未记录/非法：退化为只替换 `@`
+    expect(mentionReplaceEnd(5, -1)).toBe(6);
+    expect(mentionReplaceEnd(5, 5)).toBe(6);
+    expect(mentionReplaceEnd(5, 3)).toBe(6);
+  });
+
+  it('过滤词不入消息文本：`@` 后接游离字符也能整段替换', () => {
+    // 用户在消息框打了 `@ab` 后面板打开，随后在搜索框输入 `design`：
+    // 消息文本仍是 `@ab`，选中文件后应整体被 chip token 取代。
+    const text = '请看 @ab 谢谢';
+    const replacement = replaceMentionCompletion(
+      text,
+      3,
+      mentionReplaceEnd(3, 6),
+      '@file:design.md',
+    );
+    expect(replacement?.value).toBe('请看 @file:design.md  谢谢');
   });
 
   it('粘贴文本统一 Windows 和旧式换行', () => {
