@@ -10,11 +10,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod ops;
+pub use tiangong_types::InjectedAsset;
 
 // 响应类型重新导出到 crate 根，便于 sidecar backend 以短路径引用。
 pub use ops::{
-    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, InjectedAsset,
-    ListWindowsResponse, ScreenshotResponse, SnapshotResponse, WaitResponse,
+    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, ListWindowsResponse,
+    ScreenshotResponse, SnapshotResponse, WaitResponse,
 };
 
 pub const PLUGIN_ID: &str = "computer-use";

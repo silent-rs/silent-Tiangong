@@ -883,6 +883,7 @@ fn capture_screenshot(
             mime_type: "image/png".to_string(),
             original_name: Some(original_name.clone()),
             size_bytes,
+            kind: tiangong_types::MediaKind::Image,
             source: Some("desktop_screenshot".to_string()),
         }],
     })
