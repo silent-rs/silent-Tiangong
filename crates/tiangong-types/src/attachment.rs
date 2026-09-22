@@ -225,7 +225,9 @@ pub struct ToolResultInjection {
 
 impl ToolResultInjection {
     pub fn has_declaration_marker(stdout: &str) -> bool {
-        stdout.contains("\"injected_assets\"")
+        static MARKER: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(|| format!("\"{INJECTED_ASSETS_FIELD}\""));
+        stdout.contains(&*MARKER)
     }
 
     pub fn parse(stdout: &str) -> Option<Self> {
