@@ -13,7 +13,7 @@ pub mod ops;
 
 // 响应类型重新导出到 crate 根，便于 sidecar backend 以短路径引用。
 pub use ops::{
-    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, InjectedImage,
+    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, InjectedAsset,
     ListWindowsResponse, ScreenshotResponse, SnapshotResponse, WaitResponse,
 };
 

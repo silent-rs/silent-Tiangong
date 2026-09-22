@@ -351,24 +351,27 @@ pub struct ScreenshotRequest {
     pub access: AccessContext,
 }
 
-/// 工具结果 stdout 中的图片注入声明（RFC 0017 通用协议）。
+/// 工具结果 stdout 注入声明的插件侧镜像（RFC 0017 通用协议）。
 ///
-/// 任何插件的工具结果 stdout 若为 JSON 对象且含非空 `injected_images`
-/// 数组，core 在工具批次闭合后把每项落成 `MessagePhase::ModelOnly`
-/// 注入消息（像素直达模型）。这是跨插件形态（Rust wasm / TS / 自制）
-/// 的统一通道，不依赖 WIT 结构化字段。
+/// 权威定义在 `tiangong-types::InjectedAsset`（字段 `injected_assets` 数组，
+/// 宿主侧反序列化目标）；本 crate 保持零运行时依赖（需编译到 wasm32），
+/// 两边 serde 形状由各自测试锁定一致。任何插件形态（Rust wasm / TS /
+/// 自制）的工具结果 stdout 含非空声明数组时，core 在工具批次闭合后把
+/// 每项落成 `MessagePhase::ModelOnly` 注入消息（像素直达模型）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InjectedImage {
-    /// 图片文件绝对路径；provider 层请求组装时读取编码。
+pub struct InjectedAsset {
+    /// 资产文件绝对路径；provider 层请求组装时读取编码。
     pub local_path: String,
     pub mime_type: String,
-    /// 展示与审计用的文件名。
-    #[serde(default)]
-    pub original_name: String,
+    /// 展示与审计用的文件名；缺省由宿主从路径派生。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
     pub size_bytes: u64,
-    /// 产生来源（工具名），进入 provenance 文本。
-    #[serde(default)]
-    pub source: String,
+    // 注：本镜像不带 kind 字段——截图恒为图片，JSON 省略 kind 时宿主侧
+    // （tiangong-types::InjectedAsset）按默认 MediaKind::Image 反序列化。
+    /// 产生来源（工具名），进入 provenance 文本；缺省用调用工具名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// `desktop_screenshot` 工具响应：图片落盘后的引用信息。
@@ -387,7 +390,7 @@ pub struct ScreenshotResponse {
     pub size_bytes: u64,
     /// 注入声明：非空时 core 落成仅模型可见的图片消息。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub injected_images: Vec<InjectedImage>,
+    pub injected_assets: Vec<InjectedAsset>,
 }
 
 pub struct Screenshot;
