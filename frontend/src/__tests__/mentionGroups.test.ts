@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   MENTION_GROUP_DISPLAY_LIMIT,
+  isScanningPlaceholder,
   selectDisplayGroups,
+  selectableCandidates,
+  type MentionCandidateView,
   type MentionGroup,
 } from '@/utils/mentionGroups';
 
@@ -54,5 +57,59 @@ describe('selectDisplayGroups', () => {
     const before = JSON.stringify(groups);
     selectDisplayGroups(groups, 'x');
     expect(JSON.stringify(groups)).toBe(before);
+  });
+});
+
+/** 索引建立中占位候选：index 插件用 value 为空透传 scanning 状态。 */
+function scanningPlaceholder(): MentionCandidateView {
+  return {
+    value: '',
+    label: '索引创建中…',
+    kind: 'file',
+    hint: '正在扫描工作区文件，请稍候',
+    mark: '…',
+  };
+}
+
+describe('isScanningPlaceholder', () => {
+  it('value 为空即占位候选', () => {
+    expect(isScanningPlaceholder(scanningPlaceholder())).toBe(true);
+  });
+
+  it('真实候选不是占位', () => {
+    expect(
+      isScanningPlaceholder({ value: '@file:src/main.rs', label: 'main.rs', kind: 'file', hint: '' }),
+    ).toBe(false);
+  });
+});
+
+describe('selectableCandidates', () => {
+  it('剔除索引建立中占位，保留真实候选', () => {
+    const candidates = [
+      scanningPlaceholder(),
+      { value: '@file:src/lib.rs', label: 'lib.rs', kind: 'file', hint: '' },
+      { value: '@skill:foo', label: 'foo', kind: 'skill', hint: '' },
+    ];
+    const result = selectableCandidates(candidates);
+    expect(result.map(c => c.value)).toEqual(['@file:src/lib.rs', '@skill:foo']);
+  });
+
+  it('没有占位时原样返回全部候选', () => {
+    const candidates = [
+      { value: '@file:a.rs', label: 'a.rs', kind: 'file', hint: '' },
+      { value: '@file:b.rs', label: 'b.rs', kind: 'file', hint: '' },
+    ];
+    expect(selectableCandidates(candidates)).toHaveLength(2);
+  });
+
+  it('不修改入参数组', () => {
+    const candidates = [scanningPlaceholder(), { value: '@file:a.rs', label: 'a.rs', kind: 'file', hint: '' }];
+    const before = JSON.stringify(candidates);
+    selectableCandidates(candidates);
+    expect(JSON.stringify(candidates)).toBe(before);
+  });
+
+  it('空列表返回空列表', () => {
+    expect(selectableCandidates([])).toEqual([]);
   });
 });

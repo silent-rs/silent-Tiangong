@@ -309,14 +309,28 @@ pub struct WorkspaceIndex {
     root: PathBuf,
     base_dir: PathBuf,
     entry_count: usize,
+    /// 本次打开是否删除了旧索引并按新 schema 重建（此时索引一定为空）。
+    rebuilt: bool,
 }
 
 impl WorkspaceIndex {
+    /// 本次打开是否属于「删除旧索引后重建」。
+    ///
+    /// 调用方（`IndexManager`）据此登记待补扫：查询路径不经过 `set_workspace`
+    /// 的后台刷新，若不在打开点标记，重建出的空索引没人负责填充。
+    pub fn was_rebuilt(&self) -> bool {
+        self.rebuilt
+    }
+
     pub fn open_or_create(root: &Path, base_dir: &Path) -> Result<Self> {
         let index_dir = Self::index_dir(root, base_dir);
         let (schema, fields) = workspace_schema();
 
         let existed = index_dir.exists();
+        // schema 升级或索引损坏时旧目录被整体删除、按新 schema 重建，此时索引
+        // 一定为空。用该字段告知调用方去补一次全量扫描，否则索引会长期停留在
+        // 空状态（表现为 `@` 提及检索不到任何文件）。
+        let mut rebuilt = false;
         let index = if existed {
             match Index::open_in_dir(&index_dir).with_context(|| {
                 workspace_index_context(root, base_dir, "open", "打开 Workspace Tantivy 索引失败")
@@ -328,6 +342,7 @@ impl WorkspaceIndex {
                         index_dir = %index_dir.display(),
                         "Workspace 索引 schema 已更新，准备全量校准"
                     );
+                    rebuilt = true;
                     fs::remove_dir_all(&index_dir).with_context(|| {
                         workspace_index_context(
                             root,
@@ -360,6 +375,7 @@ impl WorkspaceIndex {
                         error = %err,
                         "Workspace Tantivy 索引打开失败，准备重建索引目录"
                     );
+                    rebuilt = true;
                     fs::remove_dir_all(&index_dir).with_context(|| {
                         workspace_index_context(
                             root,
@@ -400,6 +416,26 @@ impl WorkspaceIndex {
             .with_context(|| workspace_index_context(root, base_dir, "open", "创建索引读取器失败"))?
             .searcher()
             .num_docs() as usize;
+        if rebuilt {
+            // 作废父级 meta.json：它记录的是「旧索引的成功扫描」。不清掉的话，
+            // workspace_index_age_secs 会认为当前 schema 版本已成功扫描过，
+            // 从而把刚重建出的空索引当成健康索引——查询返回空却被当作"没有匹配"。
+            // 删掉后 age_secs 返回 None，调用方据此补一次全量扫描。
+            let meta_path = index_dir
+                .parent()
+                .map(|parent| parent.join("meta.json"))
+                .unwrap_or_else(|| index_dir.join("meta.json"));
+            if meta_path.exists()
+                && let Err(error) = fs::remove_file(&meta_path)
+            {
+                tracing::warn!(
+                    workspace = %root.display(),
+                    meta = %meta_path.display(),
+                    %error,
+                    "作废旧 Workspace 索引 meta 失败，可能漏掉重建补扫"
+                );
+            }
+        }
         Ok(Self {
             schema,
             index,
@@ -407,6 +443,7 @@ impl WorkspaceIndex {
             root: root.to_path_buf(),
             base_dir: base_dir.to_path_buf(),
             entry_count,
+            rebuilt,
         })
     }
 
@@ -1065,7 +1102,6 @@ mod tests {
         let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
         // src/lib.rs（有内容）+ trace.log（仅路径）= 2 条
         assert_eq!(index.full_scan()?, 2, "源码与二进制都应建条目");
-
         let hits = index.search("skipped", 5)?;
         assert!(hits.is_empty(), "node_modules 内容不应进入索引");
         let hits = index.search("kept", 5)?;
@@ -1078,6 +1114,44 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.path == "trace.log"),
             "mention 路径检索应能指向二进制文件"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_or_create_reports_rebuild_after_schema_change() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(workspace.join("src").join("lib.rs"), "pub fn kept() {}\n")?;
+
+        // 首次创建：不是重建
+        let mut first = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(!first.was_rebuilt(), "首次创建不应报告重建");
+        assert_eq!(first.full_scan()?, 1);
+
+        // schema 相同再次打开：仍然不是重建，且数据还在
+        let second = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(!second.was_rebuilt(), "schema 未变不应报告重建");
+        drop(second);
+
+        // 模拟 schema 升级：改一个字段选项，使磁盘 schema 与当前 schema 不匹配
+        let index_dir = WorkspaceIndex::index_dir(&workspace, &base_dir);
+        let mut on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(index_dir.join("meta.json"))?)?;
+        on_disk["schema"][0]["options"]["stored"] = serde_json::json!(false);
+        fs::write(
+            index_dir.join("meta.json"),
+            serde_json::to_string_pretty(&on_disk)?,
+        )?;
+
+        let third = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(third.was_rebuilt(), "schema 变更必须报告重建");
+        assert_eq!(
+            third.entry_count(),
+            0,
+            "重建后的索引必须为空——调用方据此补全量扫描"
         );
         Ok(())
     }

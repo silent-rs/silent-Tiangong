@@ -110,11 +110,16 @@ impl IndexService {
                     .with_context(|| "解析 index_search 请求失败")?;
                 let manager = self.manager.clone();
                 let cwd = self.resolve_workspace(req.workspace.clone());
+                let scan_root = cwd.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handle_index_search_blocking(&manager, &cwd, req)
                 })
                 .await
                 .with_context(|| "index_search 后台任务失败")??;
+                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(root);
+                }
                 serde_json::to_value(resp).with_context(|| "序列化 index_search 响应失败")
             }
             SEARCH_CODE_OPERATION => {
@@ -132,11 +137,16 @@ impl IndexService {
                     .with_context(|| "解析 mention_files 请求失败")?;
                 let manager = self.manager.clone();
                 let workspace = self.resolve_mention_workspace(req.workspace.clone());
+                let scan_root = workspace.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handle_mention_files_blocking(&manager, workspace.as_deref(), req)
                 })
                 .await
                 .with_context(|| "mention_files 后台任务失败")??;
+                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(root);
+                }
                 serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
             }
             SET_WORKSPACE_OPERATION => {
@@ -284,6 +294,39 @@ impl IndexService {
         }
     }
 
+    /// 索引不可用（刚被删除重建 / 从未扫描）时补一次全量扫描。
+    ///
+    /// 由查询路径在拿到"扫描中"结果后调用。与 {@link spawn_background_scan}
+    /// 的区别：后者服务于 `set_workspace` 的常规增量刷新，此处专治"索引被
+    /// 删空后没人负责重建"——查询路径不经过 `set_workspace`，若不在此补，
+    /// 空索引会一直空着。
+    fn ensure_full_scan(&self, root: &Path) {
+        let needs = self.manager.take_pending_full_scan(root)
+            || self.manager.workspace_index_unavailable(root);
+        if !needs {
+            return;
+        }
+        let Some(permit) = self.manager.try_begin_workspace_scan(root) else {
+            // 已有后台扫描在跑：把标记还回去，避免这次重建被漏掉。
+            self.manager.mark_pending_full_scan(root);
+            tracing::debug!(
+                workspace = %root.display(),
+                "Workspace 索引已有后台扫描在进行，重建补扫延后"
+            );
+            return;
+        };
+        let manager = self.manager.clone();
+        let root = root.to_path_buf();
+        tracing::info!(workspace = %root.display(), "Workspace 索引重建后补扫启动");
+        std::thread::spawn(move || {
+            let _permit = permit;
+            match manager.full_scan(&root) {
+                Ok(count) => tracing::info!(count, "Workspace 索引重建后补扫完成"),
+                Err(e) => tracing::warn!("Workspace 索引重建后补扫失败: {e}"),
+            }
+        });
+    }
+
     fn spawn_background_scan(&self, root: &Path) {
         let Some(permit) = self.manager.try_begin_workspace_scan(root) else {
             tracing::debug!(
@@ -344,6 +387,10 @@ fn handle_index_search_blocking(
     {
         if manager.is_workspace_scanning(cwd) {
             scanning = true;
+        } else if manager.workspace_index_unavailable(cwd) {
+            // 索引刚被删除重建或从未扫描：此时一定为空，与后台扫描同样按
+            // "扫描中"处理，避免把空索引误报为"没有匹配"。
+            scanning = true;
         } else {
             let index_query = IndexQuery::new(&req.query)
                 .with_scope(IndexScope::Workspace)
@@ -394,6 +441,17 @@ fn handle_mention_files_blocking(
         return Ok(MentionFilesResponse::default());
     }
     if manager.is_workspace_scanning(workspace) {
+        return Ok(MentionFilesResponse {
+            candidates: Vec::new(),
+            scanning: true,
+        });
+    }
+    // 索引刚被删除重建（schema 升级 / 损坏恢复）：此刻一定为空。不能把空索引
+    // 当作"没有匹配的文件"返回——用户会以为工作区里没有可提及的文件。转成
+    // 扫描中，由调用方触发补扫，下次查询即可拿到候选。
+    // 判据用 meta.json 而非进程内状态：重建索引的 sidecar 进程与随后发起查询的
+    // 进程往往不是同一个（stdio sidecar 按连接短生命周期拉起）。
+    if manager.workspace_index_unavailable(workspace) {
         return Ok(MentionFilesResponse {
             candidates: Vec::new(),
             scanning: true,

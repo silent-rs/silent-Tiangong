@@ -25,7 +25,7 @@ import {
 } from '@/utils/attachments';
 import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
-import { selectDisplayGroups } from '@/utils/mentionGroups';
+import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -453,14 +453,15 @@ export function MessageInput({
     mentionSearchRef.current?.select();
   }, [mentionOpen, completionMode]);
 
-  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
+  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）。
+  // 索引建立中的占位候选（value 为空）不可选中，也不参与键盘导航。
   const filteredCandidates = completionMode === 'slash'
     ? (() => {
         const filter = mentionFilter.toLowerCase();
         if (!filter) return SLASH_COMMANDS;
         return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
       })()
-    : filteredGroups.flatMap(group => group.candidates);
+    : selectableCandidates(filteredGroups.flatMap(group => group.candidates));
 
   useEffect(() => {
     if (!mentionOpen) return;
@@ -1318,6 +1319,29 @@ export function MessageInput({
                             {MENTION_GROUP_TITLES[group.kind] ?? group.label}
                           </div>
                           {group.candidates.map((c) => {
+                            // 索引建立中的占位候选：不可选中、不参与键盘导航，
+                            // 只作为提示行展示（避免把空结果误显示成"无匹配"）。
+                            if (isScanningPlaceholder(c)) {
+                              return (
+                                <div
+                                  key={`${group.kind}-scanning`}
+                                  className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm text-muted-foreground"
+                                >
+                                  <span
+                                    className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border text-[11px] font-semibold leading-none"
+                                    aria-hidden="true"
+                                  >
+                                    {c.mark?.trim() || '…'}
+                                  </span>
+                                  <div className="min-w-0 flex-1 overflow-hidden">
+                                    <div className="truncate font-medium">{c.label}</div>
+                                    <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                                      {c.hint}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            }
                             const i = flatIndex++;
                             return (
                               <button

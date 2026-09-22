@@ -33,3 +33,25 @@ export function selectDisplayGroups(groups: MentionGroup[], filter: string): Men
       candidates: group.candidates.slice(0, MENTION_GROUP_DISPLAY_LIMIT),
     }));
 }
+
+/**
+ * 是否「索引建立中」占位候选。
+ *
+ * 索引正在建立/重建时，sidecar 返回空候选 + `scanning: true`；mention 协议只允许
+ * 返回候选数组，index 插件因此插入一条 value 为空的占位候选把状态透传出来。
+ * 它只作提示行展示，不可选中、不参与键盘导航。
+ */
+export function isScanningPlaceholder(candidate: MentionCandidateView): boolean {
+  return candidate.value === '';
+}
+
+/**
+ * 可选中候选：剔除「索引建立中」占位提示。
+ *
+ * 键盘导航与选中都基于该数组，保证 Enter / 方向键不会落到不可选中的提示行上。
+ */
+export function selectableCandidates(
+  candidates: MentionCandidateView[],
+): MentionCandidateView[] {
+  return candidates.filter(candidate => !isScanningPlaceholder(candidate));
+}

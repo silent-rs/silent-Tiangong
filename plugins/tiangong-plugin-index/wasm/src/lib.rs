@@ -499,7 +499,7 @@ fn index_mention_candidates(payload: &str) -> Result<String, PluginError> {
     let Ok(response) = serde_json::from_str::<MentionFilesResponse>(&payload) else {
         return Ok("[]".to_string());
     };
-    let candidates: Vec<serde_json::Value> = response
+    let mut candidates: Vec<serde_json::Value> = response
         .candidates
         .into_iter()
         .map(|candidate| {
@@ -523,6 +523,18 @@ fn index_mention_candidates(payload: &str) -> Result<String, PluginError> {
             })
         })
         .collect();
+    if response.scanning {
+        // 索引正在建立/重建：候选必然不完整。mention 协议只允许返回候选数组，
+        // 这里用一个 value 为空的占位候选把"扫描中"透传给前端——前端据此渲染
+        // 不可选中的提示行，而不是把空结果误显示成"无匹配"。
+        candidates.push(serde_json::json!({
+            "value": "",
+            "label": "索引创建中…",
+            "kind": "file",
+            "hint": "正在扫描工作区文件，请稍候",
+            "mark": "…",
+        }));
+    }
     serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
 }
 
