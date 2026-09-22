@@ -327,6 +327,7 @@ pub(super) fn record_completed_tool_call(
     ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
     history: &mut ToolCallHistory,
+    pending_images: &mut Vec<super::message::PendingImageInjection>,
 ) -> bool {
     let CompletedToolCall {
         call,
@@ -334,6 +335,10 @@ pub(super) fn record_completed_tool_call(
         result,
         duration_ms,
     } = completion;
+    // 工具产物图片不进入工具结果文本：stdout JSON 的 injected_images
+    // 声明在批次闭合后统一落成仅模型可见的注入消息（RFC 0017
+    // 「看见而非知道」判据；跨插件形态的通用协议字段）。
+    pending_images.extend(parse_injected_images(&call.name, &call.id, &result.stdout));
     ctx.observer.audit_tool_execution(
         &ctx.session.id,
         &call.name,

@@ -451,6 +451,18 @@ fn message_phase_serde() {
         serde_json::to_string(&MessagePhase::Summary).unwrap(),
         r#""summary""#
     );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::CompressedResume).unwrap(),
+        r#""compressedresume""#
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::ModelOnly).unwrap(),
+        r#""modelonly""#
+    );
+    assert_eq!(
+        serde_json::from_str::<MessagePhase>(r#""modelonly""#).unwrap(),
+        MessagePhase::ModelOnly
+    );
 }
 
 #[test]

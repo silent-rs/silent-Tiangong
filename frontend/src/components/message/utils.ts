@@ -312,7 +312,7 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
   let currentAgentTurn: PendingGroup | null = null;
 
   for (const msg of messages) {
-    if (msg.phase === "compressedresume") continue;
+    if (msg.phase === "compressedresume" || msg.phase === "modelonly") continue;
     if (msg.worker_id) {
       if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
       const previous = pending[pending.length - 1];

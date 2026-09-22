@@ -74,6 +74,9 @@ pub(super) async fn execute_tool_batch(
     let mut pending_ready: std::collections::VecDeque<PreparedToolCall> =
         std::collections::VecDeque::new();
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
+    // 本批工具产物中声明的待注入图片（RFC 0017）：批次闭合时统一落成
+    // 仅模型可见的 User 消息，保证同批工具结果在消息序列中保持连续。
+    let mut pending_images: Vec<super::message::PendingImageInjection> = Vec::new();
 
     'pipeline: loop {
         // ── 准备：逐个弹出待处理调用（参数校验）──
@@ -98,7 +101,14 @@ pub(super) async fn execute_tool_batch(
         pending_ready.extend(std::mem::take(&mut batch.ready_tools));
         launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
         if tasks.is_empty() {
-            flush_ordered_results(ctx, state, &mut batch, &mut completed_buffer, usize::MAX);
+            flush_ordered_results(
+                ctx,
+                state,
+                &mut batch,
+                &mut completed_buffer,
+                usize::MAX,
+                &mut pending_images,
+            );
             break 'pipeline;
         }
         let joined = tokio::select! {
@@ -113,9 +123,11 @@ pub(super) async fn execute_tool_batch(
                             &mut batch,
                             &mut completed_buffer,
                             usize::MAX,
+                            &mut pending_images,
                         );
                         abort_running_tools(ctx, &mut tasks, &mut running, stream_tx).await;
                         close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
+                        commit_image_injections(ctx, &mut pending_images);
                         return ToolBatchOutcome::Interrupted(Deferred::Closed);
                     }
                 };
@@ -126,9 +138,11 @@ pub(super) async fn execute_tool_batch(
                         &mut batch,
                         &mut completed_buffer,
                         usize::MAX,
+                        &mut pending_images,
                     );
                     abort_running_tools(ctx, &mut tasks, &mut running, stream_tx).await;
                     close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
+                    commit_image_injections(ctx, &mut pending_images);
                     return ToolBatchOutcome::Interrupted(Deferred::Command(command));
                 }
                 handle_ambient_command(
@@ -180,7 +194,14 @@ pub(super) async fn execute_tool_batch(
             .chain(pending_ready.iter().map(|tool| tool.index))
             .min()
             .unwrap_or(usize::MAX);
-        flush_ordered_results(ctx, state, &mut batch, &mut completed_buffer, inflight_min);
+        flush_ordered_results(
+            ctx,
+            state,
+            &mut batch,
+            &mut completed_buffer,
+            inflight_min,
+            &mut pending_images,
+        );
         launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
     }
 
@@ -192,6 +213,9 @@ pub(super) async fn execute_tool_batch(
     } else {
         ctx.session.persist_to_disk();
     }
+    // 图片注入消息位于失败恢复提示之前还是之后无协议影响；放在收尾最末，
+    // 保证它出现在本批全部工具结果与恢复提示之后、下一次模型请求之前。
+    commit_image_injections(ctx, &mut pending_images);
     let observed_tokens = observed_total_tokens(&batch.response_usage);
     state.last_observed_tokens = observed_tokens;
     ctx.session.current_tokens = observed_tokens;
@@ -204,6 +228,28 @@ fn is_interrupting(command: &Command) -> bool {
         command,
         Command::Cancel | Command::Shutdown | Command::InjectUserMessage { .. }
     )
+}
+
+/// 落地本批图片注入（RFC 0017 安全边界：工具批次闭合之后、下一次模型
+/// 请求组装之前）。空批次零开销；落地后立即持久化并向前端同步消息
+/// 快照（前端按 `MessagePhase::ModelOnly` 过滤不展示，审计入口可展开）。
+fn commit_image_injections(
+    ctx: &mut TurnContext,
+    pending_images: &mut Vec<super::message::PendingImageInjection>,
+) {
+    if pending_images.is_empty() {
+        return;
+    }
+    super::message::append_model_only_image_injections(&mut ctx.session, pending_images);
+    pending_images.clear();
+    ctx.session.persist_to_disk();
+    if let Some(mut snapshot) = ctx.session.messages.last().cloned() {
+        snapshot.clear_transient_data();
+        let _ = ctx.stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message: snapshot,
+            deferred_tool_injections: None,
+        });
+    }
 }
 
 /// 就地消化非中断命令的运行时副作用（与统一命令处理的 KeepCurrent 类一致）。
@@ -279,12 +325,14 @@ fn launch_ready_tools(
 }
 
 /// 按 model 声明顺序提交已完成结果：提交所有 index < `boundary` 的缓冲项。
+/// `pending_images` 收集工具产物中声明的待注入图片，由批次闭合处统一落地。
 fn flush_ordered_results(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
     batch: &mut ToolBatchState,
     completed_buffer: &mut Vec<(usize, RunningToolCall, ToolTaskOutput)>,
     boundary: usize,
+    pending_images: &mut Vec<super::message::PendingImageInjection>,
 ) {
     completed_buffer.sort_by_key(|(index, _, _)| *index);
     let mut needs_recovery = false;
@@ -302,6 +350,7 @@ fn flush_ordered_results(
                 duration_ms: task_output.duration_ms,
             },
             &mut state.tool_history,
+            pending_images,
         );
     }
     batch.needs_failure_recovery |= needs_recovery;

@@ -1,6 +1,6 @@
 # RFC 0017：主动图片获取与执行中图片注入
 
-- 状态：草案（v2，按"看见而非知道"判据修订）
+- 状态：已实施 Phase 1（v3：注入声明改为 stdout 约定字段协议）
 - 起因：`analyze/computer-use-exception` 分支的现场分析（微信总结五连失败）
 - 关联：`docs/computer-use-exception-analysis.md`
 
@@ -54,25 +54,41 @@ computer-use 新增 `desktop_screenshot` op：
 - **工具结果只返回文本**：asset 引用、窗口元数据（app/标题/尺寸/时间）、
   provenance 前缀——这部分的作用是"知道"，且供审计与前端折叠展示。
 
-### 3.2 注入层（核心）
+### 3.2 注入声明协议（v3：工具结果 stdout 约定字段）
+
+**注入声明不扩展 WIT `tool-result` 结构**（v3 修订：结构化字段方案要求
+全部插件构造点随协议迁移，改动面不可接受）。统一协议为：
+
+> 工具结果 `stdout` 为 JSON 对象且含非空 `injected_images` 数组时，每项
+> `{local_path, mime_type, original_name, size_bytes, source}` 声明一张
+> 待注入图片。
+
+- core 在 `record_completed_tool_call` 处以廉价字符串预检 + 一次性 JSON
+  解析提取声明，构造 `StoredAsset`（asset_id 现场生成）；
+- 声明字段缺失/不合法的项跳过并告警，不拖垮工具结果本身；
+- **跨插件形态统一**：Rust wasm、TS 插件、自制插件、内置工具都走同一
+  约定；WIT 结构化字段只覆盖 Rust wasm 一种形态；
+- 工具结果文本保持「知道」职责：路径、元数据、provenance 供审计。
+
+### 3.3 注入层（核心）
 
 新增消息级可见性语义：泛化 `CompressedResume` 为
 `MessagePhase::ModelOnly`（仅模型可见的 User 消息；旧值保留兼容）。
 react 循环在**工具批次闭合之后、下一次模型请求组装之前**的安全边界，
-把待注入图片落成一条 ModelOnly User 消息：
+把声明的图片落成一条 ModelOnly User 消息：
 
 ```
 assistant(tool_use: desktop_screenshot)
-→ tool_result(文本: 截图元数据 + provenance)      ← 知道
-→ ModelOnly user( [ModelInstruction(provenance), Image(asset, data)] ) ← 看见
+→ tool_result(stdout JSON 含 injected_images)              ← 知道
+→ ModelOnly user( [ModelInstruction(provenance), Image(asset)] ) ← 看见
 → 下一次模型请求（图片 data 在此填充）
 ```
 
 - 请求组装时从媒体存储读取像素填充 `Image.data`（仅当前请求，
   持久层既有 `clear_transient_data` 机制剥离，无需新增防线）；
-- 前端按 phase 不展示于消息流，但会话检查器可展开审计——
-  **不可见 ≠ 不可审计**；
-- 注入由谁触发：拉式（工具 handler 返回时声明 asset 待注入）与推式
+- 前端按 phase 不展示于消息流（分组与搜索均已排除），但会话检查器
+  可展开审计——**不可见 ≠ 不可审计**；
+- 注入由谁触发：拉式（工具 stdout 声明）与推式
   （`plugin_injection` payload 扩展 image asset，沿 `DeferredToolInjection`
   排队）共用同一落地路径；不在 turn 运行期到达的注入排队到下一 turn 开头。
 

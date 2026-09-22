@@ -7,7 +7,10 @@ use tiangong_types::TokenUsage;
 pub(crate) fn is_compressible(message: &Message) -> bool {
     message.role != MessageRole::System
         && message.role != MessageRole::Notice
-        && message.phase != MessagePhase::CompressedResume
+        && !matches!(
+            message.phase,
+            MessagePhase::CompressedResume | MessagePhase::ModelOnly
+        )
 }
 
 /// 使用 Session 和客户端快照生成上下文摘要，不负责任务调度、持久化或通知。

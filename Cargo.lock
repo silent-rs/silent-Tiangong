@@ -11137,6 +11137,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "scru128",
  "serde",
  "serde_json",
  "tiangong-plugin-computer-use-protocol",

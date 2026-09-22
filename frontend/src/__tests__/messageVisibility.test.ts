@@ -43,3 +43,25 @@ describe('压缩续接消息可见性', () => {
     expect(findSearchMatches(messages, '第二条真实问题', [], 'messages')).toHaveLength(1);
   });
 });
+
+describe('仅模型可见注入消息（RFC 0017）', () => {
+  const messages = [
+    message('user-1', 'user', '总结微信群聊'),
+    message('assistant-1', 'assistant', '好的，我先截取屏幕'),
+    message('inject-1', 'user', '[injected-images provenance]', 'modelonly'),
+    message('assistant-2', 'assistant', '我看到了截图内容'),
+  ];
+
+  it('分组时隐藏注入消息', () => {
+    const visibleIds = groupMessages(messages).flatMap((group) =>
+      group.messages.map((item) => item.id),
+    );
+
+    expect(visibleIds).toEqual(['user-1', 'assistant-1', 'assistant-2']);
+  });
+
+  it('搜索范围排除注入消息', () => {
+    expect(findSearchMatches(messages, 'injected-images', [], 'messages')).toEqual([]);
+    expect(findSearchMatches(messages, 'injected-images', [], 'all')).toEqual([]);
+  });
+});

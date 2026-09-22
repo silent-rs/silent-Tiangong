@@ -2281,6 +2281,52 @@ mod tests {
         assert!(error.to_string().contains("asset-ready"));
     }
 
+    /// RFC 0017「看见而非知道」判据的回归保护：ModelOnly 注入消息
+    /// （provenance + Image、data=None）映射后必须携带原生图片内容
+    /// （从 local_path 读取编码），不得退化为文本提及路径。
+    #[test]
+    fn model_only_injection_message_carries_native_image() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tiangong-model-only-{}-{unique}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [9_u8, 8, 7, 6]).unwrap();
+        let mut msg = test_message(vec![
+            ContentBlock::model_instruction(
+                "[injected-images provenance]\n- 工具 desktop_screenshot",
+            ),
+            ContentBlock::Image {
+                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
+                data: None,
+            },
+        ]);
+        msg.role = MessageRole::User;
+        msg.phase = tiangong_types::MessagePhase::ModelOnly;
+
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text) if text.contains("injected-images")
+        )));
+        let image = result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                LlmMessageContent::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("注入消息必须携带原生图片内容");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, "data:image/png;base64,CQgHBg==");
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn model_instruction_is_mapped_verbatim_and_asset_reference_is_ignored() {
         let instruction = "  使用宿主已选择的资源能力处理 path=/tmp/report.pdf\n";
