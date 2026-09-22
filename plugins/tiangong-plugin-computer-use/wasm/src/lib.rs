@@ -185,7 +185,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_SCREENSHOT.to_string(),
-                description: "截取当前屏幕的截图（可按 app_name/pid/foreground_only 标注目标应用）。截图会以原生图片内容自动注入到对话中供你直接阅读（不占用工具结果文本），无需 OCR。需要天工已获得屏幕录制授权。"
+                description: "截取主显示器全屏截图（Phase 1 不支持窗口级裁剪；app_name/pid/foreground_only 仅标注目标应用元数据，不改变截图范围）。截图会以原生图片内容自动注入对话供你直接阅读（不占用工具结果文本），无需 OCR。需要屏幕录制授权。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",

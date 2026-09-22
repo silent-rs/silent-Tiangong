@@ -823,6 +823,33 @@ fn screenshot_output_dir() -> std::path::PathBuf {
     root.join("media").join("screenshots")
 }
 
+// 屏幕录制 TCC（macOS 10.15+）。macOS 没有屏幕录制的 Info.plist 用途
+// 声明键（Apple 文档不存在 NSScreenCaptureUsageDescription）：授权对话
+// 框只能由应用进程实际发起捕获请求触发。sidecar 是天工 App 的子进程，
+// 责任进程归属宿主，在此调用等价于以天工身份申请。
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// 确保屏幕录制授权可用：已授权直接通过；未决时触发系统授权弹窗；
+/// 被拒绝后返回带设置引导的错误。缺省这步时，未授权状态下
+/// `screencapture` 只会产出壁纸级空图或失败，且系统设置的屏幕录制
+/// 列表里根本不会出现天工的开关项。
+fn ensure_screen_capture_access() -> DesktopResult<()> {
+    // SAFETY: 纯查询/请求函数，无跨调用可变状态。
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        return DesktopResult::Ok(());
+    }
+    if unsafe { CGRequestScreenCaptureAccess() } {
+        return DesktopResult::Ok(());
+    }
+    DesktopResult::Err(DesktopError::PermissionDenied {
+        reason: "天工未获得屏幕录制授权。请打开 系统设置 → 隐私与安全性 → 屏幕录制，勾选天工并重启应用后重试".to_string(),
+    })
+}
+
 /// 执行截图：`screencapture` 由 sidecar（宿主直启、无 Seatbelt）调用，
 /// 屏幕录制 TCC 的责任进程归属天工 App。
 fn capture_screenshot(
@@ -830,6 +857,9 @@ fn capture_screenshot(
 ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ScreenshotResponse> {
     use tiangong_plugin_computer_use_protocol::ScreenshotResponse;
 
+    if let DesktopResult::Err(error) = ensure_screen_capture_access() {
+        return DesktopResult::Err(error);
+    }
     let dir = screenshot_output_dir();
     if let Err(error) = std::fs::create_dir_all(&dir) {
         return DesktopResult::Err(DesktopError::BackendUnavailable {
@@ -863,7 +893,13 @@ fn capture_screenshot(
     }
 
     let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    let (width, height) = png_dimensions(&path).unwrap_or((0, 0));
+    // 尺寸不可读说明产物不是有效 PNG（授权被撤销后 screencapture 可能
+    // 产出空文件），明确失败而不是返回 (0,0) 的失真元数据。
+    let Some((width, height)) = png_dimensions(&path) else {
+        return DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: format!("截图产物不是有效 PNG：{}", path.display()),
+        });
+    };
     let app_name = screenshot_target_app_name(req);
     let original_name = path
         .file_name()
@@ -921,19 +957,20 @@ fn screenshot_target_app_name(
     String::new()
 }
 
-/// 用系统 `sips` 读取 PNG 像素尺寸（零第三方依赖）。
+/// 直接读取 PNG IHDR 获得像素尺寸（签名 8 字节 + 块头 8 字节后即
+/// 宽高各 4 字节大端），不再为每次截图额外 fork 一个 `sips` 进程。
 fn png_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
-    let output = std::process::Command::new("/usr/bin/sips")
-        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
-        .arg(path)
-        .output()
+    use std::io::Read;
+    let mut header = [0_u8; 24];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
         .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let dimension = |key: &str| {
-        text.lines()
-            .find(|line| line.trim_start().starts_with(key))
-            .and_then(|line| line.rsplit(':').next())
-            .and_then(|value| value.trim().parse::<u32>().ok())
-    };
-    Some((dimension("pixelWidth")?, dimension("pixelHeight")?))
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if header[..8] != PNG_SIGNATURE || &header[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
+    Some((width, height))
 }
