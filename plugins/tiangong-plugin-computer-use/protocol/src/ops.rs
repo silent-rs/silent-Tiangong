@@ -376,7 +376,7 @@ pub struct InjectedAsset {
 
 /// `desktop_screenshot` 工具响应：图片落盘后的引用信息。
 ///
-/// 工具结果文本只携带本结构（「知道」）；`injected_images` 数组触发
+/// 工具结果文本只携带本结构（「知道」）；`injected_assets` 数组触发
 /// core 的注入落地（「看见」，RFC 0017）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenshotResponse {
