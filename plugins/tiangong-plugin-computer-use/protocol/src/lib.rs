@@ -417,6 +417,39 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_response_roundtrips_injected_asset_protocol() {
+        let response = ScreenshotResponse {
+            path: "/tmp/desktop-1.png".to_string(),
+            width: 1280,
+            height: 800,
+            app_name: "微信".to_string(),
+            size_bytes: 4096,
+            injected_assets: vec![InjectedAsset {
+                local_path: "/tmp/desktop-1.png".to_string(),
+                mime_type: "image/png".to_string(),
+                original_name: Some("desktop-1.png".to_string()),
+                size_bytes: 4096,
+                kind: tiangong_types::MediaKind::Image,
+                source: Some("desktop_screenshot".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: ScreenshotResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.path, response.path);
+        assert_eq!(decoded.width, 1280);
+        assert_eq!(decoded.height, 800);
+        assert_eq!(decoded.injected_assets.len(), 1);
+        assert_eq!(
+            decoded.injected_assets[0].source.as_deref(),
+            Some("desktop_screenshot")
+        );
+        assert_eq!(
+            decoded.injected_assets[0].kind,
+            tiangong_types::MediaKind::Image
+        );
+    }
+
+    #[test]
     fn operation_names_have_prefix() {
         // 所有私有操作名都应以插件前缀开头，避免多插件冲突。
         assert!(DESKTOP_STATUS_OPERATION.starts_with("computer_use."));
@@ -425,6 +458,7 @@ mod tests {
         assert!(DESKTOP_FIND_OPERATION.starts_with("computer_use."));
         assert!(DESKTOP_ACTION_OPERATION.starts_with("computer_use."));
         assert!(DESKTOP_WAIT_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_SCREENSHOT_OPERATION.starts_with("computer_use."));
     }
 
     #[test]
@@ -435,5 +469,6 @@ mod tests {
         assert_eq!(TOOL_DESKTOP_FIND, "desktop_find");
         assert_eq!(TOOL_DESKTOP_ACTION, "desktop_action");
         assert_eq!(TOOL_DESKTOP_WAIT, "desktop_wait");
+        assert_eq!(TOOL_DESKTOP_SCREENSHOT, "desktop_screenshot");
     }
 }

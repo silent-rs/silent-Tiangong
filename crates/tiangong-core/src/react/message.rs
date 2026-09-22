@@ -1140,7 +1140,70 @@ mod tests {
         assert!(message.content[1].validate_stable_reference().is_ok());
     }
 
-    /// 注入去重只看保留区：折叠区的同内容注入不得拦截必要的内容重注入。
+    /// 跨层主路径回归：同一份工具 stdout JSON 经过 types 强类型解析后，
+    /// 立即落成 ModelOnly User 消息；消息中的 Image 保留磁盘引用，
+    /// 供 provider 下一请求读取像素。
+    #[test]
+    fn tool_stdout_to_model_only_message_full_flow() {
+        let storage = tempfile::tempdir().unwrap();
+        let image_path = storage.path().join("wechat-chat.png");
+        std::fs::write(&image_path, [137_u8, 80, 78, 71, 1, 2, 3]).unwrap();
+        let stdout = serde_json::json!({
+            "path": image_path,
+            "width": 1280,
+            "height": 800,
+            "injected_assets": [{
+                "local_path": image_path,
+                "mime_type": "image/png",
+                "original_name": "wechat-chat.png",
+                "size_bytes": 7,
+                "kind": "image",
+                "source": "desktop_screenshot"
+            }]
+        })
+        .to_string();
+
+        // 第 1 段：工具 stdout → tiangong-types 强类型 → StoredAsset。
+        let images = parse_injected_images("desktop_screenshot", "call-shot-1", &stdout);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].asset.mime_type, "image/png");
+        assert_eq!(images[0].asset.size, 7);
+        assert_eq!(images[0].asset.original_name, "wechat-chat.png");
+        assert_eq!(images[0].asset.kind, tiangong_types::MediaKind::Image);
+        assert_eq!(images[0].tool_name, "desktop_screenshot");
+        assert_eq!(images[0].tool_call_id, "call-shot-1");
+
+        // 第 2 段：StoredAsset → ModelOnly User 消息。
+        let mut session = Session::new("full-image-flow").with_storage_root(storage.path());
+        append_model_only_image_injections(&mut session, &images);
+        let message = session.messages.last().expect("ModelOnly 消息必须存在");
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.phase, MessagePhase::ModelOnly);
+        assert!(matches!(
+            message.content.first(),
+            Some(tiangong_types::ContentBlock::ModelInstruction { text })
+                if text.contains("desktop_screenshot")
+        ));
+        assert!(matches!(
+            message.content.as_slice(),
+            [
+                tiangong_types::ContentBlock::ModelInstruction { .. },
+                tiangong_types::ContentBlock::Image { data: None, .. }
+            ]
+        ));
+
+        // 第 3 段：持久/传输消息不带图片 data，但引用仍指向真实文件。
+        let tiangong_types::ContentBlock::Image { asset, data } = &message.content[1] else {
+            unreachable!("上面已验证 Image 形状")
+        };
+        assert!(data.is_none());
+        assert_eq!(
+            std::fs::read(&asset.local_path).unwrap(),
+            [137, 80, 78, 71, 1, 2, 3]
+        );
+        assert!(message.content[1].validate_stable_reference().is_ok());
+    }
+
     ///
     /// 回归（自制插件清单压缩自愈被拦死）：清单注入 → 压缩把边界推进到
     /// 越过该清单 → 下一轮自愈重注入同内容清单 —— 旧实现对全量数组做
