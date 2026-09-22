@@ -67,7 +67,7 @@ desktop_action / desktop_wait`——**没有截屏，没有合成输入（CGEven
 | 优先级 | 方案 | 说明 |
 |---|---|---|
 | P0 | computer-use 新增 `desktop_screenshot` op | sidecar 在 macOS 已是宿主直启（host_policy.rs:77-82），TCC 的"负责任进程"归到天工 App，与 AX 授权同机制；实现走 ScreenCaptureKit（新系统）或 CGWindowListCreateImage，产物写入媒体目录并返回路径+尺寸 |
-| P0 | 新增 `desktop_ocr` op（Vision `VNRecognizeTextRequest`） | 沙箱内已被现场验证可用（#5），补齐后即可完成"截图→文本"闭环，直接支撑微信会话总结场景 |
+| P0 | 图片原生注入模型上下文（替代 OCR 主路径） | 见 RFC 0017（`docs/rfc/0017-proactive-image-injection.md`）：工具结果携带 `ContentBlock::Image`，OpenAI 类 provider 适配为隐藏 User 消息；OCR 降为纯文本模型兜底 |
 | P1 | 新增坐标级合成输入（CGEvent 鼠标点击/键盘） | 用于无 AX 应用的兜底操作；依赖辅助功能 TCC（已授予）；动作仍应走现有 AccessContext 批准流（监督模式逐次确认） |
 | P2 | 维持 terminal 沙箱现状 | 不为 GUI 访问放开 `mach-lookup`；在插件工具描述中写明"截屏/取色请走 desktop_screenshot，勿用终端" |
 | 环境 | 修复 Homebrew 属主（`sudo chown -R $(whoami) /opt/homebrew`）或改用用户级安装 | 与代码无关；沙箱内也不应放开 Homebrew 写域 |
