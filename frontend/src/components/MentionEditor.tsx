@@ -11,10 +11,12 @@ import {
 } from 'react';
 import {
   deleteMentionSelection,
+  deactivateBlocksInRange,
   getMentionBoundaries,
   insertTextAtMentionBoundary,
   normalizePastedText,
   resolveMentionKeyAction,
+  type ActiveRange,
   type MentionBoundary,
   type MentionKey,
 } from '@/utils/mentionEditorModel';
@@ -60,6 +62,10 @@ interface MentionEditorProps {
   onCompositionStart?: () => void;
   onCompositionEnd?: () => void;
   onBlur?: () => void;
+  /** mention 输入态活跃区（`@` 到光标）：区内的 mention 块降级为纯文本 */
+  activeRange?: ActiveRange | null;
+  /** 光标偏移变化通知：供外层判定「光标移出活跃区」退出输入态 */
+  onCaretChange?: (offset: number) => void;
   placeholder?: string;
   disabled?: boolean;
   className?: string;
@@ -91,6 +97,8 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       onCompositionStart,
       onCompositionEnd,
       onBlur,
+      activeRange,
+      onCaretChange,
       placeholder,
       disabled,
       className,
@@ -107,6 +115,8 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     const pendingSelectionRef = useRef<number | null>(null);
     // 异步恢复执行前若已有更新的程序化选区，则丢弃旧恢复，避免光标被拉回。
     const selectionRevisionRef = useRef(0);
+    // 上次上报给外层的光标偏移：只在真正变化时通知，避免重复渲染。
+    const lastCaretRef = useRef<number | null>(null);
 
     // ===== DOM 构建 =====
     const renderBlocks = useCallback((blocks: Block[]) => {
@@ -155,12 +165,12 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       const current = domToText(root);
       const needsRebuild = current !== value
         || (value === '' && root.childNodes.length > 0)
-        || !existingMentionsMatchValue(root, value);
+        || !existingMentionsMatchValue(root, value, activeRange);
       const selectionBeforeRebuild = needsRebuild && document.activeElement === root
         ? currentSelectionOffsets()?.start ?? null
         : null;
       if (needsRebuild) {
-        renderBlocks(parseBlocks(value));
+        renderBlocks(deactivateBlocksInRange(parseBlocks(value), activeRange));
       }
       const pending = pendingSelectionRef.current;
       if (pending != null) {
@@ -181,15 +191,21 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           }
         });
       }
-    }, [value, renderBlocks]);
+    }, [value, activeRange, renderBlocks]);
 
     // 手工输入合法 @ 文本时仍保持普通文字；只有 DOM 已经存在标签时，才校验
     // 标签 token 是否仍与当前文本解析结果一致。
-    function existingMentionsMatchValue(root: HTMLElement, text: string): boolean {
+    // 期望集合按活跃区降级后计算：活跃区内的 mention 本就是纯文本，不能因为
+    // 「解析出 mention 但 DOM 没有 chip」而反复重建。
+    function existingMentionsMatchValue(
+      root: HTMLElement,
+      text: string,
+      range: ActiveRange | null | undefined,
+    ): boolean {
       const actual = Array.from(root.querySelectorAll<HTMLElement>('.mention-chip'))
         .map((chip) => chip.dataset.mentionToken ?? '');
       if (actual.length === 0) return true;
-      const expected = parseBlocks(text)
+      const expected = deactivateBlocksInRange(parseBlocks(text), range)
         .filter((block) => block.type === 'mention')
         .map((block) => block.token);
       return actual.length === expected.length
@@ -442,6 +458,22 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     const isTextLike = (seg: Seg | undefined): seg is Seg =>
       !!seg && (seg.kind === 'text' || seg.kind === 'sentinel');
 
+    // 光标是否落在 mention 输入态活跃区内（含端点：刚打出最后一个字符时
+    // 光标就停在 end 上）。
+    function isCaretInActiveRange(offsets: { start: number; end: number } | null): boolean {
+      if (!activeRange || !offsets) return false;
+      return offsets.start >= activeRange.start && offsets.start <= activeRange.end;
+    }
+
+    // 光标偏移变化时通知外层（仅报折叠光标，且只在真正变化时报）。
+    const reportCaret = useCallback(() => {
+      const offsets = currentSelectionOffsets();
+      if (!offsets || offsets.start !== offsets.end) return;
+      if (lastCaretRef.current === offsets.start) return;
+      lastCaretRef.current = offsets.start;
+      onCaretChange?.(offsets.start);
+    }, [onCaretChange]);
+
     const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
       onKeyDown?.(e);
       if (e.defaultPrevented) return;
@@ -451,9 +483,18 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       const hasSelection = !!sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed;
       const offsets = currentSelectionOffsets();
 
+      // 光标落在活跃区内：该段文本正在作为过滤词编辑，一律不走 chip 边界守卫。
+      // 守卫基于文本解析，会把 `@ab` 这类未确认片段当成已固化提及处理（补分隔
+      // 空格、拦截删除、方向键跨块跳跃），直接打断输入态。
+      if (isCaretInActiveRange(offsets)) {
+        reportCaret();
+        return;
+      }
+
       if (
         !hasSelection
         && offsets
+        && hasChip()
         && !isComposingRef.current
         && !e.metaKey
         && !e.ctrlKey
@@ -489,6 +530,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       if (
         !hasSelection
         && offsets
+        && hasChip()
         && isMentionKey(e.key)
       ) {
         const text = domToText(rootRef.current!);
@@ -515,6 +557,8 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           e.preventDefault();
         }
       }
+
+      reportCaret();
     };
 
     function applyValue(text: string, offset: number) {
@@ -635,6 +679,9 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
 
       const selection = currentSelectionOffsets();
       if (!selection || selection.start !== selection.end) return;
+      // 无 chip 时不存在边界问题；光标落在活跃区内时该段文本正在作为过滤词
+      // 编辑，两者都不走边界插入（否则会把 `@ab` 拆成 `@ ab`）。
+      if (!hasChip() || isCaretInActiveRange(selection)) return;
       const replacement = insertTextAtMentionBoundary(
         domToText(rootRef.current!),
         selection.start,
@@ -945,7 +992,11 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         onInput={handleInput}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        onMouseUp={handleMouseUp}
+        onMouseUp={(event) => {
+          handleMouseUp(event);
+          // 点击后光标可能被移到活跃区外：上报供外层退出输入态
+          reportCaret();
+        }}
         onCompositionStart={() => {
           isComposingRef.current = true;
           const root = rootRef.current;

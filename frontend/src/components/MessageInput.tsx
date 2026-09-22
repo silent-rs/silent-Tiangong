@@ -76,8 +76,7 @@ const MENTION_KIND_BADGE_CLASS: Record<string, string> = {
   plugin: 'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
 };
 
-const SLASH_COMMANDS: MentionCandidate[] = [
-  {
+const SLASH_COMMANDS: MentionCandidate[] = [  {
     value: '/压缩对话',
     label: '/压缩对话',
     kind: 'command',
@@ -426,6 +425,45 @@ export function MessageInput({
     ? []
     : selectDisplayGroups(mentionGroups, mentionFilter);
 
+  // 退出 mention 输入态：关闭面板并清空锚点。文本原样保留（含用户已输入的
+  // 过滤词），不删字；Escape / Tab / 无候选时 Enter / 兜底条件都走这里。
+  const exitMentionInput = useCallback(() => {
+    setMentionOpen(false);
+    setMentionStart(-1);
+    setMentionFilter('');
+    setMentionIndex(0);
+  }, []);
+
+  // 输入态活跃区：`@` 位置到光标。编辑器据此把区内的 mention 块降级为纯文本，
+  // 避免未确认的 `@ab` 被渲染成 chip 打断继续输入。
+  const mentionActiveRange = useMemo(() => {
+    if (!mentionOpen || completionMode !== 'mention' || mentionStart < 0) return null;
+    return { start: mentionStart, end: mentionStart + 1 + mentionFilter.length };
+  }, [mentionOpen, completionMode, mentionStart, mentionFilter]);
+
+  // 光标移出活跃区（点击、方向键、Home/End）即退出输入态；仍在区内则按新
+  // 光标重算过滤词。`@` 被删掉同样退出。
+  const handleCaretChange = useCallback((offset: number) => {
+    if (!mentionOpen || completionMode !== 'mention' || mentionStart < 0) return;
+    if (inputContent[mentionStart] !== '@') {
+      exitMentionInput();
+      return;
+    }
+    const activeEnd = mentionStart + 1 + mentionFilter.length;
+    if (offset < mentionStart || offset > activeEnd) {
+      exitMentionInput();
+      return;
+    }
+    setMentionFilter(inputContent.slice(mentionStart + 1, offset));
+  }, [
+    mentionOpen,
+    completionMode,
+    mentionStart,
+    mentionFilter,
+    inputContent,
+    exitMentionInput,
+  ]);
+
   // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
   const filteredCandidates = completionMode === 'slash'
     ? (() => {
@@ -491,23 +529,51 @@ export function MessageInput({
       setMentionOpen(true);
       return;
     }
+    // 离开 slash 模式：清掉它遗留的锚点，避免被下面的输入态维持分支误用
+    // （slash 模式同样写 mentionStart=0 且开着面板）。
+    if (completionMode === 'slash') {
+      setCompletionMode('mention');
+      setMentionStart(-1);
+      setMentionFilter('');
+    }
 
+    // 输入态维持：以 mentionStart 为锚点，过滤词**含空格**，不每次回扫重算。
+    // 这是与旧实现的根本区别——旧逻辑遇空白即停，`@设计 文档` 这类查询无法输入。
+    if (completionMode === 'mention' && mentionOpen && mentionStart >= 0) {
+      // `@` 被删掉，或光标退到 `@` 之前：退出输入态，文本保留
+      if (value[mentionStart] !== '@' || cursorPos <= mentionStart) {
+        exitMentionInput();
+        return;
+      }
+      const filter = value.slice(mentionStart + 1, cursorPos);
+      // mention 不跨行
+      if (filter.includes('\n')) {
+        exitMentionInput();
+        return;
+      }
+      setMentionFilter(filter);
+      setMentionIndex(0);
+      return;
+    }
+
+    // 进入输入态：从光标回扫找 `@`，**允许空格**（空格是过滤词的一部分），
+    // 不允许换行；`@` 必须位于行首或前置空白，避免邮箱 `user@example.com`
+    // 误触发。
     let atPos = -1;
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = value[i];
+      if (ch === '\n') break;
       if (ch === '@') {
         if (i === 0 || /\s/.test(value[i - 1])) { atPos = i; }
         break;
       }
-      if (/\s/.test(ch)) break;
     }
     if (atPos >= 0) {
-      const filter = value.slice(atPos + 1, cursorPos);
       setMentionStart(atPos);
-      setMentionFilter(filter);
+      setMentionFilter(value.slice(atPos + 1, cursorPos));
       setMentionIndex(0);
       setCompletionMode('mention');
-      if (!mentionOpen) setMentionOpen(true);
+      setMentionOpen(true);
     } else {
       setMentionOpen(false);
     }
@@ -516,7 +582,7 @@ export function MessageInput({
   const selectCandidate = (candidate: MentionCandidate) => {
     if (mentionStart < 0) return;
     if (candidate.kind === 'command') {
-      setMentionOpen(false);
+      exitMentionInput();
       void executeSlashCommand(candidate.value);
       return;
     }
@@ -530,7 +596,8 @@ export function MessageInput({
     );
     if (!replacement) return;
     setInputContent(replacement.value);
-    setMentionOpen(false);
+    // 选中即退出输入态：清掉锚点，避免残留状态影响后续输入判定
+    exitMentionInput();
     setTimeout(() => {
       if (editor) {
         editor.focus();
@@ -759,12 +826,33 @@ export function MessageInput({
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const inMentionInput = mentionOpen && completionMode === 'mention';
+    // 方向键导航只在有候选时生效（空列表取模会得到 NaN）
     if (mentionOpen && filteredCandidates.length > 0) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % filteredCandidates.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + filteredCandidates.length) % filteredCandidates.length); return; }
-      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
-      if (e.key === 'Escape') { e.preventDefault(); setMentionOpen(false); return; }
-      if (e.key === 'Tab') { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
+    }
+    if (mentionOpen && e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (filteredCandidates.length > 0) {
+        selectCandidate(filteredCandidates[mentionIndex]);
+      } else if (inMentionInput) {
+        // 输入态无候选：退出输入态、文本留作普通文字、不发送——再按一次
+        // Enter 才发送。输入态下 Enter 的语义稳定为「确认 mention」，不因
+        // 候选有无跳变成发送。
+        exitMentionInput();
+      } else {
+        setMentionOpen(false);
+      }
+      return;
+    }
+    if (mentionOpen && (e.key === 'Escape' || e.key === 'Tab')) {
+      e.preventDefault();
+      // Esc 与 Tab 都只关闭面板；Tab 不选取候选（选取只用 Enter 与鼠标点击），
+      // 同时避免焦点被移出编辑器。mention 输入态额外清掉锚点。
+      if (inMentionInput) exitMentionInput();
+      else setMentionOpen(false);
+      return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault();
@@ -1324,6 +1412,8 @@ export function MessageInput({
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
+                activeRange={mentionActiveRange}
+                onCaretChange={handleCaretChange}
                 onCompositionStart={() => { isComposingRef.current = true; }}
                 onCompositionEnd={() => {
                   setTimeout(() => { isComposingRef.current = false; }, 0);

@@ -1,10 +1,16 @@
-import { parseBlocks } from './mentionBlocks';
+import { parseBlocks, type Block } from './mentionBlocks';
 
 export interface MentionBoundary {
   start: number;
   end: number;
   leadingSeparatorStart: number | null;
   trailingSeparatorEnd: number | null;
+}
+
+/** mention 输入态的活跃区：`@` 位置到光标的文本区间（过滤词可含空格）。 */
+export interface ActiveRange {
+  start: number;
+  end: number;
 }
 
 export type MentionKey = 'Backspace' | 'Delete' | 'ArrowLeft' | 'ArrowRight';
@@ -169,4 +175,27 @@ export function insertTextAtMentionBoundary(
 
 export function normalizePastedText(text: string): string {
   return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * 把落在活跃区内的 mention 块降级为 text 块。
+ *
+ * 输入态下 `@` 到光标之间的文本正在被编辑（过滤词可含空格），其中的
+ * `@xxx` 形片段会被 {@link parseBlocks} 误识别为 mention 并渲染成 chip——
+ * 用户尚未确认候选，chip 化会打断继续输入。活跃区永不 chip 化。
+ *
+ * 区间判定用块的起始偏移，取 `[range.start, range.end)`；`range` 为空表示
+ * 不在输入态，原样返回。
+ */
+export function deactivateBlocksInRange(blocks: Block[], range: ActiveRange | null | undefined): Block[] {
+  if (!range) return blocks;
+  let offset = 0;
+  return blocks.map((block) => {
+    const start = offset;
+    offset += block.type === 'text' ? block.value.length : block.token.length;
+    if (block.type === 'mention' && start >= range.start && start < range.end) {
+      return { type: 'text', value: block.token };
+    }
+    return block;
+  });
 }

@@ -1,6 +1,8 @@
+import { parseBlocks, serializeBlocks } from '@/utils/mentionBlocks';
 import { describe, expect, it } from 'vitest';
 
 import {
+  deactivateBlocksInRange,
   deleteMentionSelection,
   getMentionBoundaries,
   insertTextAtMentionBoundary,
@@ -106,5 +108,55 @@ describe('提及编辑规则', () => {
 
   it('粘贴文本统一 Windows 和旧式换行', () => {
     expect(normalizePastedText('第一行\r\n第二行\r第三行')).toBe('第一行\n第二行\n第三行');
+  });
+});
+
+describe('活跃区降级', () => {
+  it('无活跃区时原样返回', () => {
+    const parsed = parseBlocks('@dev @qa');
+    expect(deactivateBlocksInRange(parsed, null)).toEqual(parsed);
+    expect(deactivateBlocksInRange(parsed, undefined)).toEqual(parsed);
+  });
+
+  it('活跃区内的 mention 降级为纯文本，区外保持 chip', () => {
+    // 已固化 @dev，用户在其后新输入 `@qa`（活跃区覆盖第二个 @ 到光标）
+    const text = '@dev @qa';
+    const blocks = parseBlocks(text);
+    expect(blocks.map(b => b.type)).toEqual(['mention', 'text', 'mention']);
+    const result = deactivateBlocksInRange(blocks, { start: 5, end: 8 });
+    expect(result.map(b => b.type)).toEqual(['mention', 'text', 'text']);
+    // 降级后序列化结果不变：契约 serialize(parse(text)) === text 保持
+    expect(serializeBlocks(result)).toBe(text);
+  });
+
+  it('活跃区只覆盖到光标：其后已固化文本不受影响', () => {
+    const text = '@dev @qa 说明';
+    const blocks = parseBlocks(text);
+    const result = deactivateBlocksInRange(blocks, { start: 5, end: 8 });
+    expect(result.map(b => b.type)).toEqual(['mention', 'text', 'text', 'text']);
+  });
+
+  it('区间未覆盖 mention 起点时不降级', () => {
+    const text = '@dev @qa';
+    const blocks = parseBlocks(text);
+    // 空区间：不降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 5, end: 5 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'mention']);
+    // 区间起点落在 mention 内部（@qa 起点是 5）：不降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 6, end: 8 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'mention']);
+    // 区间从 mention 起点开始：降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 5, end: 8 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'text']);
+  });
+
+  it('空文本与纯文本不受影响', () => {
+    expect(deactivateBlocksInRange(parseBlocks(''), { start: 0, end: 0 })).toEqual([]);
+    expect(
+      deactivateBlocksInRange(parseBlocks('普通文本'), { start: 0, end: 4 }).map(b => b.type),
+    ).toEqual(['text']);
   });
 });
