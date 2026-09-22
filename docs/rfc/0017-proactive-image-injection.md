@@ -54,18 +54,24 @@ computer-use 新增 `desktop_screenshot` op：
 - **工具结果只返回文本**：asset 引用、窗口元数据（app/标题/尺寸/时间）、
   provenance 前缀——这部分的作用是"知道"，且供审计与前端折叠展示。
 
-### 3.2 注入声明协议（v3：工具结果 stdout 约定字段）
+### 3.2 注入声明协议（v4：types 权威类型定义）
 
 **注入声明不扩展 WIT `tool-result` 结构**（v3 修订：结构化字段方案要求
 全部插件构造点随协议迁移，改动面不可接受）。统一协议为：
 
-> 工具结果 `stdout` 为 JSON 对象且含非空 `injected_images` 数组时，每项
-> `{local_path, mime_type, original_name, size_bytes, source}` 声明一张
-> 待注入图片。
+> 工具结果 `stdout` 为 JSON 对象且含非空 `injected_assets` 数组时，每项
+> 按 `tiangong-types::InjectedAsset` 反序列化：`{local_path, mime_type,
+> original_name?, size_bytes, kind?, source?}`（kind 缺省 image）。
 
-- core 在 `record_completed_tool_call` 处以廉价字符串预检 + 一次性 JSON
-  解析提取声明，构造 `StoredAsset`（asset_id 现场生成）；
-- 声明字段缺失/不合法的项跳过并告警，不拖垮工具结果本身；
+- 权威类型定义在 `tiangong-types`（`InjectedAsset` / `ToolResultInjection`，
+  含 `parse` 预检与 `to_stored_asset` 转换），宿主侧反序列化即得强类型；
+- 插件私有 protocol 保持零运行时依赖（需编译到 wasm32），以 serde 形状
+  完全一致的轻量镜像参与（如 computer-use 的 `InjectedAsset`，不带 kind
+  字段时由宿主侧默认 Image 闭环），两边测试互相锁定 JSON 形状；
+- **通道泛化到文件**：声明携带 `kind`（image/video/audio/file）；Phase 1
+  仅对 image 落地注入消息，非图片类型告警跳过（Phase 2 扩展位）；
+- core 在 `record_completed_tool_call` 处提取声明（预检 + 强类型解析），
+  声明字段缺失/不合法的项跳过并告警，不拖垮工具结果本身；
 - **跨插件形态统一**：Rust wasm、TS 插件、自制插件、内置工具都走同一
   约定；WIT 结构化字段只覆盖 Rust wasm 一种形态；
 - 工具结果文本保持「知道」职责：路径、元数据、provenance 供审计。
@@ -79,7 +85,7 @@ react 循环在**工具批次闭合之后、下一次模型请求组装之前**�
 
 ```
 assistant(tool_use: desktop_screenshot)
-→ tool_result(stdout JSON 含 injected_images)              ← 知道
+→ tool_result(stdout JSON 含 injected_assets)              ← 知道
 → ModelOnly user( [ModelInstruction(provenance), Image(asset)] ) ← 看见
 → 下一次模型请求（图片 data 在此填充）
 ```

@@ -226,55 +226,44 @@ pub(crate) fn append_model_only_image_injections(
 /// 声明一张待注入图片（local_path/mime_type/original_name/size_bytes/
 /// source）。廉价字符串预检避免对大体积普通工具输出做 JSON 解析；
 /// 声明字段不合法的项跳过并记录告警，不让单条坏声明拖垮整个工具结果。
+/// 从工具结果 stdout 提取图片注入声明（RFC 0017 通用协议）。
+///
+/// 协议类型与 JSON 解析由 `tiangong-types` 权威定义（`ToolResultInjection`）；
+/// 此处只做 core 侧语义加工：损坏声明告警、跳过非法项与非图片类型
+/// （文件/音视频注入是 Phase 2 扩展位）、生成全局唯一 asset_id。
 pub(crate) fn parse_injected_images(
     tool_name: &str,
     tool_call_id: &str,
     stdout: &str,
 ) -> Vec<PendingImageInjection> {
-    if !stdout.contains("\"injected_images\"") {
+    if !tiangong_types::ToolResultInjection::has_declaration_marker(stdout) {
         return Vec::new();
     }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+    let Some(declaration) = tiangong_types::ToolResultInjection::parse(stdout) else {
         tracing::warn!(
             tool_name,
-            "工具结果含 injected_images 标记但 stdout 不是合法 JSON，忽略注入声明"
+            "工具结果含 injected_assets 标记但 stdout 不是合法 JSON，忽略注入声明"
         );
         return Vec::new();
     };
-    let Some(entries) = value.get("injected_images").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
     let mut injections = Vec::new();
-    for entry in entries {
-        let field = |key: &str| entry.get(key).and_then(|v| v.as_str()).map(String::from);
-        let Some(local_path) = field("local_path").filter(|p| !p.trim().is_empty()) else {
-            tracing::warn!(tool_name, "注入声明缺少 local_path，跳过该项");
+    for asset in declaration.injected_assets {
+        if !asset.is_valid() {
+            tracing::warn!(tool_name, "注入声明缺少 local_path/mime_type，跳过该项");
             continue;
-        };
-        let mime_type = field("mime_type").unwrap_or_else(|| "image/png".to_string());
-        let original_name = field("original_name").unwrap_or_else(|| {
-            std::path::Path::new(&local_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("injected-image")
-                .to_string()
-        });
-        let size_bytes = entry
-            .get("size_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_default();
-        let source = field("source").unwrap_or_else(|| tool_name.to_string());
+        }
+        if asset.kind != tiangong_types::MediaKind::Image {
+            // 文件/音视频尚无 provider 侧原生消费路径（RFC 0017 Phase 2）。
+            tracing::warn!(tool_name, kind = ?asset.kind, "非图片注入声明暂不支持，跳过");
+            continue;
+        }
         injections.push(PendingImageInjection {
-            tool_name: source,
+            tool_name: asset
+                .source
+                .clone()
+                .unwrap_or_else(|| tool_name.to_string()),
             tool_call_id: tool_call_id.to_string(),
-            asset: tiangong_types::StoredAsset {
-                asset_id: format!("inject-{}", scru128::new()),
-                local_path,
-                original_name,
-                mime_type,
-                size: size_bytes,
-                kind: tiangong_types::MediaKind::Image,
-            },
+            asset: asset.to_stored_asset(format!("inject-{}", scru128::new())),
         });
     }
     injections
@@ -751,7 +740,7 @@ mod tests {
             "path": "/tmp/desktop-1.png",
             "width": 100,
             "height": 50,
-            "injected_images": [{
+            "injected_assets": [{
                 "local_path": "/tmp/desktop-1.png",
                 "mime_type": "image/png",
                 "original_name": "desktop-1.png",
@@ -774,10 +763,10 @@ mod tests {
         assert!(parse_injected_images("read_file", "call-2", "{\"path\":\"/tmp/a\"}").is_empty());
         // 提到字段名但不是 JSON：安全跳过。
         assert!(
-            parse_injected_images("grep", "call-3", "found \"injected_images\" in docs").is_empty()
+            parse_injected_images("grep", "call-3", "found \"injected_assets\" in docs").is_empty()
         );
         // 声明缺 local_path：跳过该项。
-        let bad = serde_json::json!({"injected_images": [{"mime_type": "image/png"}]}).to_string();
+        let bad = serde_json::json!({"injected_assets": [{"mime_type": "image/png"}]}).to_string();
         assert!(parse_injected_images("tool", "call-4", &bad).is_empty());
     }
 
