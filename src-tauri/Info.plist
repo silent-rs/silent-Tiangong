@@ -4,6 +4,8 @@
 <dict>
     <key>CFBundleDisplayName</key>
     <string>天工</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>天工需要访问本地网络，以便在终端中连接局域网设备（SSH、部署与调试）。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>天工需要访问麦克风以实现语音输入功能</string>
 </dict>
