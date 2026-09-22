@@ -6,7 +6,7 @@
 //! 与 Core 的关系：**不经 Core 的 `Plugin`/`MentionCandidateProvider`**。
 //! 候选查询不需要会话 Core 存在，也不占用插件位；Core 只管执行 turn。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -77,7 +77,10 @@ impl CoreManager {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let mut groups: BTreeMap<String, MentionGroup> = BTreeMap::new();
+        // 按候选首次出现的 kind 顺序分组（与旧聚合通道一致），
+        // 不用 BTreeMap：字典序会让 UI 上 skill/mcp/agent 的排列改变。
+        let mut groups: Vec<MentionGroup> = Vec::new();
+        let mut group_index: HashMap<String, usize> = HashMap::new();
         let mut seen = HashSet::new();
         let needle = query.query.to_lowercase();
         for source in sources {
@@ -105,19 +108,23 @@ impl CoreManager {
                 if !seen.insert((candidate.kind.clone(), candidate.value.clone())) {
                     continue;
                 }
-                let group = groups
+                let index = *group_index
                     .entry(candidate.kind.clone())
-                    .or_insert_with(|| MentionGroup {
-                        kind: candidate.kind.clone(),
-                        label: candidate.kind.clone(),
-                        candidates: Vec::new(),
+                    .or_insert_with(|| {
+                        groups.push(MentionGroup {
+                            kind: candidate.kind.clone(),
+                            label: candidate.kind.clone(),
+                            candidates: Vec::new(),
+                        });
+                        groups.len() - 1
                     });
+                let group = &mut groups[index];
                 if group.candidates.len() < query.max_per_group {
                     group.candidates.push(candidate);
                 }
             }
         }
-        Ok(groups.into_values().collect())
+        Ok(groups)
     }
 }
 

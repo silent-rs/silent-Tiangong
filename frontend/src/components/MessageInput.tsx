@@ -7,7 +7,7 @@ import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, Sh
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, textContent } from '@/api/tauri';
+import { api, textContent, type MentionTarget } from '@/api/tauri';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
 import { useMentionGroups } from '@/hooks/useMentionGroups';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
@@ -24,7 +24,7 @@ import {
   resolveAttachmentUrl,
 } from '@/utils/attachments';
 import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
-import { mentionMarkFor } from '@/utils/mentionMarks';
+import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -389,14 +389,37 @@ export function MessageInput({
   // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====
+  const mentionTarget = useMemo<MentionTarget>(
+    () =>
+      !isNewConversation && activeSessionId
+        ? { kind: 'session', session_id: activeSessionId }
+        : sessionCwd ? { kind: 'draft', workspace: sessionCwd } : { kind: 'global' },
+    [isNewConversation, activeSessionId, sessionCwd]
+  );
   const mentionGroups = useMentionGroups(
-    !isNewConversation && activeSessionId
-      ? { kind: 'session', session_id: activeSessionId }
-      : sessionCwd ? { kind: 'draft', workspace: sessionCwd } : { kind: 'global' },
+    mentionTarget,
     mentionOpen && completionMode === 'mention' ? mentionFilter : '',
     mentionOpen && completionMode === 'mention',
   );
-  const filteredGroups = completionMode === 'slash' ? [] : mentionGroups;
+  // 预热 @提及标记表：消息气泡从 token 重建 chip 时查表，需在用户打开
+  // 补全面板前完成注册（面板查询命中时也会注册，这里覆盖未打开的场景）。
+  useEffect(() => {
+    let cancelled = false;
+    api.getMentionGroups(undefined, undefined, { target: mentionTarget, query: '', max_per_group: 1000 })
+      .then(groups => {
+        if (!cancelled) registerMentionMarks(groups.flatMap(group => group.candidates));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [mentionTarget]);
+  const filteredGroups = completionMode === 'slash'
+    ? []
+    // 渲染层截断：搜索已下推后端，每组最多展示 50 条防大列表撑爆 UI；
+    // 键盘导航的平铺数组基于截断后的结果，保证索引与可见项对齐。
+    : mentionGroups.map(group => ({
+        ...group,
+        candidates: group.candidates.slice(0, 50),
+      }));
 
   // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
   const filteredCandidates = completionMode === 'slash'
