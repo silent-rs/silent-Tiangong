@@ -11124,6 +11124,7 @@ version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-types",
 ]
 
 [[package]]
@@ -11143,6 +11144,7 @@ dependencies = [
  "tiangong-plugin-computer-use-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
+ "tiangong-types",
  "tokio",
  "tracing",
  "tracing-subscriber",

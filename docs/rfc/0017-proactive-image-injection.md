@@ -64,10 +64,11 @@ computer-use 新增 `desktop_screenshot` op：
 > original_name?, size_bytes, kind?, source?}`（kind 缺省 image）。
 
 - 权威类型定义在 `tiangong-types`（`InjectedAsset` / `ToolResultInjection`，
-  含 `parse` 预检与 `to_stored_asset` 转换），宿主侧反序列化即得强类型；
-- 插件私有 protocol 保持零运行时依赖（需编译到 wasm32），以 serde 形状
-  完全一致的轻量镜像参与（如 computer-use 的 `InjectedAsset`，不带 kind
-  字段时由宿主侧默认 Image 闭环），两边测试互相锁定 JSON 形状；
+  含 `parse` 解析与 `to_stored_asset` 转换），宿主侧反序列化即得强类型；
+- computer-use protocol 直接依赖 `tiangong-types`，复用同一个 `InjectedAsset`
+  定义；不再维护 serde 镜像，插件与宿主的 JSON 形状由同一类型保证；
+- `tiangong-types` 当前依赖仅为 serde/serde_json/chrono/scru128，已验证可
+  编译到 `wasm32-wasip2`，因此直接依赖不会引入平台不兼容；
 - **通道泛化到文件**：声明携带 `kind`（image/video/audio/file）；Phase 1
   仅对 image 落地注入消息，非图片类型告警跳过（Phase 2 扩展位）；
 - core 在 `record_completed_tool_call` 处提取声明（预检 + 强类型解析），
