@@ -670,16 +670,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_tool_arguments_become_parse_error() {
+    fn empty_tool_arguments_become_empty_object() {
         let response = from_deepseek_response(response_with_arguments(""), true).expect("response");
         let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
             panic!("expected tool call");
         };
-        assert!(
-            call.arguments
-                .get("__parse_error")
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.contains("工具参数为空"))
+        assert_eq!(
+            call.arguments,
+            serde_json::json!({}),
+            "空参数应按无参调用处理（空对象），不再构成解析错误"
         );
     }
 

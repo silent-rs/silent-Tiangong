@@ -1,11 +1,10 @@
 //! 桌面端 Core 构造依赖（issue #245）。
 //!
-//! 原 `TiangongApp::create_core` 的插件构造 body 收敛至此。`CoreManager` 内置
-//! TiangongCore 构造（针对该类型，不抽象），host 在调用 `ensure_core` 前先经
-//! [`DesktopCoreFactory::build_plugins`] 构造好插件集合并作为参数传入。
-//!
 //! host 专属状态（Tauri app_handle、CoreConfigProvider 的 generation）留在本结构。
-//! skill/mcp 等 WASM 插件由 `load_installed_plugins` 自动加载，不再手动注入。
+//! Core 的插件列表只持有一个 [`RuntimeCorePlugin`] 聚合桥（编译期唯一成员）：
+//! 对 Core 而言插件集合构造后永不变化，已安装插件的能力（工具/prompt/钩子）
+//! 由桥在被调用时向 runtime 注册表聚合——新装插件下一轮自然出现，启停/升级/
+//! 卸载由 runtime 经适配器就地生效，Core 与 app 都不需要"被通知"。
 
 use std::sync::Arc;
 
@@ -27,35 +26,20 @@ pub struct DesktopCoreFactory {
 }
 
 impl DesktopCoreFactory {
-    /// 构造桌面端 Core 所需的完整插件集合（issue #245）。
+    /// 构造桌面端 Core 的插件集合（issue #245；`ensure_core` 按需回调）。
     ///
-    /// 调用方（`TiangongApp`）在 `ensure_core` 前调用本方法，把返回的 plugins
-    /// 作为参数传给 `CoreManager::ensure_core`。Core 的实际 builder 构造由
-    /// CoreManager 内部完成，host 不再直接 build TiangongCore。
-    /// 构造桌面端 Core 所需的完整插件集合（issue #245）。
-    ///
-    /// 同步函数：body 内无异步操作，但保留 `async` 签名仅为历史兼容。调用方经
-    /// `CoreManager::ensure_core` 的按需回调传入，只有 Core 不存在时才会执行。
+    /// 返回单元素列表：runtime 聚合桥。每个 Core 持有独立桥实例（交付表
+    /// 互不共享），与既有「各 Core 适配器隔离 per-session 状态」语义一致。
     pub fn build_plugins_sync(
         &self,
         _models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
-        use tracing::info;
-
-        let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-        // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-        let Some(_app_handle) = self.app_handle.get().cloned() else {
+        if self.app_handle.get().is_none() {
             tracing::warn!("app_handle 尚未注入，桌面插件构造中止");
-            return plugins;
-        };
-        // 终端/浏览器/媒体/fs 等工具均由 load_installed_plugins 按已安装插件
-        // 自动加载（issue #330），宿主不再无条件注入进程内工具插件。
-        let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
-            &self.storage_root,
-            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
-        );
-        info!(count = wasm_plugins.len(), "已加载 WASM 插件");
-        plugins.extend(wasm_plugins);
-        plugins
+            return Vec::new();
+        }
+        vec![tiangong_plugin_runtime::RuntimeCorePlugin::desktop(
+            self.storage_root.clone(),
+        )]
     }
 }

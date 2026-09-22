@@ -346,6 +346,7 @@ pub async fn delete_session(
     let _ = state.release_any_input_send_claim(&deleted_id);
     state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
+    state.config_handoff_store.forget(&deleted_id);
     Ok(())
 }
 
@@ -411,6 +412,8 @@ pub async fn delete_sessions_by_cwd(
         let _ = state.release_any_input_send_claim(id);
         state.clear_agent_worker_view(id);
         state.remove_session_send_lock(id);
+        // 交接记账随会话一并清理（与单删路径一致），否则定档指纹泄漏。
+        state.config_handoff_store.forget(id);
     }
     drop(send_guards);
     drop(input_cache_guards);
@@ -5063,22 +5066,17 @@ pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), 
     .map_err(|error| format!("写入首次启动标记任务失败: {error}"))?
 }
 
-/// 插件安装/导入/升级/启停/回滚/卸载/重载成功后广播，拓展区等消费方刷新。
-fn notify_plugins_changed(app: &AppHandle) {
-    let _ = app.emit("plugins_changed", &());
-    // 主前端事件到达不了插件沙箱；插件页面（如插件创作的项目列表）经
-    // 桥接订阅 plugins.changed 获知插件集变化后自行刷新。
-    tiangong_plugin_runtime::emit_plugins_changed();
-}
+// 插件装卸/启停成功后的宿主响应（前端刷新、上下文交接打标）已改为
+// runtime 插件变化事件的订阅者（见 main.rs setup 注册）；命令层不再扇出。
+// 下载/安装编排同样下沉 runtime（artifacts::install_plugin_from_repository），
+// 宿主仅注入进度回调转发到前端事件。
 
+/// 下载并安装：runtime 编排 + 宿主进度事件转发。
 pub(crate) async fn download_and_install_plugin(
     storage_root: std::path::PathBuf,
     plugin_id: String,
     app: AppHandle,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
-    let total_started = Instant::now();
-    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
-        .map_err(|error| error.to_string())?;
     let progress: tiangong_plugin_runtime::artifacts::ProgressFn = std::sync::Arc::new({
         let app = app.clone();
         let plugin_id = plugin_id.clone();
@@ -5089,45 +5087,13 @@ pub(crate) async fn download_and_install_plugin(
             );
         }
     });
-    let download_started = Instant::now();
-    let staged_result = repository
-        .download(&storage_root, &plugin_id, Some(progress))
-        .await;
-    let download_ms = download_started.elapsed().as_millis() as u64;
-    let staged = match staged_result {
-        Ok(staged) => staged,
-        Err(error) => {
-            tracing::warn!(
-                plugin_id,
-                download_ms,
-                total_ms = total_started.elapsed().as_millis() as u64,
-                %error,
-                "插件下载阶段失败"
-            );
-            return Err(error.to_string());
-        }
-    };
-
-    let install_started = Instant::now();
-    let install_task = tauri::async_runtime::spawn_blocking(move || {
-        tiangong_plugin_runtime::registry::install_staged_plugin(&storage_root, staged.path())
-            .map_err(|error| error.to_string())
-    })
-    .await;
-    let install_ms = install_started.elapsed().as_millis() as u64;
-    let result = match install_task {
-        Ok(result) => result,
-        Err(error) => Err(format!("安装插件任务失败: {error}")),
-    };
-    tracing::info!(
-        plugin_id,
-        download_ms,
-        install_ms,
-        total_ms = total_started.elapsed().as_millis() as u64,
-        success = result.is_ok(),
-        "插件下载安装阶段完成"
-    );
-    result
+    tiangong_plugin_runtime::artifacts::install_plugin_from_repository(
+        &storage_root,
+        &plugin_id,
+        Some(progress),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// 从用户选择的本地完整目录或签名插件归档（tar.zst）导入插件。
@@ -5234,7 +5200,6 @@ pub async fn import_local_plugin(
     })
     .await
     .map_err(|error| format!("导入本地插件任务失败: {error}"))??;
-    notify_plugins_changed(&app);
     Ok(status)
 }
 
@@ -5249,7 +5214,6 @@ pub async fn install_plugin(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     let status = download_and_install_plugin(storage_root, plugin_id, app.clone()).await?;
-    notify_plugins_changed(&app);
     Ok(status)
 }
 
@@ -5264,7 +5228,6 @@ pub async fn upgrade_plugin(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     let status = download_and_install_plugin(storage_root, plugin_id, app.clone()).await?;
-    notify_plugins_changed(&app);
     Ok(status)
 }
 
@@ -5273,7 +5236,6 @@ pub async fn upgrade_plugin(
 pub async fn set_plugin_enabled(
     plugin_id: String,
     enabled: bool,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
@@ -5285,7 +5247,6 @@ pub async fn set_plugin_enabled(
     })
     .await
     .map_err(|error| format!("切换插件状态任务失败: {error}"))??;
-    notify_plugins_changed(&app);
     Ok(status)
 }
 
@@ -5293,7 +5254,6 @@ pub async fn set_plugin_enabled(
 #[tauri::command]
 pub async fn rollback_plugin(
     plugin_id: String,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
@@ -5305,7 +5265,6 @@ pub async fn rollback_plugin(
     })
     .await
     .map_err(|error| format!("回滚插件任务失败: {error}"))??;
-    notify_plugins_changed(&app);
     Ok(status)
 }
 
@@ -5314,7 +5273,6 @@ pub async fn rollback_plugin(
 pub async fn uninstall_plugin(
     plugin_id: String,
     keep_data: bool,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let storage_root = state
@@ -5326,7 +5284,6 @@ pub async fn uninstall_plugin(
     })
     .await
     .map_err(|error| format!("卸载插件任务失败: {error}"))??;
-    notify_plugins_changed(&app);
     Ok(())
 }
 
@@ -5350,7 +5307,6 @@ pub async fn reload_plugin(
     // 定向通知前端该插件已热加载：前端据此卸载旧的后台执行壳，下次
     // 工具调用按磁盘最新页面重建，避免旧壳吞掉重新挂载的请求。
     let _ = app.emit("plugin_reloaded", &reloaded_id);
-    notify_plugins_changed(&app);
     Ok(status)
 }
 

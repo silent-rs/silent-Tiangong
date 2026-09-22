@@ -66,6 +66,8 @@ pub struct TiangongApp {
     /// 桌面端 Core 构造依赖（issue #245）：持有 app_handle/skill/mcp/config/
     /// storage_root,提供 `build_plugins()` 供 `ensure_core` 前构造插件集合。
     pub desktop_factory: std::sync::Arc<crate::core_factory::DesktopCoreFactory>,
+    /// 插件变化上下文交接的状态容器（标记 / 首检 / 定档指纹）。
+    pub(crate) config_handoff_store: crate::config_handoff::ConfigHandoffStore,
     /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
@@ -86,10 +88,36 @@ pub struct ToolInjection {
     pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
 }
 
+/// 自制插件清单注入（插件变化事件的订阅者投递）。
+///
+/// 经工具注入通道追加到对话历史（append-only，KV cache 前缀不受影响）：
+/// turn 活跃的会话在工具批次收敛后的安全点收到清单（PendingFinish 阶段
+/// 会转 NeedModel 重新分析）；空闲会话由聚合桥的轮开始清单检查补上。
+struct LocalPluginListInput;
+
+impl tiangong_core::agent_input::ToolInput for LocalPluginListInput {
+    fn tool_name(&self) -> &str {
+        tiangong_plugin_runtime::LOCAL_PLUGIN_LIST_INJECTION
+    }
+
+    fn render(&self) -> serde_json::Value {
+        tiangong_plugin_runtime::registry::local_plugin_inventory()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct InputSendClaim {
     revision: u64,
     attachment_paths: Vec<String>,
+}
+
+/// 当前插件能力指纹（向 runtime 取值）。
+///
+/// 「插件是否发生变化」由 runtime 回答——它是插件注册表的所有者，启用
+/// 判定、版本回落与摘要算法都属于它的内部知识。app 只消费这个值，据此
+/// 决定后续如何处理（整理上下文、打标、定档），不重复实现判定逻辑。
+pub(crate) fn execution_fingerprint() -> String {
+    tiangong_plugin_runtime::registry::enabled_plugin_fingerprint()
 }
 
 fn merge_agent_output_messages(
@@ -195,6 +223,9 @@ impl TiangongApp {
             embedded_server: Mutex::new(None),
             app_handle,
             desktop_factory,
+            config_handoff_store: crate::config_handoff::ConfigHandoffStore::new(
+                storage_root.clone(),
+            ),
             core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
@@ -869,11 +900,82 @@ impl TiangongApp {
             .await
     }
 
+    /// 插件集合/版本变化的变化点打标（runtime 插件变化事件的订阅者调用）：
+    /// 给每个活跃会话标记待交接并后台立即处理（空闲当场压缩，忙留标记）。
+    ///
+    /// `fingerprint` 由事件携带（发布时刻快照），宿主不重算——回调内再取
+    /// runtime 注册表锁可能与迁移路径的锁序冲突。不活跃会话（无 Core）
+    /// 不打标：由首检兜底发现。
+    pub fn mark_all_sessions_for_plugin_change(&self, fingerprint: &str) {
+        crate::config_handoff::mark_all_sessions(
+            &self.config_handoff_store,
+            &self.core_manager,
+            fingerprint,
+        );
+    }
+
+    /// 自制插件能力变化：向全部活跃会话经注入通道下发最新清单。
+    ///
+    /// 分流判据（publisher == local）由订阅者检查；本方法只做投递。
+    /// turn 活跃的会话经 `Command::InjectTool` 在工具批次收敛后的安全点
+    /// 注入（PendingFinish 阶段自动转 NeedModel 重新分析——开发场景
+    /// 「刚装完插件模型正要收尾」会重新考虑）；空闲会话本轮投递会因
+    /// 无活跃 turn 被丢弃，由聚合桥的轮开始清单检查在下一条消息补上。
+    pub fn broadcast_local_plugin_list(&self) {
+        let session_ids: Vec<String> = self
+            .core_manager
+            .registry()
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
+        for session_id in session_ids {
+            let _ = self.tool_injection_tx.send(ToolInjection {
+                session_id: Some(session_id),
+                browser_source: None,
+                tool: Box::new(LocalPluginListInput),
+            });
+        }
+    }
+
+    /// 投递前的插件配置交接：待交接标记命中则执行，否则首检指纹兜底。
+    ///
+    /// 交接失败不阻断投递——消息照常发送，只是历史未经整理（失败已在
+    /// `run_handoff` 内定档，不会反复重压）。会话忙时同样放行：本轮结束
+    /// 后的下一条消息会在空闲窗口补做。
+    async fn handoff_before_deliver(&self, session_id: &str) {
+        use crate::config_handoff::ConfigHandoffOutcome;
+        let outcome = crate::config_handoff::ensure_before_deliver(
+            &self.config_handoff_store,
+            &self.core_manager,
+            session_id,
+            execution_fingerprint,
+        )
+        .await;
+        match outcome {
+            ConfigHandoffOutcome::Aligned => {}
+            ConfigHandoffOutcome::SkippedBusy => {
+                tracing::debug!(session_id, "会话执行中，插件交接延后到下一条消息");
+            }
+            ConfigHandoffOutcome::Failed(reason) => {
+                tracing::warn!(session_id, reason, "插件交接压缩未完成，上下文未整理即继续");
+            }
+        }
+    }
+
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     ///
-    /// app 层只做 host 专属的远端 turn 所有权检查，然后把消息交给
-    /// `CoreManager`：模型选择随消息携带（`with_model_ref`），解析、上下文
-    /// 整理与切换都是 Manager 投递路径的内部步骤，app 层不感知也不介入。
+    /// app 层只做 host 专属的远端 turn 所有权检查与插件变化的上下文交接，
+    /// 然后把消息交给 `CoreManager`：模型选择随消息携带（`with_model_ref`），
+    /// 模型解析、切换前的上下文整理都是 Manager 投递路径的内部步骤。
+    ///
+    /// 插件变化的交接在此**同步完成后**再投递：调用方（发送/编辑重发/嵌入
+    /// server）持有会话发送锁，交接与投递因此处在同一临界区内——既保证多条
+    /// 消息的先后顺序，也让交接失败沿调用栈回报，不会出现「命令已返回但消息
+    /// 还没送到」的中间态。
+    ///
+    /// 交接检查只挂在**用户消息投递**入口——ensure_core 的其余调用方
+    /// （工具注入恢复、/clear、/compress、切换会话查看）不产生模型请求，
+    /// 不应触发交接压缩。
     ///
     /// `model_ref` 为 `None` 表示跟随当前 Chat 默认模型。
     pub async fn deliver_prepared_if_live(
@@ -886,6 +988,7 @@ impl TiangongApp {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
+        self.handoff_before_deliver(session_id).await;
         self.core_manager
             .deliver_user_message(
                 session_id,

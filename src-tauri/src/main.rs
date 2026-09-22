@@ -149,6 +149,28 @@ fn run_gui() {
             // 只复用该快照，不隐式扫描、编译或热加载插件。
             state.start_plugin_preload();
 
+            // 注册插件生命周期变化订阅者：插件迁移（安装/升级/启停/卸载/重载）
+            // 由 runtime 状态机执行并广播事件，宿主在此响应——主前端刷新 +
+            // 会话上下文交接打标（指纹由事件携带）。插件页面的沙箱桥通知由
+            // runtime 发布事件时内部下发，宿主不重复扇出。
+            {
+                let emitter_handle = app.handle().clone();
+                let state_handle = app.handle().clone();
+                tiangong_plugin_runtime::set_plugins_changed_listener(Some(Arc::new(
+                    move |event: &tiangong_plugin_runtime::PluginChangeEvent| {
+                        let _ = emitter_handle.emit("plugins_changed", &());
+                        let app_state = state_handle.state::<tiangong_app::TiangongApp>();
+                        app_state.mark_all_sessions_for_plugin_change(&event.fingerprint);
+                        // 自制插件（local 签名）的能力不进 tools 声明：
+                        // 清单经注入通道追加到活跃会话的对话历史，避免
+                        // 装卸打穿 KV cache 前缀。
+                        if tiangong_plugin_runtime::registry::is_local_plugin(&event.plugin_id) {
+                            app_state.broadcast_local_plugin_list();
+                        }
+                    },
+                )));
+            }
+
             // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
 

@@ -36,14 +36,13 @@ pub struct ToolCall {
 }
 
 /// 解析 Provider 返回的工具参数。解析失败时保留为结构化错误，交给上层 ReAct 恢复链路处理。
+///
+/// 空参数（`""` / 纯空白）按**无参调用**处理返回空对象——无参工具
+/// （如 `list_local_plugins`）的合法调用形态，不构成解析错误；仅真正的
+/// JSON 语法错误才进入 `__parse_error` 恢复链路。
 pub fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
     if raw_args.trim().is_empty() {
-        return json!({
-            "__parse_error": format!(
-                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
-            ),
-            "__raw_args_preview": raw_args,
-        });
+        return json!({});
     }
 
     serde_json::from_str(raw_args).unwrap_or_else(|err| {

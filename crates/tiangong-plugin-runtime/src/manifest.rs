@@ -124,6 +124,12 @@ pub struct TsToolDecl {
     /// 前端插件崩溃或未响应时的宿主兜底上限。
     #[serde(default = "default_ts_tool_timeout_ms")]
     pub timeout_ms: u64,
+    /// 非幂等声明：该工具有副作用（构建、安装、发布等），相同参数的
+    /// 重复调用可能因外部世界变化而结果不同。core 的工具去重（防模型
+    /// 循环重试）对这类工具放开「成功/失败后完全相同调用」的拦截，
+    /// 仅保留同批次并发去重。
+    #[serde(default)]
+    pub non_idempotent: bool,
 }
 
 /// UI 贡献声明（schema v2 的 `ui` 字段）。
