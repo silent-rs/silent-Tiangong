@@ -22,12 +22,19 @@ export const MENTION_GROUP_DISPLAY_LIMIT = 50;
  *
  * - 截断必须在键盘导航的平铺数组之前完成，保证索引与可见项对齐；
  * - 空过滤词时罗列全部文件既昂贵也无意义，等用户输入至少一个字符再检索，
- *   枚举型候选（skill/mcp/agent/plugin/index）不受影响。
+ *   枚举型候选（skill/mcp/agent/plugin/index）不受影响；
+ * - 例外：文件组只有「索引建立中」占位提示（没有任何真实候选）时保留——此时
+ *   剔除它会让用户对着空面板以为工作区里没有可提及的文件，而真相是索引正在重建。
  */
 export function selectDisplayGroups(groups: MentionGroup[], filter: string): MentionGroup[] {
   const hasFilter = filter.trim() !== '';
   return groups
-    .filter(group => group.kind !== 'file' || hasFilter)
+    .filter(group => {
+      if (hasFilter || group.kind !== 'file') return true;
+      // 空过滤词 + 文件组：仅当整组都是占位提示（无真实候选可罗列）时才保留。
+      const candidates = group.candidates;
+      return candidates.length > 0 && candidates.every(isScanningPlaceholder);
+    })
     .map(group => ({
       ...group,
       candidates: group.candidates.slice(0, MENTION_GROUP_DISPLAY_LIMIT),

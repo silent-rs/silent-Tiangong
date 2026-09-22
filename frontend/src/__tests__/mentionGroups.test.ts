@@ -33,6 +33,26 @@ describe('selectDisplayGroups', () => {
     expect(selectDisplayGroups(groups, '   ').map(g => g.kind)).toEqual(['agent']);
   });
 
+  it('空过滤词时保留只含索引建立中提示的文件组', () => {
+    const groups: MentionGroup[] = [
+      { kind: 'file', label: 'file', candidates: [scanningPlaceholder()] },
+    ];
+    const result = selectDisplayGroups(groups, '');
+    expect(result.map(g => g.kind)).toEqual(['file']);
+    expect(result[0].candidates).toHaveLength(1);
+  });
+
+  it('空过滤词时文件组混有真实候选仍剔除', () => {
+    const groups: MentionGroup[] = [
+      {
+        kind: 'file',
+        label: 'file',
+        candidates: [scanningPlaceholder(), ...group('file', 2).candidates],
+      },
+    ];
+    expect(selectDisplayGroups(groups, '')).toEqual([]);
+  });
+
   it('有过滤词时保留文件组', () => {
     const groups = [group('file', 2), group('skill', 1)];
     const result = selectDisplayGroups(groups, 'main');
