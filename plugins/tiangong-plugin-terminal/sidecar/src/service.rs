@@ -51,6 +51,46 @@ const FRONTEND_ATTACH_WAIT_MS: u64 = 1_000;
 /// 达到本时长，即认定它在等待用户按键。三个条件同时成立时信号很强，
 /// 窗口不需要很长——不必让调用方空等。
 const SILENT_INTERACTIVE_HANG_SECS: u64 = 5;
+/// 包装脚本夭折的兜底判定：start marker 已出现、退出码标记还没出现、
+/// 输出静默达本时长后，才开始探测「登录 shell 是否已回到提示符」。
+///
+/// 这里守的**不是** issue #571 的原始场景——用户命令已隔离进内层脚本
+/// （见 [`prepare_posix_command`]），解析期错误只终止内层 `source`，
+/// wrapper 照常输出 cwd/rc/end marker，那类命令不会走到这里。
+///
+/// 本兜底覆盖的是剩下两类：
+/// 1. **shell 仍存活、但 marker 永远不会来**。shell 随命令一起死亡由
+///    [`SessionEndState::Ended`] 分支接管；此处专收 shell 被顶替/替换后
+///    新 shell 还活着的情形（如内层 `exec sh -i`），以及 marker 被前台
+///    程序吞掉、shell 插件干扰等无法穷举的意外。
+/// 2. **带显式 timeout 的命令**。交互程序兜底分支带 `deadline.is_none()`
+///    前置条件，命令一旦设了 timeout 就完全不生效；本分支不受该约束，
+///    是 timeout 路径下唯一能提前收尾的兜底。否则长 timeout 命令一旦丢
+///    marker，就要轮询满整个超时，且终端会被标记 Unresponsive 退出复用池。
+///
+/// 因此即便 #571 已根治，本兜底仍不可移除。
+const SILENT_ABORTED_WRAPPER_SECS: u64 = 3;
+/// 两次夭折探测的最小间隔：探测要往 shell 输入缓冲写一行，不能每轮都写。
+const ABORTED_WRAPPER_PROBE_INTERVAL_SECS: u64 = 5;
+/// 夭折探测的最大次数。连续未被执行说明前台确实还在消费 stdin，
+/// 继续写入只会不断污染它的输入，到达上限后回到纯等待。
+const MAX_ABORTED_WRAPPER_PROBES: u32 = 3;
+/// 单次夭折探测等待就绪 marker 的时间预算。
+const ABORTED_WRAPPER_PROBE_TIMEOUT_MS: u64 = 800;
+/// zsh 默认开启 `EQUALS`：以 `=` 开头的裸词被当作 equals-expansion
+/// 展开为命令路径，`echo ===` 会在**解析期**报 `== not found`，
+/// 并直接终止被 `source` 的整个脚本——包装脚本的 end marker 永不输出，
+/// 调用方只能轮询到超时（issue #571）。解析期错误无法靠 `set -e`/`trap`
+/// 补救，只能从源头关掉该选项。
+///
+/// 写法约束：
+/// - 必须对 bash/dash/sh 无害，因此 `setopt` 只在 `ZSH_VERSION` 存在时
+///   经 `eval` 执行（非 zsh 连 `[[ -o equals ]]` 都不会被解析到）；
+/// - 记录原值并在用户命令后恢复，不改变用户 shell 的既有偏好。
+const ZSH_EQUALS_DISABLE_SNIPPET: &str = "__tiangong_equals_restore=''\nif [ -n \"${ZSH_VERSION-}\" ]; then eval 'if [[ -o equals ]]; then __tiangong_equals_restore=1; fi; setopt noequals'; fi\n";
+/// 与 [`ZSH_EQUALS_DISABLE_SNIPPET`] 配对：仅当原本开启时才恢复，
+/// 用户主动 `unsetopt equals` 的偏好不会被打开。
+const ZSH_EQUALS_RESTORE_SNIPPET: &str = "if [ -n \"$__tiangong_equals_restore\" ]; then eval 'setopt equals'; fi\nunset __tiangong_equals_restore\n";
 /// 内部命令边界标记公共前缀；这些行不得显示给用户。
 const MARKER_PREFIX: &str = "__TIANGONG_";
 
@@ -149,6 +189,10 @@ struct PtySession {
     shell_pid: Option<u32>,
     /// 输出持久化日志（按 scope 分文件）：打开失败为 None（优雅降级）。
     logger: Option<Arc<persist::OutputLogger>>,
+    /// 待回显的命令文本（start marker → 命令）。与输出过滤线程共享：
+    /// 命令写入 PTY 前登记，过滤器在 start marker 到达时取出，把 marker
+    /// 行替换成命令行——命令与其输出因此严格相邻。
+    pending_echo: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -747,6 +791,9 @@ impl TerminalService {
 
         let shell_pid = child.process_id();
         let killer = child.clone_killer();
+        // 命令回显登记表：执行侧写入、输出过滤线程消费。
+        let pending_echo: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         // 输出持久化（按 scope 分文件）：仅供运行诊断和关闭时清理
         let logger = request
             .scope_id
@@ -791,6 +838,7 @@ impl TerminalService {
                 interactive_started: false,
                 shell_pid,
                 logger,
+                pending_echo: Arc::clone(&pending_echo),
             },
         );
 
@@ -814,7 +862,7 @@ impl TerminalService {
                 }
             }
         });
-        let mut output_filter = RawOutputFilter::new();
+        let mut output_filter = RawOutputFilter::new(Arc::clone(&pending_echo));
         // 首批提示符随响应返回，避免 UI 订阅尚未建立时永久丢帧。
         let boot_output = match chunk_rx.recv_timeout(Duration::from_millis(40)) {
             Ok(first) => {
@@ -1294,8 +1342,13 @@ impl TerminalService {
             // 探针确认登录 shell 已重新接管，最后才发送 Agent 的真实命令。
             self.prepare_shell_for_command(&request.session_id).await?;
             if request.interactive {
-                self.exec_interactive(&request.session_id, &command, request.timeout)
-                    .await
+                self.exec_interactive(
+                    &request.session_id,
+                    &command,
+                    request.cwd.as_deref(),
+                    request.timeout,
+                )
+                .await
             } else {
                 self.exec_non_interactive(&request, &command).await
             }
@@ -1428,17 +1481,23 @@ impl TerminalService {
         let marker_id = scru128::new().to_string();
         let markers = CommandMarkers::new(&marker_id);
         let shell = self.with_session(&request.session_id, |session| Ok(session.shell))?;
-        let prepared = prepare_non_interactive_command(command, &markers, shell)?;
+        let prepared =
+            prepare_non_interactive_command(command, request.cwd.as_deref(), &markers, shell)?;
         let start_offset =
             self.with_session(&request.session_id, |session| Ok(session.raw_bytes_total))?;
 
-        // shell 回显的是内部 wrapper，因此先把用户实际命令写入可见输出；
-        // reader 会过滤包含 marker 的 wrapper 回显和边界行。
-        publish_display_output(
-            &self.sessions,
-            &request.session_id,
-            &format!("{}\r\n", command.trim_end()),
-        );
+        // 命令回显交给输出过滤器：它在 start marker 到达时把 marker 行
+        // 替换成命令文本。此处若直接推给 UI，命令会先于 shell 为就绪
+        // 探针重绘的提示符落地，用户看到的就是「命令、提示符、输出」
+        // 三段分离——与手敲命令时命令紧贴输出的形态不一致。
+        self.with_session(&request.session_id, |session| {
+            session
+                .pending_echo
+                .lock()
+                .expect("命令回显表锁损坏")
+                .insert(markers.start.clone(), command.trim_end().to_string());
+            Ok(())
+        })?;
         self.with_session(&request.session_id, |session| {
             session
                 .writer
@@ -1454,6 +1513,9 @@ impl TerminalService {
         // 静默挂起检测基线：命令写入后输出停止增长的时刻。
         let mut last_raw_total = start_offset;
         let mut last_output_at = Instant::now();
+        // 夭折探测的节流状态。
+        let mut aborted_probes: u32 = 0;
+        let mut aborted_probe_at: Option<Instant> = None;
         loop {
             // 会话状态先行：已被回收（手动关闭或选终端回收先一步出表）时
             // 给出明确错误，不再读输出撞「会话不存在」内部错误。
@@ -1523,6 +1585,48 @@ impl TerminalService {
                         .to_string();
                 return Ok(response);
             }
+            // 包装脚本夭折兜底：start marker 已出现，但 cwd/rc/end 边界
+            // 永远不会再来了。
+            //
+            // 注意这里**不是** issue #571 的主修复路径：用户命令已隔离进
+            // 内层脚本，`echo ===`、语法错误、命令不存在等都只会终止内层
+            // `source`，wrapper 照常吐出 end marker 走正常收尾。实测只有
+            // 「shell 被顶替但新 shell 仍存活」（内层 `exec sh -i`）这类
+            // 才会落到这里；shell 随命令一起死亡的情况由上面的 Ended 分支
+            // 接管。此外 marker 被前台程序吞掉、shell 插件干扰等无法穷举
+            // 的意外也归本分支兜底。
+            //
+            // 本分支刻意不加 `deadline.is_none()` 前置条件（对比上面的
+            // 交互程序分支）：带显式 timeout 的长命令若丢了 marker，没有
+            // 本兜底就要轮询满整个超时，终端还会被标记 Unresponsive 退出
+            // 复用池——正是 #571 让用户难受的那种表现。
+            //
+            // 判据不能只看静默时长——安静跑几分钟的编译同样静默。真正的
+            // 区别是「shell 是否已回到提示符」：向 shell 写一条就绪探针，
+            // 前台还有命令在跑时它只会躺在输入缓冲里不被执行；夭折后
+            // shell 已回到提示符，探针立刻被执行并回显 marker。
+            if last_output_at.elapsed() >= Duration::from_secs(SILENT_ABORTED_WRAPPER_SECS)
+                && parsed.exit_code.is_none()
+                && aborted_probes < MAX_ABORTED_WRAPPER_PROBES
+                && aborted_probe_at.is_none_or(|at: Instant| {
+                    at.elapsed() >= Duration::from_secs(ABORTED_WRAPPER_PROBE_INTERVAL_SECS)
+                })
+            {
+                aborted_probes += 1;
+                aborted_probe_at = Some(Instant::now());
+                if self.wrapper_aborted(&request.session_id).await? {
+                    tracing::warn!(
+                        session_id = request.session_id,
+                        "命令包装脚本未正常结束，shell 已回到提示符，按异常结束收尾"
+                    );
+                    let mut response = parsed.into_response(false);
+                    response.exit_code = -1;
+                    response.stderr =
+                        "命令包装脚本未正常结束（命令可能存在语法/解析错误），已返回其结束前的输出"
+                            .to_string();
+                    return Ok(response);
+                }
+            }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 // 会话已在等待中死亡：不能再向其发送中断键，按死亡收尾。
                 if matches!(
@@ -1546,6 +1650,41 @@ impl TerminalService {
                 return self
                     .collect_after_interrupt(&request.session_id, start_offset, &markers)
                     .await;
+            }
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    /// 探测「包装脚本是否已夭折」：向 shell 写一条就绪探针，在预算内
+    /// 看到它被**执行**（而非仅被 tty 回显）即说明 shell 已回到提示符，
+    /// 当前命令的边界标记不会再出现了。
+    ///
+    /// 探针写法保证回显不含完整 marker（见 [`shell_ready_probe`]），
+    /// 因此前台仍有命令在跑时不会误判：那种情况下探针只会躺在输入
+    /// 缓冲里，等前台结束后才被执行——而那时命令的 end marker 早已
+    /// 先一步输出，主循环会以正常完成收尾。
+    ///
+    /// 之所以用探针而非 `foreground_is_interactive` 取反：后者不是充分
+    /// 条件，命令在两条前台进程之间的空档会瞬时成立，足以造成误判。
+    async fn wrapper_aborted(&self, session_id: &str) -> Result<bool> {
+        let marker = format!("__TIANGONG_ABORTCHK_{}__", scru128::new());
+        let probe_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
+        self.with_session(session_id, |session| {
+            session
+                .writer
+                .write_all(shell_ready_probe(session.shell, &marker).as_bytes())
+                .context("发送夭折探针失败")?;
+            session.writer.flush().context("刷新夭折探针失败")
+        })?;
+
+        let deadline = Instant::now() + Duration::from_millis(ABORTED_WRAPPER_PROBE_TIMEOUT_MS);
+        loop {
+            let raw = self.raw_output_since(session_id, probe_offset)?;
+            if shell_ready_probe_completed(&String::from_utf8_lossy(&raw), &marker) {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
             }
             tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
         }
@@ -1632,9 +1771,23 @@ impl TerminalService {
         &self,
         session_id: &str,
         command: &str,
+        cwd: Option<&str>,
         wait_secs: Option<u64>,
     ) -> Result<ExecResponse> {
         let start_offset = self.with_session(session_id, |session| Ok(session.raw_bytes_total))?;
+        // 交互命令原样写进 PTY（用户看到的就是 Agent 请求的命令本身）。
+        // 工作目录改由前置的独立一行 `cd` 完成，不再污染命令文本。
+        let shell = self.with_session(session_id, |session| Ok(session.shell))?;
+        if let Some(enter) = interactive_cwd_command(cwd, shell) {
+            self.with_session(session_id, |session| {
+                session
+                    .writer
+                    .write_all(enter.as_bytes())
+                    .context("切换交互命令工作目录失败")?;
+                session.writer.flush().context("刷新工作目录切换失败")
+            })?;
+            tokio::time::sleep(Duration::from_millis(COMMAND_POLL_INTERVAL_MS)).await;
+        }
         self.with_session(session_id, |session| {
             session
                 .writer
@@ -1879,17 +2032,40 @@ fn contains_marker(text: &str) -> bool {
 }
 
 /// 行级 marker 过滤器：内部 wrapper 的 shell 回显和边界行不进入 UI。
+///
+/// 同时承担命令回显：start marker 是命令真正开始执行的位置，过滤器把
+/// 它**替换**成 Agent 的命令文本，而不是丢弃。命令行因此与自己的输出
+/// 严格相邻，中间不会再夹进 shell 为就绪探针重绘的提示符——与用户手敲
+/// 命令时看到的形态一致。
 struct RawOutputFilter {
     pending: String,
     suppress_until_newline: bool,
+    /// start marker → 该命令的可见文本。命令写入 PTY 前登记，
+    /// 命中后消费一次。
+    pending_echo: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl RawOutputFilter {
-    fn new() -> Self {
+    fn new(pending_echo: Arc<Mutex<HashMap<String, String>>>) -> Self {
         Self {
             pending: String::new(),
             suppress_until_newline: false,
+            pending_echo,
         }
+    }
+
+    /// marker 行命中登记时取出命令文本，作为可见行替换它。
+    fn echo_for(&self, segment: &str) -> Option<String> {
+        let trimmed = segment.trim();
+        let mut pending = self.pending_echo.lock().expect("命令回显表锁损坏");
+        if pending.is_empty() {
+            return None;
+        }
+        let marker = pending
+            .keys()
+            .find(|marker| trimmed.contains(marker.as_str()))
+            .cloned()?;
+        pending.remove(&marker)
     }
 
     fn filter(&mut self, chunk: &str) -> String {
@@ -1899,6 +2075,11 @@ impl RawOutputFilter {
             let segment = self.pending[..end].to_string();
             self.pending.drain(..end);
             if contains_marker(&segment) {
+                // start marker 就地换成命令文本：命令行与其输出相邻。
+                if let Some(echo) = self.echo_for(&segment) {
+                    result.push_str(&echo);
+                    result.push_str("\r\n");
+                }
                 self.suppress_until_newline = !newline;
             } else if !self.suppress_until_newline {
                 result.push_str(&segment);
@@ -2019,47 +2200,72 @@ impl ParsedCommandOutput {
     }
 }
 
+/// 把 Agent 的请求拼成要执行的命令文本。
+///
+/// **不含 cwd 切换**：工作目录由包装脚本负责（见 [`prepare_posix_command`]），
+/// 不能拼进命令文本。命令文本会原样回显给用户、记入 `running_command`
+/// 并出现在失败摘要里，混入 `cd ... &&` 会让用户看到自己绝不会这样敲的
+/// 命令；宿主每次调用都传会话工作目录，拼进去等于每条命令都平白多一截
+/// 前缀，用户命令与 Agent 命令的形态就不一致了。
 fn command_from_request(request: &ExecRequest, shell: ShellKind) -> Result<String> {
-    let command = if let Some(script) = request.script.as_deref() {
+    if let Some(script) = request.script.as_deref() {
         if script.trim().is_empty() {
             bail!("script 不能为空");
         }
-        script.to_string()
-    } else {
-        if request.cmd.trim().is_empty() {
-            bail!("cmd 不能为空");
-        }
-        // cmd 可含参数（与 command 插件的 run_command 语义一致）：先按引号
-        // 感知规则拆分成程序名 + 内联参数，再逐词 quote 拼接，避免
-        // "git status" 被整体 quote 成单个命令名导致找不到命令。
-        let (program, inline_args) = split_command(request.cmd.trim());
-        let mut command = shell.quote(&program);
-        if shell == ShellKind::PowerShell {
-            command.insert_str(0, "& ");
-        }
-        for arg in inline_args.iter().chain(request.args.iter()) {
-            command.push(' ');
-            command.push_str(&shell.quote(arg));
-        }
-        command
-    };
-    let Some(cwd) = request
-        .cwd
-        .as_deref()
+        return Ok(script.to_string());
+    }
+    if request.cmd.trim().is_empty() {
+        bail!("cmd 不能为空");
+    }
+    // cmd 可含参数（与 command 插件的 run_command 语义一致）：先按引号
+    // 感知规则拆分成程序名 + 内联参数，再逐词 quote 拼接，避免
+    // "git status" 被整体 quote 成单个命令名导致找不到命令。
+    let (program, inline_args) = split_command(request.cmd.trim());
+    let mut command = shell.quote(&program);
+    if shell == ShellKind::PowerShell {
+        command.insert_str(0, "& ");
+    }
+    for arg in inline_args.iter().chain(request.args.iter()) {
+        command.push(' ');
+        command.push_str(&shell.quote(arg));
+    }
+    Ok(command)
+}
+
+/// 交互模式的工作目录切换：作为独立一行写入 PTY，不并入命令文本。
+fn interactive_cwd_command(cwd: Option<&str>, shell: ShellKind) -> Option<String> {
+    let cwd = cwd
         .map(str::trim)
         .filter(|cwd| !cwd.is_empty())
+        .map(shell_compatible_cwd)?;
+    let quoted = shell.quote(cwd);
+    Some(match shell {
+        ShellKind::Cmd => format!("cd /d {quoted}\r"),
+        ShellKind::PowerShell => format!("Set-Location -LiteralPath {quoted}\r"),
+        ShellKind::Posix => format!("cd {quoted}\r"),
+    })
+}
+
+/// 包装脚本里的工作目录切换语句（不进入用户可见的命令文本）。
+/// 切换失败必须让命令整体失败，不能在错误的目录里执行。
+fn cwd_prelude(cwd: Option<&str>, shell: ShellKind) -> String {
+    let Some(cwd) = cwd
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(shell_compatible_cwd)
     else {
-        return Ok(command);
+        return String::new();
     };
-    let cwd = shell_compatible_cwd(cwd);
     match shell {
-        ShellKind::Cmd => Ok(format!("cd /d {} && {}", shell.quote(cwd), command)),
-        ShellKind::PowerShell => Ok(format!(
-            "Set-Location -LiteralPath {} -ErrorAction Stop; {}",
-            shell.quote(cwd),
-            command
-        )),
-        ShellKind::Posix => Ok(format!("cd {} && {}", shell.quote(cwd), command)),
+        ShellKind::Cmd => format!(
+            "cd /d {}\r\nif errorlevel 1 goto :eof\r\n",
+            shell.quote(cwd)
+        ),
+        ShellKind::PowerShell => format!(
+            "Set-Location -LiteralPath {} -ErrorAction Stop\n",
+            shell.quote(cwd)
+        ),
+        ShellKind::Posix => format!("cd {} || return $?\n", shell.quote(cwd)),
     }
 }
 
@@ -2180,14 +2386,40 @@ fn visible_text_from_raw(raw: &[u8]) -> String {
 struct PreparedCommand {
     input: String,
     /// Unix 下保持临时脚本存活到命令结束；drop 后自动删除。
-    _file: Option<tempfile::TempPath>,
+    /// POSIX 路径有两个文件：wrapper 与承载用户命令的内层脚本。
+    _files: Vec<tempfile::TempPath>,
 }
 
-fn prepare_posix_command(command: &str, markers: &CommandMarkers) -> Result<PreparedCommand> {
-    let script = format!(
-        "echo '{}'\n__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n{}\n__tiangong_rc=$?\nif [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n",
-        markers.start, command, markers.cwd, markers.exit_code, markers.end,
-    );
+/// 生成 POSIX 包装：wrapper 负责 marker 边界与环境保存/恢复，
+/// **用户命令单独落在内层脚本**，由 wrapper `source` 执行。
+///
+/// 分成两层是 issue #571 的根治点：内联时用户命令的任何**解析期错误**
+///（zsh equals 展开、未闭合引号、非法重定向等）都会直接终止整份脚本，
+/// end marker 永不输出，调用方只能轮询到超时；错误发生在解析阶段，
+/// `set -e`、`trap`、`||` 兜底一律无效——脚本余下部分根本不会被执行。
+/// 拆成内层文件后，解析失败只终止内层 `source`（shell 把它折算成非零
+/// 退出码，zsh 126 / bash 1），wrapper 的控制流完好，照常吐出 cwd、
+/// 退出码与 end marker，调用方立刻拿到结果和 shell 的原始报错。
+///
+/// 同时关闭 zsh `EQUALS` 选项，让 `echo ===`、`awk =x` 这类最常见的形态
+/// 直接按字面量正常执行，而不是「稳定报错但能收尾」。
+fn prepare_posix_command(
+    command: &str,
+    cwd: Option<&str>,
+    markers: &CommandMarkers,
+) -> Result<PreparedCommand> {
+    let mut inner = tempfile::Builder::new()
+        .prefix(&markers.start)
+        .suffix(".inner.sh")
+        .tempfile()
+        .context("创建终端命令临时文件失败")?;
+    inner
+        .write_all(format!("{command}\n").as_bytes())
+        .context("写入终端命令临时文件失败")?;
+    inner.flush().context("刷新终端命令临时文件失败")?;
+    let inner_path = ShellKind::Posix.quote(&inner.path().to_string_lossy());
+
+    let script = posix_wrapper_script(&inner_path, cwd, markers);
     let mut file = tempfile::Builder::new()
         .prefix(&markers.start)
         .suffix(".sh")
@@ -2201,14 +2433,39 @@ fn prepare_posix_command(command: &str, markers: &CommandMarkers) -> Result<Prep
         // marker 放在输入行最前面，reader 从首个 chunk 起就会暂存并过滤
         // shell/ZLE 回显，不会因路径换行或语法高亮把内部 source 命令漏到 UI。
         input: format!("__TIANGONG_= . {}\r", ShellKind::Posix.quote(&path)),
-        _file: Some(file.into_temp_path()),
+        _files: vec![file.into_temp_path(), inner.into_temp_path()],
     })
 }
 
-fn prepare_cmd_command(command: &str, markers: &CommandMarkers) -> Result<PreparedCommand> {
+/// wrapper 脚本正文：`inner_path` 是已 quote 的内层脚本路径。
+/// 独立成函数便于测试直接对脚本文本断言。
+fn posix_wrapper_script(inner_path: &str, cwd: Option<&str>, markers: &CommandMarkers) -> String {
+    format!(
+        "echo '{}'\n{}{}__tiangong_had_PAGER=${{PAGER+x}}\n__tiangong_old_PAGER=${{PAGER-}}\n__tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}\n__tiangong_old_GIT_PAGER=${{GIT_PAGER-}}\n__tiangong_had_GH_PAGER=${{GH_PAGER+x}}\n__tiangong_old_GH_PAGER=${{GH_PAGER-}}\n__tiangong_had_LESS=${{LESS+x}}\n__tiangong_old_LESS=${{LESS-}}\nexport PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n. {}\n__tiangong_rc=$?\n{}if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi\nif [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi\nif [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi\nif [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi\nprintf '\\n{}'; pwd\necho '{}'$__tiangong_rc\necho '{}'\n",
+        markers.start,
+        cwd_prelude(cwd, ShellKind::Posix),
+        ZSH_EQUALS_DISABLE_SNIPPET,
+        inner_path,
+        ZSH_EQUALS_RESTORE_SNIPPET,
+        markers.cwd,
+        markers.exit_code,
+        markers.end,
+    )
+}
+
+fn prepare_cmd_command(
+    command: &str,
+    cwd: Option<&str>,
+    markers: &CommandMarkers,
+) -> Result<PreparedCommand> {
     let script = format!(
-        "@echo off\r\necho {}\r\n{}\r\nset \"__TIANGONG_RC_VALUE=%errorlevel%\"\r\necho {}\r\necho %cd%\r\necho {}%__TIANGONG_RC_VALUE%\r\necho {}\r\n",
-        markers.start, command, markers.cwd, markers.exit_code, markers.end,
+        "@echo off\r\necho {}\r\n{}{}\r\nset \"__TIANGONG_RC_VALUE=%errorlevel%\"\r\necho {}\r\necho %cd%\r\necho {}%__TIANGONG_RC_VALUE%\r\necho {}\r\n",
+        markers.start,
+        cwd_prelude(cwd, ShellKind::Cmd),
+        command,
+        markers.cwd,
+        markers.exit_code,
+        markers.end,
     );
     let mut file = tempfile::Builder::new()
         .prefix(&markers.start)
@@ -2225,24 +2482,26 @@ fn prepare_cmd_command(command: &str, markers: &CommandMarkers) -> Result<Prepar
             markers.start,
             ShellKind::Cmd.quote(&path)
         ),
-        _file: Some(file.into_temp_path()),
+        _files: vec![file.into_temp_path()],
     })
 }
 
 fn prepare_non_interactive_command(
     command: &str,
+    cwd: Option<&str>,
     markers: &CommandMarkers,
     shell: ShellKind,
 ) -> Result<PreparedCommand> {
     match shell {
-        ShellKind::Posix => prepare_posix_command(command, markers),
-        ShellKind::Cmd => prepare_cmd_command(command, markers),
+        ShellKind::Posix => prepare_posix_command(command, cwd, markers),
+        ShellKind::Cmd => prepare_cmd_command(command, cwd, markers),
         ShellKind::PowerShell => {
             // Out-Default 强制格式化在结束标记前完成，否则表格会延迟到提示符才输出。
             let result_variable = format!("{}VALUE", markers.exit_code);
             let script = format!(
-                "try {{\nWrite-Output '{start}'\n${state} = [pscustomobject]@{{ Result = 0; Before = $LASTEXITCODE; Errors = $Error.Count }}\ntry {{ . {{\n{command}\n${state}.Result = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${state}.Before) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${state}.Errors) {{ 1 }} else {{ ${state}.Before }}\n}} | Out-Default }} catch {{ ${state}.Result = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state}.Result)\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}' -ErrorAction SilentlyContinue }}\n",
+                "try {{\nWrite-Output '{start}'\n{prelude}${state} = [pscustomobject]@{{ Result = 0; Before = $LASTEXITCODE; Errors = $Error.Count }}\ntry {{ . {{\n{command}\n${state}.Result = if ($?) {{ 0 }} elseif ($LASTEXITCODE -ne ${state}.Before) {{ $LASTEXITCODE }} elseif ($Error.Count -gt ${state}.Errors) {{ 1 }} else {{ ${state}.Before }}\n}} | Out-Default }} catch {{ ${state}.Result = 1; $_ | Out-Default }}\nWrite-Output ''\nWrite-Output '{cwd}'\nWrite-Output (Get-Location).Path\nWrite-Output ('{rc}' + ${state}.Result)\nWrite-Output '{end}'\n}} finally {{ Remove-Variable -Name '{state}' -ErrorAction SilentlyContinue }}\n",
                 start = markers.start,
+                prelude = cwd_prelude(cwd, ShellKind::PowerShell),
                 cwd = markers.cwd,
                 rc = markers.exit_code,
                 end = markers.end,
@@ -2264,7 +2523,7 @@ fn prepare_non_interactive_command(
                     rc = markers.exit_code,
                     end = markers.end
                 ),
-                _file: Some(file.into_temp_path()),
+                _files: vec![file.into_temp_path()],
             })
         }
     }
@@ -3346,7 +3605,7 @@ mod tests {
 
     #[test]
     fn marker_filter_hides_wrapper_and_keeps_command_output() {
-        let mut filter = RawOutputFilter::new();
+        let mut filter = RawOutputFilter::new(Arc::new(Mutex::new(HashMap::new())));
         let visible = filter.filter(
             "$ __TIANGONG_= echo '__TIANGONG_START_x__'; ls\r\n\
              __TIANGONG_START_x__\r\nCargo.toml\r\n\
@@ -3355,13 +3614,77 @@ mod tests {
         assert_eq!(visible, "Cargo.toml\r\n");
     }
 
+    /// 命令行必须由 start marker 就地替换产生，紧贴自己的输出。
+    /// 早前实现是在写入 PTY 前抢先推送命令文本，shell 为就绪探针重绘的
+    /// 提示符会插在命令和输出之间，与用户手敲命令的形态不一致。
+    #[test]
+    fn marker_filter_把start_marker换成命令行并紧贴输出() {
+        let pending = Arc::new(Mutex::new(HashMap::from([(
+            "__TIANGONG_START_x__".to_string(),
+            "cargo clippy --workspace".to_string(),
+        )])));
+        let mut filter = RawOutputFilter::new(Arc::clone(&pending));
+        // shell 先回显 wrapper、重绘提示符，随后才是 start marker 与输出。
+        let visible = filter.filter(
+            "$ __TIANGONG_= . /tmp/x.sh\r\n\
+             __TIANGONG_START_x__\r\n\
+             Finished `dev` profile\r\n\
+             __TIANGONG_RC_x__0\r\n",
+        );
+        assert_eq!(
+            visible, "cargo clippy --workspace\r\nFinished `dev` profile\r\n",
+            "命令行应紧邻其输出，中间不得夹入提示符或 wrapper 回显"
+        );
+        assert!(
+            pending.lock().expect("锁损坏").is_empty(),
+            "命令回显只消费一次"
+        );
+    }
+
     #[test]
     fn marker_filter_handles_windows_cursor_moves_and_wrapping() {
-        let mut filter = RawOutputFilter::new();
+        let mut filter = RawOutputFilter::new(Arc::new(Mutex::new(HashMap::new())));
         let visible = filter.filter(
             "__TIANGONG_START_x__\x1b[10;1HC:\\work>echo __TIANGONG_STA\x1b[11;80HRT_x__>nul & dir /b\r\nresult.txt\x1b[13;1HC:\\work>set __TIANGONG_RC_VALUE=0\x1b[14;1H",
         );
         assert_eq!(visible, "result.txt\x1b[13;1H");
+    }
+
+    /// cwd 绝不能拼进命令文本：命令文本会原样回显给用户、记入
+    /// running_command 并出现在失败摘要里，混入 `cd ... &&` 会让用户看到
+    /// 自己绝不会这样敲的命令（宿主每次调用都带会话工作目录，等于每条
+    /// 命令都平白多一截前缀）。目录切换由包装脚本承担。
+    #[test]
+    fn cwd不进入命令文本而由包装脚本承担() {
+        let request = ExecRequest {
+            session_id: "s".to_string(),
+            cmd: "cargo".to_string(),
+            args: vec!["clippy".to_string()],
+            script: None,
+            timeout: None,
+            interactive: false,
+            cwd: Some("/work/repo".to_string()),
+        };
+        let command = command_from_request(&request, ShellKind::Posix).expect("拼装命令失败");
+        assert_eq!(command, "cargo clippy", "命令文本不得含 cd 前缀");
+
+        let markers = CommandMarkers::new("x");
+        let quoted = ShellKind::Posix.quote("/work/repo");
+        let wrapper = posix_wrapper_script("'/tmp/inner.sh'", Some("/work/repo"), &markers);
+        assert!(
+            wrapper.contains(&format!("cd {quoted} || return $?")),
+            "包装脚本须负责切换目录且失败即终止: {wrapper}"
+        );
+        let cd_at = wrapper.find(&format!("cd {quoted}")).expect("缺少 cd");
+        let source_at = wrapper.find(". '/tmp/inner.sh'").expect("缺少 source");
+        assert!(cd_at < source_at, "必须先切目录再执行命令");
+
+        // 交互模式同样不污染命令文本，改为独立一行写入。
+        assert_eq!(
+            interactive_cwd_command(Some("/work/repo"), ShellKind::Posix),
+            Some(format!("cd {quoted}\r"))
+        );
+        assert_eq!(interactive_cwd_command(None, ShellKind::Posix), None);
     }
 
     #[test]
@@ -3387,6 +3710,46 @@ mod tests {
         assert!(parsed.completed);
         assert_eq!(parsed.stdout, "again");
         assert_eq!(parsed.cwd_after, r"C:\Users\Test\very-longpath");
+    }
+
+    /// issue #571：用户命令必须落在独立的内层脚本里，由 wrapper `source`。
+    /// 内联时用户命令的解析期错误会连带终止 wrapper，end marker 永不输出。
+    #[test]
+    fn posix_包装器把用户命令隔离在内层脚本() {
+        let markers = CommandMarkers::new("x");
+        let prepared = prepare_posix_command("echo A; echo ===; echo B", None, &markers)
+            .expect("生成包装失败");
+        assert_eq!(prepared._files.len(), 2, "应生成 wrapper 与内层两个脚本");
+        let wrapper = std::fs::read_to_string(&prepared._files[0]).expect("读取 wrapper 失败");
+        let inner = std::fs::read_to_string(&prepared._files[1]).expect("读取内层脚本失败");
+        assert_eq!(inner, "echo A; echo ===; echo B\n");
+        assert!(
+            !wrapper.contains("echo A; echo ===; echo B"),
+            "用户命令不得内联进 wrapper: {wrapper}"
+        );
+        assert!(
+            wrapper.contains(&markers.end),
+            "wrapper 必须自带 end marker: {wrapper}"
+        );
+    }
+
+    /// zsh `EQUALS` 必须在用户命令前关闭、命令后按原值恢复；
+    /// 且片段对 bash/dash 无害（`setopt` 只在 ZSH_VERSION 下经 eval 执行）。
+    #[test]
+    fn posix_包装器关闭并恢复_zsh_equals() {
+        let markers = CommandMarkers::new("x");
+        let wrapper = posix_wrapper_script("'/tmp/inner.sh'", None, &markers);
+        let disable = wrapper.find("setopt noequals").expect("缺少关闭 equals");
+        let source = wrapper.find(". '/tmp/inner.sh'").expect("缺少内层 source");
+        let restore = wrapper
+            .find("__tiangong_equals_restore\" ]; then eval 'setopt equals'")
+            .expect("缺少恢复 equals");
+        assert!(disable < source, "必须在执行用户命令前关闭 equals");
+        assert!(source < restore, "必须在用户命令之后再恢复 equals");
+        assert!(
+            wrapper.contains("if [ -n \"${ZSH_VERSION-}\" ]; then eval"),
+            "setopt 必须由 ZSH_VERSION 守卫并经 eval 执行，避免 bash/dash 解析失败"
+        );
     }
 
     #[cfg(unix)]
@@ -3483,6 +3846,252 @@ mod tests {
             service
                 .with_session(&spawned.session_id, |_| Ok(()))
                 .is_ok()
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: spawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// issue #571 的验证标准：`echo A; echo ===; echo B` 必须秒级返回、
+    /// 三行输出齐全、退出码 0，终端保持可复用。
+    /// 修复前 zsh 的 equals 展开会在解析期终止整份包装脚本，end marker
+    /// 永不出现，本用例会一直轮询到超时。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zsh_裸等号命令不再挂起并返回完整输出() {
+        let Some(zsh) = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())
+        else {
+            eprintln!("跳过：本机没有 zsh");
+            return;
+        };
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: zsh.to_string(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建 zsh 测试终端失败");
+
+        let result = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("echo A; echo ===; echo B".to_string()),
+                timeout: Some(15),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("裸等号命令执行失败");
+        assert!(!result.timed_out, "裸等号命令不应超时: {result:?}");
+        assert_eq!(result.exit_code, 0, "裸等号命令应成功: {result:?}");
+        let lines: Vec<&str> = result.stdout.lines().map(str::trim).collect();
+        assert_eq!(lines, vec!["A", "===", "B"], "输出不完整: {result:?}");
+
+        // 终端仍可复用：下一条命令照常执行。
+        let next = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("echo still-usable".to_string()),
+                timeout: Some(15),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("后续命令执行失败");
+        assert_eq!(next.exit_code, 0, "终端应保持可复用: {next:?}");
+        assert!(next.stdout.contains("still-usable"), "{next:?}");
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: spawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// P1 兜底：用户命令自身有解析期错误（未闭合引号）时，包装脚本
+    /// 仍须正常收尾——返回非零退出码与 shell 的原始报错，而不是挂到超时。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 用户命令语法错误仍按非零退出码正常收尾() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        let result = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("echo before-error\necho \"unclosed\necho never".to_string()),
+                timeout: Some(15),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("语法错误命令执行失败");
+        assert!(!result.timed_out, "语法错误不应表现为超时: {result:?}");
+        assert_ne!(result.exit_code, 0, "语法错误应返回非零退出码: {result:?}");
+        assert!(
+            result.stdout.contains("before-error"),
+            "错误前已执行的输出应保留: {result:?}"
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: spawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// 夭折探针带公共 marker 前缀，其回显与执行结果都不得混进命令 stdout。
+    #[test]
+    fn 夭折探针不污染命令输出() {
+        let markers = CommandMarkers::new("x");
+        let probe_marker = "__TIANGONG_ABORTCHK_abc__";
+        let probe_echo = shell_ready_probe(ShellKind::Posix, probe_marker);
+        let raw = format!(
+            "__TIANGONG_START_x__\r\nreal-output\r\n{}\r\n{probe_marker}\r\n__TIANGONG_CWD_x__/tmp\r\n__TIANGONG_RC_x__0\r\n__TIANGONG_END_x__\r\n",
+            probe_echo.trim_end_matches('\r')
+        );
+        let parsed = parse_command_output(raw.as_bytes(), &markers);
+        assert!(parsed.completed);
+        assert_eq!(parsed.stdout, "real-output", "探针行不得进入命令输出");
+    }
+
+    /// 静默但仍在运行的长命令绝不能被夭折兜底误判：探针躺在输入缓冲里
+    /// 不被执行，`wrapper_aborted` 必须返回 false，命令照常跑到结束。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 静默长命令不被夭折兜底误判() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        // 静默 6 秒（超过 SILENT_ABORTED_WRAPPER_SECS，会触发多轮探测）
+        // 后才输出，必须拿到正常退出码与完整输出。
+        let result = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                script: Some("sleep 6; echo slow-done".to_string()),
+                timeout: Some(30),
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("静默长命令执行失败");
+        assert!(!result.timed_out, "静默长命令不应超时: {result:?}");
+        assert_eq!(result.exit_code, 0, "静默长命令应正常完成: {result:?}");
+        assert!(
+            result.stdout.contains("slow-done"),
+            "应拿到完整输出: {result:?}"
+        );
+
+        service
+            .kill_session(SessionIdRequest {
+                session_id: spawned.session_id,
+            })
+            .expect("清理测试终端失败");
+    }
+
+    /// P1 兜底必须真能触发：构造一个 end marker 永不出现、但 shell 已回到
+    /// 提示符的场景——内层脚本用 `exec` 顶掉当前 shell 进程执行别的程序，
+    /// wrapper 余下的 marker 输出随之全部丢失。
+    /// 没有兜底时本用例只能等到 timeout；有兜底时秒级返回明确语义。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 包装脚本夭折时按异常结束收尾而非超时() {
+        let cwd = tempfile::tempdir().expect("创建测试目录失败");
+        let service = TerminalService::new();
+        let spawned = service
+            .spawn_session(SpawnRequest {
+                session_id: None,
+                cmd: String::new(),
+                args: Vec::new(),
+                script: None,
+                cwd: Some(cwd.path().to_string_lossy().to_string()),
+                scope_id: Some("terminal-sidecar-test".to_string()),
+                reserve: false,
+                cols: 80,
+                rows: 24,
+            })
+            .expect("创建测试终端失败");
+
+        let started = Instant::now();
+        let result = service
+            .exec_in_session(ExecRequest {
+                session_id: spawned.session_id.clone(),
+                cmd: String::new(),
+                args: Vec::new(),
+                // 子 shell 里 exec 一个新登录 shell：当前 shell 被顶替，
+                // wrapper 的 cwd/rc/end marker 全部不会再输出。
+                script: Some("echo before-abort; exec sh -i".to_string()),
+                // 不设 timeout：没有兜底就会一路轮询到工具层超时。
+                timeout: None,
+                interactive: false,
+                cwd: None,
+            })
+            .await
+            .expect("夭折命令执行失败");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "兜底应在静默窗口后很快收尾，实际耗时 {:?}",
+            started.elapsed()
+        );
+        assert!(
+            result.stderr.contains("包装脚本未正常结束"),
+            "应按夭折给出可识别语义: {result:?}"
+        );
+        assert_eq!(result.exit_code, -1, "夭折应返回 -1: {result:?}");
+        assert!(
+            !result.timed_out,
+            "夭折不应被表述为超时（超时会另行标记不可复用）: {result:?}"
+        );
+        assert!(
+            result.stdout.contains("before-abort"),
+            "夭折前的输出应保留: {result:?}"
         );
 
         service
