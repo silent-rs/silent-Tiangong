@@ -40,7 +40,8 @@ import { type MentionEditorHandle } from "./MentionEditor";
 
 /** 每个会话的阅读位置锚点：视口顶部对齐的分组索引 + 离开时是否贴底。
  * 切换会话时按锚点恢复阅读位置（贴底则回到底部保持跟随语义）；
- * 无记录（首次进入）才定位到底部。 */
+ * 无记录（首次进入）才定位到底部。目标会话正在执行时例外：
+ * 无视锚点强制贴底并进入跟随，保证切回去即看到最新执行输出。 */
 interface SessionScrollAnchor {
   index: number;
   atBottom: boolean;
@@ -409,18 +410,29 @@ export function MessageList() {
       && activeSessionId !== prevActiveSessionRef.current;
     if (sessionSwitched && activeSessionId) {
       // 切换会话：重置流式与消息数基准（避免旧会话残留的流式状态被
-      // 误判为"回复完成"、跨会话长度比较误触发跟随），本次定位完全
-      // 由阅读位置锚点接管，不走通用滚动判定
+      // 误判为"回复完成"、跨会话长度比较误触发跟随）。定位策略：
+      // 目标会话正在执行则强制贴底（见下），否则由阅读位置锚点接管，
+      // 本次不走通用滚动判定
       prevStreamingIdRef.current = null;
       prevRunStatusRef.current = 'idle';
       prevMessagesLengthRef.current = messages.length;
+      // 切到正在执行的会话：贴底状态立即置位（同步，防止定位帧被后续
+      // 流式事件作废后丢失跟随），定位帧强制拉到底部看实时输出
+      const targetSessionRunning = runStatus !== 'idle';
+      if (targetSessionRunning) isAtBottomRef.current = true;
       requestAnimationFrame(() => {
         if (cancelled) return;
         const lastIndex = completedGroups.length - 1;
         const anchor = sessionScrollAnchors.get(activeSessionId);
-        // 有记录则恢复到离开时的阅读位置（贴底的回到底部保持跟随）；
-        // 首次进入（或记录越界，如消息被删除/压缩）定位到底部看最新内容
-        if (anchor && anchor.index <= lastIndex) {
+        if (targetSessionRunning) {
+          if (streamingGroup && scrollRef.current) {
+            scrollRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
+          } else if (lastIndex >= 0) {
+            virtualizer.scrollToIndex(lastIndex, { behavior: 'auto', align: 'end' });
+          }
+        } else if (anchor && anchor.index <= lastIndex) {
+          // 有记录则恢复到离开时的阅读位置（贴底的回到底部保持跟随）；
+          // 首次进入（或记录越界，如消息被删除/压缩）定位到底部看最新内容
           if (anchor.atBottom) {
             isAtBottomRef.current = true;
             if (streamingGroup && scrollRef.current) {
