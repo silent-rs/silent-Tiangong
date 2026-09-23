@@ -6,8 +6,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
-use tantivy::schema::{IndexRecordOption, Schema, Term, Value};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Term, Value};
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
 use super::WORKSPACE_SCHEMA_VERSION;
@@ -17,6 +17,16 @@ const MAX_ENTRIES: usize = 5000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 const SNIPPET_LINES: usize = 50;
+
+/// 按 token 前缀匹配构造查询：`ment` 命中 `mentions`、`main` 命中 `main.rs` 的
+/// `main` token。
+///
+/// 用 `FuzzyTermQuery` 的距离 0 前缀模式而非正则：tantivy-fst 的 Regex 语法受限
+/// （不接受 `^` 锚点），且前缀走 term dictionary 范围扫描，比正则引擎快。
+/// 查询词是分词后的单个 token，无需转义——不含 tantivy 查询语法字符。
+fn prefix_query(term: &str, field: Field) -> FuzzyTermQuery {
+    FuzzyTermQuery::new_prefix(Term::from_field_text(field, term), 0, false)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileState {
@@ -818,21 +828,23 @@ impl WorkspaceIndex {
 
     /// `@` 提及文件候选：只匹配 path 字段，多词 AND，浅优先（路径段数少者靠前）。
     ///
-    /// 与 {@link search} 的三点区别：不过滤 has_content（图片/PDF/Office 也要能被
-    /// `@` 到）、不查内容与符号、多词 AND 而非 OR。查询直接用 TermQuery 组合而不经
-    /// QueryParser，因此无需转义 tantivy 语法字符——`:` `/` `~` `^` 等由调用方
-    /// 原样输入也不会解析失败。
+    /// 与 {@link search} 的区别：不过滤 has_content（图片/PDF/Office 也要能被
+    /// `@` 到）、不查内容与符号、多词 AND 而非 OR、按 token 前缀匹配（见下）。
+    ///
+    /// 查询词经索引同一 tokenizer 分析后再匹配：`main.rs` 切成 `main`/`rs`
+    /// 与建索引时一致；每个词按**前缀**匹配而非整词相等——用户找文件时输入的
+    /// 是文件名片段（`ment` 找 `mentions.rs`、`s` 找 `src`），整词相等会让
+    /// 这些最自然的输入全部返回空，面板于是只剩「无匹配」。
+    /// 用 FuzzyTermQuery 的距离 0 前缀模式：查询词已是单个 token，无需转义，
+    /// 也不会因含 `:` `/` `~` `^` 等 tantivy 语法字符而解析失败。
     pub fn search_paths(&self, query_text: &str, limit: usize) -> Result<Vec<SearchHit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         // 空查询词不返回候选：刚唤出面板就罗列全部文件既昂贵也无意义，
         // 等用户输入至少一个词再检索。
-        let terms: Vec<String> = query_text
-            .split_whitespace()
-            .map(|term| term.to_lowercase())
-            .filter(|term| !term.is_empty())
-            .collect();
+        let path_field = self.fields.path;
+        let terms = self.path_query_terms(query_text, path_field)?;
         if terms.is_empty() {
             return Ok(Vec::new());
         }
@@ -842,20 +854,16 @@ impl WorkspaceIndex {
             .reader()
             .with_context(|| self.context("search_paths", "创建 Workspace 索引读取器失败"))?;
         let searcher = reader.searcher();
-        let path_field = self.fields.path;
 
-        // path 是 TEXT 字段（默认 tokenizer 已小写化），按 token 做 AND：
-        // 输入 `设计 文档` 要求路径同时含这两个 token。
+        // path 是 TEXT 字段（默认 tokenizer 已小写化），按 token 前缀做 AND：
+        // 输入 `设计 文档` 要求路径同时含以这两个词开头的 token。
         let query = BooleanQuery::new(
             terms
                 .iter()
                 .map(|term| {
                     (
                         Occur::Must,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(path_field, term),
-                            IndexRecordOption::Basic,
-                        )) as Box<dyn tantivy::query::Query>,
+                        Box::new(prefix_query(term, path_field)) as Box<dyn tantivy::query::Query>,
                     )
                 })
                 .collect(),
@@ -895,6 +903,28 @@ impl WorkspaceIndex {
         });
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    /// 把用户输入切成 path 字段的查询 token：与建索引用同一 tokenizer，
+    /// 因此 `main.rs`、`Cargo.toml`、`src/lib` 的切分结果和索引侧一致。
+    ///
+    /// 直接 `split_whitespace` 会把 `main.rs` 当成一个整词，永远匹配不上被切成
+    /// `main`/`rs` 的索引 token——这是「输入带后缀的文件名查不到」的原因。
+    fn path_query_terms(&self, query_text: &str, path_field: Field) -> Result<Vec<String>> {
+        let mut tokenizer = self
+            .index
+            .tokenizer_for_field(path_field)
+            .with_context(|| self.context("search_paths", "获取 path 字段 tokenizer 失败"))?;
+        let mut stream = tokenizer.token_stream(query_text);
+        let mut terms: Vec<String> = Vec::new();
+        // token_stream 逐个产出 token；text 已由默认 tokenizer 小写化。
+        while stream.advance() {
+            let text = stream.token().text.as_str();
+            if !text.is_empty() {
+                terms.push(text.to_string());
+            }
+        }
+        Ok(terms)
     }
 
     #[allow(dead_code)]
@@ -1190,6 +1220,48 @@ mod tests {
         assert_eq!(index.search_paths("rs", 1)?.len(), 1);
         // limit 为 0 直接返回空
         assert!(index.search_paths("rs", 0)?.is_empty());
+        Ok(())
+    }
+
+    /// 用户输入的是文件名**片段**，不是完整 token。
+    ///
+    /// 对应真实故障：`search_paths` 曾用 TermQuery 做整词相等匹配，导致
+    /// `ment` 找不到 `mentions.rs`、`s` 找不到 `src/...`、`main.rs`（带后缀）
+    /// 一个都命中不了——@ 面板于是只剩「无匹配」，看起来像索引坏了。
+    #[test]
+    fn search_paths_matches_token_prefixes_and_splits_query() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(workspace.join("src").join("mentions.rs"), "// x\n")?;
+        fs::write(workspace.join("src").join("other.rs"), "// y\n")?;
+        fs::write(workspace.join("docs.md"), "# 文档\n")?;
+
+        let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        index.full_scan()?;
+
+        // 前缀：`ment` 命中 `mentions` token，但不命中 `other`
+        let hits = index.search_paths("ment", 10)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "src/mentions.rs");
+
+        // 单个字母也能当前缀用（`s` 命中 src 段）
+        assert!(!index.search_paths("s", 10)?.is_empty());
+
+        // 查询词必须经同一 tokenizer：`mentions.rs` 被切成 mentions/rs，
+        // 与索引侧一致，因此能命中；整词相等时代码把它当一个词，永远查不到
+        let hits = index.search_paths("mentions.rs", 10)?;
+        assert_eq!(hits.len(), 1, "带后缀的文件名必须能命中");
+        assert_eq!(hits[0].path, "src/mentions.rs");
+
+        // 前缀 AND：`src ment` 两个词都要求前缀命中
+        assert_eq!(index.search_paths("src ment", 10)?.len(), 1);
+        // 前缀不满足时不得命中
+        assert!(index.search_paths("src zzz", 10)?.is_empty());
+
+        // 大小写不敏感（tokenizer 小写化）
+        assert_eq!(index.search_paths("MENTIONS", 10)?.len(), 1);
         Ok(())
     }
 }
