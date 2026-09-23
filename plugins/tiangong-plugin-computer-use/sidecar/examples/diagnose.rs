@@ -3,7 +3,9 @@
 //!
 //! 用法：cargo run -p tiangong-plugin-computer-use-sidecar --example diagnose
 
-use tiangong_plugin_computer_use_protocol::ops::{ListWindowsRequest, SnapshotRequest};
+use tiangong_plugin_computer_use_protocol::ops::{
+    ListWindowsRequest, ScreenshotRequest, SnapshotRequest,
+};
 use tiangong_plugin_computer_use_protocol::{DesktopResult, Platform};
 use tiangong_plugin_computer_use_sidecar::backend::{self, Backend};
 
@@ -124,6 +126,45 @@ async fn main() {
             }
         }
         None => println!("未找到可快照的应用"),
+    }
+
+    // desktop_screenshot：窗口级（前台应用）+ 区域 + 缩放三条路径。
+    println!("\n--- desktop_screenshot ---");
+    match backend
+        .screenshot(&ScreenshotRequest {
+            foreground_only: true,
+            ..Default::default()
+        })
+        .await
+    {
+        DesktopResult::Ok(resp) => {
+            println!(
+                "窗口截图: {}x{} ({} 字节) app={} 路径={}",
+                resp.width, resp.height, resp.size_bytes, resp.app_name, resp.path
+            );
+            // 区域 + 缩放：取窗口中心 400x300 区域，长边限 800px 验证 sips 缩放。
+            let region = tiangong_plugin_computer_use_protocol::Bounds {
+                x: 100.0,
+                y: 100.0,
+                width: 400.0,
+                height: 300.0,
+            };
+            match backend
+                .screenshot(&ScreenshotRequest {
+                    region: Some(region),
+                    max_dimension: Some(800),
+                    ..Default::default()
+                })
+                .await
+            {
+                DesktopResult::Ok(resp) => println!(
+                    "区域截图(400x300@100,100 限边800): {}x{} ({} 字节) 路径={}",
+                    resp.width, resp.height, resp.size_bytes, resp.path
+                ),
+                DesktopResult::Err(e) => println!("区域截图错误: {}", e.agent_message()),
+            }
+        }
+        DesktopResult::Err(e) => println!("截图错误: {}", e.agent_message()),
     }
 
     // find + action：取快照后用 find 在快照内查找按钮，再对其执行 focus。
