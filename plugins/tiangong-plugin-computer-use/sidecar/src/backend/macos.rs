@@ -56,6 +56,17 @@ impl MacosBackend {
     fn is_trusted() -> bool {
         ax::is_process_trusted()
     }
+    /// 控件矩形中心（AX 全局坐标，主屏左上原点）；零/负尺寸
+    /// （bounds 读取失败的默认值）返回 `None`，不显示指针。
+    fn bounds_center(bounds: &ax::AxBounds) -> Option<(f64, f64)> {
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+        Some((
+            bounds.x + bounds.width / 2.0,
+            bounds.y + bounds.height / 2.0,
+        ))
+    }
 
     /// 下一个快照版本号。
     fn next_snapshot(&self) -> u64 {
@@ -525,6 +536,10 @@ impl Backend for MacosBackend {
         };
 
         let action_kind = ActionKind::from(req.action);
+        // 虚拟指针（RFC 0018）：执行动作前读目标控件矩形，成功后把
+        // 「天工指针」显示到控件中心——AX 语义动作不移动系统鼠标，
+        // 指针是用户感知操作落点的唯一可视化。
+        let cursor_center = Self::bounds_center(&element.bounds());
         let result = match action_kind {
             ActionKind::Focus => element.set_bool_attribute(AX_FOCUSED, true),
             ActionKind::Press => element.perform_action(AX_PRESS),
@@ -549,11 +564,16 @@ impl Backend for MacosBackend {
             .insert((req.element.snapshot, element_id.clone()), element);
 
         match result {
-            Ok(()) => DesktopResult::Ok(ActionResult {
-                performed: true,
-                summary: format!("已执行 {:?}", action_kind),
-                new_window: None,
-            }),
+            Ok(()) => {
+                if let Some((x, y)) = cursor_center {
+                    super::overlay::show_at(x, y);
+                }
+                DesktopResult::Ok(ActionResult {
+                    performed: true,
+                    summary: format!("已执行 {:?}", action_kind),
+                    new_window: None,
+                })
+            }
             Err(e) => match e {
                 ax::AxError::ActionUnsupported => {
                     DesktopResult::Err(DesktopError::ActionNotSupported {

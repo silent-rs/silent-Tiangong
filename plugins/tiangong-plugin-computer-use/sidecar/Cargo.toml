@@ -31,8 +31,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # AXUIElement C API 返回的 CFString/CFArray/CFBoolean/CFNumber 值。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo", "NSData", "NSDate", "NSRunLoop"] }
+# NSImageView/NSImage/NSColor/NSScreen 用于虚拟指针 overlay（RFC 0018）。
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow", "NSImageView", "NSImage", "NSColor", "NSScreen"] }
 core-foundation = "0.10"
 
 # Linux 后端：纯 Rust AT-SPI2 实现（zbus 基于 D-Bus）。

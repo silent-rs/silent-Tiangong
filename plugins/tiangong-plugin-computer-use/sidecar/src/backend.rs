@@ -158,6 +158,9 @@ pub mod ax;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// 天工虚拟指针 overlay（RFC 0018，仅 macOS）。
+#[cfg(target_os = "macos")]
+pub mod overlay;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
