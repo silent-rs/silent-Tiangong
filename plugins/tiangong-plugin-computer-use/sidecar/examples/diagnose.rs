@@ -167,6 +167,36 @@ async fn main() {
         DesktopResult::Err(e) => println!("截图错误: {}", e.agent_message()),
     }
 
+    // desktop_screenshot：app_name 定位（CGWindowList owner 名主路径，
+    // 验证多进程应用——如微信 4.x——主窗口挂 helper 进程时仍可命中）。
+    println!("\n--- desktop_screenshot(app_name) ---");
+    let app_for_name = match backend.list_windows(&ListWindowsRequest::default()).await {
+        DesktopResult::Ok(r) => r
+            .windows
+            .iter()
+            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .or_else(|| r.windows.iter().find(|w| !w.app_name.is_empty()))
+            .map(|w| w.app_name.clone()),
+        _ => None,
+    };
+    if let Some(name) = app_for_name {
+        match backend
+            .screenshot(&ScreenshotRequest {
+                app_name: Some(name.clone()),
+                ..Default::default()
+            })
+            .await
+        {
+            DesktopResult::Ok(resp) => println!(
+                "应用名截图 app={name}: {}x{} ({} 字节) 路径={}",
+                resp.width, resp.height, resp.size_bytes, resp.path
+            ),
+            DesktopResult::Err(e) => println!("应用名截图错误: {}", e.agent_message()),
+        }
+    } else {
+        println!("无可定位的应用名，跳过");
+    }
+
     // find + action：取快照后用 find 在快照内查找按钮，再对其执行 focus。
     println!("\n--- desktop_find + desktop_action(focus) ---");
     use tiangong_plugin_computer_use_protocol::ops::{

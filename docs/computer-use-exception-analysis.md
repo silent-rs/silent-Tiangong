@@ -80,3 +80,29 @@ desktop_action / desktop_wait`——**没有截屏，没有合成输入（CGEven
 3. 合成输入：监督模式下未经批准不落键；对微信输入框真实生效。
 4. 回归：terminal 沙箱策略逐字不变（`seatbelt.rs` 测试快照不变）。
 5. 全 workspace `cargo check` / `clippy -D warnings` / 相关测试通过。
+
+## 5. 后续异常：正式版无法打开开发分支会话（2026-09-23）
+
+- 现象：正式版天工打不开会话「电脑操作异常分析」（`03gwww09n2l9or2msgq34nuwp`，
+  1681 条消息，JSON 本身完好）。
+- 根因：分支为 RFC 0017 宿主注入图片新增 `MessagePhase::HostInjected`
+  （序列化 `"hostinjected"`）；正式版（main）枚举只有
+  `Normal/React/Summary/CompressedResume`，serde 反序列化遇到未知变体
+  直接失败，导致**整个会话**加载失败。逐字段核对：会话其余结构
+  （含 `ContentBlock::Image` / `StoredAsset`）均与 main 兼容，唯一拦路的
+  是 2 条注入图片消息的 `phase`。这是「开发分支写入格式超前于正式版
+  读取能力」的前向兼容缺陷。
+- 修复：
+  1. 数据抢救：2 条消息 `phase` 由 `hostinjected` 降级 `normal`
+     （原文件备份 `*.json.bak.20260923222211`），正式版恢复可打开。
+  2. 代码根治：`MessagePhase` 改手写 `Deserialize`，未知阶段值降级
+     `Normal`（`#[serde(other)]` 要求置于末位变体、无法映射 Normal，
+     故不用），补未知值降级测试；后续合入 main 后正式版即可读新格式。
+- 关联改动（同日）：`desktop_screenshot` 应用定位由 pid 交集改为
+  CGWindowList owner 名主路径（`window_frame_for_app`），解决微信 4.x
+  等多进程应用主窗口挂 helper 进程时按名定位漏窗的问题；diagnose
+  诊断程序增加 app_name 截图路径。
+- 遗留风险：宿主注入截图产物当前落在系统临时目录
+  （`/var/folders/.../T/media/screenshots`），被系统清理后会话中的图片
+  引用失效；后续应将注入媒体迁入 `~/.tiangong/media` 持久化。owner 名
+  定位路径的端到端行为需在具备 TCC 授权的宿主环境复核。
