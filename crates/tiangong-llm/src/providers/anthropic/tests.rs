@@ -118,12 +118,17 @@ fn test_request_mapping_with_system_and_tools() {
     ));
     assert_eq!(mapped.messages.len(), 3);
     assert_eq!(mapped.tools.as_ref().map(Vec::len), Some(1));
-    assert!(matches!(
+    // 全模型统一 adaptive 形态（智谱等兼容端点实测已支持），档位在 output_config。
+    assert_eq!(
         mapped.thinking,
-        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
-            budget_tokens: None
+        Some(tiangong_anthropic::types::ThinkingConfig::Adaptive)
+    );
+    assert_eq!(
+        mapped.output_config,
+        Some(tiangong_anthropic::types::OutputConfig {
+            effort: Some(tiangong_anthropic::types::EffortLevel::High)
         })
-    ));
+    );
     // 开启思考时官方要求 temperature 为 1：省略字段而非透传 0.2。
     assert_eq!(mapped.temperature, None);
     assert!(matches!(
@@ -195,23 +200,23 @@ fn test_unknown_claude_model_defaults_to_adaptive() {
 }
 
 #[test]
-fn test_legacy_model_keeps_enabled_without_output_config() {
-    // 旧模型与第三方兼容端点：保持 enabled 形态，不下发 output_config。
-    let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
-    assert_eq!(
-        mapped.output_config, None,
-        "non-adaptive model must not carry output_config"
-    );
+fn test_compat_endpoint_models_also_use_adaptive() {
+    // 第三方 Anthropic 兼容端点（智谱 GLM，实测已完整支持 adaptive +
+    // effort：low 档不思考、high 档思考）与旧官方模型名同样统一下发
+    // adaptive + output_config。
     let mut request = sample_request();
     request.model = "glm-5.3".to_string();
     let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
-    assert!(matches!(
+    assert_eq!(
         mapped.thinking,
-        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
-            budget_tokens: None
+        Some(tiangong_anthropic::types::ThinkingConfig::Adaptive)
+    );
+    assert_eq!(
+        mapped.output_config,
+        Some(tiangong_anthropic::types::OutputConfig {
+            effort: Some(tiangong_anthropic::types::EffortLevel::High)
         })
-    ));
-    assert_eq!(mapped.output_config, None);
+    );
 }
 
 #[test]

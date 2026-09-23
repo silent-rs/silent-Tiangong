@@ -115,59 +115,6 @@ async fn read_complete_response(
 /// 协议要求的思考预算下限（官方拒绝小于 1024 的值）。
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
 
-/// 判断模型是否走 adaptive thinking（新模式）。
-///
-/// 决策方向：**默认新模式**。Anthropic 4.7+ 一代模型拒绝旧版
-/// `thinking.type=enabled`（400），且自适应思考永远开启、无法关闭
-/// （`disabled` 同样 400），深度由 `output_config.effort` 控制。官方
-/// 新模型持续发布，枚举新家族无法穷尽，因此只枚举确定不支持新模式的
-/// 封闭集合，未知 claude 命名一律按新模式处理。
-///
-/// 判定顺序（子串匹配，兼容中转站前缀如 `anthropic/claude-opus-5-5`）：
-/// 1. 已知双模/新代家族（4.6 起官方推荐 adaptive）：adaptive；
-/// 2. 非 claude 模型（智谱 GLM、阶跃等第三方 Anthropic 兼容端点，
-///    模拟的是旧协议，adaptive 与 output_config 支持情况未知）：
-///    回落旧版 enabled 形态；
-/// 3. 旧版官方家族（3.x / 4 / 4-1 / 4-5，仅支持 extended thinking，
-///    adaptive 会 400）：回落旧版 enabled 形态（先经第 1 步截走 4-6+，
-///    此处裸 `opus-4`/`sonnet-4` 子串已不会误伤新代）；
-/// 4. 其余未知 claude 命名：adaptive（新默认，未来新模型自动覆盖）。
-pub fn uses_adaptive_thinking(model: &str) -> bool {
-    const DUAL_MODE_OR_NEWER_MARKERS: &[&str] = &[
-        "opus-4-6",
-        "opus-4-7",
-        "opus-4-8",
-        "opus-5",
-        "sonnet-4-6",
-        "sonnet-5",
-        "fable",
-        "mythos",
-    ];
-    const LEGACY_ONLY_MARKERS: &[&str] = &[
-        "claude-2",
-        "claude-3",
-        "claude-instant",
-        "claude-opus-4",
-        "claude-sonnet-4",
-        "claude-haiku-4",
-    ];
-    let model = model.to_ascii_lowercase();
-    if DUAL_MODE_OR_NEWER_MARKERS
-        .iter()
-        .any(|marker| model.contains(marker))
-    {
-        return true;
-    }
-    // 非 claude 模型名：第三方 Anthropic 兼容端点，保持旧协议形态。
-    if !model.contains("claude") {
-        return false;
-    }
-    // 旧版官方家族（封闭历史集合，4-6+ 已在上面截走）。
-    !LEGACY_ONLY_MARKERS
-        .iter()
-        .any(|marker| model.contains(marker))
-}
-
 #[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
@@ -317,25 +264,23 @@ impl AnthropicClient {
         });
     }
 
-    /// adaptive 模型的 thinking 形态兜底规范化（判定见
-    /// [`uses_adaptive_thinking`]，默认新模式）：
+    /// thinking 形态统一规范化为 adaptive 新模式（不区分模型）：
+    ///
+    /// 实测智谱 GLM 的 Anthropic 兼容端点已完整支持 adaptive +
+    /// output_config.effort（low 档不思考、high 档思考），Claude 官方
+    /// 与中转端点新模型仅接受该形态，因此对所有模型统一下发：
     ///
     /// - `Enabled`：转换为 `Adaptive`（深度由 output_config.effort 或
-    ///   模型默认档控制），避免旧格式被 400 拒收；
-    /// - `Disabled`：置为不发 thinking。此类模型自适应思考永远开启、
-    ///   无法关闭，显式 disabled 同样会被 400 拒收，省略字段即回落到
-    ///   模型默认行为；
-    /// - 其他模型（旧官方家族与第三方兼容端点）：不改动，继续走
-    ///   [`Self::fill_default_thinking_budget`] 的旧版协议形态。
+    ///   模型默认档控制），避免旧格式被新模型 400 拒收；
+    /// - `Disabled`：置为不发 thinking。自适应思考无法关闭，显式
+    ///   disabled 会被新模型 400 拒收，省略字段即回落到模型默认行为；
+    /// - `Adaptive` / `None`：保持不变。
     fn normalize_thinking_for_model(request: &mut MessagesCreateRequest) {
-        if !uses_adaptive_thinking(&request.model) {
-            return;
-        }
         match request.thinking.take() {
             Some(ThinkingConfig::Enabled { .. }) => {
                 tracing::debug!(
                     model = %request.model,
-                    "thinking enabled -> adaptive for adaptive-only model"
+                    "thinking enabled -> adaptive"
                 );
                 request.thinking = Some(ThinkingConfig::Adaptive);
             }
@@ -631,74 +576,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_and_compat_models_keep_enabled_shape() {
-        // 旧模型（extended-thinking-only）与第三方兼容端点模型名不受
-        // adaptive 规范化影响，保持 enabled + 默认预算。
+    fn all_models_normalized_to_adaptive() {
+        // 全模型统一新模式：官方新旧家族与第三方兼容端点（智谱 GLM
+        // 实测已支持 adaptive + effort）一律转 adaptive，不再有旧格式路径。
         for model in [
-            "claude-opus-4-5",
+            "claude-opus-5-5",
             "claude-sonnet-4-5",
+            "claude-3-7-sonnet",
             "glm-5.3",
+            "glm-5.3-flash",
             "step-5-preview",
         ] {
             let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
             request.model = model.to_string();
             AnthropicClient::normalize_thinking_for_model(&mut request);
-            assert!(
-                matches!(
-                    request.thinking,
-                    Some(ThinkingConfig::Enabled {
-                        budget_tokens: None
-                    })
-                ),
-                "{model} should keep enabled shape"
+            assert_eq!(
+                request.thinking,
+                Some(ThinkingConfig::Adaptive),
+                "{model} should normalize to adaptive"
             );
-        }
-    }
-
-    #[test]
-    fn adaptive_model_detection_defaults_to_new_mode() {
-        // 新代与双模家族（4.6 起）：新模式。
-        for model in [
-            "claude-opus-4-6",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-            "claude-opus-5",
-            "claude-opus-5-5",
-            "anthropic/claude-fable-5-1",
-            "claude-mythos-preview",
-            "claude-sonnet-5",
-            "claude-sonnet-4-6",
-        ] {
-            assert!(uses_adaptive_thinking(model), "{model} should be adaptive");
-        }
-        // 未知 claude 命名（含未来新家族）：默认新模式，无需持续补名单。
-        for model in [
-            "claude-eclipse-9",
-            "claude-10-opus",
-            "anthropic/claude-something-new",
-        ] {
-            assert!(
-                uses_adaptive_thinking(model),
-                "{model} should default to adaptive"
-            );
-        }
-        // 旧版官方家族（extended-only，adaptive 会 400）：回落旧格式。
-        for model in [
-            "claude-3-7-sonnet",
-            "claude-3-5-haiku",
-            "claude-opus-4-0",
-            "claude-opus-4-1",
-            "claude-opus-4",
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-sonnet-4",
-            "claude-haiku-4-5",
-        ] {
-            assert!(!uses_adaptive_thinking(model), "{model} should stay legacy");
-        }
-        // 非 claude 模型（第三方 Anthropic 兼容端点，旧协议实现）：回落。
-        for model in ["glm-5.3", "glm-5.3-flash", "step-5-preview"] {
-            assert!(!uses_adaptive_thinking(model), "{model} should stay legacy");
         }
     }
 

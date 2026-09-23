@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use tiangong_anthropic::client::uses_adaptive_thinking;
 use tiangong_anthropic::types::{
     CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
     EffortLevel, ImageSourceParam, Message as AnthropicMessage,
@@ -143,31 +142,20 @@ fn build_tools(request: &ProviderRequest) -> Option<Vec<AnthropicTool>> {
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
-    // reasoning_effort 有值即开启思考；预算是 Anthropic 协议自身细节，
-    // 省略时由 tiangong-anthropic 客户端在发送前统一填充默认值。
+    // reasoning_effort 有值即开启思考，统一 adaptive 形态（不区分模型：
+    // Claude 新模型仅接受该形态，智谱 GLM 等兼容端点实测已完整支持）；
+    // 深度档位由 map_output_config 对齐到 output_config.effort。
     request
         .reasoning_effort
         .is_thinking_enabled()
-        .then(|| thinking_shape(request))
+        .then_some(ThinkingConfig::Adaptive)
 }
 
-/// adaptive 模型（判定见 `uses_adaptive_thinking`，默认新模式）用
-/// adaptive 形态，深度档位经 output_config.effort 传递（见
-/// map_output_config）；旧官方家族与第三方兼容端点沿用旧版
-/// enabled + 客户端默认预算。
-fn thinking_shape(request: &ProviderRequest) -> ThinkingConfig {
-    if uses_adaptive_thinking(&request.model) {
-        ThinkingConfig::Adaptive
-    } else {
-        ThinkingConfig::enabled()
-    }
-}
-
-/// adaptive 模型的思考深度：天工 ReasoningEffort 档位与 Anthropic
-/// effort 档位语义一致，直接对齐映射；未开启思考或非 adaptive 模型
-/// 不下发 output_config（effort 省略时走模型默认档）。
+/// adaptive 思考深度：天工 ReasoningEffort 档位与 Anthropic effort
+/// 档位语义一致，直接对齐映射；未开启思考不下发 output_config
+/// （effort 省略时走模型默认档）。
 fn map_output_config(request: &ProviderRequest) -> Option<OutputConfig> {
-    if !request.reasoning_effort.is_thinking_enabled() || !uses_adaptive_thinking(&request.model) {
+    if !request.reasoning_effort.is_thinking_enabled() {
         return None;
     }
     let effort = match request.reasoning_effort {
