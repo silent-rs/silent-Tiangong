@@ -956,35 +956,31 @@ fn capture_screenshot(
     {
         Some((region.x, region.y, region.width, region.height))
     } else {
-        // 应用定位：显式 pid / app_name 反查（多进程取第一个有窗口的）/
-        // 前台应用。
-        let target_pids: Vec<u32> = if let Some(pid) = req.pid.filter(|p| *p > 0) {
-            vec![pid]
-        } else if let Some(name) = req
-            .app_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-        {
-            find_app_pids_by_name(name)
-        } else if req.foreground_only {
-            let workspace = NSWorkspace::sharedWorkspace();
-            workspace
-                .frontmostApplication()
-                .map(|app| app.processIdentifier() as u32)
-                .into_iter()
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut located: Option<(f64, f64, f64, f64)> = None;
-        for pid in &target_pids {
-            if let Some(frame) = window_frame_for_pid(*pid) {
-                located = Some(frame);
-                break;
-            }
-        }
-        if located.is_none() && !target_pids.is_empty() {
+        // 应用定位：显式 pid / app_name（CGWindowList owner 名主路径，见
+        // window_frame_for_app）/ 前台应用。
+        let (pid_opt, name_opt): (Option<u32>, Option<&str>) =
+            if let Some(pid) = req.pid.filter(|p| *p > 0) {
+                (Some(pid), None)
+            } else if let Some(name) = req
+                .app_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            {
+                (None, Some(name))
+            } else if req.foreground_only {
+                let workspace = NSWorkspace::sharedWorkspace();
+                (
+                    workspace
+                        .frontmostApplication()
+                        .map(|app| app.processIdentifier() as u32),
+                    None,
+                )
+            } else {
+                (None, None)
+            };
+        let located = window_frame_for_app(pid_opt, name_opt);
+        if located.is_none() && (pid_opt.is_some() || name_opt.is_some()) {
             return DesktopResult::Err(DesktopError::BackendUnavailable {
                 reason: "未找到目标应用可截取的屏幕窗口（窗口可能已最小化或不在屏幕上）"
                     .to_string(),
@@ -1079,18 +1075,27 @@ fn capture_screenshot(
     })
 }
 
-/// CGWindowList 按 pid 定位最前的普通层（layer 0）屏幕窗口的 frame
-/// （points，主屏左上原点全局坐标，与 AX bounds 同系）。按 z 序取第一
-/// 个；最小化/离屏窗口不在 OnScreenOnly 列表内。
-fn window_frame_for_pid(pid: u32) -> Option<(f64, f64, f64, f64)> {
+/// CGWindowList 窗口定位：按 pid（精确）或 owner 名（包含匹配，大小写
+/// 不敏感）取最前的普通层（layer 0）屏幕窗口 frame（points，主屏左上
+/// 原点全局坐标，与 AX bounds 同系）。按 z 序取第一个；最小化/离屏窗口
+/// 不在 OnScreenOnly 列表内。
+///
+/// owner 名匹配是主路径：多进程应用（微信 4.x 等）的主窗口可能挂在
+/// NSWorkspace 应用名匹配不到的 helper 进程上，pid 交集会漏；CGWindowList
+/// 的 OwnerName 与窗口同源，不存在集合错位。
+fn window_frame_for_app(pid: Option<u32>, app_name: Option<&str>) -> Option<(f64, f64, f64, f64)> {
     use core_foundation::base::{CFType, FromVoid, TCFType};
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
-        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerName,
+        kCGWindowOwnerPID,
     };
+    if pid.is_none() && app_name.is_none() {
+        return None;
+    }
 
     let array = copy_window_info(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
@@ -1098,8 +1103,10 @@ fn window_frame_for_pid(pid: u32) -> Option<(f64, f64, f64, f64)> {
     )?;
     // SAFETY: 静态 CFStringRef 由 CoreGraphics 框架常驻提供。
     let key_pid: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerPID) };
+    let key_owner: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerName) };
     let key_layer: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowLayer) };
     let key_bounds: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowBounds) };
+    let needle = app_name.map(str::to_lowercase);
     let dict_number = |dict: &CFDictionary<CFString, CFType>, key: &CFString| -> Option<i64> {
         let value = dict.find(key)?;
         let number: CFNumber = value.downcast()?;
@@ -1109,7 +1116,17 @@ fn window_frame_for_pid(pid: u32) -> Option<(f64, f64, f64, f64)> {
         // SAFETY: 数组存活期间元素指针有效；ItemRef 只借用不接管所有权。
         let item: core_foundation::base::ItemRef<'_, CFDictionary<CFString, CFType>> =
             unsafe { <CFDictionary<CFString, CFType>>::from_void(ptr) };
-        if dict_number(&item, &key_pid) != Some(pid as i64) {
+        let owner_pid = dict_number(&item, &key_pid);
+        let pid_match = pid.is_some_and(|p| owner_pid == Some(p as i64));
+        let name_match = needle.as_deref().is_some_and(|n| {
+            item.find(&key_owner)
+                .and_then(|v| {
+                    // CFType 无 Display：先 downcast 到 CFString 再取文本。
+                    v.downcast::<CFString>()
+                })
+                .is_some_and(|owner| owner.to_string().to_lowercase().contains(n))
+        });
+        if !pid_match && !name_match {
             continue;
         }
         if dict_number(&item, &key_layer) != Some(0) {
