@@ -4,6 +4,7 @@ import {
   isScanningPlaceholder,
   selectDisplayGroups,
   selectableCandidates,
+  truncateMiddle,
   type MentionCandidateView,
   type MentionGroup,
 } from '@/utils/mentionGroups';
@@ -90,6 +91,53 @@ function scanningPlaceholder(): MentionCandidateView {
     mark: '…',
   };
 }
+
+describe('truncateMiddle', () => {
+  it('未超长时原样返回', () => {
+    expect(truncateMiddle('短描述', 40)).toBe('短描述');
+    expect(truncateMiddle('', 40)).toBe('');
+  });
+
+  it('刚好等于上限时也不截断', () => {
+    const text = 'a'.repeat(40);
+    expect(truncateMiddle(text, 40)).toBe(text);
+  });
+
+  it('超长时保留头尾、中间省略', () => {
+    const text =
+      '天工原生 Subagent · 游戏美术设计：负责《机关传说》的视觉风格、角色/机关/场景美术、动画、音频，兼动画与音效制作';
+    const result = truncateMiddle(text, 40);
+    const [head, tail] = result.split('…');
+    // 头尾都必须是原文的真实前缀/后缀，不能是臆造内容
+    expect(text.startsWith(head)).toBe(true);
+    expect(text.endsWith(tail)).toBe(true);
+    expect(head.length).toBeGreaterThan(0);
+    expect(tail.length).toBeGreaterThan(0);
+    // 省略号只出现一次
+    expect(result.split('…')).toHaveLength(2);
+    expect(result.length).toBeLessThanOrEqual(40);
+  });
+
+  it('截断结果长度不超过上限', () => {
+    const text = 'x'.repeat(200);
+    expect(truncateMiddle(text, 40)).toHaveLength(40);
+    expect(truncateMiddle(text, 10)).toHaveLength(10);
+  });
+
+  it('文件路径的头尾截断保留目录与文件名', () => {
+    const path = 'crates/tiangong-core-manager/src/core_manager/mentions.rs';
+    const result = truncateMiddle(path, 30);
+    const [head, tail] = result.split('…');
+    expect(path.startsWith(head)).toBe(true);
+    expect(path.endsWith(tail)).toBe(true);
+    // 文件名必须留在尾部——它是路径里最能区分候选的部分
+    expect(tail).toContain('mentions.rs');
+  });
+
+  it('上限过小（放不下头尾加省略号）时原样返回', () => {
+    expect(truncateMiddle('abcdefghij', 2)).toBe('abcdefghij');
+  });
+});
 
 describe('isScanningPlaceholder', () => {
   it('value 为空即占位候选', () => {

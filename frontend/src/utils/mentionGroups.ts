@@ -53,6 +53,26 @@ export function isScanningPlaceholder(candidate: MentionCandidateView): boolean 
 }
 
 /**
+ * 头尾截断：保留开头与结尾，中间以一个省略号代替。
+ *
+ * 候选的说明文本关键信息常落在两端——开头是主体身份，结尾是补充说明；只保留
+ * 开头会把收尾信息整段丢掉（Agent 职责、文件路径都如此）。单行展示不换行，
+ * 全文由 title 的 hover 提示提供。
+ *
+ * 长度按字符数估算：中西文混排下宽度不等，但配合 `whitespace-nowrap` 与
+ * `min-w-0` 由 flex 收敛，极端超长仍会被容器裁掉，不会撑破面板。
+ */
+export function truncateMiddle(text: string, maxChars = 40): string {
+  if (maxChars < 3 || text.length <= maxChars) {
+    return text;
+  }
+  // 头部占六成：主体信息优先级高于结尾补充。
+  const headLength = Math.ceil((maxChars - 1) * 0.6);
+  const tailLength = maxChars - 1 - headLength;
+  return `${text.slice(0, headLength)}…${text.slice(text.length - tailLength)}`;
+}
+
+/**
  * 可选中候选：剔除「索引建立中」占位提示。
  *
  * 键盘导航与选中都基于该数组，保证 Enter / 方向键不会落到不可选中的提示行上。

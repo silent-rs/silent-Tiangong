@@ -25,7 +25,7 @@ import {
 } from '@/utils/attachments';
 import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEditorModel';
 import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
-import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder } from '@/utils/mentionGroups';
+import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder, truncateMiddle } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -1308,10 +1308,10 @@ export function MessageInput({
                           </span>
                           {c.hint && (
                             <span
-                              className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                              className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
                               title={c.hint}
                             >
-                              {c.hint}
+                              {truncateMiddle(c.hint)}
                             </span>
                           )}
                         </div>
@@ -1347,10 +1347,10 @@ export function MessageInput({
                                     </span>
                                     {c.hint && (
                                       <span
-                                        className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                                        className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
                                         title={c.hint}
                                       >
-                                        {c.hint}
+                                        {truncateMiddle(c.hint)}
                                       </span>
                                     )}
                                   </div>
@@ -1387,14 +1387,15 @@ export function MessageInput({
                                     </span>
                                   )}
                                   {c.hint && (
-                                    // 描述可换行，但截断到两行（超出部分省略号），
-                                    // 全文靠 title 的 hover 提示读——否则一条长描述
-                                    // 能把面板撑成只有两三项可见。
+                                    // 头尾截断：保留主体与收尾信息，中间省略；
+                                    // 单行不换行，全文靠 title 的 hover 提示读。
+                                    // truncate 是兜底：主轴被 label/技能名挤占时，
+                                    // 由 CSS 裁掉并补省略号，绝不允许冲出面板边界。
                                     <span
-                                      className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                                      className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
                                       title={c.hint}
                                     >
-                                      {c.hint}
+                                      {truncateMiddle(c.hint)}
                                     </span>
                                   )}
                                 </div>
