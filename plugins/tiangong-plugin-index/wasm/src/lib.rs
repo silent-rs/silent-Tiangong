@@ -493,11 +493,17 @@ fn index_mention_candidates(payload: &str) -> Result<String, PluginError> {
             .unwrap_or(0) as usize,
         workspace: Some(workspace.to_string()),
     };
-    let Ok(payload) = invoke_for_ui::<MentionFiles>(&request) else {
-        return Ok("[]".to_string());
+    let payload = match invoke_for_ui::<MentionFiles>(&request) {
+        Ok(payload) => payload,
+        // 查询失败不能静默降级成空列表：面板会显示"无匹配"，把 sidecar 调用
+        // 失败伪装成"工作区里没有这个文件"。用占位候选把原因透传出去。
+        Err(error) => return Ok(mention_failure_candidates(&error)),
     };
-    let Ok(response) = serde_json::from_str::<MentionFilesResponse>(&payload) else {
-        return Ok("[]".to_string());
+    let response = match serde_json::from_str::<MentionFilesResponse>(&payload) {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(mention_failure_candidates(&plugin_err(error.to_string())));
+        }
     };
     let mut candidates: Vec<serde_json::Value> = response
         .candidates
@@ -536,6 +542,24 @@ fn index_mention_candidates(payload: &str) -> Result<String, PluginError> {
         }));
     }
     serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
+}
+
+/// 查询失败时返回一条占位候选（value 为空，与「索引创建中…」同一协议）。
+///
+/// mention 协议只允许返回候选数组，没有独立错误通道；静默返回空列表会让用户
+/// 把"索引查不到"误判成"没有匹配的文件"，且事后无从排查。
+fn mention_failure_candidates(error: &PluginError) -> String {
+    let reason = match error {
+        PluginError::Message(message) => message.as_str(),
+    };
+    serde_json::to_string(&[serde_json::json!({
+        "value": "",
+        "label": "文件索引查询失败",
+        "hint": reason,
+        "kind": "file",
+        "mark": "!",
+    })])
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。

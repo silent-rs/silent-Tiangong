@@ -82,15 +82,18 @@ impl CoreManager {
         let mut groups: Vec<MentionGroup> = Vec::new();
         let mut group_index: HashMap<String, usize> = HashMap::new();
         let mut seen = HashSet::new();
+        let mut source_summary: Vec<String> = Vec::new();
         for source in sources {
             // 单个来源失败只跳过它：mention 是输入辅助，不阻塞补全。
             let candidates = match source.query(&query) {
                 Ok(candidates) => candidates,
                 Err(error) => {
                     tracing::warn!(source = source.id(), %error, "mention 候选查询失败");
+                    source_summary.push(format!("{}=err", source.id()));
                     continue;
                 }
             };
+            source_summary.push(format!("{}={}", source.id(), candidates.len()));
             for candidate in candidates {
                 if !query.allowed_kinds.is_empty() && !query.allowed_kinds.contains(&candidate.kind)
                 {
@@ -126,6 +129,15 @@ impl CoreManager {
                 }
             }
         }
+        // mention 通道此前零可观测：来源返回空、工作区没带上、查询词被过滤，
+        // 在面板上全都退化成"无匹配"，无法区分。一行汇总足够定位（每按键一次）。
+        tracing::info!(
+            query = %query.query,
+            workspace = ?query.context.workspace,
+            sources = %source_summary.join(","),
+            groups = groups.len(),
+            "mention 候选查询完成"
+        );
         Ok(groups)
     }
 }
