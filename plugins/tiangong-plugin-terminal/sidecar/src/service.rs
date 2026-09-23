@@ -382,12 +382,27 @@ fn shell_ready_probe(shell: ShellKind, marker: &str) -> String {
     }
 }
 
-/// 就绪判定：marker 含随机 scru128，整体子串命中即视为 shell 已执行探针。
-/// 富提示符（starship）与 shell 插件（zsh xtrace/autosuggest）会在输出中
-/// 叠加前缀或与探针交错，严格行相等匹配会漏判；子串匹配的安全性由
-/// [`shell_ready_probe`] 的拼接写法保证（回显不含完整 marker）。
+/// 就绪判定：把原始字节经终端仿真还原成「终端上真实呈现的行」后，再要求
+/// 某一整行等于 marker。
+///
+/// 不能在原始字节流上做子串匹配。原始流里混着 ZLE 重绘序列、光标回退、
+/// `\r` 覆写以及 zsh-autosuggestions / zsh-syntax-highlighting 的预测文本
+/// 与擦除——这些字节从未作为「终端最终显示的内容」存在过，只是绘制过程的
+/// 中间态。在中间态上 `contains` 会把行编辑器重绘出的、**尚未执行**的命令
+/// 行当成执行结果：autosuggest 重绘时引号被消化，完整 marker 随之出现，
+/// 就绪判定退化成恒真，正常运行的命令被误判为「包装脚本夭折」。
+///
+/// 还原后改用整行相等匹配，[`shell_ready_probe`] 的相邻引用串拼接防护才真
+/// 正生效：回显的 `echo '前缀''后缀'` 整行不可能等于纯 marker 行，唯有 shell
+/// 实际执行过 echo 才会产生独占一行的 marker。
 fn shell_ready_probe_completed(raw: &str, marker: &str) -> bool {
-    raw.contains(marker)
+    let mut processor = persist::TerminalLineProcessor::new();
+    let mut lines = processor.process(raw);
+    let current = processor.current_line();
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines.iter().any(|line| line.trim() == marker)
 }
 
 fn default_cols() -> u16 {
@@ -3583,23 +3598,48 @@ mod tests {
         );
     }
 
+    /// 富提示符下**真正执行过**探针：marker 独占一行（前面可能有 starship
+    /// 提示符与 OSC 颜色查询等噪声行），必须判为就绪。
     #[test]
-    fn 就绪判定_命中富提示符与_xtrace_噪声中的_marker() {
+    fn 就绪判定_命中富提示符噪声中独占一行的_marker() {
         let marker = "__TIANGONG_READY_abc__";
-        // starship 右提示符 + OSC 颜色查询 + zsh xtrace/autosuggest 前缀：
-        // marker 不独占整行，严格行相等匹配会漏判，子串匹配必须命中。
         let noisy = format!(
             "\u{1b}]11;rgb:1e1e/1e1e/2e2e\u{1b}\\\r\n\
-             _zsh_autosuggest_bind_widgets:18> echo {marker}\r\n\
-             \u{1b}[1;32m❯\u{1b}[0m {marker}\u{1b}[K\r\n"
+             \u{1b}[1;32m❯\u{1b}[0m echo '__TIANGONG_READY_''abc__'\r\n\
+             {marker}\u{1b}[K\r\n"
         );
         assert!(
             shell_ready_probe_completed(&noisy, marker),
-            "富提示符与 xtrace 噪声中的 marker 必须判为就绪"
+            "执行后独占一行的 marker 必须判为就绪"
         );
         assert!(
             !shell_ready_probe_completed(&noisy, "__TIANGONG_READY_other__"),
             "不同随机 marker 不得互相命中"
+        );
+    }
+
+    /// zsh-autosuggestions / zsh-syntax-highlighting 等 ZLE widget 会在**行编辑
+    /// 阶段**重绘输入行，重绘时引号被消化，完整 marker 随之出现在原始字节流
+    /// 中——但命令一个字都还没执行。
+    ///
+    /// 这是 #571 兜底假阴性的真正根因：旧实现在未经终端仿真的原始字节上做
+    /// `contains`，把重绘中间态当成执行结果，导致 git fetch 等正常命令被误判
+    /// 为「包装脚本夭折」，实际执行成功却回报失败，诱导调用方重复执行。
+    #[test]
+    fn 就绪判定_zsh行编辑器重绘不算就绪() {
+        let marker = "__TIANGONG_READY_abc__";
+        // autosuggest 的 xtrace 前缀里带完整 marker：命令尚未执行。
+        let xtrace = format!("_zsh_autosuggest_bind_widgets:18> echo {marker}\r\n");
+        assert!(
+            !shell_ready_probe_completed(&xtrace, marker),
+            "xtrace 回显的未执行命令行不得判为就绪: {xtrace:?}"
+        );
+
+        // 语法高亮重绘：marker 与提示符同行，且行尾被擦除序列覆盖。
+        let redraw = format!("\u{1b}[1;32m❯\u{1b}[0m echo {marker}\u{1b}[K\r");
+        assert!(
+            !shell_ready_probe_completed(&redraw, marker),
+            "行编辑器重绘出的命令行不得判为就绪: {redraw:?}"
         );
     }
 
