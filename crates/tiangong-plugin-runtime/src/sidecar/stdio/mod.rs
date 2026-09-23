@@ -33,12 +33,12 @@ use serde_json::Value;
 mod process;
 mod sandbox_exemptions;
 
-#[cfg(all(test, windows))]
-use process::WindowsJob;
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
     prepare_policy_fd, sanitize_spawn_environment, terminate_process_tree,
 };
+#[cfg(windows)]
+use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
 use sandbox_exemptions::{
     apply_user_cache_write, exempt_authorized_reads, exempt_authorized_user_credentials,
     exempt_mcp_config_write, resolve_launcher, retain_existing_writable_roots,
@@ -784,7 +784,7 @@ impl StdioSidecarConnection {
         )?;
         #[cfg(windows)]
         if let Some(stop) = &sandbox_stop {
-            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, &stop.name);
+            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, stop.name());
         }
         if self.config.sensitive_storage.any() {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);

@@ -8,7 +8,11 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow};
+// `Context` 与 `bail!` 仅被 unix 与非 unix/windows 兜底分支使用，
+// Windows 下无引用，需按平台条件导入以避免 unused_imports 警告。
+#[cfg(not(windows))]
+use anyhow::{Context, bail};
 
 use super::StdioProcess;
 use crate::sidecar::SidecarConfig;
@@ -206,7 +210,7 @@ pub(super) fn terminate_process_tree(process: &StdioProcess, child: &mut Child) 
 }
 
 #[cfg(windows)]
-enum WindowsLifecycle {
+pub(super) enum WindowsLifecycle {
     Job(WindowsJob),
     Sandbox(WindowsStopEvent),
 }
@@ -231,14 +235,19 @@ impl WindowsLifecycle {
 }
 
 #[cfg(windows)]
-struct WindowsStopEvent {
+pub(super) struct WindowsStopEvent {
     handle: std::os::windows::io::OwnedHandle,
     name: String,
 }
 
 #[cfg(windows)]
 impl WindowsStopEvent {
-    fn new() -> std::io::Result<Self> {
+    /// 停止事件的内核对象名，供宿主经环境变量传递给 Sandbox Launcher。
+    pub(super) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(super) fn new() -> std::io::Result<Self> {
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
