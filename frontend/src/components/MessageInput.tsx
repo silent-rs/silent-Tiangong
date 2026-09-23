@@ -1266,10 +1266,10 @@ export function MessageInput({
               {mentionOpen && (
                 <div
                   ref={mentionRef}
-                  className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
+                  className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-80 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
                   {completionMode === 'mention' && (
-                    <div className="border-b px-3 py-2">
+                    <div className="border-b px-3 py-1.5">
                       <input
                         ref={mentionSearchRef}
                         type="text"
@@ -1283,30 +1283,28 @@ export function MessageInput({
                     </div>
                   )}
                   {filteredCandidates.length === 0 ? (
-                    <div className="px-3 py-4 text-center text-sm text-muted-foreground">
+                    <div className="px-3 py-3 text-center text-sm text-muted-foreground">
                       无匹配 · Enter 或 Esc 关闭
                     </div>
                   ) : completionMode === 'slash' ? (
-                    // slash 命令：平铺渲染
+                    // slash 命令：平铺渲染（单行紧凑排布，与 mention 项一致）
                     filteredCandidates.map((c, i) => (
                       <button
                         key={c.value}
                         ref={(el) => { candidateRefs.current[i] = el; }}
-                        className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                        className={`flex w-full items-center gap-2 px-3 py-1 text-left text-sm transition-colors hover:bg-accent ${
                           i === mentionIndex ? 'bg-accent' : ''
                         }`}
                         onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
                         onMouseEnter={() => setMentionIndex(i)}
                       >
-                        <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                        <div className="min-w-0 flex-1 overflow-hidden">
-                          <div className="flex min-w-0 items-baseline gap-2">
-                            <span className="truncate font-medium">{c.label}</span>
-                          </div>
-                          <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                        <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 shrink-0 font-medium">{c.label}</span>
+                        {c.hint && (
+                          <span className="min-w-0 truncate text-xs text-muted-foreground">
                             {c.hint}
                           </span>
-                        </div>
+                        )}
                       </button>
                     ))
                   ) : (
@@ -1315,7 +1313,7 @@ export function MessageInput({
                       let flatIndex = 0;
                       return filteredGroups.map((group) => (
                         <div key={group.kind}>
-                          <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          <div className="px-3 pt-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                             {MENTION_GROUP_TITLES[group.kind] ?? group.label}
                           </div>
                           {group.candidates.map((c) => {
@@ -1325,20 +1323,20 @@ export function MessageInput({
                               return (
                                 <div
                                   key={`${group.kind}-scanning`}
-                                  className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm text-muted-foreground"
+                                  className="flex w-full items-center gap-2 px-3 py-1 text-left text-sm text-muted-foreground"
                                 >
                                   <span
-                                    className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border text-[11px] font-semibold leading-none"
+                                    className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none"
                                     aria-hidden="true"
                                   >
                                     {c.mark?.trim() || '…'}
                                   </span>
-                                  <div className="min-w-0 flex-1 overflow-hidden">
-                                    <div className="truncate font-medium">{c.label}</div>
-                                    <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
+                                  <span className="min-w-0 truncate font-medium">{c.label}</span>
+                                  {c.hint && (
+                                    <span className="min-w-0 truncate text-xs text-muted-foreground">
                                       {c.hint}
                                     </span>
-                                  </div>
+                                  )}
                                 </div>
                               );
                             }
@@ -1347,7 +1345,7 @@ export function MessageInput({
                               <button
                                 key={c.value}
                                 ref={(el) => { candidateRefs.current[i] = el; }}
-                                className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                                className={`flex w-full items-center gap-2 px-3 py-1 text-left text-sm transition-colors hover:bg-accent ${
                                   i === mentionIndex ? 'bg-accent' : ''
                                 }`}
                                 onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
@@ -1355,23 +1353,23 @@ export function MessageInput({
                               >
                                 {/* 标记字符与气泡 chip 同源（插件提供，缺省按 kind 回退） */}
                                 <span
-                                  className={`inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border text-[11px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
+                                  className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
                                   aria-hidden="true"
                                 >
                                   {c.mark?.trim() || mentionMarkFor(c.kind, c.value)}
                                 </span>
-                                <div className="min-w-0 flex-1 overflow-hidden">
-                                  <div className="flex min-w-0 items-baseline gap-2">
-                                    <span className="truncate font-medium">{c.label}</span>
-                                    {c.kind === 'skill' && c.value.includes('@') && (
-                                      <span className="shrink-0 text-xs text-muted-foreground">
-                                        {c.value.replace(/^@/, '')}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
-                                    {c.hint}
-                                  </span>
+                                <div className="flex min-w-0 flex-1 items-baseline gap-2">
+                                  <span className="min-w-0 truncate font-medium">{c.label}</span>
+                                  {c.kind === 'skill' && c.value.includes('@') && (
+                                    <span className="shrink-0 text-xs text-muted-foreground">
+                                      {c.value.replace(/^@/, '')}
+                                    </span>
+                                  )}
+                                  {c.hint && (
+                                    <span className="min-w-0 truncate text-xs text-muted-foreground">
+                                      {c.hint}
+                                    </span>
+                                  )}
                                 </div>
                               </button>
                             );
