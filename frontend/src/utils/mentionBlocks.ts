@@ -13,7 +13,7 @@
  *   - 提及延伸到下一个空白或文末，无引号/转义。
  */
 
-export type MentionKind = 'skill' | 'mcp' | 'agent' | 'all' | 'index' | 'plugin';
+export type MentionKind = 'skill' | 'mcp' | 'agent' | 'all' | 'index' | 'plugin' | 'file';
 
 export type Block =
   | { type: 'text'; value: string }
@@ -31,6 +31,8 @@ const TOKEN_CHAR = /[^\s]/;
  * - `@index`：字面量（工作区搜索插件）
  * - `@all`：字面量
  * - `@<role>`：`@[A-Za-z0-9_]+`（后端 validate_role_identifier）
+ * - `@file:<相对路径>`：路径不含空白时直接书写；含空白时用反引号包裹
+ *   （`` @file:`设计 文档/需求.md` ``）。路径统一用 `/` 分隔，跨平台可原样往返。
  *
  * 不符合上述语法的 token 视为普通文本（返回 null），不渲染成块。
  */
@@ -41,6 +43,16 @@ export function classifyMention(token: string): { kind: MentionKind; label: stri
   if (token === '@all') return { kind: 'all', label: 'All' };
 
   if (token === '@index') return { kind: 'index', label: '工作区搜索' };
+
+  // 文件路径可能含空格，允许反引号包裹；label 取文件名（末段）。
+  // 反引号内至少要有一个非反引号字符，`@file:``` 这类空路径不构成提及。
+  const mFile = /^@file:(?:`([^`]+)`|([^`\s]+))$/.exec(token);
+  if (mFile) {
+    const path = mFile[1] ?? mFile[2];
+    if (!path) return null;
+    const label = path.split('/').filter(Boolean).pop() ?? path;
+    return { kind: 'file', label };
+  }
 
   const mSkill = /^@skill:([a-z0-9][a-z0-9_-]*)$/.exec(token);
   if (mSkill) return { kind: 'skill', label: mSkill[1] };
@@ -80,9 +92,20 @@ export function parseBlocks(text: string): Block[] {
     const ch = text[i];
     const atStart = i === 0 || /\s/.test(text[i - 1]);
     if (ch === '@' && atStart) {
-      // 捕获从 i 到下一个空白/文末的 token
+      // 捕获从 i 到下一个空白/文末的 token；反引号内的空白属于 token 自身
+      // （文件路径可能含空格），故遇到反引号时延伸到配对反引号。
       let j = i + 1;
-      while (j < text.length && TOKEN_CHAR.test(text[j])) j++;
+      let quoted = false;
+      while (j < text.length) {
+        if (text[j] === '`') {
+          quoted = !quoted;
+          j++;
+          if (!quoted) break;
+          continue;
+        }
+        if (!quoted && !TOKEN_CHAR.test(text[j])) break;
+        j++;
+      }
       const token = text.slice(i, j);
       const cls = classifyMention(token);
       if (cls) {

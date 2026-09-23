@@ -20,7 +20,9 @@ pub use attachment::{
     validate_ready_content_blocks,
 };
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
-pub use mention::{MentionCandidate, MentionGroup};
+pub use mention::{
+    MentionCandidate, MentionContext, MentionGroup, MentionQuery, MentionRequest, MentionTarget,
+};
 pub use message::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
     MessageToolCall, TurnStatus, now_text,

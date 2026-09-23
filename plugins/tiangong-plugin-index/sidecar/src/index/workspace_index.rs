@@ -6,8 +6,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Schema, Value};
+use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Term, Value};
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
 use super::WORKSPACE_SCHEMA_VERSION;
@@ -17,6 +17,16 @@ const MAX_ENTRIES: usize = 5000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 const SNIPPET_LINES: usize = 50;
+
+/// 按 token 前缀匹配构造查询：`ment` 命中 `mentions`、`main` 命中 `main.rs` 的
+/// `main` token。
+///
+/// 用 `FuzzyTermQuery` 的距离 0 前缀模式而非正则：tantivy-fst 的 Regex 语法受限
+/// （不接受 `^` 锚点），且前缀走 term dictionary 范围扫描，比正则引擎快。
+/// 查询词是分词后的单个 token，无需转义——不含 tantivy 查询语法字符。
+fn prefix_query(term: &str, field: Field) -> FuzzyTermQuery {
+    FuzzyTermQuery::new_prefix(Term::from_field_text(field, term), 0, false)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileState {
@@ -309,14 +319,28 @@ pub struct WorkspaceIndex {
     root: PathBuf,
     base_dir: PathBuf,
     entry_count: usize,
+    /// 本次打开是否删除了旧索引并按新 schema 重建（此时索引一定为空）。
+    rebuilt: bool,
 }
 
 impl WorkspaceIndex {
+    /// 本次打开是否属于「删除旧索引后重建」。
+    ///
+    /// 调用方（`IndexManager`）据此登记待补扫：查询路径不经过 `set_workspace`
+    /// 的后台刷新，若不在打开点标记，重建出的空索引没人负责填充。
+    pub fn was_rebuilt(&self) -> bool {
+        self.rebuilt
+    }
+
     pub fn open_or_create(root: &Path, base_dir: &Path) -> Result<Self> {
         let index_dir = Self::index_dir(root, base_dir);
         let (schema, fields) = workspace_schema();
 
         let existed = index_dir.exists();
+        // schema 升级或索引损坏时旧目录被整体删除、按新 schema 重建，此时索引
+        // 一定为空。用该字段告知调用方去补一次全量扫描，否则索引会长期停留在
+        // 空状态（表现为 `@` 提及检索不到任何文件）。
+        let mut rebuilt = false;
         let index = if existed {
             match Index::open_in_dir(&index_dir).with_context(|| {
                 workspace_index_context(root, base_dir, "open", "打开 Workspace Tantivy 索引失败")
@@ -328,6 +352,7 @@ impl WorkspaceIndex {
                         index_dir = %index_dir.display(),
                         "Workspace 索引 schema 已更新，准备全量校准"
                     );
+                    rebuilt = true;
                     fs::remove_dir_all(&index_dir).with_context(|| {
                         workspace_index_context(
                             root,
@@ -360,6 +385,7 @@ impl WorkspaceIndex {
                         error = %err,
                         "Workspace Tantivy 索引打开失败，准备重建索引目录"
                     );
+                    rebuilt = true;
                     fs::remove_dir_all(&index_dir).with_context(|| {
                         workspace_index_context(
                             root,
@@ -400,6 +426,26 @@ impl WorkspaceIndex {
             .with_context(|| workspace_index_context(root, base_dir, "open", "创建索引读取器失败"))?
             .searcher()
             .num_docs() as usize;
+        if rebuilt {
+            // 作废父级 meta.json：它记录的是「旧索引的成功扫描」。不清掉的话，
+            // workspace_index_age_secs 会认为当前 schema 版本已成功扫描过，
+            // 从而把刚重建出的空索引当成健康索引——查询返回空却被当作"没有匹配"。
+            // 删掉后 age_secs 返回 None，调用方据此补一次全量扫描。
+            let meta_path = index_dir
+                .parent()
+                .map(|parent| parent.join("meta.json"))
+                .unwrap_or_else(|| index_dir.join("meta.json"));
+            if meta_path.exists()
+                && let Err(error) = fs::remove_file(&meta_path)
+            {
+                tracing::warn!(
+                    workspace = %root.display(),
+                    meta = %meta_path.display(),
+                    %error,
+                    "作废旧 Workspace 索引 meta 失败，可能漏掉重建补扫"
+                );
+            }
+        }
         Ok(Self {
             schema,
             index,
@@ -407,6 +453,7 @@ impl WorkspaceIndex {
             root: root.to_path_buf(),
             base_dir: base_dir.to_path_buf(),
             entry_count,
+            rebuilt,
         })
     }
 
@@ -543,7 +590,7 @@ impl WorkspaceIndex {
                 }
                 continue;
             }
-            if !file_type.is_file() || should_skip_file(&name_str) {
+            if !file_type.is_file() {
                 continue;
             }
             let metadata = match entry.metadata() {
@@ -600,7 +647,6 @@ impl WorkspaceIndex {
                 }
                 self.scan_dir(writer, &path, depth + 1)?;
             } else if file_type.is_file()
-                && !should_skip_file(&name_str)
                 && let Err(err) =
                     self.index_file_with_writer(writer, &path, entry.metadata().ok().as_ref())
             {
@@ -665,8 +711,16 @@ impl WorkspaceIndex {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
+        // 二进制/文档（扩展名在跳过清单里）只建 path 条目：不读内容、不提符号，
+        // 让 `@` 提及能指向图片/PDF/Office 等文件；`index_search` 工具靠
+        // has_content 过滤掉它们，不会稀释内容检索结果。
+        let with_content = !should_skip_file(&path.to_string_lossy());
         let language = detect_language(path);
-        let content = read_snippet(path);
+        let content = if with_content {
+            read_snippet(path)
+        } else {
+            String::new()
+        };
 
         let mut doc = TantivyDocument::new();
         doc.add_text(self.fields.path, &rel_path);
@@ -675,6 +729,7 @@ impl WorkspaceIndex {
         doc.add_u64(self.fields.size, size);
         doc.add_u64(self.fields.modified_at, modified_timestamp(metadata));
         doc.add_text(self.fields.language, &language);
+        doc.add_bool(self.fields.has_content, with_content);
         if !content.is_empty() {
             doc.add_text(self.fields.content, &content);
         }
@@ -733,9 +788,21 @@ impl WorkspaceIndex {
             ],
         );
 
-        let query = query_parser
+        let parsed = query_parser
             .parse_query(query_text)
             .with_context(|| self.context("search", "解析 Workspace 搜索查询失败"))?;
+        // 只返回读取过内容的命中：二进制/文档只建 path 条目（has_content=false），
+        // 它们是给 `@` 提及用的，不该稀释内容检索结果。
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(parsed)),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_bool(self.fields.has_content, true),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
 
         let mut hits = Vec::new();
@@ -759,11 +826,111 @@ impl WorkspaceIndex {
         Ok(hits)
     }
 
+    /// `@` 提及文件候选：只匹配 path 字段，多词 AND，浅优先（路径段数少者靠前）。
+    ///
+    /// 与 {@link search} 的区别：不过滤 has_content（图片/PDF/Office 也要能被
+    /// `@` 到）、不查内容与符号、多词 AND 而非 OR、按 token 前缀匹配（见下）。
+    ///
+    /// 查询词经索引同一 tokenizer 分析后再匹配：`main.rs` 切成 `main`/`rs`
+    /// 与建索引时一致；每个词按**前缀**匹配而非整词相等——用户找文件时输入的
+    /// 是文件名片段（`ment` 找 `mentions.rs`、`s` 找 `src`），整词相等会让
+    /// 这些最自然的输入全部返回空，面板于是只剩「无匹配」。
+    /// 用 FuzzyTermQuery 的距离 0 前缀模式：查询词已是单个 token，无需转义，
+    /// 也不会因含 `:` `/` `~` `^` 等 tantivy 语法字符而解析失败。
+    pub fn search_paths(&self, query_text: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // 空查询词不返回候选：刚唤出面板就罗列全部文件既昂贵也无意义，
+        // 等用户输入至少一个词再检索。
+        let path_field = self.fields.path;
+        let terms = self.path_query_terms(query_text, path_field)?;
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let reader = self
+            .index
+            .reader()
+            .with_context(|| self.context("search_paths", "创建 Workspace 索引读取器失败"))?;
+        let searcher = reader.searcher();
+
+        // path 是 TEXT 字段（默认 tokenizer 已小写化），按 token 前缀做 AND：
+        // 输入 `设计 文档` 要求路径同时含以这两个词开头的 token。
+        let query = BooleanQuery::new(
+            terms
+                .iter()
+                .map(|term| {
+                    (
+                        Occur::Must,
+                        Box::new(prefix_query(term, path_field)) as Box<dyn tantivy::query::Query>,
+                    )
+                })
+                .collect(),
+        );
+
+        // TopDocs 只按分数取前 N，而 AND 下各文档分数相同、顺序不定，
+        // 因此多取一些再在 Rust 侧按浅优先排序。
+        let fetch = limit.saturating_mul(4).clamp(limit, 200);
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(fetch).order_by_score())
+            .with_context(|| self.context("search_paths", "执行 Workspace 路径检索失败"))?;
+
+        let mut hits: Vec<SearchHit> = top_docs
+            .into_iter()
+            .filter_map(|(_score, doc_address)| {
+                let doc: TantivyDocument = searcher.doc(doc_address).ok()?;
+                let path_val = doc
+                    .get_first(self.fields.path)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if path_val.is_empty() {
+                    return None;
+                }
+                Some(SearchHit {
+                    path: path_val,
+                    language: String::new(),
+                })
+            })
+            .collect();
+
+        // 浅优先：路径段数少者靠前，同级按字典序保证结果稳定。
+        hits.sort_by(|a, b| {
+            path_depth(&a.path)
+                .cmp(&path_depth(&b.path))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    /// 把用户输入切成 path 字段的查询 token：与建索引用同一 tokenizer，
+    /// 因此 `main.rs`、`Cargo.toml`、`src/lib` 的切分结果和索引侧一致。
+    ///
+    /// 直接 `split_whitespace` 会把 `main.rs` 当成一个整词，永远匹配不上被切成
+    /// `main`/`rs` 的索引 token——这是「输入带后缀的文件名查不到」的原因。
+    fn path_query_terms(&self, query_text: &str, path_field: Field) -> Result<Vec<String>> {
+        let mut tokenizer = self
+            .index
+            .tokenizer_for_field(path_field)
+            .with_context(|| self.context("search_paths", "获取 path 字段 tokenizer 失败"))?;
+        let mut stream = tokenizer.token_stream(query_text);
+        let mut terms: Vec<String> = Vec::new();
+        // token_stream 逐个产出 token；text 已由默认 tokenizer 小写化。
+        while stream.advance() {
+            let text = stream.token().text.as_str();
+            if !text.is_empty() {
+                terms.push(text.to_string());
+            }
+        }
+        Ok(terms)
+    }
+
     #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         self.entry_count
     }
-
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
@@ -839,6 +1006,13 @@ impl WorkspaceIndex {
 pub struct SearchHit {
     pub path: String,
     pub language: String,
+}
+
+/// 路径段数（浅优先排序用）：`src/main.rs` → 2，`main.rs` → 1。
+fn path_depth(path: &str) -> usize {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
 }
 
 pub fn hash_path(root: &Path) -> String {
@@ -940,27 +1114,154 @@ mod tests {
     }
 
     #[test]
-    fn full_scan_skips_ignored_entries() -> Result<()> {
+    fn full_scan_indexes_all_but_only_text_gets_content() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let workspace = temp.path().join("workspace");
         let base_dir = temp.path().join("index");
         fs::create_dir_all(workspace.join("src"))?;
         fs::create_dir_all(workspace.join("node_modules").join("pkg"))?;
         fs::write(workspace.join("src").join("lib.rs"), "pub fn kept() {}\n")?;
-        // 应被跳过：node_modules 下与 .log 扩展
+        // 应被跳过：node_modules 目录下
         fs::write(
             workspace.join("node_modules").join("pkg").join("lib.rs"),
             "pub fn skipped() {}\n",
         )?;
+        // 二进制只建 path 条目：不进索引内容，但 `@` 提户要能指向它
         fs::write(workspace.join("trace.log"), "noise\n")?;
 
         let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
-        assert_eq!(index.full_scan()?, 1, "只应索引 src/lib.rs 一个文件");
-
+        // src/lib.rs（有内容）+ trace.log（仅路径）= 2 条
+        assert_eq!(index.full_scan()?, 2, "源码与二进制都应建条目");
         let hits = index.search("skipped", 5)?;
         assert!(hits.is_empty(), "node_modules 内容不应进入索引");
         let hits = index.search("kept", 5)?;
         assert!(hits.iter().any(|h| h.path == "src/lib.rs"));
+        // 二进制只有 path 条目，内容检索不应命中
+        let hits = index.search("noise", 5)?;
+        assert!(hits.is_empty(), "二进制内容不进入索引");
+        // 但路径检索能指向它（mention 候选）
+        let hits = index.search_paths("trace", 5)?;
+        assert!(
+            hits.iter().any(|h| h.path == "trace.log"),
+            "mention 路径检索应能指向二进制文件"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_or_create_reports_rebuild_after_schema_change() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(workspace.join("src").join("lib.rs"), "pub fn kept() {}\n")?;
+
+        // 首次创建：不是重建
+        let mut first = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(!first.was_rebuilt(), "首次创建不应报告重建");
+        assert_eq!(first.full_scan()?, 1);
+
+        // schema 相同再次打开：仍然不是重建，且数据还在
+        let second = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(!second.was_rebuilt(), "schema 未变不应报告重建");
+        drop(second);
+
+        // 模拟 schema 升级：改一个字段选项，使磁盘 schema 与当前 schema 不匹配
+        let index_dir = WorkspaceIndex::index_dir(&workspace, &base_dir);
+        let mut on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(index_dir.join("meta.json"))?)?;
+        on_disk["schema"][0]["options"]["stored"] = serde_json::json!(false);
+        fs::write(
+            index_dir.join("meta.json"),
+            serde_json::to_string_pretty(&on_disk)?,
+        )?;
+
+        let third = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert!(third.was_rebuilt(), "schema 变更必须报告重建");
+        assert_eq!(
+            third.entry_count(),
+            0,
+            "重建后的索引必须为空——调用方据此补全量扫描"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_paths_requires_all_terms_and_prefers_shallow() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src").join("deep"))?;
+        fs::write(workspace.join("src").join("main.rs"), "fn main() {}\n")?;
+        fs::write(
+            workspace.join("src").join("deep").join("main.rs"),
+            "fn deep_main() {}\n",
+        )?;
+        fs::write(workspace.join("docs.md"), "# 文档\n")?;
+
+        let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        index.full_scan()?;
+
+        // 空查询词不返回候选：刚唤出面板时罗列全部文件既昂贵也无意义
+        assert!(index.search_paths("", 10)?.is_empty());
+        assert!(index.search_paths("   ", 10)?.is_empty());
+
+        // 多词 AND：`src main` 要求路径同时含两个 token
+        let hits = index.search_paths("src main", 10)?;
+        assert_eq!(hits.len(), 2, "两层目录的 main.rs 都应命中");
+        // 浅优先：src/main.rs 排在 src/deep/main.rs 之前
+        assert_eq!(hits[0].path, "src/main.rs");
+        assert_eq!(hits[1].path, "src/deep/main.rs");
+
+        // 只含其一的词不应命中（AND 语义）
+        assert!(index.search_paths("main docs", 10)?.is_empty());
+
+        // limit 生效
+        assert_eq!(index.search_paths("rs", 1)?.len(), 1);
+        // limit 为 0 直接返回空
+        assert!(index.search_paths("rs", 0)?.is_empty());
+        Ok(())
+    }
+
+    /// 用户输入的是文件名**片段**，不是完整 token。
+    ///
+    /// 对应真实故障：`search_paths` 曾用 TermQuery 做整词相等匹配，导致
+    /// `ment` 找不到 `mentions.rs`、`s` 找不到 `src/...`、`main.rs`（带后缀）
+    /// 一个都命中不了——@ 面板于是只剩「无匹配」，看起来像索引坏了。
+    #[test]
+    fn search_paths_matches_token_prefixes_and_splits_query() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(workspace.join("src").join("mentions.rs"), "// x\n")?;
+        fs::write(workspace.join("src").join("other.rs"), "// y\n")?;
+        fs::write(workspace.join("docs.md"), "# 文档\n")?;
+
+        let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        index.full_scan()?;
+
+        // 前缀：`ment` 命中 `mentions` token，但不命中 `other`
+        let hits = index.search_paths("ment", 10)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "src/mentions.rs");
+
+        // 单个字母也能当前缀用（`s` 命中 src 段）
+        assert!(!index.search_paths("s", 10)?.is_empty());
+
+        // 查询词必须经同一 tokenizer：`mentions.rs` 被切成 mentions/rs，
+        // 与索引侧一致，因此能命中；整词相等时代码把它当一个词，永远查不到
+        let hits = index.search_paths("mentions.rs", 10)?;
+        assert_eq!(hits.len(), 1, "带后缀的文件名必须能命中");
+        assert_eq!(hits[0].path, "src/mentions.rs");
+
+        // 前缀 AND：`src ment` 两个词都要求前缀命中
+        assert_eq!(index.search_paths("src ment", 10)?.len(), 1);
+        // 前缀不满足时不得命中
+        assert!(index.search_paths("src zzz", 10)?.is_empty());
+
+        // 大小写不敏感（tokenizer 小写化）
+        assert_eq!(index.search_paths("MENTIONS", 10)?.len(), 1);
         Ok(())
     }
 }

@@ -11355,7 +11355,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -11363,7 +11363,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.2.3"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11386,7 +11386,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11511,6 +11511,7 @@ dependencies = [
  "tempfile",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-core-manager",
  "tiangong-llm",
  "tiangong-plugin-command-protocol",
  "tiangong-sandbox",

@@ -15,9 +15,7 @@ use tiangong_core::{
     core::{Plugin, TiangongCore},
     permission::TrustMode,
     session::Session,
-    tools::extension::{
-        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-    },
+    tools::extension::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider},
     tools::result::ToolResult,
 };
 use tiangong_llm::tool::{ToolCall, ToolSpec};
@@ -63,7 +61,6 @@ impl Plugin for MockPlugin {
         &self.id
     }
 }
-impl MentionCandidateProvider for MockPlugin {}
 impl ToolSpecProvider for MockPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         let description = if self.id.starts_with("dynamic-tools") {

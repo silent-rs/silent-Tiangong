@@ -7,8 +7,9 @@ import { Send, Square, FolderOpen, Mic, Loader2, Keyboard, MessageSquarePlus, Sh
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, textContent } from '@/api/tauri';
+import { api, textContent, type MentionTarget } from '@/api/tauri';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from './ui/select';
+import { useMentionGroups } from '@/hooks/useMentionGroups';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
@@ -22,8 +23,9 @@ import {
   estimatedBase64Size,
   resolveAttachmentUrl,
 } from '@/utils/attachments';
-import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
-import { registerMentionMarks, mentionMarkFor } from '@/utils/mentionMarks';
+import { mentionReplaceEnd, replaceMentionCompletion } from '@/utils/mentionEditorModel';
+import { mentionMarkFor, registerMentionMarks } from '@/utils/mentionMarks';
+import { selectDisplayGroups, selectableCandidates, isScanningPlaceholder, truncateMiddle } from '@/utils/mentionGroups';
 import { formatDuration } from './message/utils';
 import { SessionInputPluginHost } from './SessionInputPluginHost';
 import { InputQueueBar } from './InputQueueBar';
@@ -52,17 +54,12 @@ interface MentionCandidate {
   mark?: string;
 }
 
-interface MentionGroup {
-  kind: string;
-  label: string;
-  candidates: MentionCandidate[];
-}
-
 /** mention 分组标题（后端 label 缺省是 kind 原文，这里映射为展示名）。 */
 const MENTION_GROUP_TITLES: Record<string, string> = {
   skill: '技能',
   mcp: 'MCP 工具',
   agent: 'Agent',
+  file: '文件',
   index: '工作区搜索',
   plugin: '插件',
   command: '命令',
@@ -74,12 +71,12 @@ const MENTION_KIND_BADGE_CLASS: Record<string, string> = {
   mcp: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
   agent: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300',
   all: 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+  file: 'border-slate-500/30 bg-slate-500/10 text-slate-700 dark:text-slate-300',
   index: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
   plugin: 'border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300',
 };
 
-const SLASH_COMMANDS: MentionCandidate[] = [
-  {
+const SLASH_COMMANDS: MentionCandidate[] = [  {
     value: '/压缩对话',
     label: '/压缩对话',
     kind: 'command',
@@ -146,12 +143,15 @@ export function MessageInput({
 
   // @提及补全状态
   const [mentionOpen, setMentionOpen] = useState(false);
-  const [mentionGroups, setMentionGroups] = useState<MentionGroup[]>([]);
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionStart, setMentionStart] = useState(-1);
+  // 待替换区间末端：触发 mention 时 `@` 到光标的范围。过滤词由面板内的独立
+  // 搜索框承载（不写入消息文本），选中候选时整段替换为 chip token。
+  const [mentionEnd, setMentionEnd] = useState(-1);
   const [completionMode, setCompletionMode] = useState<'mention' | 'slash'>('mention');
   const mentionRef = useRef<HTMLDivElement>(null);
+  const mentionSearchRef = useRef<HTMLInputElement>(null);
   const candidateRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // 信任模式
@@ -395,60 +395,73 @@ export function MessageInput({
   // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====
-  const loadCandidates = useCallback(async () => {
-    try {
-      // 接口定义每组候选上限为 1000（防止单个插件撑爆传输与渲染）；后端
-      // 截断发生在前端搜索之前，超过上限的候选不可搜。搜索在全量已收候选
-      // 上进行，渲染时每组再截断展示。
-      const groups = await api.getMentionGroups(undefined, 1000);
-      setMentionGroups(groups);
-      // 注册插件提供的标记字符：编辑器 chip 与消息气泡从 token 重建时查表。
-      registerMentionMarks(groups.flatMap(group => group.candidates));
-    } catch (e) {
-      console.error('加载提及候选失败:', e);
+  const mentionTarget = useMemo<MentionTarget>(
+    () =>
+      !isNewConversation && activeSessionId
+        ? { kind: 'session', session_id: activeSessionId }
+        : sessionCwd ? { kind: 'draft', workspace: sessionCwd } : { kind: 'global' },
+    [isNewConversation, activeSessionId, sessionCwd]
+  );
+  const mentionGroups = useMentionGroups(
+    mentionTarget,
+    mentionOpen && completionMode === 'mention' ? mentionFilter : '',
+    mentionOpen && completionMode === 'mention',
+  );
+  // 预热 @提及标记表：消息气泡从 token 重建 chip 时查表，需在用户打开
+  // 补全面板前完成注册（面板查询命中时也会注册，这里覆盖未打开的场景）。
+  // 只取枚举型候选的 mark：file 组候选量随工作区规模增长，且 mark 固定为
+  // "F"，不该为它触发一次全量文件检索（会话切换/草稿目录变更都会重跑）。
+  useEffect(() => {
+    let cancelled = false;
+    api.getMentionGroups(undefined, undefined, {
+      target: mentionTarget,
+      query: '',
+      max_per_group: 1000,
+      allowed_kinds: ['skill', 'mcp', 'agent', 'plugin', 'index'],
+    })
+      .then(groups => {
+        if (!cancelled) registerMentionMarks(groups.flatMap(group => group.candidates));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [mentionTarget]);
+  const filteredGroups = completionMode === 'slash'
+    ? []
+    : selectDisplayGroups(mentionGroups, mentionFilter);
+
+  // 关闭 mention 面板并清空锚点。文本原样保留（含触发时的 `@` 与已打字符），
+  // 不删字；焦点回消息框、光标落在 `@` 之后，用户可继续编辑。
+  const closeMentionPanel = useCallback(() => {
+    const caret = mentionStart >= 0 ? mentionStart + 1 : null;
+    setMentionOpen(false);
+    setMentionFilter('');
+    setMentionStart(-1);
+    setMentionEnd(-1);
+    setMentionIndex(0);
+    const editor = editorRef.current;
+    if (editor && caret != null) {
+      editor.focus();
+      editor.setSelection(caret);
     }
-  }, []);
+  }, [mentionStart]);
 
-  const filteredGroups = (() => {
-    if (completionMode === 'slash') {
-      return [];
-    }
+  // 面板打开时把焦点移到面板内的独立搜索框：此后所有键入都进搜索框，消息
+  // 文本不再被输入态污染——因此不需要活跃区降级、光标越界判定那一套机制。
+  useEffect(() => {
+    if (!mentionOpen || completionMode !== 'mention') return;
+    mentionSearchRef.current?.focus();
+    mentionSearchRef.current?.select();
+  }, [mentionOpen, completionMode]);
 
-    // 插件 mention 候选由已安装插件统一提供。
-    const groups: MentionGroup[] = mentionGroups;
-
-    const filtered = mentionFilter
-      ? (() => {
-          const lower = mentionFilter.toLowerCase();
-          return groups
-            .map(group => ({
-              ...group,
-              candidates: group.candidates.filter(c =>
-                c.label.toLowerCase().includes(lower)
-                || c.value.toLowerCase().includes(lower)
-                || c.hint.toLowerCase().includes(lower)
-              ),
-            }))
-            .filter(group => group.candidates.length > 0);
-        })()
-      : groups;
-
-    // 渲染层截断：搜索在全量候选上进行，每组最多展示 50 条防大列表撑爆 UI。
-    // 键盘导航的平铺数组基于截断后的结果，保证索引与可见项对齐。
-    return filtered.map(group => ({
-      ...group,
-      candidates: group.candidates.slice(0, 50),
-    }));
-  })();
-
-  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）
+  // 平铺所有候选（用于键盘导航与选中；slash 模式用 SLASH_COMMANDS）。
+  // 索引建立中的占位候选（value 为空）不可选中，也不参与键盘导航。
   const filteredCandidates = completionMode === 'slash'
     ? (() => {
         const filter = mentionFilter.toLowerCase();
         if (!filter) return SLASH_COMMANDS;
         return SLASH_COMMANDS.filter(c => c.value.toLowerCase().startsWith(filter));
       })()
-    : filteredGroups.flatMap(group => group.candidates);
+    : selectableCandidates(filteredGroups.flatMap(group => group.candidates));
 
   useEffect(() => {
     if (!mentionOpen) return;
@@ -456,12 +469,6 @@ export function MessageInput({
       block: 'nearest',
     });
   }, [mentionIndex, mentionOpen, filteredCandidates.length]);
-
-  // 挂载即预热候选：消息气泡与编辑器从 token 重建 chip 时需要查插件提供
-  // 的标记字符，注册表不能等到 @ 菜单第一次打开才填充。
-  useEffect(() => {
-    loadCandidates();
-  }, [loadCandidates]);
 
   const executeSlashCommand = useCallback(async (command: string) => {
     const trimmed = command.trim();
@@ -506,6 +513,7 @@ export function MessageInput({
     const beforeCursor = value.slice(0, cursorPos);
     if (beforeCursor.startsWith('/') && !/\s/.test(beforeCursor)) {
       setMentionStart(0);
+      setMentionEnd(cursorPos);
       setMentionFilter(beforeCursor);
       setMentionIndex(0);
       setCompletionMode('slash');
@@ -513,22 +521,32 @@ export function MessageInput({
       return;
     }
 
+    // 面板已开（mention）：消息文本的变化只可能是用户回到编辑器继续打字，
+    // 视为取消——过滤词从此由面板搜索框承载，不再从消息文本推导。
+    if (completionMode === 'mention' && mentionOpen) {
+      closeMentionPanel();
+      return;
+    }
+
+    // 进入 mention：从光标回扫找 `@`（遇空白/换行即止），须位于行首或前置
+    // 空白，避免邮箱 `user@example.com` 误触发。过滤词初值取自消息文本里
+    // `@` 之后已输入的部分，随后交由面板搜索框接管。
     let atPos = -1;
     for (let i = cursorPos - 1; i >= 0; i--) {
       const ch = value[i];
+      if (ch === '\n' || /\s/.test(ch)) break;
       if (ch === '@') {
         if (i === 0 || /\s/.test(value[i - 1])) { atPos = i; }
         break;
       }
-      if (/\s/.test(ch)) break;
     }
     if (atPos >= 0) {
-      const filter = value.slice(atPos + 1, cursorPos);
       setMentionStart(atPos);
-      setMentionFilter(filter);
+      setMentionEnd(cursorPos);
+      setMentionFilter(value.slice(atPos + 1, cursorPos));
       setMentionIndex(0);
       setCompletionMode('mention');
-      if (!mentionOpen) { loadCandidates(); setMentionOpen(true); }
+      setMentionOpen(true);
     } else {
       setMentionOpen(false);
     }
@@ -537,21 +555,24 @@ export function MessageInput({
   const selectCandidate = (candidate: MentionCandidate) => {
     if (mentionStart < 0) return;
     if (candidate.kind === 'command') {
-      setMentionOpen(false);
+      closeMentionPanel();
       void executeSlashCommand(candidate.value);
       return;
     }
     const editor = editorRef.current;
-    const cursorPos = editor?.getSelection()?.start ?? inputContent.length;
+    // 替换区间是 `@` 到触发时的光标（mentionEnd）：过滤词在面板搜索框里，
+    // 不在消息文本中，因此不能用当前光标位置当区间末端。
+    const replaceEnd = mentionReplaceEnd(mentionStart, mentionEnd);
     const replacement = replaceMentionCompletion(
       inputContent,
       mentionStart,
-      cursorPos,
+      replaceEnd,
       candidate.value,
     );
     if (!replacement) return;
     setInputContent(replacement.value);
-    setMentionOpen(false);
+    // 选中即关闭面板并清空锚点，避免残留状态影响后续输入判定
+    closeMentionPanel();
     setTimeout(() => {
       if (editor) {
         editor.focus();
@@ -779,13 +800,13 @@ export function MessageInput({
     }
   };
 
+  // 面板打开时键盘由面板内的独立搜索框处理（见 handleMentionSearchKeyDown），
+  // 消息框只在焦点意外留在编辑器时兜底关闭面板。
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (mentionOpen && filteredCandidates.length > 0) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % filteredCandidates.length); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + filteredCandidates.length) % filteredCandidates.length); return; }
-      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
-      if (e.key === 'Escape') { e.preventDefault(); setMentionOpen(false); return; }
-      if (e.key === 'Tab') { e.preventDefault(); selectCandidate(filteredCandidates[mentionIndex]); return; }
+    if (mentionOpen && completionMode === 'mention' && e.key === 'Escape') {
+      e.preventDefault();
+      closeMentionPanel();
+      return;
     }
     if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault();
@@ -795,6 +816,37 @@ export function MessageInput({
       } else {
         void handleEnqueue();
       }
+    }
+  };
+
+  // 面板搜索框键盘：选取仅 Enter 与鼠标点击，Tab 不选取；方向键导航高亮项；
+  // Esc 关闭并退出，焦点回消息框。
+  const handleMentionSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (completionMode !== 'mention') return;
+    const count = filteredCandidates.length;
+    if (e.key === 'ArrowDown' && count > 0) {
+      e.preventDefault();
+      setMentionIndex(i => (i + 1) % count);
+      return;
+    }
+    if (e.key === 'ArrowUp' && count > 0) {
+      e.preventDefault();
+      setMentionIndex(i => (i - 1 + count) % count);
+      return;
+    }
+    if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (count > 0) {
+        selectCandidate(filteredCandidates[mentionIndex]);
+      } else {
+        // 无候选：关闭面板、文本留作普通文字，不发送
+        closeMentionPanel();
+      }
+      return;
+    }
+    if (e.key === 'Escape' || e.key === 'Tab') {
+      e.preventDefault();
+      closeMentionPanel();
     }
   };
 
@@ -1210,32 +1262,58 @@ export function MessageInput({
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
             >
-              {/* @提及补全下拉列表 */}
-              {mentionOpen && filteredCandidates.length > 0 && (
+              {/* @提及补全面板：过滤词由面板内独立搜索框承载，不复用消息输入框 */}
+              {mentionOpen && (
                 <div
                   ref={mentionRef}
-                  className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-72 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
+                  className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-80 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
-                  {completionMode === 'slash' ? (
-                    // slash 命令：平铺渲染
+                  {/* 吸顶：面板内容可滚动，搜索框必须始终可见（否则滚到长列表
+                      中部后就看不到当前过滤词，也不敢改） */}
+                  {completionMode === 'mention' && (
+                    <div className="sticky top-0 z-10 border-b bg-popover px-3 py-1.5">
+                      <input
+                        ref={mentionSearchRef}
+                        type="text"
+                        value={mentionFilter}
+                        onChange={(e) => { setMentionFilter(e.target.value); setMentionIndex(0); }}
+                        onKeyDown={handleMentionSearchKeyDown}
+                        placeholder="搜索技能 / 工具 / Agent / 文件…"
+                        aria-label="提及候选过滤"
+                        className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                      />
+                    </div>
+                  )}
+                  {filteredCandidates.length === 0 ? (
+                    <div className="px-3 py-3 text-center text-sm text-muted-foreground">
+                      无匹配 · Enter 或 Esc 关闭
+                    </div>
+                  ) : completionMode === 'slash' ? (
+                    // slash 命令：平铺渲染。标签完整显示（不截断），
+                    // 描述允许换行，并用 title 提供 hover 全文提示。
                     filteredCandidates.map((c, i) => (
                       <button
                         key={c.value}
                         ref={(el) => { candidateRefs.current[i] = el; }}
-                        className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                        className={`flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
                           i === mentionIndex ? 'bg-accent' : ''
                         }`}
                         onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
                         onMouseEnter={() => setMentionIndex(i)}
                       >
-                        <Keyboard className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                        <div className="min-w-0 flex-1 overflow-hidden">
-                          <div className="flex min-w-0 items-baseline gap-2">
-                            <span className="truncate font-medium">{c.label}</span>
-                          </div>
-                          <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
-                            {c.hint}
+                        <Keyboard className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <span className="max-w-full whitespace-normal break-words font-medium">
+                            {c.label}
                           </span>
+                          {c.hint && (
+                            <span
+                              className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
+                              title={c.hint}
+                            >
+                              {truncateMiddle(c.hint)}
+                            </span>
+                          )}
                         </div>
                       </button>
                     ))
@@ -1245,16 +1323,46 @@ export function MessageInput({
                       let flatIndex = 0;
                       return filteredGroups.map((group) => (
                         <div key={group.kind}>
-                          <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          <div className="px-3 pt-1.5 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                             {MENTION_GROUP_TITLES[group.kind] ?? group.label}
                           </div>
                           {group.candidates.map((c) => {
+                            // 索引建立中的占位候选：不可选中、不参与键盘导航，
+                            // 只作为提示行展示（避免把空结果误显示成"无匹配"）。
+                            if (isScanningPlaceholder(c)) {
+                              return (
+                                <div
+                                  key={`${group.kind}-scanning`}
+                                  className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm text-muted-foreground"
+                                >
+                                  <span
+                                    className="mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none"
+                                    aria-hidden="true"
+                                  >
+                                    {c.mark?.trim() || '…'}
+                                  </span>
+                                  <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                    <span className="max-w-full whitespace-normal break-words font-medium">
+                                      {c.label}
+                                    </span>
+                                    {c.hint && (
+                                      <span
+                                        className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
+                                        title={c.hint}
+                                      >
+                                        {truncateMiddle(c.hint)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            }
                             const i = flatIndex++;
                             return (
                               <button
                                 key={c.value}
                                 ref={(el) => { candidateRefs.current[i] = el; }}
-                                className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent ${
+                                className={`flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
                                   i === mentionIndex ? 'bg-accent' : ''
                                 }`}
                                 onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
@@ -1262,23 +1370,34 @@ export function MessageInput({
                               >
                                 {/* 标记字符与气泡 chip 同源（插件提供，缺省按 kind 回退） */}
                                 <span
-                                  className={`inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border text-[11px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
+                                  className={`mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
                                   aria-hidden="true"
                                 >
                                   {c.mark?.trim() || mentionMarkFor(c.kind, c.value)}
                                 </span>
-                                <div className="min-w-0 flex-1 overflow-hidden">
-                                  <div className="flex min-w-0 items-baseline gap-2">
-                                    <span className="truncate font-medium">{c.label}</span>
-                                    {c.kind === 'skill' && c.value.includes('@') && (
-                                      <span className="shrink-0 text-xs text-muted-foreground">
-                                        {c.value.replace(/^@/, '')}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <span className="mt-0.5 block whitespace-normal break-words text-xs leading-5 text-muted-foreground">
-                                    {c.hint}
+                                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                  {/* 主体完整显示：不截断，放不下就换行——截断后
+                                      用户无法确认选中的是哪一个 */}
+                                  <span className="max-w-full whitespace-normal break-words font-medium">
+                                    {c.label}
                                   </span>
+                                  {c.kind === 'skill' && c.value.includes('@') && (
+                                    <span className="whitespace-nowrap text-xs text-muted-foreground">
+                                      {c.value.replace(/^@/, '')}
+                                    </span>
+                                  )}
+                                  {c.hint && (
+                                    // 头尾截断：保留主体与收尾信息，中间省略；
+                                    // 单行不换行，全文靠 title 的 hover 提示读。
+                                    // truncate 是兜底：主轴被 label/技能名挤占时，
+                                    // 由 CSS 裁掉并补省略号，绝不允许冲出面板边界。
+                                    <span
+                                      className="min-w-0 flex-1 truncate text-xs leading-4 text-muted-foreground"
+                                      title={c.hint}
+                                    >
+                                      {truncateMiddle(c.hint)}
+                                    </span>
+                                  )}
                                 </div>
                               </button>
                             );
@@ -1349,7 +1468,12 @@ export function MessageInput({
                 onCompositionEnd={() => {
                   setTimeout(() => { isComposingRef.current = false; }, 0);
                 }}
-                onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
+                onBlur={(e) => {
+                  // 焦点移进面板（搜索框/候选按钮）不关闭；移到别处才关。
+                  const next = e.relatedTarget as Node | null;
+                  if (next && mentionRef.current?.contains(next)) return;
+                  setTimeout(() => setMentionOpen(false), 150);
+                }}
                 disabled={!cacheKey}
                 placeholder={
                   isIdle

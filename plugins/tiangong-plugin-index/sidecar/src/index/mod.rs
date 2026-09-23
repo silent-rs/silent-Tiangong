@@ -51,7 +51,7 @@ impl IndexQuery {
     }
 }
 
-const WORKSPACE_SCHEMA_VERSION: u32 = 2;
+const WORKSPACE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexMeta {
@@ -77,6 +77,12 @@ pub struct IndexManager {
     sessions: DashMap<String, Arc<std::sync::Mutex<SessionIndex>>>,
     /// 每个 workspace root 的后台扫描标志（key = `workspace_key(root)`）。
     scanning_roots: std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+    /// 索引被删除重建（schema 升级 / 损坏恢复）后待补全量扫描的工作区。
+    ///
+    /// 重建后的索引一定为空，而 `search` / `search_paths` 等查询路径不经过
+    /// `set_workspace` 的后台刷新，若不在此登记，索引会长期停留在空状态。
+    /// key = `workspace_key(root)`。
+    pending_full_scan: std::sync::Mutex<std::collections::HashSet<String>>,
     base_dir: PathBuf,
 }
 
@@ -114,6 +120,7 @@ impl IndexManager {
             workspaces: DashMap::new(),
             sessions: DashMap::new(),
             scanning_roots: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_full_scan: std::sync::Mutex::new(std::collections::HashSet::new()),
             base_dir,
         })
     }
@@ -156,9 +163,29 @@ impl IndexManager {
         }
 
         let index = WorkspaceIndex::open_or_create(root, &self.base_dir)?;
+        if index.was_rebuilt() {
+            // 旧索引被删除重建：此刻索引一定为空。查询路径（search / search_paths）
+            // 不经过 set_workspace 的后台刷新，若不登记，索引会长期停留在空状态。
+            self.mark_pending_full_scan(root);
+        }
         let index = Arc::new(std::sync::Mutex::new(index));
         self.workspaces.insert(key, Arc::clone(&index));
         Ok(index)
+    }
+
+    /// 登记工作区需要补一次全量扫描（索引刚被删除重建）。
+    pub fn mark_pending_full_scan(&self, root: &Path) {
+        if let Ok(mut pending) = self.pending_full_scan.lock() {
+            pending.insert(workspace_key(root));
+        }
+    }
+
+    /// 取出并清除待补扫标记；返回 true 表示调用方应触发一次全量扫描。
+    pub fn take_pending_full_scan(&self, root: &Path) -> bool {
+        self.pending_full_scan
+            .lock()
+            .map(|mut pending| pending.remove(&workspace_key(root)))
+            .unwrap_or(false)
     }
 
     pub fn get_or_create_session_index(
@@ -198,6 +225,31 @@ impl IndexManager {
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
         let hits = guard.search(&query.text, query.limit)?;
+        Ok(hits
+            .into_iter()
+            .map(|h| IndexHit {
+                path: h.path,
+                language: h.language,
+                scope: IndexScope::Workspace,
+            })
+            .collect())
+    }
+
+    /// `@` 提及文件候选检索：只查 path 字段，多词 AND，浅优先。
+    ///
+    /// 与 {@link search} 分开：mention 要能指向二进制/文档（它们只有 path 条目），
+    /// 且查询词是自由文本（含空格），不需要内容与符号字段参与。
+    pub fn search_paths(
+        &self,
+        root: &Path,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<IndexHit>> {
+        let index = self.get_or_create_workspace_index(root)?;
+        let guard = index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
+        let hits = guard.search_paths(query_text, limit)?;
         Ok(hits
             .into_iter()
             .map(|h| IndexHit {
@@ -368,6 +420,18 @@ impl IndexManager {
         tantivy_dir.is_dir()
     }
 
+    /// 工作区索引当前是否不可用：没有「当前 schema 版本」的成功扫描记录。
+    ///
+    /// 覆盖三种情况：索引刚被删除重建（父级 meta.json 还是旧 schema 版本）、
+    /// 索引从未扫描过、meta.json 缺失。此时磁盘上的索引一定不完整，调用方
+    /// 不能把空检索结果当作"没有匹配"返回。
+    ///
+    /// 判据落在 meta.json 而不是进程内状态：sidecar 是按连接拉起的短生命周期
+    /// 进程，重建索引的进程与随后发起查询的进程往往不是同一个。
+    pub fn workspace_index_unavailable(&self, root: &Path) -> bool {
+        self.workspace_index_age_secs(root).is_none()
+    }
+
     /// 距离最近一次成功扫描的秒数，None 表示索引不存在或没有成功扫描记录。
     pub fn workspace_index_age_secs(&self, root: &Path) -> Option<u64> {
         let meta_path = self.workspace_meta_path(root);
@@ -488,6 +552,86 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    /// 索引被删除重建后必须判为不可用，且补一次全量扫描即恢复可用。
+    ///
+    /// 对应真实故障：schema 升级把旧索引删掉重建后，索引长期停在空状态，
+    /// `@` 提及因而检索不到任何文件。判据必须落在 meta.json（跨进程），
+    /// 不能依赖进程内状态——stdio sidecar 是按连接短生命周期拉起的。
+    #[test]
+    fn workspace_index_unavailable_until_full_scan_after_rebuild() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let base_dir = temp.path().join("index");
+        let manager = IndexManager::new_with_dir(base_dir.clone()).expect("manager");
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("lib.rs"), "pub fn kept() {}\n").unwrap();
+
+        assert!(
+            manager.workspace_index_unavailable(&root),
+            "从未扫描过的索引必须判为不可用"
+        );
+
+        manager.full_scan(&root).expect("full scan");
+        assert!(
+            !manager.workspace_index_unavailable(&root),
+            "成功扫描后必须恢复可用"
+        );
+        assert!(
+            manager.search_paths(&root, "lib", 5).unwrap().len() == 1,
+            "恢复后应能检索到文件"
+        );
+
+        // 模拟 schema 升级：篡改磁盘 schema 使下次打开触发删除重建。
+        // 用全新 manager 重新打开——stdio sidecar 本就是按连接短生命周期拉起，
+        // 重建索引的进程与随后发起查询的进程本来就不是同一个。
+        let index_dir = workspace_index::WorkspaceIndex::index_dir(&root, &base_dir);
+        let mut on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(index_dir.join("meta.json")).unwrap())
+                .unwrap();
+        on_disk["schema"][0]["options"]["stored"] = serde_json::json!(false);
+        std::fs::write(
+            index_dir.join("meta.json"),
+            serde_json::to_string_pretty(&on_disk).unwrap(),
+        )
+        .unwrap();
+
+        let reopened_manager = IndexManager::new_with_dir(base_dir).expect("reopen manager");
+        let reopened = reopened_manager
+            .get_or_create_workspace_index(&root)
+            .expect("reopen index");
+        assert!(
+            reopened.lock().unwrap().was_rebuilt(),
+            "schema 变更必须触发删除重建"
+        );
+        drop(reopened);
+
+        assert!(
+            reopened_manager.workspace_index_unavailable(&root),
+            "重建后 meta.json 仍是旧 schema 版本，必须继续判为不可用"
+        );
+        assert!(
+            reopened_manager
+                .search_paths(&root, "lib", 5)
+                .unwrap()
+                .is_empty(),
+            "重建后的空索引检索不到任何文件"
+        );
+
+        reopened_manager.full_scan(&root).expect("rescan");
+        assert!(
+            !reopened_manager.workspace_index_unavailable(&root),
+            "补扫后必须恢复可用"
+        );
+        assert_eq!(
+            reopened_manager
+                .search_paths(&root, "lib", 5)
+                .unwrap()
+                .len(),
+            1,
+            "补扫后应能重新检索到文件"
+        );
+    }
 
     /// 并发为同一路径申请扫描许可，必须只有一个线程成功取得（去重原子性）。
     #[test]

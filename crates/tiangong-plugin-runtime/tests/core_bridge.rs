@@ -82,6 +82,10 @@ fn 桥聚合_新装插件下一轮可见且卸载后消失() {
         has(&after_uninstall, "bridge_a_tool") && !has(&after_uninstall, "bridge_b_tool"),
         "卸载后 B 工具消失、其余不受影响"
     );
+    // 注册表是进程级全局，preload 只增量合并：测试插件必须各自卸载，
+    // 否则残留条目污染后续测试的清单/指纹断言。
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "bridge-view-a", false)
+        .expect("清理测试插件 A");
 }
 
 /// 并发聚合首见同一新插件：装载在锁外进行，双方结果一致且线程不卡死。
@@ -117,6 +121,8 @@ fn 桥聚合_并发首见收敛() {
         first.iter().any(|n| n == "bridge_c_tool"),
         "并发聚合应交付 C 工具（固定通道工具亦在声明中）：{first:?}"
     );
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "bridge-view-c", false)
+        .expect("清理测试插件 C");
 }
 
 // ── 自制插件动态调用通道（local 签名 → 固定工具 + 对话内清单）──
@@ -238,6 +244,10 @@ fn 固定通道_自制插件不进声明_清单与判据正确() {
     assert_eq!(plugins.len(), 1, "清单只含自制插件：{inventory}");
     assert_eq!(plugins[0]["name"], "local-bridge-a");
     assert_eq!(plugins[0]["functions"][0]["name"], "local_a_tool");
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-bridge-a", false)
+        .expect("清理测试插件 A");
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "unsigned-bridge-b", false)
+        .expect("清理测试插件 B");
 }
 
 #[tokio::test]
@@ -273,6 +283,10 @@ async fn 固定通道_方法不存在返回可用方法() {
         "错误信息应带可用方法：{}",
         result.stderr
     );
+    // 注册表是进程级全局：测试插件必须真正卸载，否则残留条目会污染
+    // 后续测试的清单断言（preload 只增量合并，不清理扫描不到的插件）。
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-bridge-c", false)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -337,6 +351,8 @@ async fn 固定通道_查询工具返回清单() {
         "{}",
         result.stdout
     );
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-bridge-e", false)
+        .expect("清理测试插件 E");
 }
 
 // ── 压缩链路口径回归：指纹只计入进入模型请求前缀的插件 ──
@@ -471,4 +487,10 @@ fn 自制插件prompt不进系统段落_随清单注入() {
         entry["prompt"][0], "自制插件专属段落",
         "清单应携带 prompt 内容：{entry}"
     );
+    // 注册表是进程级全局，preload 只增量合并：残留插件会污染其他测试
+    // 的 prompt/清单断言，各自卸载。
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "local-prompt-a", false)
+        .expect("清理自制 prompt 插件");
+    tiangong_plugin_runtime::registry::uninstall_plugin(root.path(), "unsigned-prompt-b", false)
+        .expect("清理未签名 prompt 插件");
 }

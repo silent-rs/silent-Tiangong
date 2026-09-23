@@ -17,6 +17,7 @@ pub mod core_manager;
 mod metadata;
 mod workspace;
 
+pub use core_manager::mentions::MentionSource;
 pub use core_manager::{CoreManager, CoreRegistry, CoreRegistryGuard, EnsuredCore};
 pub use metadata::SessionMetadata;
 pub use workspace::resolve_effective_cwd;

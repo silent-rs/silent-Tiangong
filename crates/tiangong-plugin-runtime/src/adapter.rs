@@ -18,7 +18,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
 use tiangong_core::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
 };
 use tiangong_core::tools::result::{ToolExecutionRecord, ToolResult};
 use tiangong_llm::tool::{ToolCall, ToolSpec};
@@ -680,32 +680,6 @@ impl PromptSectionProvider for WasmPluginAdapter {
             .map_err(|error| error.to_string())?;
         *frozen = Some(sections.clone());
         Ok(sections)
-    }
-}
-
-// MentionCandidateProvider：调 WASM 的 mention-candidates 导出，供 Core.get_mentions 收集。
-// 错误（含插件未启用）降级为空列表——mention 是 UI 辅助，不应阻塞输入补全。
-impl MentionCandidateProvider for WasmPluginAdapter {
-    fn mention_candidates(&self) -> Vec<tiangong_core::MentionCandidate> {
-        if !self.is_enabled() {
-            return Vec::new();
-        }
-        match self.call_wasm_off_runtime(WasmPlugin::mention_candidates) {
-            Ok(candidates) => candidates
-                .into_iter()
-                .map(|c| tiangong_core::MentionCandidate {
-                    value: c.value,
-                    label: c.label,
-                    kind: c.kind,
-                    hint: c.hint,
-                    mark: c.mark,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::warn!("wasm mention_candidates 失败: {e}");
-                Vec::new()
-            }
-        }
     }
 }
 

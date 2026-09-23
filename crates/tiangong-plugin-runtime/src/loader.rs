@@ -420,22 +420,50 @@ impl WasmPlugin {
             .collect())
     }
 
-    /// 返回插件贡献的 @提及候选。
+    /// @提及查询的单请求预算（含 sidecar 往返）：补全是交互路径，
+    /// 超时的来源返回空候选，不阻塞输入框。
+    const MENTION_QUERY_TIMEOUT_MS: u64 = 3000;
+    /// 按查询返回插件贡献的 @提及候选。
     ///
     /// 复用 0.1.0 world 已有的 plugin-ui 消息通道，避免给现有 world 增加强制导出：
     /// 旧插件收到未知方法会返回 plugin-error，此处按“不支持 Mention”降级为空列表；
-    /// 新插件返回 MentionCandidate JSON 数组。
-    pub fn mention_candidates(&mut self) -> Result<Vec<MentionCandidate>> {
-        const METHOD: &str = "__tiangong.mention_candidates.v1";
+    /// 新插件返回 MentionCandidate JSON 数组。请求级上下文，不调用 set_workspace；
+    /// 错误返回时也清除宿主上下文。
+    pub fn query_mentions(
+        &mut self,
+        query: &tiangong_types::MentionQuery,
+    ) -> Result<Vec<MentionCandidate>> {
         let request = crate::bindings::exports::tiangong::plugin::plugin_ui::ViewMessageRequest {
-            method: METHOD.to_string(),
-            payload: "{}".to_string(),
+            method: "__tiangong.mention_candidates.v1".into(),
+            payload: serde_json::to_string(query)?,
         };
+        let limits = PluginRuntimeConfig::default();
+        self.store
+            .set_fuel(limits.fuel_limit)
+            .map_err(|e| anyhow::anyhow!("重置 mention fuel 失败: {e}"))?;
+        self.store.set_epoch_deadline(limits.epoch_deadline_ticks());
+        self.store.data_mut().set_full_invocation_context(Some(
+            crate::protocol::RequestInvocationContext {
+                session_id: query.context.session_id.clone().unwrap_or_default(),
+                invocation_id: scru128::new().to_string(),
+                workspace: query.context.workspace.clone().unwrap_or_default(),
+                actor_id: String::new(),
+                deadline_ms: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64
+                        + Self::MENTION_QUERY_TIMEOUT_MS,
+                ),
+            },
+        ));
         let response = self
             .instance
             .tiangong_plugin_plugin_ui()
-            .call_handle_view_message(&mut self.store, &request)
-            .map_err(|e| anyhow::anyhow!("mention-candidates 调用失败: {e}"))?;
+            .call_handle_view_message(&mut self.store, &request);
+        self.store.data_mut().set_full_invocation_context(None);
+        self.store.set_epoch_deadline(u64::MAX);
+        let response = response.map_err(|e| anyhow::anyhow!("mention-candidates 调用失败: {e}"))?;
         let payload = match response {
             Ok(response) => response.payload,
             Err(_) => return Ok(Vec::new()),

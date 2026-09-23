@@ -6,6 +6,8 @@ use crate::{IndexHit, IndexOperation, IndexScope, SessionIndexHit};
 
 pub const INDEX_SEARCH_OPERATION: &str = "index.search";
 pub const SEARCH_CODE_OPERATION: &str = "index.search_code";
+/// `@` 提及文件候选：输入框补全用，只查 path 字段（不查内容）。
+pub const MENTION_FILES_OPERATION: &str = "index.mention_files";
 
 /// `index_search` 工具请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -74,4 +76,47 @@ impl IndexOperation for SearchCode {
     const NAME: &'static str = SEARCH_CODE_OPERATION;
     type Request = SearchCodeRequest;
     type Response = SearchCodeResponse;
+}
+
+/// `@` 提及文件候选请求。
+///
+/// 与 {@link IndexSearchRequest} 分开：mention 只查 path 字段（用户要的是
+/// 「指向某个文件」，不是搜内容），scope 固定 Workspace、limit 更严，且查询
+/// 词可含空格（按词 AND 匹配）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFilesRequest {
+    /// 查询词（用户在 `@` 之后输入的内容，可含空格）。
+    #[serde(default)]
+    pub query: String,
+    /// 返回数量上限。
+    #[serde(default)]
+    pub limit: usize,
+    /// 工作区根目录（由宿主按会话上下文注入）。
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+/// 单个文件候选。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFileCandidate {
+    /// 相对工作区的路径（统一 `/` 分隔，跨平台可原样往返）。
+    pub relative_path: String,
+    /// 文件名（展示用）。
+    pub file_name: String,
+}
+
+/// 文件候选响应。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MentionFilesResponse {
+    pub candidates: Vec<MentionFileCandidate>,
+    /// 后台扫描进行中为 true：此时索引不完整，候选可能缺失。
+    #[serde(default)]
+    pub scanning: bool,
+}
+
+pub struct MentionFiles;
+impl IndexOperation for MentionFiles {
+    const NAME: &'static str = MENTION_FILES_OPERATION;
+    type Request = MentionFilesRequest;
+    type Response = MentionFilesResponse;
 }

@@ -1,9 +1,12 @@
+import { parseBlocks, serializeBlocks } from '@/utils/mentionBlocks';
 import { describe, expect, it } from 'vitest';
 
 import {
+  deactivateBlocksInRange,
   deleteMentionSelection,
   getMentionBoundaries,
   insertTextAtMentionBoundary,
+  mentionReplaceEnd,
   normalizePastedText,
   replaceMentionCompletion,
   resolveMentionKeyAction,
@@ -104,7 +107,81 @@ describe('提及编辑规则', () => {
     expect(replaceMentionCompletion('@de', 2, 1, '@dev')).toBeNull();
   });
 
+  it('选中替换用触发时记录的区间末端，而非当前光标', () => {
+    // 过滤词在面板搜索框里，消息文本中只有 `@` 本身
+    expect(mentionReplaceEnd(0, 1)).toBe(1);
+    // 触发时已打了 `@ab`（mentionEnd=3）：选中后整段替换，不留游离字符
+    expect(mentionReplaceEnd(0, 3)).toBe(3);
+    // mentionEnd 未记录/非法：退化为只替换 `@`
+    expect(mentionReplaceEnd(5, -1)).toBe(6);
+    expect(mentionReplaceEnd(5, 5)).toBe(6);
+    expect(mentionReplaceEnd(5, 3)).toBe(6);
+  });
+
+  it('过滤词不入消息文本：`@` 后接游离字符也能整段替换', () => {
+    // 用户在消息框打了 `@ab` 后面板打开，随后在搜索框输入 `design`：
+    // 消息文本仍是 `@ab`，选中文件后应整体被 chip token 取代。
+    const text = '请看 @ab 谢谢';
+    const replacement = replaceMentionCompletion(
+      text,
+      3,
+      mentionReplaceEnd(3, 6),
+      '@file:design.md',
+    );
+    expect(replacement?.value).toBe('请看 @file:design.md  谢谢');
+  });
+
   it('粘贴文本统一 Windows 和旧式换行', () => {
     expect(normalizePastedText('第一行\r\n第二行\r第三行')).toBe('第一行\n第二行\n第三行');
+  });
+});
+
+describe('活跃区降级', () => {
+  it('无活跃区时原样返回', () => {
+    const parsed = parseBlocks('@dev @qa');
+    expect(deactivateBlocksInRange(parsed, null)).toEqual(parsed);
+    expect(deactivateBlocksInRange(parsed, undefined)).toEqual(parsed);
+  });
+
+  it('活跃区内的 mention 降级为纯文本，区外保持 chip', () => {
+    // 已固化 @dev，用户在其后新输入 `@qa`（活跃区覆盖第二个 @ 到光标）
+    const text = '@dev @qa';
+    const blocks = parseBlocks(text);
+    expect(blocks.map(b => b.type)).toEqual(['mention', 'text', 'mention']);
+    const result = deactivateBlocksInRange(blocks, { start: 5, end: 8 });
+    expect(result.map(b => b.type)).toEqual(['mention', 'text', 'text']);
+    // 降级后序列化结果不变：契约 serialize(parse(text)) === text 保持
+    expect(serializeBlocks(result)).toBe(text);
+  });
+
+  it('活跃区只覆盖到光标：其后已固化文本不受影响', () => {
+    const text = '@dev @qa 说明';
+    const blocks = parseBlocks(text);
+    const result = deactivateBlocksInRange(blocks, { start: 5, end: 8 });
+    expect(result.map(b => b.type)).toEqual(['mention', 'text', 'text', 'text']);
+  });
+
+  it('区间未覆盖 mention 起点时不降级', () => {
+    const text = '@dev @qa';
+    const blocks = parseBlocks(text);
+    // 空区间：不降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 5, end: 5 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'mention']);
+    // 区间起点落在 mention 内部（@qa 起点是 5）：不降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 6, end: 8 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'mention']);
+    // 区间从 mention 起点开始：降级
+    expect(
+      deactivateBlocksInRange(blocks, { start: 5, end: 8 }).map(b => b.type),
+    ).toEqual(['mention', 'text', 'text']);
+  });
+
+  it('空文本与纯文本不受影响', () => {
+    expect(deactivateBlocksInRange(parseBlocks(''), { start: 0, end: 0 })).toEqual([]);
+    expect(
+      deactivateBlocksInRange(parseBlocks('普通文本'), { start: 0, end: 4 }).map(b => b.type),
+    ).toEqual(['text']);
   });
 });

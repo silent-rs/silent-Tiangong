@@ -9,6 +9,7 @@ transport-protocol = "0.1.0"
 
 [dependencies]
 tiangong-core = { workspace = true }
+tiangong-core-manager = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }

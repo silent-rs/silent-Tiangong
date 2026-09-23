@@ -23,8 +23,8 @@ use tiangong_plugin_index_protocol::management::{
     RebuildWorkspaceIndexRequest,
 };
 use tiangong_plugin_index_protocol::search::{
-    IndexSearch, IndexSearchRequest, IndexSearchResponse, SearchCode, SearchCodeRequest,
-    SearchCodeResponse,
+    IndexSearch, IndexSearchRequest, IndexSearchResponse, MentionFiles, MentionFilesRequest,
+    MentionFilesResponse, SearchCode, SearchCodeRequest, SearchCodeResponse,
 };
 use tiangong_plugin_index_protocol::{IndexOperation, IndexScope, TurnData};
 use tiangong_types::{MessageRole, PluginSession};
@@ -442,7 +442,7 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
-            "__tiangong.mention_candidates.v1" => index_mention_candidates()?,
+            "__tiangong.mention_candidates.v1" => index_mention_candidates(&request.payload)?,
             "list" => {
                 invoke_for_ui::<ListWorkspaceIndexes>(&tiangong_plugin_index_protocol::Empty {})?
             }
@@ -462,20 +462,104 @@ impl UiGuest for Component {
     }
 }
 
-/// 生成 @提及候选：返回 index 插件本身（`@index` 点名触发工作区文件搜索）。
+/// 生成 @提及候选：按宿主查询上下文检索工作区文件，返回文件候选。
 ///
-/// 与 mcp/skill 的 mention 机制一致（`__tiangong.mention_candidates.v1`）。
-/// 候选内容控制规模——只返回 index 插件一个候选，不返回全量文件列表，
-/// 避免撑爆 mention 补全 UI。用户 `@index:关键词` 后由 Agent 调用 index_search。
-fn index_mention_candidates() -> Result<String, PluginError> {
-    let candidates = vec![serde_json::json!({
-        "value": "@index",
-        "label": "工作区搜索",
-        "kind": "index",
-        "hint": "搜索工作区文件与对话历史",
-        "mark": "I",
-    })];
+/// 与 mcp/skill 的 mention 机制一致（`__tiangong.mention_candidates.v1`），但
+/// 候选内容不是静态清单——由 tantivy 索引按查询词实时检索，因此能覆盖
+/// 图片/PDF/Office 等二进制文件（它们只建 path 条目），并支持符号名检索。
+///
+/// 工作区取宿主随查询注入的请求级上下文（`MentionQuery.context.workspace`）：
+/// 本实例是注册表预加载的查询实例，不经 `set_workspace` 初始化，`state` 里的
+/// 工作区恒为空。查询失败一律降级为空列表，不阻塞输入框补全。
+fn index_mention_candidates(payload: &str) -> Result<String, PluginError> {
+    let query: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    let Some(workspace) = query
+        .pointer("/context/workspace")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        // 草稿/全局查询没有工作区，直接无候选
+        return Ok("[]".to_string());
+    };
+    let request = MentionFilesRequest {
+        query: query
+            .get("query")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        limit: query
+            .get("max_per_group")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize,
+        workspace: Some(workspace.to_string()),
+    };
+    let payload = match invoke_for_ui::<MentionFiles>(&request) {
+        Ok(payload) => payload,
+        // 查询失败不能静默降级成空列表：面板会显示"无匹配"，把 sidecar 调用
+        // 失败伪装成"工作区里没有这个文件"。用占位候选把原因透传出去。
+        Err(error) => return Ok(mention_failure_candidates(&error)),
+    };
+    let response = match serde_json::from_str::<MentionFilesResponse>(&payload) {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(mention_failure_candidates(&plugin_err(error.to_string())));
+        }
+    };
+    let mut candidates: Vec<serde_json::Value> = response
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            // 路径含空白时用反引号包裹：前端 token 扫描到空白即止，
+            // 不包裹会把路径截断（跨平台统一 `/` 分隔，可原样往返）。
+            let token = if candidate
+                .relative_path
+                .chars()
+                .any(|character| character.is_whitespace())
+            {
+                format!("@file:`{}`", candidate.relative_path)
+            } else {
+                format!("@file:{}", candidate.relative_path)
+            };
+            serde_json::json!({
+                "value": token,
+                "label": candidate.file_name,
+                "kind": "file",
+                "hint": candidate.relative_path,
+                "mark": "F",
+            })
+        })
+        .collect();
+    if response.scanning {
+        // 索引正在建立/重建：候选必然不完整。mention 协议只允许返回候选数组，
+        // 这里用一个 value 为空的占位候选把"扫描中"透传给前端——前端据此渲染
+        // 不可选中的提示行，而不是把空结果误显示成"无匹配"。
+        candidates.push(serde_json::json!({
+            "value": "",
+            "label": "索引创建中…",
+            "kind": "file",
+            "hint": "正在扫描工作区文件，请稍候",
+            "mark": "…",
+        }));
+    }
     serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
+}
+
+/// 查询失败时返回一条占位候选（value 为空，与「索引创建中…」同一协议）。
+///
+/// mention 协议只允许返回候选数组，没有独立错误通道；静默返回空列表会让用户
+/// 把"索引查不到"误判成"没有匹配的文件"，且事后无从排查。
+fn mention_failure_candidates(error: &PluginError) -> String {
+    let reason = match error {
+        PluginError::Message(message) => message.as_str(),
+    };
+    serde_json::to_string(&[serde_json::json!({
+        "value": "",
+        "label": "文件索引查询失败",
+        "hint": reason,
+        "kind": "file",
+        "mark": "!",
+    })])
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。

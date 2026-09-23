@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 use tiangong_core::config::core::CoreConfig;
 use tiangong_core::core::Plugin;
 use tiangong_core::session::Session;
-use tiangong_core::tools::extension::{
-    MentionCandidateProvider, PromptSectionProvider, ToolSpecProvider,
-};
+use tiangong_core::tools::extension::{PromptSectionProvider, ToolSpecProvider};
 use tiangong_plugin_runtime::{
     PluginRuntimeConfig, SidecarConnection, ToolCall, WasmPluginAdapter, WasmPluginLoader,
 };
@@ -695,20 +693,4 @@ fn file_plugin_preparation_never_starts_a_sidecar() {
         sidecar.calls.lock().unwrap().is_empty(),
         "仅设置目录、信任模式或读取声明不应调用 sidecar"
     );
-}
-
-#[test]
-fn legacy_plugin_without_mention_method_returns_empty_candidates() {
-    // Memory WASM 按旧 0.1.0 world 构建，不实现保留的 Mention 消息方法；
-    // 运行时必须保持正常加载，并把未知方法降级为空候选。
-    let Some(wasm) = wasm_or_skip() else {
-        return;
-    };
-    let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
-    let plugin = loader.load(&wasm, &config).expect("旧插件应保持可加载");
-    let adapter = WasmPluginAdapter::new(plugin, config);
-
-    let candidates = <WasmPluginAdapter as MentionCandidateProvider>::mention_candidates(&adapter);
-    assert!(candidates.is_empty(), "旧插件不支持 Mention 时应返回空候选");
 }

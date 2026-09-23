@@ -229,4 +229,52 @@ describe('MentionEditor 轻量交互', () => {
     dispatchKey(editor, 'Backspace');
     expect(onSetEditingContent).toHaveBeenLastCalledWith('请 处理');
   });
+
+  it('未进入输入态时 chip 边界守卫保持既有行为', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    const editor = await mountEditor('@ab', onChange, editorRef);
+
+    act(() => editorRef.current!.setSelection(3));
+    dispatchKey(editor, 'x');
+    // 未进入 mention 输入态（无活跃区）：守卫照旧，避免文字紧贴 chip 落字
+    expect(onChange).toHaveBeenLastCalledWith('@ab x');
+  });
+
+  it('光标落在活跃区内时不走 chip 边界守卫', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    // 已固化 @dev，其后是正在编辑的 @qa（活跃区覆盖第二个 @ 到光标）
+    const editor = await mountEditor('@dev @qa', onChange, editorRef, {
+      activeRange: { start: 5, end: 8 },
+    });
+    // 活跃区内的 @qa 已降级为纯文本：DOM 里只有一个 chip
+    expect(editor.querySelectorAll('.mention-chip')).toHaveLength(1);
+
+    act(() => editorRef.current!.setSelection(8));
+    dispatchKey(editor, 'x');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('退出输入态后活跃区文本还原为 chip', async () => {
+    const onChange = vi.fn();
+    const editorRef = createRef<MentionEditorHandle>();
+    await mountEditor('@dev @qa', onChange, editorRef, {
+      activeRange: { start: 5, end: 8 },
+    });
+    expect(editorRef.current!.element!.querySelectorAll('.mention-chip')).toHaveLength(1);
+
+    // 外层退出输入态（activeRange 置空）而 value 不变：应重建 DOM 还原 chip
+    await act(async () => {
+      root!.render(
+        <MentionEditor
+          ref={editorRef}
+          value="@dev @qa"
+          onChange={onChange}
+          activeRange={null}
+        />,
+      );
+    });
+    expect(editorRef.current!.element!.querySelectorAll('.mention-chip')).toHaveLength(2);
+  });
 });

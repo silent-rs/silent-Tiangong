@@ -22,6 +22,7 @@ const MENTION_KIND_CLASS: Record<MentionKind, string> = {
   all: 'border-rose-500/30 bg-rose-500/10',
   index: 'border-emerald-500/30 bg-emerald-500/10',
   plugin: 'border-violet-500/30 bg-violet-500/10',
+  file: 'border-slate-500/30 bg-slate-500/10',
 };
 
 const MENTION_MARK_KIND_CLASS: Record<MentionKind, string> = {
@@ -31,6 +32,7 @@ const MENTION_MARK_KIND_CLASS: Record<MentionKind, string> = {
   all: 'text-rose-700 dark:text-rose-300',
   index: 'text-emerald-700 dark:text-emerald-300',
   plugin: 'text-violet-700 dark:text-violet-300',
+  file: 'text-slate-700 dark:text-slate-300',
 };
 
 export function mentionChipClass(kind: MentionKind): string {
@@ -48,6 +50,7 @@ const TOKEN_PREFIX: Record<MentionKind, string> = {
   all: '@',
   index: '@',
   plugin: '@plugin:',
+  file: '@file:',
 };
 
 /**

@@ -82,9 +82,7 @@ pub(crate) fn prepare_plugins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::extension::{
-        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler,
-    };
+    use crate::tools::extension::{PromptSectionProvider, ToolOverrideHandler};
 
     fn tool(name: &str) -> ToolSpec {
         ToolSpec {
@@ -110,7 +108,6 @@ mod tests {
     }
     impl PromptSectionProvider for OrderedPlugin {}
     impl ToolOverrideHandler for OrderedPlugin {}
-    impl MentionCandidateProvider for OrderedPlugin {}
 
     /// 顺序语义锁定：tools 顺序 = 内置注入工具 + 插件 id 字典序（prompt
     /// 置顶）+ 插件自身输出序（core 不排序）；重名工具保留先注册者。

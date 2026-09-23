@@ -1,3 +1,11 @@
+export type MentionTarget = { kind: 'global' } | { kind: 'session'; session_id: string } | { kind: 'draft'; workspace: string };
+export interface MentionRequest {
+  target: MentionTarget;
+  query: string;
+  allowed_kinds?: string[];
+  max_per_group?: number;
+}
+
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -1037,8 +1045,9 @@ export const api = {
   getMentionGroups: (
     allowedKinds?: string[],
     maxPerGroup?: number,
+    request?: MentionRequest,
   ): Promise<{ kind: string; label: string; candidates: { value: string; label: string; kind: string; hint: string; mark?: string }[] }[]> =>
-    invoke('get_mention_groups', { allowedKinds, maxPerGroup }),
+    invoke('get_mention_groups', { allowedKinds, maxPerGroup, request }),
 
   // ----------------------------------------------------------------
   // 上下文管理

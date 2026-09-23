@@ -4,7 +4,6 @@ use super::connections::remove_sidecar_connection;
 use super::migrations::post_install_sidecar_check_with;
 
 use super::*;
-use tiangong_core::MentionCandidate;
 
 /// 指纹只反映插件能力的声明态：加载顺序与重复项不构成变化。
 #[test]
@@ -352,16 +351,6 @@ fn startup_preparation_reports_verification_and_resident_failures_then_recovers(
     loaded_plugins().lock().unwrap().remove(&id);
 }
 
-fn candidate(kind: &str, value: &str) -> MentionCandidate {
-    MentionCandidate {
-        value: value.to_string(),
-        label: value.to_string(),
-        kind: kind.to_string(),
-        hint: String::new(),
-        mark: String::new(),
-    }
-}
-
 #[test]
 fn 插件发现忽略内部事务目录并拒绝目录名与清单id不一致() {
     let root = tempfile::tempdir().unwrap();
@@ -559,55 +548,66 @@ fn sidecar_check_failures_keep_installation_and_publish_only_after_save() {
     loaded_plugins().lock().unwrap().remove(&id);
 }
 
+/// #550 验收：查询句柄不依赖会话 Core（无任何 Core 也可达），
+/// 且停用/卸载后立即从候选集合消失。
 #[test]
-fn group_按kind分组保持顺序() {
-    let groups = group_mention_candidates(
-        vec![
-            candidate("skill", "@skill:a"),
-            candidate("mcp", "@mcp:x"),
-            candidate("skill", "@skill:b"),
-        ],
-        &[],
-        usize::MAX,
+#[serial_test::serial]
+fn mention_sources_are_reachable_without_any_session_core() {
+    let manifest = |id: &str| -> PluginManifest {
+        serde_json::from_str(&format!(
+            r#"{{"schema_version":2,"id":"{id}","version":"1.0.0","mention":{{"hint":"候选"}},"ui":{{"contributions":[{{"slot":"extension.tab","id":"app","title":"{id}","entry":"dist/index.html"}}]}}}}"#
+        ))
+        .expect("解析测试清单")
+    };
+    let record = |id: &str, enabled: bool| LoadedPlugin {
+        directory: std::path::PathBuf::from(format!("/tmp/{id}")),
+        manifest: manifest(id),
+        signed_release: None,
+        wasm_bytes: None,
+        component: None,
+        ui_plugin: None,
+        descriptor: None,
+        generation: 1,
+        instances: Vec::new(),
+        ts_instances: Vec::new(),
+        sidecar: None,
+        verified_sidecar: None,
+        load_error: None,
+        runtime_error: None,
+        enabled,
+    };
+    {
+        let mut plugins = loaded_plugins().lock().unwrap();
+        plugins.insert("mention-enabled".into(), record("mention-enabled", true));
+        plugins.insert("mention-disabled".into(), record("mention-disabled", false));
+    }
+    let query = tiangong_types::MentionQuery::default();
+    let values: Vec<String> = mention_sources()
+        .into_iter()
+        // 注册表持有的来源：没有任何 TiangongCore 存在，也不依赖适配器弱引用。
+        .flat_map(|source| source.query(&query).expect("查询不应失败"))
+        .map(|candidate| candidate.value)
+        .collect();
+    assert!(
+        values.contains(&"@plugin:mention-enabled".to_string()),
+        "启用插件应可见：{values:?}"
     );
-    assert_eq!(groups.len(), 2);
-    assert_eq!(groups[0].kind, "skill");
-    assert_eq!(groups[0].candidates.len(), 2);
-    assert_eq!(groups[1].kind, "mcp");
-    assert_eq!(groups[1].candidates.len(), 1);
-}
-
-#[test]
-fn group_白名单过滤() {
-    let groups = group_mention_candidates(
-        vec![candidate("skill", "@skill:a"), candidate("mcp", "@mcp:x")],
-        &["skill".to_string()],
-        usize::MAX,
+    assert!(
+        !values
+            .iter()
+            .any(|value| value.contains("mention-disabled")),
+        "停用插件不应出现：{values:?}"
     );
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].kind, "skill");
-    assert_eq!(groups[0].candidates.len(), 1);
-}
-
-#[test]
-fn group_每组数量截断() {
-    let groups = group_mention_candidates(
-        vec![
-            candidate("skill", "@skill:a"),
-            candidate("skill", "@skill:b"),
-            candidate("skill", "@skill:c"),
-        ],
-        &[],
-        2,
+    // 卸载后同一来源不得再返回候选（换代/移除保护）。
+    // 只取本测试自己的来源：全局注册表可能残留其他测试插入的插件。
+    let handle = mention_sources()
+        .into_iter()
+        .find(|source| source.id() == "mention-enabled")
+        .expect("应取到本测试插件的候选来源");
+    loaded_plugins().lock().unwrap().remove("mention-enabled");
+    assert!(
+        handle.query(&query).expect("查询不应失败").is_empty(),
+        "卸载后旧来源必须返回空候选"
     );
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].candidates.len(), 2);
-    assert_eq!(groups[0].candidates[0].value, "@skill:a");
-    assert_eq!(groups[0].candidates[1].value, "@skill:b");
-}
-
-#[test]
-fn group_空候选返回空() {
-    let groups = group_mention_candidates(Vec::new(), &[], usize::MAX);
-    assert!(groups.is_empty());
+    loaded_plugins().lock().unwrap().remove("mention-disabled");
 }

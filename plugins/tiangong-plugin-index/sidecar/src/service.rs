@@ -21,7 +21,8 @@ use tiangong_plugin_index_protocol::management::{
     RebuildWorkspaceIndexResponse,
 };
 use tiangong_plugin_index_protocol::search::{
-    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, SEARCH_CODE_OPERATION,
+    INDEX_SEARCH_OPERATION, IndexSearchRequest, IndexSearchResponse, MENTION_FILES_OPERATION,
+    MentionFileCandidate, MentionFilesRequest, MentionFilesResponse, SEARCH_CODE_OPERATION,
     SearchCodeRequest, SearchCodeResponse,
 };
 use tiangong_plugin_index_protocol::{
@@ -109,11 +110,16 @@ impl IndexService {
                     .with_context(|| "解析 index_search 请求失败")?;
                 let manager = self.manager.clone();
                 let cwd = self.resolve_workspace(req.workspace.clone());
+                let scan_root = cwd.clone();
                 let resp = tokio::task::spawn_blocking(move || {
                     handle_index_search_blocking(&manager, &cwd, req)
                 })
                 .await
                 .with_context(|| "index_search 后台任务失败")??;
+                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(root);
+                }
                 serde_json::to_value(resp).with_context(|| "序列化 index_search 响应失败")
             }
             SEARCH_CODE_OPERATION => {
@@ -125,6 +131,23 @@ impl IndexService {
                         .await
                         .with_context(|| "search_code 后台任务失败")?;
                 serde_json::to_value(resp).with_context(|| "序列化 search_code 响应失败")
+            }
+            MENTION_FILES_OPERATION => {
+                let req: MentionFilesRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 mention_files 请求失败")?;
+                let manager = self.manager.clone();
+                let workspace = self.resolve_mention_workspace(req.workspace.clone());
+                let scan_root = workspace.clone();
+                let resp = tokio::task::spawn_blocking(move || {
+                    handle_mention_files_blocking(&manager, workspace.as_deref(), req)
+                })
+                .await
+                .with_context(|| "mention_files 后台任务失败")??;
+                // 查询可能刚触发索引重建：在此补一次全量扫描，否则空索引没人管。
+                if let Some(root) = scan_root.as_deref() {
+                    self.ensure_full_scan(root);
+                }
+                serde_json::to_value(resp).with_context(|| "序列化 mention_files 响应失败")
             }
             SET_WORKSPACE_OPERATION => {
                 let req: SetWorkspaceRequest = serde_json::from_value(payload)
@@ -228,6 +251,20 @@ impl IndexService {
             .or_else(|| self.workspace())
     }
 
+    /// mention 文件候选的工作区：请求注入优先（wasm 从宿主查询上下文读出），
+    /// 其次 `set_workspace` 注入的全局工作区，最后回落宿主权威调用上下文。
+    fn resolve_mention_workspace(&self, requested: Option<String>) -> Option<PathBuf> {
+        requested
+            .map(PathBuf::from)
+            .or_else(|| self.workspace())
+            .or_else(|| {
+                tiangong_plugin_sidecar::invocation_context()
+                    .map(|ctx| ctx.workspace)
+                    .filter(|workspace| !workspace.is_empty())
+                    .map(PathBuf::from)
+            })
+    }
+
     // ── 生命周期 ─────────────────────────────────────────────
 
     fn handle_set_workspace(&self, workspace: Option<String>) -> Result<()> {
@@ -255,6 +292,39 @@ impl IndexService {
         if needs_refresh {
             self.spawn_background_scan(root);
         }
+    }
+
+    /// 索引不可用（刚被删除重建 / 从未扫描）时补一次全量扫描。
+    ///
+    /// 由查询路径在拿到"扫描中"结果后调用。与 {@link spawn_background_scan}
+    /// 的区别：后者服务于 `set_workspace` 的常规增量刷新，此处专治"索引被
+    /// 删空后没人负责重建"——查询路径不经过 `set_workspace`，若不在此补，
+    /// 空索引会一直空着。
+    fn ensure_full_scan(&self, root: &Path) {
+        let needs = self.manager.take_pending_full_scan(root)
+            || self.manager.workspace_index_unavailable(root);
+        if !needs {
+            return;
+        }
+        let Some(permit) = self.manager.try_begin_workspace_scan(root) else {
+            // 已有后台扫描在跑：把标记还回去，避免这次重建被漏掉。
+            self.manager.mark_pending_full_scan(root);
+            tracing::debug!(
+                workspace = %root.display(),
+                "Workspace 索引已有后台扫描在进行，重建补扫延后"
+            );
+            return;
+        };
+        let manager = self.manager.clone();
+        let root = root.to_path_buf();
+        tracing::info!(workspace = %root.display(), "Workspace 索引重建后补扫启动");
+        std::thread::spawn(move || {
+            let _permit = permit;
+            match manager.full_scan(&root) {
+                Ok(count) => tracing::info!(count, "Workspace 索引重建后补扫完成"),
+                Err(e) => tracing::warn!("Workspace 索引重建后补扫失败: {e}"),
+            }
+        });
     }
 
     fn spawn_background_scan(&self, root: &Path) {
@@ -317,6 +387,10 @@ fn handle_index_search_blocking(
     {
         if manager.is_workspace_scanning(cwd) {
             scanning = true;
+        } else if manager.workspace_index_unavailable(cwd) {
+            // 索引刚被删除重建或从未扫描：此时一定为空，与后台扫描同样按
+            // "扫描中"处理，避免把空索引误报为"没有匹配"。
+            scanning = true;
         } else {
             let index_query = IndexQuery::new(&req.query)
                 .with_scope(IndexScope::Workspace)
@@ -348,6 +422,75 @@ fn handle_index_search_blocking(
         session_hits,
         scanning,
     })
+}
+
+/// `@` 提及文件候选阻塞实现（在 spawn_blocking 线程内执行）。
+///
+/// 与 `index_search` 的分工：mention 只查 path 字段（用户要「指向某个文件」），
+/// 覆盖二进制/文档（它们只有 path 条目），多词 AND；索引未就绪时返回空候选并置
+/// `scanning`，由 UI 提示，不用 fs 遍历兜底——两套来源会互相覆盖同 kind 候选。
+fn handle_mention_files_blocking(
+    manager: &IndexManager,
+    workspace: Option<&Path>,
+    req: MentionFilesRequest,
+) -> Result<MentionFilesResponse> {
+    let Some(workspace) = workspace else {
+        return Ok(MentionFilesResponse::default());
+    };
+    if !workspace.is_dir() {
+        return Ok(MentionFilesResponse::default());
+    }
+    if manager.is_workspace_scanning(workspace) {
+        return Ok(MentionFilesResponse {
+            candidates: Vec::new(),
+            scanning: true,
+        });
+    }
+    // 索引刚被删除重建（schema 升级 / 损坏恢复）：此刻一定为空。不能把空索引
+    // 当作"没有匹配的文件"返回——用户会以为工作区里没有可提及的文件。转成
+    // 扫描中，由调用方触发补扫，下次查询即可拿到候选。
+    // 判据用 meta.json 而非进程内状态：重建索引的 sidecar 进程与随后发起查询的
+    // 进程往往不是同一个（stdio sidecar 按连接短生命周期拉起）。
+    if manager.workspace_index_unavailable(workspace) {
+        return Ok(MentionFilesResponse {
+            candidates: Vec::new(),
+            scanning: true,
+        });
+    }
+    let hits = manager.search_paths(workspace, &req.query, mention_limit(req.limit))?;
+    let candidates = hits
+        .into_iter()
+        .map(|hit| {
+            // label 取文件名（末段）；路径统一 `/` 分隔，跨平台可原样往返
+            let file_name = hit
+                .path
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&hit.path)
+                .to_string();
+            MentionFileCandidate {
+                relative_path: hit.path,
+                file_name,
+            }
+        })
+        .collect();
+    Ok(MentionFilesResponse {
+        candidates,
+        scanning: false,
+    })
+}
+
+/// mention 候选条数：请求未带 limit 时取默认值，否则收敛到 `[1, MAX]`。
+/// 上限比 index_search 严——mention 是交互路径，前端还有每组展示截断。
+fn mention_limit(requested: usize) -> usize {
+    const DEFAULT_MENTION_LIMIT: usize = 50;
+    const MAX_MENTION_LIMIT: usize = 200;
+    if requested == 0 {
+        DEFAULT_MENTION_LIMIT
+    } else {
+        requested.clamp(1, MAX_MENTION_LIMIT)
+    }
 }
 
 /// search_code 阻塞实现（在 spawn_blocking 线程内执行）。

@@ -7,6 +7,9 @@ pub struct WorkspaceFields {
     pub size: Field,
     pub modified_at: Field,
     pub content: Field,
+    /// 是否读取过文件内容（二进制/文档只建 path 条目时为 false）。
+    /// `index_search` 工具只返回 true 的命中；mention 候选两者都要。
+    pub has_content: Field,
     pub language: Field,
     pub symbol_name: Field,
     pub symbol_kind: Field,
@@ -23,6 +26,7 @@ pub fn workspace_schema() -> (Schema, WorkspaceFields) {
     let size = b.add_u64_field("size", STORED);
     let modified_at = b.add_u64_field("modified_at", STORED);
     let content = b.add_text_field("content", TEXT);
+    let has_content = b.add_bool_field("has_content", INDEXED | FAST);
     let language = b.add_text_field("language", STRING | STORED);
     let symbol_name = b.add_text_field("symbol_name", TEXT);
     let symbol_kind = b.add_text_field("symbol_kind", STRING);
@@ -38,6 +42,7 @@ pub fn workspace_schema() -> (Schema, WorkspaceFields) {
             size,
             modified_at,
             content,
+            has_content,
             language,
             symbol_name,
             symbol_kind,

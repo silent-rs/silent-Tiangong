@@ -710,7 +710,6 @@ impl crate::tools::extension::ToolOverrideHandler for ToolPlugin {
 }
 
 impl crate::tools::extension::PromptSectionProvider for ToolPlugin {}
-impl crate::tools::extension::MentionCandidateProvider for ToolPlugin {}
 impl crate::core::plugin::Plugin for ToolPlugin {
     fn id(&self) -> &str {
         self.id

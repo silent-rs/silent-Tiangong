@@ -900,7 +900,7 @@ mod tests {
     fn compression_keeps_current_declarations_and_survives_persist_failure() {
         use crate::core::plugin::Plugin;
         use crate::tools::extension::{
-            MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+            PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
         };
 
         struct ChangingPlugin {
@@ -911,7 +911,6 @@ mod tests {
                 "changing"
             }
         }
-        impl MentionCandidateProvider for ChangingPlugin {}
         impl ToolOverrideHandler for ChangingPlugin {}
         impl ToolSpecProvider for ChangingPlugin {
             fn try_tool_specs(
