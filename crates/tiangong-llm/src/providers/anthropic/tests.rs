@@ -142,6 +142,61 @@ fn test_temperature_kept_when_thinking_disabled() {
 }
 
 #[test]
+fn test_adaptive_model_maps_effort_to_output_config() {
+    // opus-5-5 一代模型：thinking 用 adaptive 形态，思考档位对齐到
+    // output_config.effort；不再下发 budget_tokens 旧格式。
+    let mut request = sample_request();
+    request.model = "claude-opus-5-5".to_string();
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Adaptive)
+    );
+    assert_eq!(
+        mapped.output_config,
+        Some(tiangong_anthropic::types::OutputConfig {
+            effort: Some(tiangong_anthropic::types::EffortLevel::High)
+        })
+    );
+
+    // 档位随 reasoning_effort 变化：Max 直达 max。
+    request.reasoning_effort = ReasoningEffort::Max;
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(
+        mapped.output_config,
+        Some(tiangong_anthropic::types::OutputConfig {
+            effort: Some(tiangong_anthropic::types::EffortLevel::Max)
+        })
+    );
+
+    // 关闭思考：不发 thinking，也不发 output_config。
+    request.reasoning_effort = ReasoningEffort::None;
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(mapped.thinking, None);
+    assert_eq!(mapped.output_config, None);
+}
+
+#[test]
+fn test_legacy_model_keeps_enabled_without_output_config() {
+    // 旧模型与第三方兼容端点：保持 enabled 形态，不下发 output_config。
+    let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
+    assert_eq!(
+        mapped.output_config, None,
+        "non-adaptive model must not carry output_config"
+    );
+    let mut request = sample_request();
+    request.model = "glm-5.3".to_string();
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert!(matches!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Enabled {
+            budget_tokens: None
+        })
+    ));
+    assert_eq!(mapped.output_config, None);
+}
+
+#[test]
 fn test_top_p_dropped_when_thinking_enabled() {
     // 与 temperature 同款官方约束：开思考时 top_p 不可自定义。
     let mut request = sample_request();

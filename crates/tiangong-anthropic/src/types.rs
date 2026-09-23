@@ -186,7 +186,31 @@ pub enum ThinkingConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u32>,
     },
+    /// 自适应思考（Claude 4.7+ 一代模型唯一可用形态）：模型自行决定
+    /// 是否思考及思考多深，深度由 `output_config.effort` 档位控制。
+    /// 旧版 `Enabled` 会被这些模型以 400 拒收，`Disabled` 同样拒收。
+    Adaptive,
     Disabled,
+}
+
+/// `output_config.effort` 档位：adaptive thinking 模型的深度控制。
+/// 档位语义：low 省token / medium 平衡（Opus 5.5 默认）/ high 默认强度
+/// （其余模型默认）/ xhigh 长程 agentic / max 无上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+/// 请求级输出配置，当前承载 adaptive thinking 模型的 effort 深度档位。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
 }
 
 impl ThinkingConfig {
@@ -228,6 +252,9 @@ pub struct MessagesCreateRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    /// 输出配置：adaptive thinking 模型的深度档位（output_config.effort）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

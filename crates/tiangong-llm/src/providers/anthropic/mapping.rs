@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+use tiangong_anthropic::client::is_adaptive_thinking_model;
 use tiangong_anthropic::types::{
     CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
-    ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
-    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, SystemContent, TextBlock,
-    ThinkingConfig, Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
+    EffortLevel, ImageSourceParam, Message as AnthropicMessage,
+    MessageRole as AnthropicMessageRole, MessagesCreateRequest, MessagesCreateResponse,
+    OutputConfig, StreamEvent, SystemContent, TextBlock, ThinkingConfig, Tool as AnthropicTool,
+    ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
 use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
-use crate::request::ProviderRequest;
+use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolCall, ToolChoice, ToolResult, ToolResultContent};
@@ -93,6 +95,7 @@ pub(super) fn to_anthropic_request(
         tool_choice,
         stream: None,
         thinking,
+        output_config: map_output_config(request),
     })
 }
 
@@ -145,7 +148,39 @@ fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
     request
         .reasoning_effort
         .is_thinking_enabled()
-        .then(ThinkingConfig::enabled)
+        .then(|| thinking_shape(request))
+}
+
+/// adaptive-only 模型（Claude 4.7+）用 adaptive 形态，深度档位经
+/// output_config.effort 传递（见 map_output_config）；其余模型（旧
+/// Claude 与第三方兼容端点）沿用旧版 enabled + 客户端默认预算。
+fn thinking_shape(request: &ProviderRequest) -> ThinkingConfig {
+    if is_adaptive_thinking_model(&request.model) {
+        ThinkingConfig::Adaptive
+    } else {
+        ThinkingConfig::enabled()
+    }
+}
+
+/// adaptive-only 模型的思考深度：天工 ReasoningEffort 档位与 Anthropic
+/// effort 档位语义一致，直接对齐映射；未开启思考或非 adaptive 模型
+/// 不下发 output_config（effort 省略时走模型默认档）。
+fn map_output_config(request: &ProviderRequest) -> Option<OutputConfig> {
+    if !request.reasoning_effort.is_thinking_enabled()
+        || !is_adaptive_thinking_model(&request.model)
+    {
+        return None;
+    }
+    let effort = match request.reasoning_effort {
+        ReasoningEffort::None => return None,
+        ReasoningEffort::Low => EffortLevel::Low,
+        ReasoningEffort::Medium => EffortLevel::Medium,
+        ReasoningEffort::High => EffortLevel::High,
+        ReasoningEffort::Max => EffortLevel::Max,
+    };
+    Some(OutputConfig {
+        effort: Some(effort),
+    })
 }
 
 fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmError>> {

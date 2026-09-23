@@ -115,6 +115,27 @@ async fn read_complete_response(
 /// 协议要求的思考预算下限（官方拒绝小于 1024 的值）。
 const MIN_THINKING_BUDGET_TOKENS: u32 = 1_024;
 
+/// 判断模型是否仅支持 adaptive thinking（Claude 4.7 及之后的一代）。
+///
+/// 这些模型拒绝旧版 `thinking.type=enabled`（携带 budget_tokens）与
+/// `disabled`，请求会直接返回 400；思考深度由 `output_config.effort`
+/// 控制，且自适应思考永远开启、无法关闭。按模型名子串识别，兼容
+/// 中转站带前缀的模型名（如 `anthropic/claude-opus-5-5`）。
+///
+/// 官方 adaptive-only 名单：opus-4-7 / opus-4-8 / opus-5 / opus-5-5 /
+/// sonnet-5 / fable-5 / fable-5-1 / mythos-5 / mythos-5-1；mythos-preview
+/// 两种模式皆可，官方推荐 adaptive。第三方 Anthropic 兼容端点（如智谱
+/// GLM）的模型名不含这些子串，继续走旧版 enabled 形态不受影响。
+pub fn is_adaptive_thinking_model(model: &str) -> bool {
+    const ADAPTIVE_ONLY_MARKERS: &[&str] = &[
+        "opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "fable", "mythos",
+    ];
+    let model = model.to_ascii_lowercase();
+    ADAPTIVE_ONLY_MARKERS
+        .iter()
+        .any(|marker| model.contains(marker))
+}
+
 #[derive(Clone)]
 pub struct AnthropicClient {
     http_client: reqwest::Client,
@@ -144,6 +165,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<MessagesCreateResponse, AnthropicError> {
+        Self::normalize_thinking_for_model(&mut request);
         Self::fill_default_thinking_budget(&mut request);
         let response = self
             .request_builder("/v1/messages")
@@ -158,6 +180,7 @@ impl AnthropicClient {
         &self,
         mut request: MessagesCreateRequest,
     ) -> Result<EventStream, AnthropicError> {
+        Self::normalize_thinking_for_model(&mut request);
         Self::fill_default_thinking_budget(&mut request);
         request.stream = Some(true);
         // 建连与等待响应头受用户配置的请求超时约束，避免网关建连后
@@ -260,6 +283,38 @@ impl AnthropicClient {
         request.thinking = Some(ThinkingConfig::Enabled {
             budget_tokens: Some(budget),
         });
+    }
+
+    /// adaptive-only 模型（Claude 4.7+）的 thinking 形态兜底规范化：
+    ///
+    /// - `Enabled`：转换为 `Adaptive`（深度由 output_config.effort 或
+    ///   模型默认档控制），避免旧格式被 400 拒收；
+    /// - `Disabled`：置为不发 thinking。此类模型自适应思考永远开启、
+    ///   无法关闭，显式 disabled 同样会被 400 拒收，省略字段即回落到
+    ///   模型默认行为；
+    /// - 其他模型（旧模型与第三方兼容端点）：不改动，继续走
+    ///   [`Self::fill_default_thinking_budget`] 的旧版协议形态。
+    fn normalize_thinking_for_model(request: &mut MessagesCreateRequest) {
+        if !is_adaptive_thinking_model(&request.model) {
+            return;
+        }
+        match request.thinking.take() {
+            Some(ThinkingConfig::Enabled { .. }) => {
+                tracing::debug!(
+                    model = %request.model,
+                    "thinking enabled -> adaptive for adaptive-only model"
+                );
+                request.thinking = Some(ThinkingConfig::Adaptive);
+            }
+            Some(ThinkingConfig::Disabled) => {
+                tracing::debug!(
+                    model = %request.model,
+                    "thinking disabled dropped: adaptive thinking cannot be turned off"
+                );
+                request.thinking = None;
+            }
+            other => request.thinking = other,
+        }
     }
 
     fn stream_request_builder(&self, path: &str) -> reqwest::RequestBuilder {
@@ -451,6 +506,7 @@ mod tests {
             tool_choice: None,
             stream: None,
             thinking,
+            output_config: None,
         }
     }
 
@@ -517,6 +573,104 @@ mod tests {
         let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
         AnthropicClient::fill_default_thinking_budget(&mut request);
         assert_eq!(request.thinking, Some(ThinkingConfig::Disabled));
+    }
+
+    #[test]
+    fn adaptive_only_model_converts_enabled_to_adaptive() {
+        // opus-5-5 等模型拒绝旧版 enabled：发送前统一转换为 adaptive，
+        // 且不再走补预算逻辑（adaptive 无预算概念）。
+        let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+        request.model = "claude-opus-5-5".to_string();
+        AnthropicClient::normalize_thinking_for_model(&mut request);
+        AnthropicClient::fill_default_thinking_budget(&mut request);
+        assert_eq!(request.thinking, Some(ThinkingConfig::Adaptive));
+        let payload = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(payload["thinking"], serde_json::json!({"type": "adaptive"}));
+    }
+
+    #[test]
+    fn adaptive_only_model_drops_disabled() {
+        // 自适应思考无法关闭：disabled 会被 400 拒收，省略字段走默认。
+        let mut request = request_with(32_768, Some(ThinkingConfig::Disabled));
+        request.model = "anthropic/claude-opus-5".to_string();
+        AnthropicClient::normalize_thinking_for_model(&mut request);
+        assert_eq!(request.thinking, None);
+    }
+
+    #[test]
+    fn legacy_and_compat_models_keep_enabled_shape() {
+        // 旧模型（extended-thinking-only）与第三方兼容端点模型名不受
+        // adaptive 规范化影响，保持 enabled + 默认预算。
+        for model in [
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "glm-5.3",
+            "step-5-preview",
+        ] {
+            let mut request = request_with(32_768, Some(ThinkingConfig::enabled()));
+            request.model = model.to_string();
+            AnthropicClient::normalize_thinking_for_model(&mut request);
+            assert!(
+                matches!(
+                    request.thinking,
+                    Some(ThinkingConfig::Enabled {
+                        budget_tokens: None
+                    })
+                ),
+                "{model} should keep enabled shape"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_model_detection_covers_marker_families() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "anthropic/claude-fable-5-1",
+            "claude-mythos-preview",
+            "claude-sonnet-5",
+        ] {
+            assert!(
+                is_adaptive_thinking_model(model),
+                "{model} should be adaptive"
+            );
+        }
+        // extended-only 与第三方兼容端点不得误判。
+        for model in [
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "glm-5.3",
+            "glm-5.3-flash",
+            "step-5-preview",
+        ] {
+            assert!(
+                !is_adaptive_thinking_model(model),
+                "{model} should not be adaptive"
+            );
+        }
+    }
+
+    #[test]
+    fn effort_serializes_into_output_config() {
+        // adaptive 深度档位序列化为 output_config.effort，档位值 snake_case。
+        let mut request = request_with(32_768, Some(ThinkingConfig::Adaptive));
+        request.model = "claude-opus-5-5".to_string();
+        request.output_config = Some(crate::types::OutputConfig {
+            effort: Some(crate::types::EffortLevel::Xhigh),
+        });
+        let payload = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(
+            payload["output_config"],
+            serde_json::json!({"effort": "xhigh"})
+        );
+        // 无 output_config 时字段整体省略。
+        request.output_config = None;
+        let payload = serde_json::to_value(&request).expect("serialize");
+        assert!(payload.get("output_config").is_none());
     }
 
     #[test]
