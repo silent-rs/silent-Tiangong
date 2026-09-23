@@ -179,16 +179,9 @@ pub struct Tool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
-    Enabled {
-        /// 思考预算（≥1024 且须小于 max_tokens，协议要求必填）。
-        /// 调用方可省略：发送前由 AnthropicClient 统一补默认预算，
-        /// 省略值不会序列化进请求。
-        #[serde(skip_serializing_if = "Option::is_none")]
-        budget_tokens: Option<u32>,
-    },
-    /// 自适应思考（Claude 4.7+ 一代模型唯一可用形态）：模型自行决定
-    /// 是否思考及思考多深，深度由 `output_config.effort` 档位控制。
-    /// 旧版 `Enabled` 会被这些模型以 400 拒收，`Disabled` 同样拒收。
+    /// 自适应思考（现行唯一思考形态）：模型自行决定是否思考及思考多深，
+    /// 深度由 `output_config.effort` 档位控制。Claude 4.7+ 新模型仅接受
+    /// 该形态，智谱 GLM 等第三方兼容端点实测也已完整支持。
     Adaptive,
     Disabled,
 }
@@ -211,22 +204,6 @@ pub enum EffortLevel {
 pub struct OutputConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortLevel>,
-}
-
-impl ThinkingConfig {
-    /// 开启思考，预算由客户端发送前统一填充。
-    pub fn enabled() -> Self {
-        Self::Enabled {
-            budget_tokens: None,
-        }
-    }
-
-    /// 开启思考并显式指定预算（官方 Anthropic 端点使用）。
-    pub fn with_budget(budget_tokens: u32) -> Self {
-        Self::Enabled {
-            budget_tokens: Some(budget_tokens),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

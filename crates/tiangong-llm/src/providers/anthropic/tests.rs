@@ -149,7 +149,7 @@ fn test_temperature_kept_when_thinking_disabled() {
 #[test]
 fn test_adaptive_model_maps_effort_to_output_config() {
     // opus-5-5 一代模型：thinking 用 adaptive 形态，思考档位对齐到
-    // output_config.effort；不再下发 budget_tokens 旧格式。
+    // output_config.effort；旧版预算格式已随全切移除。
     let mut request = sample_request();
     request.model = "claude-opus-5-5".to_string();
     let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
