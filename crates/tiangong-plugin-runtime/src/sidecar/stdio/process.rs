@@ -210,7 +210,7 @@ pub(super) fn terminate_process_tree(process: &StdioProcess, child: &mut Child) 
 }
 
 #[cfg(windows)]
-pub(super) enum WindowsLifecycle {
+enum WindowsLifecycle {
     Job(WindowsJob),
     Sandbox(WindowsStopEvent),
 }

@@ -175,6 +175,27 @@ jobs:
           done < <(jq -r '.[]' <<< "$MATRIX")
           cargo check "${packages[@]}"
 
+  rust-check-windows:
+    name: App Rust check (windows)
+    needs: changes
+    # #[cfg(windows)] 代码在 Linux 上根本不参与编译，其余 Rust 作业全部跑在
+    # ubuntu 上，因此 Windows 专有的名称解析错误（私有项跨模块引用、导入被
+    # 错误 cfg 限定等）在 App CI 里没有任何防线。#568 引入的 E0433/E0425 就
+    # 是这样进入 main 的，直到 #575 才由插件 Sidecar 作业偶然暴露。
+    #
+    # 这里只做 cargo check（类型检查，不链接、不跑测试），单作业成本约 3-4
+    # 分钟；且仅在 runtime 受影响时触发，不拖慢常规改动。
+    if: contains(fromJSON(needs.changes.outputs.matrix), 'tiangong-plugin-runtime')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-check-windows
+      - name: Check plugin runtime on Windows
+        run: cargo check -p tiangong-plugin-runtime --all-targets
+
   rust-clippy:
     name: App Rust clippy
     needs: changes
