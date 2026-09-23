@@ -173,3 +173,98 @@ fn desktop_session_serializes_snake_case() {
 /// 抑制未使用导入：在非 macos 平台 ListWindows 等 import 可能未直接使用。
 #[allow(unused_imports)]
 use tiangong_plugin_computer_use_protocol::ListWindowsResponse as _ListWindowsResponse;
+
+// ── desktop_keyboard（RFC 0018 §2.4）─────────────────────────────
+
+/// 协议结构 roundtrip：三手势的请求都能序列化/反序列化（wasm 与 sidecar
+/// 共用同一 serde 形状）。
+#[test]
+fn keyboard_request_roundtrips_all_actions() {
+    let type_req = KeyboardRequest {
+        action: KeyboardActionKind::Type,
+        text: Some("你好 world".to_string()),
+        key: None,
+        keys: None,
+        access: Default::default(),
+    };
+    let json = serde_json::to_string(&type_req).unwrap();
+    assert!(json.contains("\"type\""), "action 应序列化为 snake_case");
+    let back: KeyboardRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.action, KeyboardActionKind::Type);
+    assert_eq!(back.text.as_deref(), Some("你好 world"));
+
+    let combo_json = serde_json::to_string(&KeyboardRequest {
+        action: KeyboardActionKind::Combo,
+        text: None,
+        key: None,
+        keys: Some(vec![
+            "cmd".to_string(),
+            "shift".to_string(),
+            "3".to_string(),
+        ]),
+        access: Default::default(),
+    })
+    .unwrap();
+    assert!(combo_json.contains("\"combo\""));
+    let back: KeyboardRequest = serde_json::from_str(&combo_json).unwrap();
+    assert_eq!(back.keys.as_deref().map(<[String]>::len), Some(3));
+}
+
+/// dispatch 层路由：desktop_keyboard 请求可被解析并到达平台后端
+/// （未实现平台返回 ActionNotSupported；macOS 未授权时 PermissionDenied，
+/// 均为合法 DesktopResult，不做具体断言以兼容 CI 授权状态）。
+#[tokio::test]
+async fn desktop_keyboard_dispatches_to_backend() {
+    let service = tiangong_plugin_computer_use_sidecar::ComputerUseService::new().unwrap();
+    let resp = service
+        .dispatch(request(
+            DESKTOP_KEYBOARD_OPERATION,
+            serde_json::json!({
+                "action": "key",
+                "key": "return",
+            }),
+        ))
+        .await;
+    assert!(resp.success, "路由应成功");
+    let payload = resp.payload.expect("应有 payload");
+    assert!(
+        payload.get("performed").is_some() || payload.get("kind").is_some(),
+        "应包含执行结果或错误 kind：{payload}"
+    );
+}
+
+/// 非法手势参数（未知 action）在协议层即失败。
+#[tokio::test]
+async fn desktop_keyboard_rejects_unknown_action() {
+    let service = tiangong_plugin_computer_use_sidecar::ComputerUseService::new().unwrap();
+    let resp = service
+        .dispatch(request(
+            DESKTOP_KEYBOARD_OPERATION,
+            serde_json::json!({ "action": "chord", "key": "a" }),
+        ))
+        .await;
+    assert!(!resp.success, "未知 action 应在解析层失败");
+}
+
+// ── desktop_screenshot 窗口/区域（RFC 0017 Phase 2 部分）─────────
+
+/// ScreenshotRequest 新字段向后兼容：旧请求（无 region/max_dimension）
+/// 反序列化为 None，全屏语义不变。
+#[test]
+fn screenshot_request_new_fields_are_backward_compatible() {
+    let legacy = serde_json::json!({ "app_name": "WeChat" });
+    let req: ScreenshotRequest = serde_json::from_value(legacy).unwrap();
+    assert_eq!(req.app_name.as_deref(), Some("WeChat"));
+    assert!(req.region.is_none());
+    assert!(req.max_dimension.is_none());
+
+    let full = serde_json::json!({
+        "region": { "x": 10.5, "y": 20.0, "width": 800.0, "height": 600.0 },
+        "max_dimension": 1568
+    });
+    let req: ScreenshotRequest = serde_json::from_value(full).unwrap();
+    let region = req.region.expect("region 应解析");
+    assert_eq!(region.x, 10.5);
+    assert_eq!(region.height, 600.0);
+    assert_eq!(req.max_dimension, Some(1568));
+}

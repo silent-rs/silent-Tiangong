@@ -6,11 +6,11 @@ use anyhow::{Context, Result};
 
 use tiangong_plugin_computer_use_protocol::ops::{
     self, ActionRequest, ActionResponse, CAPABILITY, DESKTOP_ACTION_OPERATION,
-    DESKTOP_FIND_OPERATION, DESKTOP_LIST_WINDOWS_OPERATION, DESKTOP_MOUSE_OPERATION,
-    DESKTOP_SNAPSHOT_OPERATION, DESKTOP_STATUS_OPERATION, DESKTOP_WAIT_OPERATION,
-    DesktopStatusResponse, FindResponse, ListWindowsResponse, MouseResponse, SET_ACCESS_OPERATION,
-    SetAccessRequest, SnapshotResponse, VIRTUAL_CURSOR_OPERATION, VirtualCursorRequest,
-    VirtualCursorResponse, WaitResponse,
+    DESKTOP_FIND_OPERATION, DESKTOP_KEYBOARD_OPERATION, DESKTOP_LIST_WINDOWS_OPERATION,
+    DESKTOP_MOUSE_OPERATION, DESKTOP_SNAPSHOT_OPERATION, DESKTOP_STATUS_OPERATION,
+    DESKTOP_WAIT_OPERATION, DesktopStatusResponse, FindResponse, KeyboardResponse,
+    ListWindowsResponse, MouseResponse, SET_ACCESS_OPERATION, SetAccessRequest, SnapshotResponse,
+    VIRTUAL_CURSOR_OPERATION, VirtualCursorRequest, VirtualCursorResponse, WaitResponse,
 };
 use tiangong_plugin_computer_use_protocol::{
     Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, PLUGIN_ID, PLUGIN_VERSION,
@@ -151,6 +151,13 @@ impl ComputerUseService {
                 serde_json::to_value(map_mouse(result))
                     .with_context(|| "序列化 desktop_mouse 响应失败")
             }
+            DESKTOP_KEYBOARD_OPERATION => {
+                let req: ops::KeyboardRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_keyboard 请求失败")?;
+                let result = self.backend.keyboard(&req).await;
+                serde_json::to_value(map_keyboard(result))
+                    .with_context(|| "序列化 desktop_keyboard 响应失败")
+            }
             VIRTUAL_CURSOR_OPERATION => {
                 let req: VirtualCursorRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 virtual_cursor 请求失败")?;
@@ -246,6 +253,18 @@ fn map_action(
 fn map_mouse(result: DesktopResult<crate::backend::MouseResult>) -> DesktopResult<MouseResponse> {
     match result {
         DesktopResult::Ok(info) => DesktopResult::Ok(MouseResponse {
+            performed: info.performed,
+            summary: info.summary,
+        }),
+        DesktopResult::Err(error) => DesktopResult::Err(error),
+    }
+}
+
+fn map_keyboard(
+    result: DesktopResult<crate::backend::KeyboardResult>,
+) -> DesktopResult<KeyboardResponse> {
+    match result {
+        DesktopResult::Ok(info) => DesktopResult::Ok(KeyboardResponse {
             performed: info.performed,
             summary: info.summary,
         }),

@@ -74,6 +74,30 @@ desktop_mouse { gesture: move | click | right_click | double_click | drag | scro
 虚拟指针全程独立平滑跟随手势目标，点击瞬间播放按压脉冲动画（0→1.25→1 正弦
 回弹，hotspot 始终对准目标点）。合成事件需要辅助功能授权（与 AX 同一 TCC）。
 
+### 2.4 desktop_keyboard：键盘合成输入（CGEvent）
+补齐合成输入族的键盘半边（微信场景「能看、能点、不能打字」的最后缺口）。
+键盘事件投递给**当前焦点应用**（与真人一致），不触碰系统鼠标，无借用归还
+问题；输入焦点由 Agent 先用 `desktop_mouse click`（或 AX focus）建立。
+同样以手势而非裸事件暴露：
+
+```
+desktop_keyboard { action: type | key | combo, text?, key?, keys? }
+```
+
+- `type`：逐字符 Unicode 字符串分派（`CGEventKeyboardSetUnicodeString`，
+  down/up 成对携带同一字符串）——不经输入法组字、不依赖物理布局，
+  中文/表情与 ASCII 同路径（微信 Qt 输入框的关键能力）
+- `key`：单键名 → 虚拟键码（HIToolbox ANSI 表）；别名不敏感
+  （enter→return、esc→escape、backspace→delete、del→forward_delete…）
+- `combo`：修饰键 down（保持给定顺序）→ 普通键 down/up → 修饰键逆序 up 的
+  真实 HID 序列（部分应用监听修饰键本身，与点击手势同款真实管线）；
+  要求恰好一个非修饰键（cmd+c、cmd+shift+3），单独按修饰键没有语义
+- 键名集合：修饰键 cmd/rcmd/ctrl/rctrl/alt/ralt/shift/rshift + 非修饰键
+  （return/tab/space/delete/forward_delete/escape/方向键/home/end/page_up/
+  page_down/help/f1–f12/a–z/0–9，US ANSI 布局）；`fn` 不可合成，明确拒绝
+- wasm 侧只做结构校验（type→text、key→key、combo→keys≥2），键名合法性由
+  sidecar `keyboard::perform` 单点裁决，避免两份键码表漂移
+
 ## 3. 复用路线（嵌入式浏览器）
 
 浏览器插件的自动化（web_click 等）发生在天工窗口内的 webview，无系统鼠标参与，同样有落点可视化需求。预留：

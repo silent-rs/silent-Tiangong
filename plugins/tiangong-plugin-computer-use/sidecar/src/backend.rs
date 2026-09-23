@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindRequest, ListWindowsRequest, MouseRequest, ScreenshotRequest,
-    SnapshotRequest, WaitRequest,
+    ActionRequest, FindRequest, KeyboardRequest, ListWindowsRequest, MouseRequest,
+    ScreenshotRequest, SnapshotRequest, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, DesktopError, DesktopResult, DesktopSession,
@@ -54,6 +54,13 @@ pub trait Backend: Send + Sync {
             supported: vec![],
         })
     }
+    /// 键盘合成输入（CGEvent，RFC 0018 §2.4）。默认不支持，macOS 实装。
+    async fn keyboard(&self, _req: &KeyboardRequest) -> DesktopResult<KeyboardResult> {
+        DesktopResult::Err(DesktopError::ActionNotSupported {
+            action: "desktop_keyboard".to_string(),
+            supported: vec![],
+        })
+    }
     async fn screenshot(&self, _req: &ScreenshotRequest) -> DesktopResult<ScreenshotResponse> {
         DesktopResult::Err(unsupported_screenshot(self.platform()))
     }
@@ -95,6 +102,12 @@ pub struct ActionResult {
 /// `desktop_mouse` 返回信息。
 #[derive(Debug, Clone, Default)]
 pub struct MouseResult {
+    pub performed: bool,
+    pub summary: String,
+}
+/// `desktop_keyboard` 返回信息。
+#[derive(Debug, Clone, Default)]
+pub struct KeyboardResult {
     pub performed: bool,
     pub summary: String,
 }
@@ -169,6 +182,9 @@ fn cfg_if_current_backend() -> Box<dyn Backend> {
 
 #[cfg(target_os = "macos")]
 pub mod ax;
+/// 键盘合成输入（CGEvent，RFC 0018 §2.4，仅 macOS）。
+#[cfg(target_os = "macos")]
+pub mod keyboard;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

@@ -19,14 +19,16 @@ use serde::Serialize;
 use serde_json::json;
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
-    FindConditions, FindRequest, ListWindows, ListWindowsRequest, Mouse, MouseGesture,
-    MouseRequest, Screenshot, ScreenshotRequest, SetAccess, SetAccessRequest, Snapshot,
-    SnapshotRequest, VirtualCursor, VirtualCursorRequest, Wait, WaitRequest,
+    FindConditions, FindRequest, Keyboard, KeyboardActionKind, KeyboardRequest, ListWindows,
+    ListWindowsRequest, Mouse, MouseGesture, MouseRequest, Screenshot, ScreenshotRequest,
+    SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, VirtualCursor, VirtualCursorRequest,
+    Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
-    ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
-    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_MOUSE, TOOL_DESKTOP_SCREENSHOT,
-    TOOL_DESKTOP_SNAPSHOT, TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT, TOOL_VIRTUAL_CURSOR,
+    Bounds, ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
+    TOOL_DESKTOP_FIND, TOOL_DESKTOP_KEYBOARD, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_MOUSE,
+    TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_SNAPSHOT, TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT,
+    TOOL_VIRTUAL_CURSOR,
 };
 
 mod descriptor {
@@ -203,6 +205,21 @@ impl Guest for Component {
                 })),
             },
             ToolSpec {
+                name: TOOL_DESKTOP_KEYBOARD.to_string(),
+                description: "键盘合成输入（CGEvent，投递给当前焦点应用）：type 输入任意文本（中文/表情不经输入法直接分派）；key 按单个键（return/esc/tab/方向键/字母数字等）；combo 执行组合键（cmd+c、cmd+shift+3 等，US ANSI 布局）。先用 desktop_mouse click 或 desktop_action focus 建立输入焦点，再调用本工具；这是无障碍树外控件（如 Qt 自绘输入框）唯一的文本输入路径。"
+                    .to_string(),
+                input_schema: schema_string(json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["type", "key", "combo"], "description": "手势类型" },
+                        "text": { "type": "string", "description": "type 必填：要输入的文本" },
+                        "key": { "type": "string", "description": "key 必填：键名（enter/esc/backspace 等别名不敏感）" },
+                        "keys": { "type": "array", "items": { "type": "string" }, "description": "combo 必填：键名数组，修饰键在前，如 [\"cmd\",\"c\"]" }
+                    },
+                    "required": ["action"]
+                })),
+            },
+            ToolSpec {
                 name: TOOL_VIRTUAL_CURSOR.to_string(),
                 description: "开关天工虚拟鼠标的持久显示（默认关闭）。开启后指针出现在系统鼠标当前位置并常驻，desktop_action 执行时平滑移动到目标控件中心向用户突出展示操作落点；关闭后淡出。适合向用户演示或汇报桌面操作的场景，普通自动化操作无需开启。"
                     .to_string(),
@@ -216,14 +233,26 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_SCREENSHOT.to_string(),
-                description: "截取主显示器全屏截图（Phase 1 不支持窗口级裁剪；app_name/pid/foreground_only 仅标注目标应用元数据，不改变截图范围）。截图会以原生图片内容自动注入对话供你直接阅读（不占用工具结果文本），无需 OCR。需要屏幕录制授权。"
+                description: "截屏并自动注入对话供你直接阅读（无需 OCR）。范围按优先级：region 显式区域 > app_name/pid/foreground_only 应用窗口 > 主显示器全屏。region 坐标用 desktop_snapshot 的 bounds 换算（主屏左上原点，points）；max_dimension 可限制产物长边像素以节省视觉 token。需要屏幕录制授权。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
                     "properties": {
-                        "app_name": { "type": "string", "description": "目标应用名称（包含匹配），记录到截图元数据" },
-                        "pid": { "type": "integer", "description": "目标进程编号", "minimum": 0 },
-                        "foreground_only": { "type": "boolean", "description": "仅针对前台应用" }
+                        "app_name": { "type": "string", "description": "截取该应用最前窗口（包含匹配）" },
+                        "pid": { "type": "integer", "description": "截取该进程最前窗口", "minimum": 0 },
+                        "foreground_only": { "type": "boolean", "description": "截取前台应用窗口" },
+                        "region": {
+                            "type": "object",
+                            "description": "显式区域（优先于 app 定位；坐标与 bounds 同系）",
+                            "properties": {
+                                "x": { "type": "number" },
+                                "y": { "type": "number" },
+                                "width": { "type": "number", "minimum": 0 },
+                                "height": { "type": "number", "minimum": 0 }
+                            },
+                            "required": ["x", "y", "width", "height"]
+                        },
+                        "max_dimension": { "type": "integer", "description": "产物长边最大像素（如 1568），超过等比缩小", "minimum": 1 }
                     }
                 })),
             },
@@ -234,7 +263,8 @@ impl Guest for Component {
         Ok(vec![
             "桌面应用控制优先使用 computer-use 插件：先 desktop_status 确认能力，再 desktop_list_windows 定位窗口，desktop_snapshot 读取控件树，desktop_find 精确匹配控件后用 desktop_action 执行动作，动作后用 desktop_wait 确认状态。网页内容继续优先交给浏览器插件。".to_string(),
             "桌面控件以语义定位为主：优先用稳定标识（automation_id）与控件类型（role）匹配，名称仅作补充；同名控件返回多个候选时不得默认操作第一个，需进一步限定。控件引用只在本次快照内有效，动作前必须重新确认目标。".to_string(),
-            "需要看屏幕内容（截图、OCR、阅读界面文字）时用 desktop_screenshot：图片会以原生视觉内容注入对话，直接阅读即可，不要试图用终端执行 screencapture（沙箱限制不可达 WindowServer）。".to_string(),
+            "需要看屏幕内容（截图、OCR、阅读界面文字）时用 desktop_screenshot：图片会以原生视觉内容注入对话，直接阅读即可，不要试图用终端执行 screencapture（沙箱限制不可达 WindowServer）。支持应用窗口与显式 region 区域截图，小范围内容优先用窗口/region 而非全屏。".to_string(),
+            "无障碍树外的控件（Canvas、Qt 自绘、游戏界面）用坐标路径：desktop_screenshot 看界面 → desktop_mouse 坐标点击/拖拽 → desktop_keyboard 输入文本或按键。键盘输入前先用 click 建立焦点；文本输入用 type（不经输入法），快捷键用 combo（修饰键在前）。".to_string(),
         ])
     }
 
@@ -249,6 +279,7 @@ impl Guest for Component {
             TOOL_DESKTOP_SCREENSHOT => handle_screenshot(call.arguments),
             TOOL_VIRTUAL_CURSOR => handle_virtual_cursor(call.arguments),
             TOOL_DESKTOP_MOUSE => handle_desktop_mouse(call.arguments),
+            TOOL_DESKTOP_KEYBOARD => handle_desktop_keyboard(call.arguments),
             other => Err(plugin_err(format!("未知的 Computer Use 工具: {other}"))),
         }
     }
@@ -555,6 +586,91 @@ fn parse_mouse_gesture(value: &str) -> Option<MouseGesture> {
         _ => None,
     }
 }
+/// 解析 desktop_screenshot 的 region 参数：四个有限数且 width/height > 0。
+fn parse_region(value: &serde_json::Value) -> Option<Bounds> {
+    let object = value.as_object()?;
+    let number = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|n| n.is_finite())
+    };
+    let (x, y, width, height) = (
+        number("x")?,
+        number("y")?,
+        number("width")?,
+        number("height")?,
+    );
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(Bounds {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+fn handle_desktop_keyboard(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_keyboard", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let action = match args
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_keyboard_action)
+    {
+        Some(a) => a,
+        None => {
+            return Ok(tool_failure(
+                "desktop_keyboard 缺少或无法识别 action（type/key/combo）",
+                "bad action",
+            ));
+        }
+    };
+    let text = args.get("text").and_then(as_str_owned);
+    let key = args.get("key").and_then(as_str_owned);
+    let keys: Option<Vec<String>> = args.get("keys").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    });
+    // 手势参数完整性（键名合法性由 sidecar 单点裁决，此处只查结构）。
+    if action == KeyboardActionKind::Type && text.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Ok(tool_failure("type 必须提供非空 text", "missing text"));
+    }
+    if action == KeyboardActionKind::Key && key.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Ok(tool_failure("key 手势必须提供非空 key 键名", "missing key"));
+    }
+    if action == KeyboardActionKind::Combo {
+        let valid = keys.as_ref().is_some_and(|k| k.len() >= 2);
+        if !valid {
+            return Ok(tool_failure(
+                "combo 必须提供 keys 数组（至少修饰键 + 普通键两个）",
+                "missing keys",
+            ));
+        }
+    }
+    let request = KeyboardRequest {
+        action,
+        text,
+        key,
+        keys,
+        access: state::access_context(),
+    };
+    run_desktop_op::<Keyboard, _>(&request, "desktop_keyboard")
+}
+fn parse_keyboard_action(value: &str) -> Option<KeyboardActionKind> {
+    match value {
+        "type" => Some(KeyboardActionKind::Type),
+        "key" => Some(KeyboardActionKind::Key),
+        "combo" => Some(KeyboardActionKind::Combo),
+        _ => None,
+    }
+}
 fn handle_virtual_cursor(arguments: String) -> Result<ToolResult, PluginError> {
     let args = match parse_args("virtual_cursor", &arguments) {
         Ok(v) => v,
@@ -626,6 +742,26 @@ fn handle_screenshot(arguments: String) -> Result<ToolResult, PluginError> {
             "pid out of range",
         ));
     }
+    // region 显式区域（优先于 app 定位）；四个分量必须为有限正数。
+    let region = args.get("region").and_then(parse_region);
+    if args.get("region").is_some() && region.is_none() {
+        return Ok(tool_failure(
+            "desktop_screenshot 的 region 需要有限的 x/y/width/height（width/height > 0）",
+            "bad region",
+        ));
+    }
+    let max_dimension = match args.get("max_dimension") {
+        Some(v) if !v.is_null() => match as_u32_bounded(v) {
+            Some(d) if d > 0 => Some(d),
+            _ => {
+                return Ok(tool_failure(
+                    "desktop_screenshot 的 max_dimension 需为正整数",
+                    "bad max_dimension",
+                ));
+            }
+        },
+        _ => None,
+    };
     let request = ScreenshotRequest {
         app_name: args.get("app_name").and_then(as_str_owned),
         pid,
@@ -633,6 +769,8 @@ fn handle_screenshot(arguments: String) -> Result<ToolResult, PluginError> {
             .get("foreground_only")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        region,
+        max_dimension,
         access: state::access_context(),
     };
     let result = sidecar_client::invoke::<Screenshot>(&request)

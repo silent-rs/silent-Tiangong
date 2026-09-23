@@ -59,6 +59,21 @@ computer-use 新增 `desktop_screenshot` op：
 - **工具结果只返回文本**：asset 引用、窗口元数据（app/标题/尺寸/时间）、
   provenance 前缀——这部分的作用是"知道"，且供审计与前端折叠展示。
 
+#### 3.1.1 窗口级/区域截图（Phase 2 部分提前落地）
+`desktop_screenshot` 已支持按范围截取（优先级：显式 `region` > 应用窗口
+`app_name`/`pid`/`foreground_only` > 主显示器全屏）：
+
+- 窗口定位：`CGWindowListCopyWindowInfo`（OnScreenOnly | ExcludeDesktop）
+  按 pid 取最前 layer-0 窗口的 frame（points，与 AX bounds 同系），
+  `screencapture -R x,y,w,h -o` 区域截取——所见即所得（遮挡关系保留，
+  与真人看到的屏幕一致）
+- `region`：控件级截图（Agent 用 desktop_snapshot 的 bounds 换算），
+  免去全屏注入的视觉 token 开销
+- `max_dimension`：产物长边超限（如 Anthropic 推荐 1568px）时 `sips -Z`
+  原地等比缩小，开放问题 2 的缩放策略落地为按需参数
+- ScreenCaptureKit 路线（每窗口独立捕获、含离屏内容）仍留待后续，
+  当前 `-R` 已覆盖微信等主流场景
+
 ### 3.2 注入声明协议（v4：types 权威类型定义）
 
 **注入声明不扩展 WIT `tool-result` 结构**（v3 修订：结构化字段方案要求
@@ -138,7 +153,7 @@ Anthropic 的 tool_result image 内联**降级为可选优化**（利于前缀�
 | 阶段 | 内容 |
 |---|---|
 | Phase 1 | `desktop_screenshot` op + `MessagePhase::HostInjected` + 安全边界注入落地 + 三系 provider user 消息映射 + assistant 侧过程片段展示 |
-| Phase 2 | `plugin_injection` 图片化（推式）+ 跨 turn 排队语义 |
+| Phase 2 | `plugin_injection` 图片化（推式）+ 跨 turn 排队语义（窗口级/区域截图与 max_dimension 缩放已提前落地，见 §3.1.1） |
 | Phase 3 | 配额/去重/压缩降级 + Anthropic tool_result 内联优化（可选） |
 
 ## 4.x 版本互操作注意事项

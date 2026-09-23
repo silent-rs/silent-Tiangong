@@ -338,6 +338,9 @@ impl ComputerUseOperation for Wait {
 pub const DESKTOP_SCREENSHOT_OPERATION: &str = "computer_use.desktop_screenshot";
 
 /// `desktop_screenshot` 工具请求。
+///
+/// 截取范围按优先级：显式 `region` > 应用窗口（app_name/pid/foreground_only
+/// 任一提供即截取该应用最前窗口）> 主显示器全屏。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenshotRequest {
     /// 截取指定应用的窗口（包含匹配）；缺省截取整个主显示器。
@@ -348,6 +351,14 @@ pub struct ScreenshotRequest {
     /// 仅截取前台窗口。
     #[serde(default)]
     pub foreground_only: bool,
+    /// 显式区域截图（屏幕逻辑坐标 points，主屏左上原点，与 desktop_snapshot
+    /// 的 bounds 同系）；提供时忽略 app 定位。width/height 必须 > 0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<crate::Bounds>,
+    /// 产物长边最大像素（如 1568 为 Anthropic 推荐值）；超过时等比缩小
+    /// 以节省视觉 token。缺省不缩放。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_dimension: Option<u32>,
     #[serde(flatten)]
     pub access: AccessContext,
 }
@@ -435,6 +446,50 @@ impl ComputerUseOperation for Mouse {
     const NAME: &'static str = DESKTOP_MOUSE_OPERATION;
     type Request = MouseRequest;
     type Response = DesktopResult<MouseResponse>;
+}
+// ── desktop_keyboard（RFC 0018 §2.4：键盘合成输入，CGEvent）────────
+pub const DESKTOP_KEYBOARD_OPERATION: &str = "computer_use.desktop_keyboard";
+/// 键盘手势类型。`type` 走 Unicode 字符串分派（不经输入法、不依赖布局，
+/// 中文与 ASCII 同路径）；`key`/`combo` 走虚拟键码（US ANSI 布局）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardActionKind {
+    /// 输入一段文本（逐字符合成，目标为当前焦点控件）。
+    #[default]
+    Type,
+    /// 按单个非修饰键（return/tab/esc/方向键/字母数字等）。
+    Key,
+    /// 组合键（修饰键 + 恰好一个非修饰键，如 cmd+c、cmd+shift+3）。
+    Combo,
+}
+/// `desktop_keyboard` 工具请求。键盘事件投递给当前焦点应用：Agent 应先
+/// 用 desktop_mouse click（或 desktop_action focus）建立输入焦点。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyboardRequest {
+    pub action: KeyboardActionKind,
+    /// type 必填：要输入的文本（支持任意 Unicode）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// key 必填：键名（别名不敏感：enter/esc/backspace 等）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// combo 必填：键名数组，修饰键在前（如 ["cmd","c"]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub access: AccessContext,
+}
+/// `desktop_keyboard` 工具响应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyboardResponse {
+    pub performed: bool,
+    pub summary: String,
+}
+pub struct Keyboard;
+impl ComputerUseOperation for Keyboard {
+    const NAME: &'static str = DESKTOP_KEYBOARD_OPERATION;
+    type Request = KeyboardRequest;
+    type Response = DesktopResult<KeyboardResponse>;
 }
 // ── virtual_cursor（RFC 0018：Agent 可控的持久指针开关）──────────
 pub const VIRTUAL_CURSOR_OPERATION: &str = "computer_use.virtual_cursor";

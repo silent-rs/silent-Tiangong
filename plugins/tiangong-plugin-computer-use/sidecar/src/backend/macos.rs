@@ -736,6 +736,28 @@ impl Backend for MacosBackend {
             Err(reason) => DesktopResult::Err(DesktopError::BackendUnavailable { reason }),
         }
     }
+    async fn keyboard(
+        &self,
+        req: &tiangong_plugin_computer_use_protocol::ops::KeyboardRequest,
+    ) -> DesktopResult<crate::backend::KeyboardResult> {
+        if !Self::is_trusted() {
+            return DesktopResult::Err(DesktopError::PermissionDenied {
+                reason: "尚未授予辅助功能权限".to_string(),
+            });
+        }
+        match super::keyboard::perform(
+            req.action,
+            req.text.clone(),
+            req.key.clone(),
+            req.keys.clone(),
+        ) {
+            Ok(summary) => DesktopResult::Ok(crate::backend::KeyboardResult {
+                performed: true,
+                summary,
+            }),
+            Err(reason) => DesktopResult::Err(DesktopError::BackendUnavailable { reason }),
+        }
+    }
     async fn screenshot(
         &self,
         req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
@@ -906,6 +928,11 @@ fn ensure_screen_capture_access() -> DesktopResult<()> {
 
 /// 执行截图：`screencapture` 由 sidecar（宿主直启、无 Seatbelt）调用，
 /// 屏幕录制 TCC 的责任进程归属天工 App。
+///
+/// 截取范围按优先级：显式 `region` > 应用窗口（CGWindowList 按 pid 定位
+/// 最前普通层窗口，bounds 即屏幕坐标 points）> 主显示器全屏。区域用
+/// `-R x,y,w,h`（所见即所得：被遮挡部分包含遮挡物，与真人看到的屏幕
+/// 一致）；`max_dimension` 超限时用 `sips -Z` 原地等比缩小。
 fn capture_screenshot(
     req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
 ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ScreenshotResponse> {
@@ -922,13 +949,57 @@ fn capture_screenshot(
     }
     let path = dir.join(format!("desktop-{}.png", scru128::new()));
 
-    // -x 静音；-o 去除阴影边饰（全屏截图时无副作用）。
-    let output = match std::process::Command::new("/usr/sbin/screencapture")
-        .arg("-x")
-        .arg("-o")
-        .arg(&path)
-        .output()
+    // 决定截取矩形（None = 全屏）。
+    let rect: Option<(f64, f64, f64, f64)> = if let Some(region) = req
+        .region
+        .filter(|r| r.width.is_finite() && r.height.is_finite() && r.width > 0.0 && r.height > 0.0)
     {
+        Some((region.x, region.y, region.width, region.height))
+    } else {
+        // 应用定位：显式 pid / app_name 反查（多进程取第一个有窗口的）/
+        // 前台应用。
+        let target_pids: Vec<u32> = if let Some(pid) = req.pid.filter(|p| *p > 0) {
+            vec![pid]
+        } else if let Some(name) = req
+            .app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            find_app_pids_by_name(name)
+        } else if req.foreground_only {
+            let workspace = NSWorkspace::sharedWorkspace();
+            workspace
+                .frontmostApplication()
+                .map(|app| app.processIdentifier() as u32)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut located: Option<(f64, f64, f64, f64)> = None;
+        for pid in &target_pids {
+            if let Some(frame) = window_frame_for_pid(*pid) {
+                located = Some(frame);
+                break;
+            }
+        }
+        if located.is_none() && !target_pids.is_empty() {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: "未找到目标应用可截取的屏幕窗口（窗口可能已最小化或不在屏幕上）"
+                    .to_string(),
+            });
+        }
+        located
+    };
+
+    // -x 静音；-o 去除阴影边饰；-R 指定区域（points）。
+    let mut command = std::process::Command::new("/usr/sbin/screencapture");
+    command.arg("-x").arg("-o");
+    if let Some((x, y, w, h)) = rect {
+        command.arg(format!("-R{x:.0},{y:.0},{w:.0},{h:.0}"));
+    }
+    let output = match command.arg(&path).output() {
         Ok(output) => output,
         Err(error) => {
             return DesktopResult::Err(DesktopError::BackendUnavailable {
@@ -944,6 +1015,35 @@ fn capture_screenshot(
                 output.status.code().unwrap_or(-1),
             ),
         });
+    }
+
+    // 长边超限时等比缩小（sips -Z 按最大边缩放，原地修改）。
+    if let Some(max_dimension) = req.max_dimension.filter(|m| *m > 0)
+        && let Some((w, h)) = png_dimensions(&path)
+        && w.max(h) > max_dimension
+    {
+        let resized = std::process::Command::new("/usr/bin/sips")
+            .arg("-Z")
+            .arg(max_dimension.to_string())
+            .arg(&path)
+            .output();
+        match resized {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: format!(
+                        "sips 缩放失败（退出码 {}）：{}",
+                        out.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&out.stderr).trim(),
+                    ),
+                });
+            }
+            Err(error) => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: format!("启动 sips 失败：{error}"),
+                });
+            }
+        }
     }
 
     let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
@@ -977,6 +1077,67 @@ fn capture_screenshot(
             source: Some("desktop_screenshot".to_string()),
         }],
     })
+}
+
+/// CGWindowList 按 pid 定位最前的普通层（layer 0）屏幕窗口的 frame
+/// （points，主屏左上原点全局坐标，与 AX bounds 同系）。按 z 序取第一
+/// 个；最小化/离屏窗口不在 OnScreenOnly 列表内。
+fn window_frame_for_pid(pid: u32) -> Option<(f64, f64, f64, f64)> {
+    use core_foundation::base::{CFType, FromVoid, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    };
+
+    let array = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    // SAFETY: 静态 CFStringRef 由 CoreGraphics 框架常驻提供。
+    let key_pid: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerPID) };
+    let key_layer: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowLayer) };
+    let key_bounds: CFString = unsafe { CFString::wrap_under_get_rule(kCGWindowBounds) };
+    let dict_number = |dict: &CFDictionary<CFString, CFType>, key: &CFString| -> Option<i64> {
+        let value = dict.find(key)?;
+        let number: CFNumber = value.downcast()?;
+        number.to_i64()
+    };
+    for ptr in array.get_all_values() {
+        // SAFETY: 数组存活期间元素指针有效；ItemRef 只借用不接管所有权。
+        let item: core_foundation::base::ItemRef<'_, CFDictionary<CFString, CFType>> =
+            unsafe { <CFDictionary<CFString, CFType>>::from_void(ptr) };
+        if dict_number(&item, &key_pid) != Some(pid as i64) {
+            continue;
+        }
+        if dict_number(&item, &key_layer) != Some(0) {
+            continue;
+        }
+        let Some(bounds_ref) = item.find(&key_bounds) else {
+            continue;
+        };
+        // SAFETY: CGWindowList 契约保证该值是 CFDictionary；get-rule 包装
+        // 只借用指针（数组存活期间有效），不接管所有权。
+        let bounds: CFDictionary<CFString, CFType> = unsafe {
+            <CFDictionary<CFString, CFType>>::wrap_under_get_rule(
+                bounds_ref.as_CFTypeRef() as core_foundation::dictionary::CFDictionaryRef
+            )
+        };
+        let bounds_number = |name: &str| -> Option<f64> {
+            let key = CFString::new(name);
+            let value = bounds.find(&key)?;
+            let number: CFNumber = value.downcast()?;
+            number.to_f64()
+        };
+        let (x, y) = (bounds_number("X")?, bounds_number("Y")?);
+        let (w, h) = (bounds_number("Width")?, bounds_number("Height")?);
+        if w > 0.0 && h > 0.0 {
+            return Some((x, y, w, h));
+        }
+    }
+    None
 }
 
 /// 解析截图目标应用名：显式 app_name 优先，pid 次之（反查应用名），

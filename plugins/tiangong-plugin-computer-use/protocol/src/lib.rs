@@ -32,6 +32,7 @@ pub const TOOL_DESKTOP_WAIT: &str = "desktop_wait";
 pub const TOOL_DESKTOP_SCREENSHOT: &str = "desktop_screenshot";
 pub const TOOL_VIRTUAL_CURSOR: &str = "virtual_cursor";
 pub const TOOL_DESKTOP_MOUSE: &str = "desktop_mouse";
+pub const TOOL_DESKTOP_KEYBOARD: &str = "desktop_keyboard";
 
 /// 一个类型化 Computer Use 业务操作。
 ///
