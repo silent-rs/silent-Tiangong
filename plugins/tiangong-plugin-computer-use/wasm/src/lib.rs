@@ -492,7 +492,7 @@ fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
 
 /// desktop_screenshot：图源工具（RFC 0017）。响应 JSON 里的
 /// `injected_assets` 数组是注入声明：core 在工具批次闭合后据此落成
-/// 仅模型可见的注入消息——工具文本只留引用与元数据。
+/// 宿主注入消息——工具文本只留引用与元数据，媒体由前端 assistant 侧展示。
 fn handle_screenshot(arguments: String) -> Result<ToolResult, PluginError> {
     let args = match parse_args("desktop_screenshot", &arguments) {
         Ok(v) => v,

@@ -1141,10 +1141,10 @@ mod tests {
     }
 
     /// 跨层主路径回归：同一份工具 stdout JSON 经过 types 强类型解析后，
-    /// 立即落成 ModelOnly User 消息；消息中的 Image 保留磁盘引用，
+    /// 立即落成 HostInjected User 消息；消息中的 Image 保留磁盘引用，
     /// 供 provider 下一请求读取像素。
     #[test]
-    fn tool_stdout_to_model_only_message_full_flow() {
+    fn tool_stdout_to_host_injected_message_full_flow() {
         let storage = tempfile::tempdir().unwrap();
         let image_path = storage.path().join("wechat-chat.png");
         std::fs::write(&image_path, [137_u8, 80, 78, 71, 1, 2, 3]).unwrap();
@@ -1173,12 +1173,12 @@ mod tests {
         assert_eq!(images[0].tool_name, "desktop_screenshot");
         assert_eq!(images[0].tool_call_id, "call-shot-1");
 
-        // 第 2 段：StoredAsset → ModelOnly User 消息。
+        // 第 2 段：StoredAsset → HostInjected User 消息。
         let mut session = Session::new("full-image-flow").with_storage_root(storage.path());
-        append_model_only_image_injections(&mut session, &images);
-        let message = session.messages.last().expect("ModelOnly 消息必须存在");
+        append_host_injected_images(&mut session, &images);
+        let message = session.messages.last().expect("HostInjected 消息必须存在");
         assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.phase, MessagePhase::ModelOnly);
+        assert_eq!(message.phase, MessagePhase::HostInjected);
         assert!(matches!(
             message.content.first(),
             Some(tiangong_types::ContentBlock::ModelInstruction { text })

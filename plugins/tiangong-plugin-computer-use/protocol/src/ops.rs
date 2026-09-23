@@ -366,7 +366,7 @@ pub struct ScreenshotResponse {
     #[serde(default)]
     pub app_name: String,
     pub size_bytes: u64,
-    /// 注入声明：非空时 core 落成仅模型可见的图片消息。
+    /// 注入声明：非空时 core 落成宿主注入的图片消息。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_assets: Vec<InjectedAsset>,
 }

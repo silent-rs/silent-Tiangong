@@ -913,7 +913,7 @@ fn capture_screenshot(
         app_name,
         size_bytes,
         // 注入声明（RFC 0017）：core 读到此数组后在工具批次闭合处
-        // 落成仅模型可见的图片消息。
+        // 落成宿主注入的图片消息。
         injected_assets: vec![tiangong_plugin_computer_use_protocol::InjectedAsset {
             local_path: path.display().to_string(),
             mime_type: "image/png".to_string(),
