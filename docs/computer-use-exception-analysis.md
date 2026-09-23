@@ -106,3 +106,22 @@ desktop_action / desktop_wait`——**没有截屏，没有合成输入（CGEven
   sidecar 无条件注入 `TIANGONG_STORAGE_ROOT`，截图落统一媒体目录
   `~/.tiangong/media/screenshots`，tcp/stdio 两条 spawn 路径同口径）。
   owner 名定位路径的端到端行为需在具备 TCC 授权的宿主环境复核。
+
+## 6. "最后一公里"证据链（2026-09-24，三级实证）
+
+现象：注入图片在前端消息中正常展示，但 agent（模型）表现得不知道图片到达。
+
+| # | 环节 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | 上下文组装 | ✅ 完好 | 序列级回归测试 `host_injected_message_survives_full_request_assembly`：完整工具轮序列（user → assistant(tool_calls) → tool → 注入消息）经 `build_provider_messages` 后 provenance 文本与图片内容均保留、位于 Tool 结果之后，未被跳头/sanitize 配对整形丢弃 |
+| 2 | HTTP 序列化 | ✅ 完好 | 抓包级回归测试 `openai_request_body_carries_host_injected_image`：MockServer 捕获的真实请求 body 含 `image_url` 原生图片内容与 provenance 文本 |
+| 3 | 落库/前端 | ✅ 完好 | 会话文件 Image 块完整（data=None 设计内）；前端 assistant 侧展示正常 |
+
+**结论：天工侧链路完好，断点在上游**——glm-5.3 非多模态，OpenAI 兼容网关
+对文本模型的 `image_url` 静默丢弃（provenance 文本是否随之受损取决于网关
+对混合内容消息的处理）。
+
+设计取向（维持，不做降级）：provenance 让 agent 知道图片到达及其本地路径；
+agent 需要看图时自行调用 `analyze_attachment`（走多模态路由）解读——
+前提是模型配置了 Multimodal 路由槽位。曾实现"端点能力快照三态降级"，
+因改动面过大（7 crate）且与 analyze-attachment 在册信号重复而回退。
