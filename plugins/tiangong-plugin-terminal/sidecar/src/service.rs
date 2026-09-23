@@ -382,12 +382,27 @@ fn shell_ready_probe(shell: ShellKind, marker: &str) -> String {
     }
 }
 
-/// 就绪判定：marker 含随机 scru128，整体子串命中即视为 shell 已执行探针。
-/// 富提示符（starship）与 shell 插件（zsh xtrace/autosuggest）会在输出中
-/// 叠加前缀或与探针交错，严格行相等匹配会漏判；子串匹配的安全性由
-/// [`shell_ready_probe`] 的拼接写法保证（回显不含完整 marker）。
+/// 就绪判定：把原始字节经终端仿真还原成「终端上真实呈现的行」后，再要求
+/// 某一整行等于 marker。
+///
+/// 不能在原始字节流上做子串匹配。原始流里混着 ZLE 重绘序列、光标回退、
+/// `\r` 覆写以及 zsh-autosuggestions / zsh-syntax-highlighting 的预测文本
+/// 与擦除——这些字节从未作为「终端最终显示的内容」存在过，只是绘制过程的
+/// 中间态。在中间态上 `contains` 会把行编辑器重绘出的、**尚未执行**的命令
+/// 行当成执行结果：autosuggest 重绘时引号被消化，完整 marker 随之出现，
+/// 就绪判定退化成恒真，正常运行的命令被误判为「包装脚本夭折」。
+///
+/// 还原后改用整行相等匹配，[`shell_ready_probe`] 的相邻引用串拼接防护才真
+/// 正生效：回显的 `echo '前缀''后缀'` 整行不可能等于纯 marker 行，唯有 shell
+/// 实际执行过 echo 才会产生独占一行的 marker。
 fn shell_ready_probe_completed(raw: &str, marker: &str) -> bool {
-    raw.contains(marker)
+    let mut processor = persist::TerminalLineProcessor::new();
+    let mut lines = processor.process(raw);
+    let current = processor.current_line();
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines.iter().any(|line| line.trim() == marker)
 }
 
 fn default_cols() -> u16 {
@@ -2069,7 +2084,9 @@ impl RawOutputFilter {
     }
 
     fn filter(&mut self, chunk: &str) -> String {
-        self.pending.push_str(chunk);
+        // 终端应答序列先行剥离：它们与 marker 无关，且可能出现在任意位置，
+        // 在进入行边界切分前去掉，避免混进 UI 输出。
+        self.pending.push_str(&strip_terminal_reports(chunk));
         let mut result = String::new();
         while let Some((end, newline)) = next_output_boundary(&self.pending) {
             let segment = self.pending[..end].to_string();
@@ -2108,6 +2125,73 @@ impl RawOutputFilter {
         }
         result
     }
+}
+
+/// 剥离终端**应答**序列：这类字节是终端回答应用查询的结果，方向是
+/// 终端 → 应用，本就不该出现在给用户看的输出里。
+///
+/// 触发场景：zsh 的 ZLE 行编辑器被唤醒重绘时（夭折探针写入、窗口尺寸
+/// 变化等），zsh-syntax-highlighting 与主题会发出 OSC 11（查询背景色）
+/// 和 DSR 6n（查询光标位置），终端的应答随即混入 PTY 输出流。过滤器
+/// 若不处理，用户就会在长命令输出中途看到 `]11;rgb:1e1e/1e1e/2e2e` 与
+/// `[24;1R` 这类乱码。
+///
+/// 只剥离两类明确的应答，不动任何正常渲染序列（SGR 颜色、光标移动等）：
+/// - OSC 颜色应答：`ESC ] 1[01] ; rgb:... (ESC \ | BEL)`
+/// - DSR 光标位置上报：`ESC [ <行> ; <列> R`
+fn strip_terminal_reports(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\x1b' && index + 1 < bytes.len() {
+            // DSR 光标位置上报：ESC [ digits ; digits R
+            if bytes[index + 1] == b'[' {
+                let mut end = index + 2;
+                while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+                    end += 1;
+                }
+                if end < bytes.len() && bytes[end] == b'R' && end > index + 2 {
+                    index = end + 1;
+                    continue;
+                }
+            }
+            // OSC 颜色应答：ESC ] 10/11 ; ... 以 ESC \ 或 BEL 结束
+            if bytes[index + 1] == b']' {
+                let mut end = index + 2;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let code = &value[index + 2..end];
+                if matches!(code, "10" | "11" | "12") && end < bytes.len() && bytes[end] == b';' {
+                    let mut scan = end;
+                    while scan < bytes.len() {
+                        if bytes[scan] == 0x07 {
+                            scan += 1;
+                            break;
+                        }
+                        if bytes[scan] == b'\x1b'
+                            && scan + 1 < bytes.len()
+                            && bytes[scan + 1] == b'\\'
+                        {
+                            scan += 2;
+                            break;
+                        }
+                        scan += 1;
+                    }
+                    // 未见终止符说明序列尚未收全，留待下个分片再处理。
+                    if scan < bytes.len() || value[end..].contains('\u{7}') {
+                        index = scan;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch_len = value[index..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&value[index..index + ch_len]);
+        index += ch_len;
+    }
+    out
 }
 
 fn next_output_boundary(value: &str) -> Option<(usize, bool)> {
@@ -3583,23 +3667,48 @@ mod tests {
         );
     }
 
+    /// 富提示符下**真正执行过**探针：marker 独占一行（前面可能有 starship
+    /// 提示符与 OSC 颜色查询等噪声行），必须判为就绪。
     #[test]
-    fn 就绪判定_命中富提示符与_xtrace_噪声中的_marker() {
+    fn 就绪判定_命中富提示符噪声中独占一行的_marker() {
         let marker = "__TIANGONG_READY_abc__";
-        // starship 右提示符 + OSC 颜色查询 + zsh xtrace/autosuggest 前缀：
-        // marker 不独占整行，严格行相等匹配会漏判，子串匹配必须命中。
         let noisy = format!(
             "\u{1b}]11;rgb:1e1e/1e1e/2e2e\u{1b}\\\r\n\
-             _zsh_autosuggest_bind_widgets:18> echo {marker}\r\n\
-             \u{1b}[1;32m❯\u{1b}[0m {marker}\u{1b}[K\r\n"
+             \u{1b}[1;32m❯\u{1b}[0m echo '__TIANGONG_READY_''abc__'\r\n\
+             {marker}\u{1b}[K\r\n"
         );
         assert!(
             shell_ready_probe_completed(&noisy, marker),
-            "富提示符与 xtrace 噪声中的 marker 必须判为就绪"
+            "执行后独占一行的 marker 必须判为就绪"
         );
         assert!(
             !shell_ready_probe_completed(&noisy, "__TIANGONG_READY_other__"),
             "不同随机 marker 不得互相命中"
+        );
+    }
+
+    /// zsh-autosuggestions / zsh-syntax-highlighting 等 ZLE widget 会在**行编辑
+    /// 阶段**重绘输入行，重绘时引号被消化，完整 marker 随之出现在原始字节流
+    /// 中——但命令一个字都还没执行。
+    ///
+    /// 这是 #571 兜底假阴性的真正根因：旧实现在未经终端仿真的原始字节上做
+    /// `contains`，把重绘中间态当成执行结果，导致 git fetch 等正常命令被误判
+    /// 为「包装脚本夭折」，实际执行成功却回报失败，诱导调用方重复执行。
+    #[test]
+    fn 就绪判定_zsh行编辑器重绘不算就绪() {
+        let marker = "__TIANGONG_READY_abc__";
+        // autosuggest 的 xtrace 前缀里带完整 marker：命令尚未执行。
+        let xtrace = format!("_zsh_autosuggest_bind_widgets:18> echo {marker}\r\n");
+        assert!(
+            !shell_ready_probe_completed(&xtrace, marker),
+            "xtrace 回显的未执行命令行不得判为就绪: {xtrace:?}"
+        );
+
+        // 语法高亮重绘：marker 与提示符同行，且行尾被擦除序列覆盖。
+        let redraw = format!("\u{1b}[1;32m❯\u{1b}[0m echo {marker}\u{1b}[K\r");
+        assert!(
+            !shell_ready_probe_completed(&redraw, marker),
+            "行编辑器重绘出的命令行不得判为就绪: {redraw:?}"
         );
     }
 
@@ -3612,6 +3721,42 @@ mod tests {
              __TIANGONG_RC_x__0\r\n",
         );
         assert_eq!(visible, "Cargo.toml\r\n");
+    }
+
+    /// 终端应答序列（方向是终端 → 应用）绝不能进入给用户看的输出。
+    ///
+    /// zsh 的 ZLE 被唤醒重绘时（夭折探针写入等），zsh-syntax-highlighting
+    /// 与主题会发 OSC 11 查背景色、DSR 6n 查光标位置，终端应答随即混入 PTY
+    /// 输出流。过滤器不处理的话，用户会在长命令输出中途看到
+    /// `]11;rgb:1e1e/1e1e/2e2e` 与 `[24;1R` 这类乱码。
+    #[test]
+    fn marker_filter_剥离终端应答序列() {
+        let mut filter = RawOutputFilter::new(Arc::new(Mutex::new(HashMap::new())));
+        let visible = filter
+            .filter("\u{1b}]11;rgb:1e1e/1e1e/2e2e\u{1b}\\building...\r\n\u{1b}[24;1Rdone\r\n");
+        assert_eq!(
+            visible, "building...\r\ndone\r\n",
+            "OSC 颜色应答与 DSR 光标上报必须被剥离: {visible:?}"
+        );
+    }
+
+    /// 剥离只针对应答序列，正常渲染序列（SGR 颜色、光标移动、擦除）必须
+    /// 原样保留——它们是 UI 正确着色与重绘的依据。
+    #[test]
+    fn marker_filter_不误伤正常渲染序列() {
+        let kept = strip_terminal_reports(
+            "\u{1b}[1;32mgreen\u{1b}[0m\u{1b}[2J\u{1b}[H\u{1b}[K\u{1b}[10Dmoved",
+        );
+        assert_eq!(
+            kept, "\u{1b}[1;32mgreen\u{1b}[0m\u{1b}[2J\u{1b}[H\u{1b}[K\u{1b}[10Dmoved",
+            "正常渲染序列不得被剥离: {kept:?}"
+        );
+        // OSC 0/2（设置标题）是应用 → 终端方向，不属于应答，保留。
+        let title = strip_terminal_reports("\u{1b}]0;my title\u{7}text");
+        assert_eq!(
+            title, "\u{1b}]0;my title\u{7}text",
+            "设置标题序列不得被剥离"
+        );
     }
 
     /// 命令行必须由 start marker 就地替换产生，紧贴自己的输出。

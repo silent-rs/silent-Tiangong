@@ -282,3 +282,168 @@ stdin 的前台程序。
 `用户命令语法错误仍按非零退出码正常收尾` 均以
 `stderr: "命令执行超时", exit_code: -1, timed_out: true` 失败，
 与 issue 描述的现象一致；恢复修复后通过。
+
+## 10. 回归修复：就绪探针在 zsh 行编辑器下的假阴性（0.3.11）
+
+### 10.1 现象
+
+0.3.10 上线后出现新的异常：`git fetch`、`yarn install`、`gh pr create`、
+`cargo test` 等命令**实际执行成功**，却被回报为
+
+```
+命令包装脚本未正常结束（命令可能存在语法/解析错误），已返回其结束前的输出
+exit_code = -1
+```
+
+这是**假阴性**，比 #571 的挂起更危险：挂起是可见的卡死，而假阴性会让调用方
+误以为操作失败并重试——对 `git push`、创建 PR、发送消息、消耗额度这类动作
+可能造成重复执行。实测一次会话内复现 5 次以上。
+
+### 10.2 根因：在绘制中间态上做子串匹配
+
+第 8 章引入的 P1 兜底用 `shell_ready_probe` 写入一行探针，再由
+`shell_ready_probe_completed` 判断 shell 是否已回到提示符。旧实现是：
+
+```rust
+fn shell_ready_probe_completed(raw: &str, marker: &str) -> bool {
+    raw.contains(marker)          // 裸字节子串匹配
+}
+```
+
+其安全性依赖 `shell_ready_probe` 的相邻引用串写法——写入的字节里 marker 被
+`''` 断开，纯 tty 回显不含完整 marker，必须 shell 真正执行 `echo` 拼接后才
+出现。测试 `shell_ready_probe_文本不含完整_marker` 守的就是这条。
+
+**但 zsh 行编辑器插件会打破这个前提。** `zsh-autosuggestions`、
+`zsh-syntax-highlighting` 是 ZLE widget，在**行编辑阶段**就对输入行做解析与
+重绘；重绘输出的是语义处理后的内容，引号被消化，完整 marker 随之出现在 PTY
+原始字节流里——而命令**一个字都还没执行**。就绪判定因此恒真，正在正常运行的
+命令被判为夭折。
+
+关键在于：原始字节流里混着 ZLE 重绘序列、光标回退、`\r` 覆写与预测文本擦除，
+这些字节**从未作为「终端最终显示的内容」存在过**，只是绘制过程的中间态。在
+中间态上 `contains`，等于把「屏幕上曾经闪过的像素」当成命令执行结果。
+
+同一文件里 `parse_command_output`（主判据）早已走的是正确路子：先用
+`persist::TerminalLineProcessor`（`vte::Parser` + 光标模拟）把原始字节还原成
+终端真实呈现的行，再做**整行相等**匹配。两套判据一严一松，缺陷由此而来。
+
+### 10.3 一条错误的测试固化了缺陷
+
+0.3.10 的 `就绪判定_命中富提示符与_xtrace_噪声中的_marker` 用例里：
+
+```
+_zsh_autosuggest_bind_widgets:18> echo __TIANGONG_READY_abc__
+```
+
+这是 autosuggest 的 xtrace 回显，**命令尚未执行**，而断言写的是「必须判为
+就绪」。当时为了容忍富提示符噪声把判定放得过宽，等于给错误判据发了通行证。
+
+### 10.4 修复
+
+让探针判据与主判据走同一条路——先终端仿真还原，再整行相等：
+
+```rust
+fn shell_ready_probe_completed(raw: &str, marker: &str) -> bool {
+    let mut processor = persist::TerminalLineProcessor::new();
+    let mut lines = processor.process(raw);
+    let current = processor.current_line();
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines.iter().any(|line| line.trim() == marker)
+}
+```
+
+- 重绘中间态被 vte 正确消化，只留终端最终呈现的行
+- 整行相等取代子串包含，回显的 `echo '前缀''后缀'` 不可能等于纯 marker 行
+- `shell_ready_probe` 的拼接防护重新生效，且不再依赖「用户没装 shell 插件」
+  这一脆弱前提
+
+判据只变严不变松，end marker 主判据完全未动，不会引回 #571 的挂起；也不涉及
+前台进程组判断（`foreground_is_interactive` 存在前台空档瞬时误判问题，见
+8.3），不引入新的误判面。
+
+### 10.5 验证
+
+`cargo test -p tiangong-plugin-terminal-sidecar -- --test-threads=1`：45 passed。
+
+| 用例 | 覆盖 |
+|---|---|
+| `就绪判定_zsh行编辑器重绘不算就绪` | xtrace 回显与语法高亮重绘均不得判为就绪（本次回归的直接守护） |
+| `就绪判定_命中富提示符噪声中独占一行的_marker` | 真正执行后 marker 独占一行仍必须判为就绪，兜底能力不被削弱 |
+| `就绪判定_未执行的纯回显不算就绪` | 原有防护保持有效 |
+
+**反向确认**：把 `shell_ready_probe_completed` 退回 `raw.contains(marker)`
+后，`就绪判定_zsh行编辑器重绘不算就绪` 立即 FAILED；恢复修复后通过。证明该
+用例确实守得住这个缺陷。
+
+### 10.6 经验
+
+本次定位走了弯路：最初三次尝试都在单元测试里构造「读 stdin 的长命令」，
+全部无法复现——因为**测试环境的 shell 不加载用户 `.zshrc`，没有 autosuggest**，
+而故障只在装了 ZLE 插件的真实环境出现。复现环境与故障环境不一致时，构造再多
+用例也撞不上。应当先确认故障环境的差异特征，再决定复现路径。
+
+## 11. 终端应答序列漏进 UI 输出（0.3.11）
+
+### 11.1 现象
+
+长命令运行中途，用户在终端面板看到乱码：
+
+```
+]11;rgb:1e1e/1e1e/2e2e     [24;1R
+```
+
+短命令（`echo`、`git status`）从不出现，只在运行超过数秒的命令上可见。
+
+### 11.2 根因
+
+这两段不是随机噪声，是**终端应答序列**，方向为终端 → 应用：
+
+| 序列 | 含义 |
+|---|---|
+| `ESC ] 11 ; rgb:... ESC \` | OSC 11 背景色**查询的应答** |
+| `ESC [ 24;1 R` | DSR 光标位置上报（第 24 行第 1 列） |
+
+产生链条：
+
+1. 命令静默超过 `SILENT_ABORTED_WRAPPER_SECS`（3 秒）触发夭折探针
+2. 探针写入 PTY，唤醒 zsh 的 ZLE 行编辑器重绘
+3. 重绘时 zsh-syntax-highlighting 与主题发出 OSC 11 / DSR 6n 查询
+4. 终端应答混入 PTY 输出流
+5. `RawOutputFilter::filter` 只处理 marker 行，**不识别应答序列**，原样透传给 UI
+
+这解释了「只在长命令出现」的规律：短命令不触发探针，ZLE 不被唤醒。
+
+需要说明的是，探针写 PTY 的行为在 0.3.10 已存在；第 10 章把就绪判定改严后，
+探针不再被重绘误判为就绪而提前退出，会按节流跑满多轮，触发重绘的次数增加，
+使该缺陷更容易被观察到。即使没有探针，窗口尺寸变化等其他重绘诱因同样会让
+应答序列漏出，因此这是独立于探针的过滤缺陷。
+
+### 11.3 修复
+
+新增 `strip_terminal_reports`，在 `RawOutputFilter::filter` 入口先行剥离，
+再进入行边界切分：
+
+- OSC 颜色应答：`ESC ] 10|11|12 ; ... (ESC \ | BEL)`
+- DSR 光标位置上报：`ESC [ <行> ; <列> R`
+
+只剥离这两类明确的应答，不触碰任何正常渲染序列。未见终止符时保留在
+`pending` 中，留待下个分片继续，避免跨 chunk 截断。
+
+### 11.4 验证
+
+`cargo test -p tiangong-plugin-terminal-sidecar -- --test-threads=1`：47 passed。
+
+| 用例 | 覆盖 |
+|---|---|
+| `marker_filter_剥离终端应答序列` | OSC 11 应答与 DSR 上报均不得进入 UI 输出 |
+| `marker_filter_不误伤正常渲染序列` | SGR 颜色、`ESC[2J`、`ESC[H`、`ESC[K`、光标左移与 OSC 0（设置标题）必须原样保留 |
+
+### 11.5 遗留
+
+本次只处理「应答序列不该漏进 UI」这一层。探针写 PTY 会唤醒 ZLE 重绘这一
+副作用仍然存在（第 8 章 P1 兜底的固有代价）。若后续认为该副作用收益不抵
+成本，可考虑收紧触发条件或移除 P1 兜底——此前评估中 P1 的价值在于带 timeout
+的长命令丢 marker 时能提前收尾，取舍需结合实际发生率再定。

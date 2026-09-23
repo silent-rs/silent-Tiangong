@@ -11742,7 +11742,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-terminal-sidecar"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "async-trait",
