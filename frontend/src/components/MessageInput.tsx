@@ -1268,8 +1268,10 @@ export function MessageInput({
                   ref={mentionRef}
                   className="mention-completion-menu absolute bottom-full left-0 z-50 mb-1 max-h-80 w-[min(36rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-md border bg-popover shadow-lg"
                 >
+                  {/* 吸顶：面板内容可滚动，搜索框必须始终可见（否则滚到长列表
+                      中部后就看不到当前过滤词，也不敢改） */}
                   {completionMode === 'mention' && (
-                    <div className="border-b px-3 py-1.5">
+                    <div className="sticky top-0 z-10 border-b bg-popover px-3 py-1.5">
                       <input
                         ref={mentionSearchRef}
                         type="text"
@@ -1287,24 +1289,32 @@ export function MessageInput({
                       无匹配 · Enter 或 Esc 关闭
                     </div>
                   ) : completionMode === 'slash' ? (
-                    // slash 命令：平铺渲染（单行紧凑排布，与 mention 项一致）
+                    // slash 命令：平铺渲染。标签完整显示（不截断），
+                    // 描述允许换行，并用 title 提供 hover 全文提示。
                     filteredCandidates.map((c, i) => (
                       <button
                         key={c.value}
                         ref={(el) => { candidateRefs.current[i] = el; }}
-                        className={`flex w-full items-center gap-2 px-3 py-1 text-left text-sm transition-colors hover:bg-accent ${
+                        className={`flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
                           i === mentionIndex ? 'bg-accent' : ''
                         }`}
                         onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
                         onMouseEnter={() => setMentionIndex(i)}
                       >
-                        <Keyboard className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span className="min-w-0 shrink-0 font-medium">{c.label}</span>
-                        {c.hint && (
-                          <span className="min-w-0 truncate text-xs text-muted-foreground">
-                            {c.hint}
+                        <Keyboard className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <span className="max-w-full whitespace-normal break-words font-medium">
+                            {c.label}
                           </span>
-                        )}
+                          {c.hint && (
+                            <span
+                              className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                              title={c.hint}
+                            >
+                              {c.hint}
+                            </span>
+                          )}
+                        </div>
                       </button>
                     ))
                   ) : (
@@ -1323,20 +1333,27 @@ export function MessageInput({
                               return (
                                 <div
                                   key={`${group.kind}-scanning`}
-                                  className="flex w-full items-center gap-2 px-3 py-1 text-left text-sm text-muted-foreground"
+                                  className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm text-muted-foreground"
                                 >
                                   <span
-                                    className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none"
+                                    className="mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none"
                                     aria-hidden="true"
                                   >
                                     {c.mark?.trim() || '…'}
                                   </span>
-                                  <span className="min-w-0 truncate font-medium">{c.label}</span>
-                                  {c.hint && (
-                                    <span className="min-w-0 truncate text-xs text-muted-foreground">
-                                      {c.hint}
+                                  <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                    <span className="max-w-full whitespace-normal break-words font-medium">
+                                      {c.label}
                                     </span>
-                                  )}
+                                    {c.hint && (
+                                      <span
+                                        className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                                        title={c.hint}
+                                      >
+                                        {c.hint}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
                               );
                             }
@@ -1345,7 +1362,7 @@ export function MessageInput({
                               <button
                                 key={c.value}
                                 ref={(el) => { candidateRefs.current[i] = el; }}
-                                className={`flex w-full items-center gap-2 px-3 py-1 text-left text-sm transition-colors hover:bg-accent ${
+                                className={`flex w-full items-start gap-2 px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
                                   i === mentionIndex ? 'bg-accent' : ''
                                 }`}
                                 onMouseDown={(e) => { e.preventDefault(); selectCandidate(c); }}
@@ -1353,20 +1370,30 @@ export function MessageInput({
                               >
                                 {/* 标记字符与气泡 chip 同源（插件提供，缺省按 kind 回退） */}
                                 <span
-                                  className={`inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
+                                  className={`mt-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-sm border text-[10px] font-semibold leading-none ${MENTION_KIND_BADGE_CLASS[c.kind] ?? MENTION_KIND_BADGE_CLASS.plugin}`}
                                   aria-hidden="true"
                                 >
                                   {c.mark?.trim() || mentionMarkFor(c.kind, c.value)}
                                 </span>
-                                <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                                  <span className="min-w-0 truncate font-medium">{c.label}</span>
+                                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                  {/* 主体完整显示：不截断，放不下就换行——截断后
+                                      用户无法确认选中的是哪一个 */}
+                                  <span className="max-w-full whitespace-normal break-words font-medium">
+                                    {c.label}
+                                  </span>
                                   {c.kind === 'skill' && c.value.includes('@') && (
-                                    <span className="shrink-0 text-xs text-muted-foreground">
+                                    <span className="whitespace-nowrap text-xs text-muted-foreground">
                                       {c.value.replace(/^@/, '')}
                                     </span>
                                   )}
                                   {c.hint && (
-                                    <span className="min-w-0 truncate text-xs text-muted-foreground">
+                                    // 描述可换行，但截断到两行（超出部分省略号），
+                                    // 全文靠 title 的 hover 提示读——否则一条长描述
+                                    // 能把面板撑成只有两三项可见。
+                                    <span
+                                      className="min-w-0 flex-1 whitespace-normal break-words text-xs leading-4 text-muted-foreground line-clamp-2"
+                                      title={c.hint}
+                                    >
                                       {c.hint}
                                     </span>
                                   )}
