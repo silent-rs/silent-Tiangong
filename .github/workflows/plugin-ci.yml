@@ -64,10 +64,15 @@ jobs:
               crates/tiangong-plugin-sidecar/src/bin/*)
                 # 测试/诊断二进制由 App CI 覆盖，不影响插件 Sidecar 共享库。
                 ;;
-              crates/tiangong-plugin-sidecar/Cargo.toml|crates/tiangong-plugin-sidecar/src/*.rs)
+              crates/tiangong-plugin-sidecar/Cargo.toml|crates/tiangong-plugin-sidecar/src/*.rs|crates/tiangong-plugin-runtime/*)
+                # 两者都是全部 sidecar 的共享依赖：改动必须让所有 sidecar
+                # 重新构建。不能只靠下面的 fallback_all——它们路径本身命中
+                # crates/* 会置 scoped_change=true，使 fallback_all 的判定
+                # 条件永假，矩阵反而为空（Windows 专有编译错误曾因此漏检
+                # 进入 main，见 #575）。
                 sidecar_shared_changed=true
                 ;;
-              Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*|crates/tiangong-plugin-runtime/*)
+              Cargo.toml|Cargo.lock|.github/workflows/plugin-ci.yml|xtask/*)
                 fallback_all=true
                 ;;
             esac

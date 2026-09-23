@@ -424,3 +424,5 @@ mod windows_tests {
         assert_eq!(actual.JobMemoryLimit, expected.max_memory_bytes as usize);
     }
 }
+
+// CI 矩阵验证用的无副作用注释（本分支仅用于验证，不合并）
