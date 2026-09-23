@@ -179,30 +179,31 @@ pub struct Tool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
-    Enabled {
-        /// 思考预算（≥1024 且须小于 max_tokens，协议要求必填）。
-        /// 调用方可省略：发送前由 AnthropicClient 统一补默认预算，
-        /// 省略值不会序列化进请求。
-        #[serde(skip_serializing_if = "Option::is_none")]
-        budget_tokens: Option<u32>,
-    },
+    /// 自适应思考（现行唯一思考形态）：模型自行决定是否思考及思考多深，
+    /// 深度由 `output_config.effort` 档位控制。Claude 4.7+ 新模型仅接受
+    /// 该形态，智谱 GLM 等第三方兼容端点实测也已完整支持。
+    Adaptive,
     Disabled,
 }
 
-impl ThinkingConfig {
-    /// 开启思考，预算由客户端发送前统一填充。
-    pub fn enabled() -> Self {
-        Self::Enabled {
-            budget_tokens: None,
-        }
-    }
+/// `output_config.effort` 档位：adaptive thinking 模型的深度控制。
+/// 档位语义：low 省token / medium 平衡（Opus 5.5 默认）/ high 默认强度
+/// （其余模型默认）/ xhigh 长程 agentic / max 无上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
 
-    /// 开启思考并显式指定预算（官方 Anthropic 端点使用）。
-    pub fn with_budget(budget_tokens: u32) -> Self {
-        Self::Enabled {
-            budget_tokens: Some(budget_tokens),
-        }
-    }
+/// 请求级输出配置，当前承载 adaptive thinking 模型的 effort 深度档位。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -228,6 +229,9 @@ pub struct MessagesCreateRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    /// 输出配置：adaptive thinking 模型的深度档位（output_config.effort）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

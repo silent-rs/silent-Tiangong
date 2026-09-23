@@ -3,14 +3,15 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use tiangong_anthropic::types::{
     CacheControl, ContentBlock, ContentBlockDeltaData, ContentBlockParam, ContentBlockStartData,
-    ImageSourceParam, Message as AnthropicMessage, MessageRole as AnthropicMessageRole,
-    MessagesCreateRequest, MessagesCreateResponse, StreamEvent, SystemContent, TextBlock,
-    ThinkingConfig, Tool as AnthropicTool, ToolChoice as AnthropicToolChoice, Usage,
+    EffortLevel, ImageSourceParam, Message as AnthropicMessage,
+    MessageRole as AnthropicMessageRole, MessagesCreateRequest, MessagesCreateResponse,
+    OutputConfig, StreamEvent, SystemContent, TextBlock, ThinkingConfig, Tool as AnthropicTool,
+    ToolChoice as AnthropicToolChoice, Usage,
 };
 
 use crate::error::LlmError;
 use crate::message::{ChatMessage, MessageContent, MessageRole, ThinkingContent};
-use crate::request::ProviderRequest;
+use crate::request::{ProviderRequest, ReasoningEffort};
 use crate::response::{ProviderResponse, StopReason};
 use crate::stream::ProviderStreamEvent;
 use crate::tool::{ToolCall, ToolChoice, ToolResult, ToolResultContent};
@@ -93,6 +94,7 @@ pub(super) fn to_anthropic_request(
         tool_choice,
         stream: None,
         thinking,
+        output_config: map_output_config(request),
     })
 }
 
@@ -140,12 +142,32 @@ fn build_tools(request: &ProviderRequest) -> Option<Vec<AnthropicTool>> {
 }
 
 fn map_thinking_config(request: &ProviderRequest) -> Option<ThinkingConfig> {
-    // reasoning_effort 有值即开启思考；预算是 Anthropic 协议自身细节，
-    // 省略时由 tiangong-anthropic 客户端在发送前统一填充默认值。
+    // reasoning_effort 有值即开启思考，统一 adaptive 形态（不区分模型：
+    // Claude 新模型仅接受该形态，智谱 GLM 等兼容端点实测已完整支持）；
+    // 深度档位由 map_output_config 对齐到 output_config.effort。
     request
         .reasoning_effort
         .is_thinking_enabled()
-        .then(ThinkingConfig::enabled)
+        .then_some(ThinkingConfig::Adaptive)
+}
+
+/// adaptive 思考深度：天工 ReasoningEffort 档位与 Anthropic effort
+/// 档位语义一致，直接对齐映射；未开启思考不下发 output_config
+/// （effort 省略时走模型默认档）。
+fn map_output_config(request: &ProviderRequest) -> Option<OutputConfig> {
+    if !request.reasoning_effort.is_thinking_enabled() {
+        return None;
+    }
+    let effort = match request.reasoning_effort {
+        ReasoningEffort::None => return None,
+        ReasoningEffort::Low => EffortLevel::Low,
+        ReasoningEffort::Medium => EffortLevel::Medium,
+        ReasoningEffort::High => EffortLevel::High,
+        ReasoningEffort::Max => EffortLevel::Max,
+    };
+    Some(OutputConfig {
+        effort: Some(effort),
+    })
 }
 
 fn map_message(message: &ChatMessage) -> Option<Result<AnthropicMessage, LlmError>> {
