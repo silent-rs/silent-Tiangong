@@ -177,6 +177,24 @@ fn test_adaptive_model_maps_effort_to_output_config() {
 }
 
 #[test]
+fn test_unknown_claude_model_defaults_to_adaptive() {
+    // 未收录的全新命名族：默认新模式，未来新模型无需改代码即自动生效。
+    let mut request = sample_request();
+    request.model = "claude-eclipse-9".to_string();
+    let mapped = super::mapping::to_anthropic_request(&request).expect("mapped request");
+    assert_eq!(
+        mapped.thinking,
+        Some(tiangong_anthropic::types::ThinkingConfig::Adaptive)
+    );
+    assert_eq!(
+        mapped.output_config,
+        Some(tiangong_anthropic::types::OutputConfig {
+            effort: Some(tiangong_anthropic::types::EffortLevel::High)
+        })
+    );
+}
+
+#[test]
 fn test_legacy_model_keeps_enabled_without_output_config() {
     // 旧模型与第三方兼容端点：保持 enabled 形态，不下发 output_config。
     let mapped = super::mapping::to_anthropic_request(&sample_request()).expect("mapped request");
