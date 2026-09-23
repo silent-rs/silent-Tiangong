@@ -336,7 +336,7 @@ pub(super) fn record_completed_tool_call(
         duration_ms,
     } = completion;
     // 工具产物图片不进入工具结果文本：stdout JSON 的 injected_assets
-    // 声明在批次闭合后统一落成仅模型可见的注入消息（RFC 0017
+    // 声明在批次闭合后统一落成宿主注入消息（RFC 0017
     // 「看见而非知道」判据；跨插件形态的通用协议字段）。
     pending_images.extend(parse_injected_images(&call.name, &call.id, &result.stdout));
     ctx.observer.audit_tool_execution(

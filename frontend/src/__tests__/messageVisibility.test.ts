@@ -44,20 +44,27 @@ describe('压缩续接消息可见性', () => {
   });
 });
 
-describe('仅模型可见注入消息（RFC 0017）', () => {
+describe('宿主注入媒体消息（RFC 0017）', () => {
   const messages = [
     message('user-1', 'user', '总结微信群聊'),
     message('assistant-1', 'assistant', '好的，我先截取屏幕'),
-    message('inject-1', 'user', '[injected-images provenance]', 'modelonly'),
+    message('inject-1', 'user', '[injected-images provenance]', 'hostinjected'),
     message('assistant-2', 'assistant', '我看到了截图内容'),
   ];
 
-  it('分组时隐藏注入消息', () => {
-    const visibleIds = groupMessages(messages).flatMap((group) =>
+  it('分组时注入消息归入助手轮次组（assistant 侧展示）', () => {
+    const groups = groupMessages(messages);
+    const visibleIds = groups.flatMap((group) =>
       group.messages.map((item) => item.id),
     );
 
-    expect(visibleIds).toEqual(['user-1', 'assistant-1', 'assistant-2']);
+    expect(visibleIds).toEqual(['user-1', 'assistant-1', 'inject-1', 'assistant-2']);
+    const injectGroup = groups.find((group) =>
+      group.messages.some((item) => item.id === 'inject-1'),
+    );
+
+    expect(injectGroup?.type).toBe('agent_turn');
+    expect(injectGroup?.messages.some((item) => item.id === 'assistant-1')).toBe(true);
   });
 
   it('搜索范围排除注入消息', () => {

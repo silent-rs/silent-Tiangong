@@ -456,12 +456,12 @@ fn message_phase_serde() {
         r#""compressedresume""#
     );
     assert_eq!(
-        serde_json::to_string(&MessagePhase::ModelOnly).unwrap(),
-        r#""modelonly""#
+        serde_json::to_string(&MessagePhase::HostInjected).unwrap(),
+        r#""hostinjected""#
     );
     assert_eq!(
-        serde_json::from_str::<MessagePhase>(r#""modelonly""#).unwrap(),
-        MessagePhase::ModelOnly
+        serde_json::from_str::<MessagePhase>(r#""hostinjected""#).unwrap(),
+        MessagePhase::HostInjected
     );
 }
 

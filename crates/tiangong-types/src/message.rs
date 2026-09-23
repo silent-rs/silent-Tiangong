@@ -79,25 +79,26 @@ pub enum MessagePhase {
     /// 由 core 持久化一条承载「最近用户提问 + 已完成结果 + 进行中工具」
     /// 的 User 消息。该消息始终发送给模型，前端不展示、搜索或编辑。
     CompressedResume,
-    /// 仅模型可见的注入消息（RFC 0017）。
+    /// 宿主注入的媒体消息（RFC 0017）。
     ///
     /// 工具产物图片等宿主注入内容：以原生视觉部件发送给模型（像素直达，
-    /// 而非文本提及路径），前端消息流不展示、不搜索、不可编辑；会话
-    /// 检查器可审计。与 CompressedResume 共享「进模型、不进 UI」语义，
-    /// 但不要求「始终发送」——被压缩边界截断时随历史一起降级。
-    ModelOnly,
+    /// 而非文本提及路径），前端把它作为助手轮次内的过程片段在 assistant
+    /// 侧展示（不进搜索、不可编辑），会话检查器可审计。它不是用户
+    /// 意图，不作轮次锚点；与 CompressedResume 一样随压缩边界降级，
+    /// 但不要求「始终发送」。
+    HostInjected,
 }
 
 impl MessagePhase {
     /// 是否为用户真实输入。
     ///
-    /// 宿主注入的 role=User 消息（图片注入 `ModelOnly`、压缩恢复锚点
+    /// 宿主注入的 role=User 消息（图片注入 `HostInjected`、压缩恢复锚点
     /// `CompressedResume`）是模型上下文的载体，不代表一次用户意图，
     /// 不得作为轮次锚点（`elapsed_ms` / `turn_status` 的落点）。
     /// UI 可见性与本判据正交：React/Summary 过程消息属于用户发起的
     /// 轮次，仍视为真实输入。
     pub fn is_user_input(&self) -> bool {
-        !matches!(self, Self::ModelOnly | Self::CompressedResume)
+        !matches!(self, Self::HostInjected | Self::CompressedResume)
     }
 }
 

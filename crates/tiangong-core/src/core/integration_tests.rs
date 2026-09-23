@@ -1248,7 +1248,7 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
     let injected = restored
         .messages
         .iter()
-        .find(|m| m.phase == MessagePhase::ModelOnly)
+        .find(|m| m.phase == MessagePhase::HostInjected)
         .expect("图片注入消息必须存在");
     assert_eq!(injected.role, MessageRole::User);
     assert!(
@@ -1264,7 +1264,7 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
             < restored
                 .messages
                 .iter()
-                .position(|m| m.phase == MessagePhase::ModelOnly)
+                .position(|m| m.phase == MessagePhase::HostInjected)
                 .unwrap(),
         "注入消息应位于真实用户消息之后"
     );

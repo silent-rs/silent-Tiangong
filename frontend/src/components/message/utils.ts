@@ -312,8 +312,11 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
   let currentAgentTurn: PendingGroup | null = null;
 
   for (const msg of messages) {
-    if (msg.phase === "compressedresume" || msg.phase === "modelonly") continue;
-    if (msg.worker_id) {
+    if (msg.phase === "compressedresume") continue;
+    // 宿主注入消息（RFC 0017）：role=User 但属助手轮次的过程片段，
+    // 归 agent_turn 组在 assistant 侧展示，不单独成组、不作用户锚点。
+    const hostInjected = msg.phase === "hostinjected";
+    if (msg.worker_id && !hostInjected) {
       if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
       const previous = pending[pending.length - 1];
       if (previous?.type === "worker" && previous.worker_id === msg.worker_id) {
@@ -321,7 +324,7 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
       } else {
         pending.push({ key: `worker-${msg.worker_id}-${msg.id}`, type: "worker", worker_id: msg.worker_id, msgs: [msg] });
       }
-    } else if (msg.role === "user") {
+    } else if (msg.role === "user" && !hostInjected) {
       if (currentAgentTurn) { pending.push(currentAgentTurn); currentAgentTurn = null; }
       pending.push({ key: msg.id, type: "user", msgs: [msg] });
     } else {

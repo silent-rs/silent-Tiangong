@@ -75,7 +75,7 @@ pub(super) async fn execute_tool_batch(
         std::collections::VecDeque::new();
     let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
     // 本批工具产物中声明的待注入图片（RFC 0017）：批次闭合时统一落成
-    // 仅模型可见的 User 消息，保证同批工具结果在消息序列中保持连续。
+    // 宿主注入的 User 消息，保证同批工具结果在消息序列中保持连续。
     let mut pending_images: Vec<super::message::PendingImageInjection> = Vec::new();
 
     'pipeline: loop {
@@ -232,7 +232,7 @@ fn is_interrupting(command: &Command) -> bool {
 
 /// 落地本批图片注入（RFC 0017 安全边界：工具批次闭合之后、下一次模型
 /// 请求组装之前）。空批次零开销；落地后立即持久化并向前端同步消息
-/// 快照（前端按 `MessagePhase::ModelOnly` 过滤不展示，审计入口可展开）。
+/// 快照（前端按 `MessagePhase::HostInjected` 归入助手轮次作过程片段展示）。
 fn commit_image_injections(
     ctx: &mut TurnContext,
     pending_images: &mut Vec<super::message::PendingImageInjection>,
@@ -240,7 +240,7 @@ fn commit_image_injections(
     if pending_images.is_empty() {
         return;
     }
-    super::message::append_model_only_image_injections(&mut ctx.session, pending_images);
+    super::message::append_host_injected_images(&mut ctx.session, pending_images);
     pending_images.clear();
     ctx.session.persist_to_disk();
     if let Some(mut snapshot) = ctx.session.messages.last().cloned() {

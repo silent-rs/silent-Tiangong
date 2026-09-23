@@ -169,24 +169,21 @@ pub fn append_runtime_tool_message(_session: &mut Session, tool_name: &str, cont
 /// 工具产物中待注入的图片（RFC 0017 拉式路径）。
 ///
 /// 工具结果自身只携带引用与 provenance 文本；像素在工具批次闭合后由
-/// [`append_model_only_image_injections`] 落成仅模型可见的 User 消息，
-/// 经 provider 层以原生多模态内容直达模型。
+/// [`append_host_injected_images`] 落成宿主注入的 User 消息，经 provider
+/// 层以原生多模态内容直达模型，前端在 assistant 侧作为过程片段展示。
 pub(crate) struct PendingImageInjection {
     pub tool_name: String,
     pub tool_call_id: String,
     pub asset: tiangong_types::StoredAsset,
 }
 
-/// 把待注入图片落成 `MessagePhase::ModelOnly` 的 User 消息（RFC 0017）。
+/// 把待注入图片落成 `MessagePhase::HostInjected` 的 User 消息（RFC 0017）。
 ///
 /// 调用时机：工具批次闭合后、下一次模型请求组装前——保证同批工具结果
 /// 在消息序列中保持连续（Provider 工具协议要求），图片消息紧随其后。
 /// 像素数据不在此填充：请求组装时 provider 层按 `asset.local_path` 读取，
 /// 持久化侧由既有 `clear_transient_data` 机制兜底剥离。
-pub(crate) fn append_model_only_image_injections(
-    session: &mut Session,
-    images: &[PendingImageInjection],
-) {
+pub(crate) fn append_host_injected_images(session: &mut Session, images: &[PendingImageInjection]) {
     use tiangong_types::ContentBlock;
     if images.is_empty() {
         return;
@@ -216,7 +213,7 @@ pub(crate) fn append_model_only_image_injections(
     }
     let mut message = Message::new(crate::session::MessageRole::User, String::new());
     message.content = content;
-    let message = message.with_phase(crate::session::MessagePhase::ModelOnly);
+    let message = message.with_phase(crate::session::MessagePhase::HostInjected);
     session.messages.push(message);
 }
 
@@ -680,11 +677,11 @@ mod tests {
     use super::*;
     use crate::session::MessagePhase;
 
-    /// RFC 0017：图片注入消息必须是「仅模型可见的 User 消息」——role=User、
-    /// phase=ModelOnly、content 含 provenance（ModelInstruction）与 Image 块，
+    /// RFC 0017：图片注入消息必须是「宿主注入的 User 消息」——role=User、
+    /// phase=HostInjected、content 含 provenance（ModelInstruction）与 Image 块，
     /// 且 Image 不携带内联 data（持久层稳定引用，请求时由 provider 填充）。
     #[test]
-    fn model_only_image_injection_message_shape() {
+    fn host_injected_image_message_shape() {
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("model-only-inject").with_storage_root(storage.path());
         let asset = tiangong_types::StoredAsset {
@@ -695,7 +692,7 @@ mod tests {
             size: 1024,
             kind: tiangong_types::MediaKind::Image,
         };
-        append_model_only_image_injections(
+        append_host_injected_images(
             &mut session,
             &[PendingImageInjection {
                 tool_name: "desktop_screenshot".to_string(),
@@ -705,7 +702,7 @@ mod tests {
         );
         let message = session.messages.last().expect("注入消息必须存在");
         assert_eq!(message.role, crate::session::MessageRole::User);
-        assert_eq!(message.phase, crate::session::MessagePhase::ModelOnly);
+        assert_eq!(message.phase, crate::session::MessagePhase::HostInjected);
         assert!(matches!(
             message.content.first(),
             Some(tiangong_types::ContentBlock::ModelInstruction { text }) if text.contains("desktop_screenshot")
@@ -723,7 +720,7 @@ mod tests {
         }
         // 空列表零副作用。
         let before = session.messages.len();
-        append_model_only_image_injections(&mut session, &[]);
+        append_host_injected_images(&mut session, &[]);
         assert_eq!(session.messages.len(), before);
     }
 
@@ -766,10 +763,10 @@ mod tests {
     }
 
     /// 跨层主路径回归：同一份工具 stdout JSON 经过 types 强类型解析后，
-    /// 立即落成 ModelOnly User 消息；消息中的 Image 保留磁盘引用，
+    /// 立即落成 HostInjected User 消息；消息中的 Image 保留磁盘引用，
     /// 供 provider 下一请求读取像素。
     #[test]
-    fn tool_stdout_to_model_only_message_full_flow() {
+    fn tool_stdout_to_host_injected_message_full_flow() {
         let storage = tempfile::tempdir().unwrap();
         let image_path = storage.path().join("wechat-chat.png");
         std::fs::write(&image_path, [137_u8, 80, 78, 71, 1, 2, 3]).unwrap();
@@ -798,12 +795,12 @@ mod tests {
         assert_eq!(images[0].tool_name, "desktop_screenshot");
         assert_eq!(images[0].tool_call_id, "call-shot-1");
 
-        // 第 2 段：StoredAsset → ModelOnly User 消息。
+        // 第 2 段：StoredAsset → HostInjected User 消息。
         let mut session = Session::new("full-image-flow").with_storage_root(storage.path());
-        append_model_only_image_injections(&mut session, &images);
-        let message = session.messages.last().expect("ModelOnly 消息必须存在");
+        append_host_injected_images(&mut session, &images);
+        let message = session.messages.last().expect("HostInjected 消息必须存在");
         assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.phase, MessagePhase::ModelOnly);
+        assert_eq!(message.phase, MessagePhase::HostInjected);
         assert!(matches!(
             message.content.first(),
             Some(tiangong_types::ContentBlock::ModelInstruction { text })

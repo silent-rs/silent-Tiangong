@@ -65,7 +65,7 @@ export function findSearchMatches(
 
   const matches: SearchMatch[] = [];
   for (const msg of messages) {
-    if (msg.phase === 'compressedresume' || msg.phase === 'modelonly') continue;
+    if (msg.phase === 'compressedresume' || msg.phase === 'hostinjected') continue;
     const groupIndex = msgGroupMap.get(msg.id) ?? -1;
 
     if (scope === 'messages') {

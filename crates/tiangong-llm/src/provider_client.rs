@@ -2281,11 +2281,11 @@ mod tests {
         assert!(error.to_string().contains("asset-ready"));
     }
 
-    /// RFC 0017「看见而非知道」判据的回归保护：ModelOnly 注入消息
+    /// RFC 0017「看见而非知道」判据的回归保护：HostInjected 注入消息
     /// （provenance + Image、data=None）映射后必须携带原生图片内容
     /// （从 local_path 读取编码），不得退化为文本提及路径。
     #[test]
-    fn model_only_injection_message_carries_native_image() {
+    fn host_injected_message_carries_native_image() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2305,7 +2305,7 @@ mod tests {
             },
         ]);
         msg.role = MessageRole::User;
-        msg.phase = tiangong_types::MessagePhase::ModelOnly;
+        msg.phase = tiangong_types::MessagePhase::HostInjected;
 
         let result = provider_message_from_session(&msg)
             .expect("映射不应失败")

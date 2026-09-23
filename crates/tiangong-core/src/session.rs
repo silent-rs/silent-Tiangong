@@ -678,7 +678,7 @@ mod persistence_tests {
         session.append_message(MessageRole::User, "真实问题");
         session.append_message(MessageRole::Assistant, "回答");
         let mut injected = Message::new(MessageRole::User, "[injected-images]");
-        injected.phase = MessagePhase::ModelOnly;
+        injected.phase = MessagePhase::HostInjected;
         session.messages.push(injected);
         assert_eq!(
             session.latest_user_message_index(),
