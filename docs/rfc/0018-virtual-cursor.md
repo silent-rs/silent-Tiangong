@@ -50,9 +50,29 @@ overlay 窗口属性（`sidecar/src/backend/overlay.rs`，仅 macOS）：
 
 坐标换算：AX 全局坐标（主屏左上原点）→ AppKit 全局坐标（主屏左下原点），`window_origin(x, y, screen_top)` 纯函数（含单测）；bounds 零/负尺寸（读取失败默认值）不显示指针。
 
-### 2.3 与系统输入的关系
+### 2.3 desktop_mouse：坐标级鼠标手势（CGEvent 合成）
 
-Phase 1 不合成任何真实输入——指针纯展示，配合既有 AX 语义动作。若后续引入坐标级鼠标合成（CGEvent 合成移动/点击），指针将作为合成事件的可视化伴生（提前移动到目标、点击涟漪），届时再扩展。
+`desktop_action`（AX 语义动作）唤不出右键菜单、没有滚轮、拖不了拽，Canvas 等自绘
+UI 还没有 AX 树——坐标级合成输入是其补充。工具暴露的是**手势而非裸事件**：
+`down`/`up` 永不单独出现，`drag` 由实现侧生成插值轨迹（ease-out 步进）保证拖拽
+会话时序，杜绝跨工具调用的按住状态泄漏（cliclick/Playwright 同款设计）。
+
+```
+desktop_mouse { gesture: move | click | right_click | double_click | drag | scroll,
+                x, y, to_x?, to_y?, delta_y?, delta_x? }
+```
+
+**系统鼠标「借用并归还」**（用户系统鼠标不被劫持）：
+
+- `move`：纯虚拟——只动天工指针，不投递任何系统事件
+- `click/right_click/double_click`：真实 HID down/up 序列（窗口激活、上下文菜单、
+  菜单跟踪与真人完全一致——定向 `CGEventPostToPid` 实测无法唤出依赖 WindowServer
+  状态的菜单），借用后立即把系统鼠标移回原位（≈100ms 闪回）
+- `drag`：真实指针轨迹（拖拽会话必须跟随系统指针），结束归还原位
+- `scroll`：无激活/菜单依赖，AX 定位坐标处进程后定向投递，系统鼠标不动
+
+虚拟指针全程独立平滑跟随手势目标，点击瞬间播放按压脉冲动画（0→1.25→1 正弦
+回弹，hotspot 始终对准目标点）。合成事件需要辅助功能授权（与 AX 同一 TCC）。
 
 ## 3. 复用路线（嵌入式浏览器）
 
@@ -63,5 +83,5 @@ Phase 1 不合成任何真实输入——指针纯展示，配合既有 AX 语�
 
 ## 4. 平台与限制
 
-- macOS 实装；Windows（UIA BoundingRectangle）/ Linux（AT-SPI extents）后续按同模式扩展
-- Phase 1 限制：仅主屏坐标正确（多屏待后续）；无点击涟漪；Windows/Linux `virtual_cursor` 返回不支持
+- macOS 实装（虚拟指针 + desktop_mouse 手势）；Windows/Linux 后续按同模式扩展
+- 限制：仅主屏坐标正确（多屏待后续）；无 AX 树区域的点击兜底为 warp+归还；定向投递的滚轮在个别自绘应用可能不生效；Windows/Linux 两工具均返回不支持

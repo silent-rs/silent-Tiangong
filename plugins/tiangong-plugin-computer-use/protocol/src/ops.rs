@@ -380,6 +380,62 @@ impl ComputerUseOperation for Screenshot {
 
 // ── 生命周期 ──────────────────────────────────────────────────
 
+// ── desktop_mouse（RFC 0018 §2.3：坐标级鼠标手势，CGEvent 合成）────
+pub const DESKTOP_MOUSE_OPERATION: &str = "computer_use.desktop_mouse";
+/// 鼠标手势类型。手势（而非裸事件）是暴露单元：down/up 永不单独出现，
+/// drag 由实现侧生成插值轨迹保证时序，杜绝跨调用的按住状态泄漏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseGesture {
+    /// 移动（hover）。
+    Move,
+    /// 左键单击。
+    Click,
+    /// 右键单击（唤出上下文菜单）。
+    RightClick,
+    /// 左键双击。
+    DoubleClick,
+    /// 按下后插值轨迹拖拽到终点再抬起。
+    Drag,
+    /// 滚轮（像素级）。
+    Scroll,
+}
+/// `desktop_mouse` 工具请求。坐标为屏幕逻辑坐标（points，主屏左上原点，
+/// 与 desktop_snapshot 的 bounds 同系）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MouseRequest {
+    pub gesture: MouseGesture,
+    /// 起点/目标点 X。
+    pub x: f64,
+    /// 起点/目标点 Y。
+    pub y: f64,
+    /// drag 终点 X（drag 必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_x: Option<f64>,
+    /// drag 终点 Y（drag 必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_y: Option<f64>,
+    /// 垂直滚动像素（正=向下；scroll 必填）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_y: Option<f64>,
+    /// 水平滚动像素（正=向右；scroll 可选，默认 0）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_x: Option<f64>,
+    #[serde(flatten)]
+    pub access: AccessContext,
+}
+/// `desktop_mouse` 工具响应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseResponse {
+    pub performed: bool,
+    pub summary: String,
+}
+pub struct Mouse;
+impl ComputerUseOperation for Mouse {
+    const NAME: &'static str = DESKTOP_MOUSE_OPERATION;
+    type Request = MouseRequest;
+    type Response = DesktopResult<MouseResponse>;
+}
 // ── virtual_cursor（RFC 0018：Agent 可控的持久指针开关）──────────
 pub const VIRTUAL_CURSOR_OPERATION: &str = "computer_use.virtual_cursor";
 /// `virtual_cursor` 工具请求。

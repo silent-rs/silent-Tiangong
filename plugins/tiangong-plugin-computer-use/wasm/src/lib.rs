@@ -19,14 +19,14 @@ use serde::Serialize;
 use serde_json::json;
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
-    FindConditions, FindRequest, ListWindows, ListWindowsRequest, Screenshot, ScreenshotRequest,
-    SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, VirtualCursor, VirtualCursorRequest,
-    Wait, WaitRequest,
+    FindConditions, FindRequest, ListWindows, ListWindowsRequest, Mouse, MouseGesture,
+    MouseRequest, Screenshot, ScreenshotRequest, SetAccess, SetAccessRequest, Snapshot,
+    SnapshotRequest, VirtualCursor, VirtualCursorRequest, Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
-    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_SNAPSHOT,
-    TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT, TOOL_VIRTUAL_CURSOR,
+    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_MOUSE, TOOL_DESKTOP_SCREENSHOT,
+    TOOL_DESKTOP_SNAPSHOT, TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT, TOOL_VIRTUAL_CURSOR,
 };
 
 mod descriptor {
@@ -185,6 +185,24 @@ impl Guest for Component {
                 })),
             },
             ToolSpec {
+                name: TOOL_DESKTOP_MOUSE.to_string(),
+                description: "坐标级鼠标手势（CGEvent 合成，走真实输入管线）：移动、左/右键单击、双击、拖拽、滚轮。可唤出右键菜单、操作 Canvas 等无障碍树外的界面，是 desktop_action 语义动作的补充。坐标用 desktop_snapshot 的 bounds 换算；开启 virtual_cursor 后指针实时跟随并有点击动画。"
+                    .to_string(),
+                input_schema: schema_string(json!({
+                    "type": "object",
+                    "properties": {
+                        "gesture": { "type": "string", "enum": ["move", "click", "right_click", "double_click", "drag", "scroll"] },
+                        "x": { "type": "number", "description": "目标点 X（屏幕逻辑坐标，主屏左上原点）" },
+                        "y": { "type": "number", "description": "目标点 Y" },
+                        "to_x": { "type": "number", "description": "drag 终点 X（drag 必填）" },
+                        "to_y": { "type": "number", "description": "drag 终点 Y（drag 必填）" },
+                        "delta_y": { "type": "number", "description": "垂直滚动像素，正=向下（scroll 必填）" },
+                        "delta_x": { "type": "number", "description": "水平滚动像素，正=向右（scroll 可选）" }
+                    },
+                    "required": ["gesture", "x", "y"]
+                })),
+            },
+            ToolSpec {
                 name: TOOL_VIRTUAL_CURSOR.to_string(),
                 description: "开关天工虚拟鼠标的持久显示（默认关闭）。开启后指针出现在系统鼠标当前位置并常驻，desktop_action 执行时平滑移动到目标控件中心向用户突出展示操作落点；关闭后淡出。适合向用户演示或汇报桌面操作的场景，普通自动化操作无需开启。"
                     .to_string(),
@@ -230,6 +248,7 @@ impl Guest for Component {
             TOOL_DESKTOP_WAIT => handle_wait(call.arguments),
             TOOL_DESKTOP_SCREENSHOT => handle_screenshot(call.arguments),
             TOOL_VIRTUAL_CURSOR => handle_virtual_cursor(call.arguments),
+            TOOL_DESKTOP_MOUSE => handle_desktop_mouse(call.arguments),
             other => Err(plugin_err(format!("未知的 Computer Use 工具: {other}"))),
         }
     }
@@ -468,6 +487,74 @@ fn handle_action(arguments: String) -> Result<ToolResult, PluginError> {
     run_desktop_op::<Action, _>(&request, "desktop_action")
 }
 
+fn handle_desktop_mouse(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_mouse", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let gesture = match args
+        .get("gesture")
+        .and_then(|value| value.as_str())
+        .and_then(parse_mouse_gesture)
+    {
+        Some(g) => g,
+        None => {
+            return Ok(tool_failure(
+                "desktop_mouse 缺少或无法识别 gesture",
+                "bad gesture",
+            ));
+        }
+    };
+    let (Some(x), Some(y)) = (
+        args.get("x").and_then(|value| value.as_f64()),
+        args.get("y").and_then(|value| value.as_f64()),
+    ) else {
+        return Ok(tool_failure("desktop_mouse 缺少 x/y 坐标", "missing x/y"));
+    };
+    // 手势参数完整性：drag 需终点，scroll 需滚动量。
+    let (to_x, to_y) = (
+        args.get("to_x").and_then(|value| value.as_f64()),
+        args.get("to_y").and_then(|value| value.as_f64()),
+    );
+    let (delta_y, delta_x) = (
+        args.get("delta_y").and_then(|value| value.as_f64()),
+        args.get("delta_x").and_then(|value| value.as_f64()),
+    );
+    if gesture == MouseGesture::Drag && (to_x.is_none() || to_y.is_none()) {
+        return Ok(tool_failure(
+            "drag 必须同时提供 to_x 与 to_y",
+            "missing drag target",
+        ));
+    }
+    if gesture == MouseGesture::Scroll && delta_y.is_none() && delta_x.is_none() {
+        return Ok(tool_failure(
+            "scroll 必须提供 delta_y 或 delta_x",
+            "missing scroll delta",
+        ));
+    }
+    let request = MouseRequest {
+        gesture,
+        x,
+        y,
+        to_x,
+        to_y,
+        delta_y,
+        delta_x,
+        access: state::access_context(),
+    };
+    run_desktop_op::<Mouse, _>(&request, "desktop_mouse")
+}
+fn parse_mouse_gesture(value: &str) -> Option<MouseGesture> {
+    match value {
+        "move" => Some(MouseGesture::Move),
+        "click" => Some(MouseGesture::Click),
+        "right_click" => Some(MouseGesture::RightClick),
+        "double_click" => Some(MouseGesture::DoubleClick),
+        "drag" => Some(MouseGesture::Drag),
+        "scroll" => Some(MouseGesture::Scroll),
+        _ => None,
+    }
+}
 fn handle_virtual_cursor(arguments: String) -> Result<ToolResult, PluginError> {
     let args = match parse_args("virtual_cursor", &arguments) {
         Ok(v) => v,

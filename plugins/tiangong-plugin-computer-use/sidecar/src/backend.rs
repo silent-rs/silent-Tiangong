@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindRequest, ListWindowsRequest, ScreenshotRequest, SnapshotRequest, WaitRequest,
+    ActionRequest, FindRequest, ListWindowsRequest, MouseRequest, ScreenshotRequest,
+    SnapshotRequest, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, DesktopError, DesktopResult, DesktopSession,
@@ -45,6 +46,14 @@ pub trait Backend: Send + Sync {
     ///
     /// 默认返回平台不支持：尚未实现原生截图的平台保持能力缺失的
     /// 明确失败，而不是静默空图。
+    /// 坐标级鼠标手势（CGEvent 合成，RFC 0018 §2.3）。默认不支持，
+    /// macOS 后端实装。
+    async fn mouse(&self, _req: &MouseRequest) -> DesktopResult<MouseResult> {
+        DesktopResult::Err(DesktopError::ActionNotSupported {
+            action: "desktop_mouse".to_string(),
+            supported: vec![],
+        })
+    }
     async fn screenshot(&self, _req: &ScreenshotRequest) -> DesktopResult<ScreenshotResponse> {
         DesktopResult::Err(unsupported_screenshot(self.platform()))
     }
@@ -83,6 +92,12 @@ pub struct ActionResult {
     pub new_window: Option<tiangong_plugin_computer_use_protocol::ElementRef>,
 }
 
+/// `desktop_mouse` 返回信息。
+#[derive(Debug, Clone, Default)]
+pub struct MouseResult {
+    pub performed: bool,
+    pub summary: String,
+}
 /// `desktop_wait` 返回信息。
 #[derive(Debug, Clone, Default)]
 pub struct WaitResult {
@@ -158,6 +173,9 @@ pub mod ax;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// 坐标级鼠标手势（CGEvent 合成，RFC 0018 §2.3，仅 macOS）。
+#[cfg(target_os = "macos")]
+pub mod mouse;
 /// 天工虚拟指针 overlay（RFC 0018，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod overlay;

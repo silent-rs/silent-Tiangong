@@ -71,6 +71,14 @@ impl AxError {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyElementAtPosition(
+        application: AXUIElementRef,
+        x: f64,
+        y: f64,
+        element: *mut AXUIElementRef,
+    ) -> i32;
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     fn AXUIElementCopyAttributeNames(element: AXUIElementRef, names: *mut CFArrayRef) -> i32;
     fn AXUIElementCopyAttributeValue(
@@ -391,6 +399,27 @@ impl Drop for AxElement {
 pub fn is_process_trusted() -> bool {
     // SAFETY：无副作用。
     unsafe { AXIsProcessTrusted() != 0 }
+}
+/// 解析屏幕坐标处顶层元素的进程 pid（desktop_mouse 定向投递用）。
+///
+/// 坐标为 AX 全局坐标（主屏左上原点，points）。命中返回目标进程；
+/// 无 AX 树区域或坐标无效时返回 `None`，调用方走 warp 兜底。
+pub fn pid_at_position(x: f64, y: f64) -> Option<i32> {
+    // SAFETY：SystemWide 元素为 caller-owned 引用，用完 release。
+    let system_wide = unsafe { AXUIElementCreateSystemWide() };
+    if system_wide.is_null() {
+        return None;
+    }
+    let mut element: AXUIElementRef = std::ptr::null();
+    let code = unsafe { AXUIElementCopyElementAtPosition(system_wide, x, y, &mut element) };
+    unsafe { CFRelease(system_wide as CFTypeRef) };
+    if code != 0 || element.is_null() {
+        return None;
+    }
+    let mut pid: i32 = 0;
+    let ok = unsafe { AXUIElementGetPid(element, &mut pid) } == 0;
+    unsafe { CFRelease(element as CFTypeRef) };
+    ok.then_some(pid)
 }
 
 /// retain 一个 CFTypeRef 并返回新引用。

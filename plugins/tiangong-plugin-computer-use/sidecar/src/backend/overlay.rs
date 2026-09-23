@@ -44,6 +44,9 @@ const FADE_STEP: f64 = 0.05;
 const MOVE_EASE: f64 = 0.16;
 /// 距目标小于该距离（points）即吸附，结束移动。
 const MOVE_EPSILON: f64 = 0.5;
+/// 点击脉冲：总时长与最大放大系数（0→1.25→1 的正弦回弹）。
+const PULSE_MS: u64 = 280;
+const PULSE_SCALE: f64 = 0.25;
 
 /// 指针 PNG（由 resources/virtual-cursor.svg 按同规格生成，见
 /// resources/gen_cursor_png.swift）。
@@ -59,6 +62,8 @@ enum Command {
     MoveTo { x: f64, y: f64 },
     /// 持久开关：开启时常驻（接管系统鼠标位置），关闭时淡出。
     SetEnabled(bool),
+    /// 点击脉冲：指针移动到目标并播放一次按压回弹动画（点击反馈）。
+    ClickPulse { x: f64, y: f64 },
 }
 
 /// 平滑移动指针到屏幕坐标（points，AX 全局坐标系：主屏左上原点）。
@@ -69,6 +74,14 @@ enum Command {
 pub fn move_to(x: f64, y: f64) {
     if let Some(sender) = SENDER.get() {
         let _ = sender.send(Command::MoveTo { x, y });
+    }
+}
+
+/// 点击脉冲：指针移动到目标并播放按压回弹动画（Agent 经
+/// `desktop_mouse` 点击手势驱动）。非阻塞投递。
+pub fn click_pulse(x: f64, y: f64) {
+    if let Some(sender) = SENDER.get() {
+        let _ = sender.send(Command::ClickPulse { x, y });
     }
 }
 
@@ -113,6 +126,8 @@ pub fn run_main_loop() {
     // 首次出现或淡出后（不可见）直接落位，可见时连续滑动。
     let mut current: Option<(f64, f64)> = None;
     let mut target: Option<(f64, f64)> = None;
+    let mut pulse_until: Option<Instant> = None;
+    let mut last_scale: f64 = 1.0;
     let mut screen_top = main_screen_top(mtm);
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
@@ -151,6 +166,14 @@ pub fn run_main_loop() {
                         visible_until = Some(Instant::now());
                         dirty = true;
                     }
+                    Command::ClickPulse { x, y } => {
+                        if enabled {
+                            target = Some((x, y));
+                            pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_MS));
+                            screen_top = main_screen_top(mtm);
+                            dirty = true;
+                        }
+                    }
                 }
             }
         }
@@ -181,7 +204,37 @@ pub fn run_main_loop() {
             }
             dirty = true;
         }
+        // 点击脉冲：窗口尺寸按正弦回弹缩放（hotspot 始终对准目标点）。
+        let scale = match pulse_until {
+            Some(deadline) => {
+                let total = PULSE_MS as f64;
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as f64;
+                let progress = (1.0 - remaining / total).clamp(0.0, 1.0);
+                if progress >= 1.0 {
+                    pulse_until = None;
+                    1.0
+                } else {
+                    1.0 + PULSE_SCALE * (std::f64::consts::PI * progress).sin()
+                }
+            }
+            None => 1.0,
+        };
+        if scale != last_scale
+            && let Some((cx, cy)) = current
+        {
+            let origin = window_origin_scaled(cx, cy, screen_top, scale);
+            let size = NSSize::new(CONTENT_W * scale, CONTENT_H * scale);
+            window.setFrame_display(NSRect::new(origin, size), true);
+            last_scale = scale;
+        }
         pump_events(&app);
+        // 缓存系统鼠标当前位置（AX 坐标），供 desktop_mouse 的 drag
+        // 手势「借用并归还」读取（NSEvent 仅主线程可用）。
+        let location = NSEvent::mouseLocation();
+        let screen_top_now = screen_top;
+        super::mouse::cache_system_cursor(location.x, screen_top_now - location.y);
         if let Some(deadline) = visible_until
             && Instant::now() >= deadline
         {
@@ -212,7 +265,15 @@ fn wait_for_shutdown() {
 /// `screen_top` 为主屏顶边的 AppKit y（单主屏时即主屏高度）。纯函数，
 /// 便于单测坐标换算。
 fn window_origin(x: f64, y: f64, screen_top: f64) -> NSPoint {
-    NSPoint::new(x - HOTSPOT_X, screen_top - y + HOTSPOT_Y - CONTENT_H)
+    window_origin_scaled(x, y, screen_top, 1.0)
+}
+
+/// 按缩放系数计算窗口原点：脉冲动画时 hotspot 仍对准目标点。
+fn window_origin_scaled(x: f64, y: f64, screen_top: f64, scale: f64) -> NSPoint {
+    NSPoint::new(
+        x - HOTSPOT_X * scale,
+        screen_top - y + HOTSPOT_Y * scale - CONTENT_H * scale,
+    )
 }
 
 /// 主屏顶边的 AppKit y 坐标；读取失败时返回 0（指针纵向偏移，

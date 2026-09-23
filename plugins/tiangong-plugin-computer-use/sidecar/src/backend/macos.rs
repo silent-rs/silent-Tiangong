@@ -703,6 +703,39 @@ impl Backend for MacosBackend {
         }
     }
 
+    async fn mouse(
+        &self,
+        req: &tiangong_plugin_computer_use_protocol::ops::MouseRequest,
+    ) -> DesktopResult<crate::backend::MouseResult> {
+        if !Self::is_trusted() {
+            return DesktopResult::Err(DesktopError::PermissionDenied {
+                reason: "尚未授予辅助功能权限".to_string(),
+            });
+        }
+        // 参数完整性在协议层校验后进入；此处直接执行手势。
+        let to = match (req.to_x, req.to_y) {
+            (Some(tx), Some(ty)) => Some((tx, ty)),
+            (None, None) => None,
+            _ => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: "drag 的 to_x/to_y 必须同时提供".to_string(),
+                });
+            }
+        };
+        match super::mouse::perform(
+            req.gesture,
+            req.x,
+            req.y,
+            to,
+            (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0)),
+        ) {
+            Ok(summary) => DesktopResult::Ok(crate::backend::MouseResult {
+                performed: true,
+                summary,
+            }),
+            Err(reason) => DesktopResult::Err(DesktopError::BackendUnavailable { reason }),
+        }
+    }
     async fn screenshot(
         &self,
         req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
