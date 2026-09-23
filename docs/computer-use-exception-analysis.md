@@ -102,7 +102,7 @@ desktop_action / desktop_wait`——**没有截屏，没有合成输入（CGEven
   CGWindowList owner 名主路径（`window_frame_for_app`），解决微信 4.x
   等多进程应用主窗口挂 helper 进程时按名定位漏窗的问题；diagnose
   诊断程序增加 app_name 截图路径。
-- 遗留风险：宿主注入截图产物当前落在系统临时目录
-  （`/var/folders/.../T/media/screenshots`），被系统清理后会话中的图片
-  引用失效；后续应将注入媒体迁入 `~/.tiangong/media` 持久化。owner 名
-  定位路径的端到端行为需在具备 TCC 授权的宿主环境复核。
+- 遗留风险：~~宿主注入截图产物当前落在系统临时目录~~（已修复：宿主对免沙箱
+  sidecar 无条件注入 `TIANGONG_STORAGE_ROOT`，截图落统一媒体目录
+  `~/.tiangong/media/screenshots`，tcp/stdio 两条 spawn 路径同口径）。
+  owner 名定位路径的端到端行为需在具备 TCC 授权的宿主环境复核。
