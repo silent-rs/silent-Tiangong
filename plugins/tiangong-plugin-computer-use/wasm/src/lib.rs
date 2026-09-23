@@ -20,12 +20,13 @@ use serde_json::json;
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
     FindConditions, FindRequest, ListWindows, ListWindowsRequest, Screenshot, ScreenshotRequest,
-    SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, Wait, WaitRequest,
+    SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, VirtualCursor, VirtualCursorRequest,
+    Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
     TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_SNAPSHOT,
-    TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT,
+    TOOL_DESKTOP_STATUS, TOOL_DESKTOP_WAIT, TOOL_VIRTUAL_CURSOR,
 };
 
 mod descriptor {
@@ -184,6 +185,18 @@ impl Guest for Component {
                 })),
             },
             ToolSpec {
+                name: TOOL_VIRTUAL_CURSOR.to_string(),
+                description: "开关天工虚拟鼠标的持久显示（默认关闭）。开启后指针出现在系统鼠标当前位置并常驻，desktop_action 执行时平滑移动到目标控件中心向用户突出展示操作落点；关闭后淡出。适合向用户演示或汇报桌面操作的场景，普通自动化操作无需开启。"
+                    .to_string(),
+                input_schema: schema_string(json!({
+                    "type": "object",
+                    "properties": {
+                        "enabled": { "type": "boolean", "description": "true 常驻显示，false 淡出隐藏" }
+                    },
+                    "required": ["enabled"]
+                })),
+            },
+            ToolSpec {
                 name: TOOL_DESKTOP_SCREENSHOT.to_string(),
                 description: "截取主显示器全屏截图（Phase 1 不支持窗口级裁剪；app_name/pid/foreground_only 仅标注目标应用元数据，不改变截图范围）。截图会以原生图片内容自动注入对话供你直接阅读（不占用工具结果文本），无需 OCR。需要屏幕录制授权。"
                     .to_string(),
@@ -216,6 +229,7 @@ impl Guest for Component {
             TOOL_DESKTOP_ACTION => handle_action(call.arguments),
             TOOL_DESKTOP_WAIT => handle_wait(call.arguments),
             TOOL_DESKTOP_SCREENSHOT => handle_screenshot(call.arguments),
+            TOOL_VIRTUAL_CURSOR => handle_virtual_cursor(call.arguments),
             other => Err(plugin_err(format!("未知的 Computer Use 工具: {other}"))),
         }
     }
@@ -454,6 +468,23 @@ fn handle_action(arguments: String) -> Result<ToolResult, PluginError> {
     run_desktop_op::<Action, _>(&request, "desktop_action")
 }
 
+fn handle_virtual_cursor(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("virtual_cursor", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let enabled = match args.get("enabled").and_then(|value| value.as_bool()) {
+        Some(v) => v,
+        None => {
+            return Ok(tool_failure(
+                "virtual_cursor 缺少 enabled 参数",
+                "missing enabled",
+            ));
+        }
+    };
+    let request = VirtualCursorRequest { enabled };
+    run_desktop_op::<VirtualCursor, _>(&request, "virtual_cursor")
+}
 fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
     let args = match parse_args("desktop_wait", &arguments) {
         Ok(v) => v,

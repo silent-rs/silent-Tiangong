@@ -8,7 +8,8 @@ use tiangong_plugin_computer_use_protocol::ops::{
     self, ActionRequest, ActionResponse, CAPABILITY, DESKTOP_ACTION_OPERATION,
     DESKTOP_FIND_OPERATION, DESKTOP_LIST_WINDOWS_OPERATION, DESKTOP_SNAPSHOT_OPERATION,
     DESKTOP_STATUS_OPERATION, DESKTOP_WAIT_OPERATION, DesktopStatusResponse, FindResponse,
-    ListWindowsResponse, SET_ACCESS_OPERATION, SetAccessRequest, SnapshotResponse, WaitResponse,
+    ListWindowsResponse, SET_ACCESS_OPERATION, SetAccessRequest, SnapshotResponse,
+    VIRTUAL_CURSOR_OPERATION, VirtualCursorRequest, VirtualCursorResponse, WaitResponse,
 };
 use tiangong_plugin_computer_use_protocol::{
     Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, PLUGIN_ID, PLUGIN_VERSION,
@@ -142,6 +143,22 @@ impl ComputerUseService {
                 serde_json::to_value(result).with_context(|| "序列化 desktop_screenshot 响应失败")
             }
 
+            VIRTUAL_CURSOR_OPERATION => {
+                let req: VirtualCursorRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 virtual_cursor 请求失败")?;
+                // 指针开关是纯 UI 状态：直接投递 overlay，立即回显生效值。
+                #[cfg(target_os = "macos")]
+                crate::backend::overlay::set_enabled(req.enabled);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = req.enabled;
+                    anyhow::bail!("virtual_cursor 仅 macOS 支持");
+                }
+                serde_json::to_value(DesktopResult::Ok(VirtualCursorResponse {
+                    enabled: req.enabled,
+                }))
+                .with_context(|| "序列化 virtual_cursor 响应失败")
+            }
             SET_ACCESS_OPERATION => {
                 let req: SetAccessRequest =
                     serde_json::from_value(payload).with_context(|| "解析 set_access 请求失败")?;

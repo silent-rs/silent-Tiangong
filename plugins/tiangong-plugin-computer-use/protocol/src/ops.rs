@@ -380,6 +380,27 @@ impl ComputerUseOperation for Screenshot {
 
 // ── 生命周期 ──────────────────────────────────────────────────
 
+// ── virtual_cursor（RFC 0018：Agent 可控的持久指针开关）──────────
+pub const VIRTUAL_CURSOR_OPERATION: &str = "computer_use.virtual_cursor";
+/// `virtual_cursor` 工具请求。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualCursorRequest {
+    /// `true`：指针常驻显示并跟随 desktop_action 落点（出现在系统鼠标
+    /// 当前位置）；`false`：淡出隐藏。
+    pub enabled: bool,
+}
+/// `virtual_cursor` 工具响应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualCursorResponse {
+    /// 生效后的开关状态（回显）。
+    pub enabled: bool,
+}
+pub struct VirtualCursor;
+impl ComputerUseOperation for VirtualCursor {
+    const NAME: &'static str = VIRTUAL_CURSOR_OPERATION;
+    type Request = VirtualCursorRequest;
+    type Response = DesktopResult<VirtualCursorResponse>;
+}
 pub const SET_ACCESS_OPERATION: &str = "computer_use.set_access";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -537,8 +537,9 @@ impl Backend for MacosBackend {
 
         let action_kind = ActionKind::from(req.action);
         // 虚拟指针（RFC 0018）：执行动作前读目标控件矩形，成功后把
-        // 「天工指针」显示到控件中心——AX 语义动作不移动系统鼠标，
-        // 指针是用户感知操作落点的唯一可视化。
+        // 「天工指针」平滑移动到控件中心——AX 语义动作不移动系统鼠标，
+        // 指针是用户感知操作落点的唯一可视化。仅当 Agent 已通过
+        // virtual_cursor 工具开启时常驻显示，关闭态静默忽略。
         let cursor_center = Self::bounds_center(&element.bounds());
         let result = match action_kind {
             ActionKind::Focus => element.set_bool_attribute(AX_FOCUSED, true),
@@ -566,7 +567,7 @@ impl Backend for MacosBackend {
         match result {
             Ok(()) => {
                 if let Some((x, y)) = cursor_center {
-                    super::overlay::show_at(x, y);
+                    super::overlay::move_to(x, y);
                 }
                 DesktopResult::Ok(ActionResult {
                     performed: true,

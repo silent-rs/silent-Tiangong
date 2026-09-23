@@ -20,15 +20,26 @@
 
 ### 2.2 实现位置：插件 sidecar 内自建 overlay 窗口
 
-不新增宿主窗口、不扩展 core/协议——虚拟鼠标整体是 computer-use 插件的自身能力：
+不新增宿主窗口、不扩展 core/协议——虚拟鼠标整体是 computer-use 插件的自身能力。
+
+**持久开关（Agent 控制）**：指针默认关闭；Agent 经 `virtual_cursor` 工具持久开关——
+开启后指针出现在系统鼠标当前位置（`NSEvent.mouseLocation`）并常驻，`desktop_action`
+执行时平滑移动（≈60fps 逐帧指数趋近，自带减速缓动）到目标控件中心，不自动淡出；
+关闭后淡出，后续动作不再驱动指针。普通自动化不开启也不受影响。
 
 ```
+Agent: virtual_cursor {enabled: true}   → sidecar → overlay 常驻显示（接管系统鼠标位置）
 desktop_action(sidecar, AX 执行)
   → 执行前读取目标控件 bounds（AXPosition + AXSize）
-  → 成功后 overlay::show_at(控件中心)
-  → overlay 线程：NSWindow 小窗（64×48pt）显示指针，箭头尖端对准中心
-  → 保持 2.4s 后 30ms/步淡出
+  → 成功后 overlay::move_to(控件中心)（关闭态静默忽略）
+  → 指针平滑滑动、常驻
+Agent: virtual_cursor {enabled: false}  → 淡出
 ```
+
+**线程模型**：AppKit 断言 NSApplication/NSWindow 只能在进程主线程使用（子线程触发
+Objective-C 异常直接 abort）。sidecar `main` 把服务循环交给工作线程，主线程专跑
+overlay 事件循环（手动泵 + 16ms 帧）；`move_to`/`set_enabled` 经全局 channel 非阻塞
+投递，可在任意线程调用；服务退出经 `request_shutdown` 归还主线程。
 
 overlay 窗口属性（`sidecar/src/backend/overlay.rs`，仅 macOS）：
 
@@ -53,4 +64,4 @@ Phase 1 不合成任何真实输入——指针纯展示，配合既有 AX 语�
 ## 4. 平台与限制
 
 - macOS 实装；Windows（UIA BoundingRectangle）/ Linux（AT-SPI extents）后续按同模式扩展
-- Phase 1 限制：仅主屏坐标正确（多屏待后续）；指针瞬移无移动动画；无点击涟漪；Windows/Linux 不显示
+- Phase 1 限制：仅主屏坐标正确（多屏待后续）；无点击涟漪；Windows/Linux `virtual_cursor` 返回不支持
