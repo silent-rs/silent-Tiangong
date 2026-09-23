@@ -463,6 +463,12 @@ fn message_phase_serde() {
         serde_json::from_str::<MessagePhase>(r#""hostinjected""#).unwrap(),
         MessagePhase::HostInjected
     );
+    // 前向兼容：未知阶段值（更高版本写入的新变体）降级为 Normal，
+    // 不得反序列化失败导致整个会话打不开。
+    assert_eq!(
+        serde_json::from_str::<MessagePhase>(r#""somefuturephase""#).unwrap(),
+        MessagePhase::Normal
+    );
 }
 
 #[test]

@@ -63,10 +63,15 @@ pub struct DeferredToolInjection {
 ///
 /// 用于前端区分 ReAct 工具执行阶段的过程消息与总结阶段的最终回复，
 /// 实现消息分层展示。向后兼容：旧 session 缺失该字段时默认为 `Normal`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// 前向兼容：未知阶段值（更高版本写入的新变体）降级为 `Normal`，
+/// 而不是反序列化失败导致整个会话无法打开（曾发生于：开发版会话
+/// 携带 `hostinjected` 消息，正式版无该变体，会话打不开）。序列化
+/// 仍由 derive 生成小写标签；`Deserialize` 为手写实现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MessagePhase {
-    /// 默认值：旧消息或未标记阶段的消息。
+    /// 默认值：旧消息或未标记阶段的消息；也是未知阶段值的降级目标。
     #[default]
     Normal,
     /// ReAct 工具执行阶段的消息（工具调用、工具结果、过程文本）。
@@ -87,6 +92,22 @@ pub enum MessagePhase {
     /// 意图，不作轮次锚点；与 CompressedResume 一样随压缩边界降级，
     /// 但不要求「始终发送」。
     HostInjected,
+}
+
+impl<'de> Deserialize<'de> for MessagePhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let phase = String::deserialize(deserializer)?;
+        Ok(match phase.as_str() {
+            "react" => Self::React,
+            "summary" => Self::Summary,
+            "compressedresume" => Self::CompressedResume,
+            "hostinjected" => Self::HostInjected,
+            _ => Self::Normal,
+        })
+    }
 }
 
 impl MessagePhase {
