@@ -784,7 +784,7 @@ impl StdioSidecarConnection {
         )?;
         #[cfg(windows)]
         if let Some(stop) = &sandbox_stop {
-            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, &stop.name);
+            command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, stop.name());
         }
         if self.config.sensitive_storage.any() {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
