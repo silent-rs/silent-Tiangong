@@ -2084,7 +2084,9 @@ impl RawOutputFilter {
     }
 
     fn filter(&mut self, chunk: &str) -> String {
-        self.pending.push_str(chunk);
+        // 终端应答序列先行剥离：它们与 marker 无关，且可能出现在任意位置，
+        // 在进入行边界切分前去掉，避免混进 UI 输出。
+        self.pending.push_str(&strip_terminal_reports(chunk));
         let mut result = String::new();
         while let Some((end, newline)) = next_output_boundary(&self.pending) {
             let segment = self.pending[..end].to_string();
@@ -2123,6 +2125,73 @@ impl RawOutputFilter {
         }
         result
     }
+}
+
+/// 剥离终端**应答**序列：这类字节是终端回答应用查询的结果，方向是
+/// 终端 → 应用，本就不该出现在给用户看的输出里。
+///
+/// 触发场景：zsh 的 ZLE 行编辑器被唤醒重绘时（夭折探针写入、窗口尺寸
+/// 变化等），zsh-syntax-highlighting 与主题会发出 OSC 11（查询背景色）
+/// 和 DSR 6n（查询光标位置），终端的应答随即混入 PTY 输出流。过滤器
+/// 若不处理，用户就会在长命令输出中途看到 `]11;rgb:1e1e/1e1e/2e2e` 与
+/// `[24;1R` 这类乱码。
+///
+/// 只剥离两类明确的应答，不动任何正常渲染序列（SGR 颜色、光标移动等）：
+/// - OSC 颜色应答：`ESC ] 1[01] ; rgb:... (ESC \ | BEL)`
+/// - DSR 光标位置上报：`ESC [ <行> ; <列> R`
+fn strip_terminal_reports(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\x1b' && index + 1 < bytes.len() {
+            // DSR 光标位置上报：ESC [ digits ; digits R
+            if bytes[index + 1] == b'[' {
+                let mut end = index + 2;
+                while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+                    end += 1;
+                }
+                if end < bytes.len() && bytes[end] == b'R' && end > index + 2 {
+                    index = end + 1;
+                    continue;
+                }
+            }
+            // OSC 颜色应答：ESC ] 10/11 ; ... 以 ESC \ 或 BEL 结束
+            if bytes[index + 1] == b']' {
+                let mut end = index + 2;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                let code = &value[index + 2..end];
+                if matches!(code, "10" | "11" | "12") && end < bytes.len() && bytes[end] == b';' {
+                    let mut scan = end;
+                    while scan < bytes.len() {
+                        if bytes[scan] == 0x07 {
+                            scan += 1;
+                            break;
+                        }
+                        if bytes[scan] == b'\x1b'
+                            && scan + 1 < bytes.len()
+                            && bytes[scan + 1] == b'\\'
+                        {
+                            scan += 2;
+                            break;
+                        }
+                        scan += 1;
+                    }
+                    // 未见终止符说明序列尚未收全，留待下个分片再处理。
+                    if scan < bytes.len() || value[end..].contains('\u{7}') {
+                        index = scan;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch_len = value[index..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&value[index..index + ch_len]);
+        index += ch_len;
+    }
+    out
 }
 
 fn next_output_boundary(value: &str) -> Option<(usize, bool)> {
@@ -3652,6 +3721,42 @@ mod tests {
              __TIANGONG_RC_x__0\r\n",
         );
         assert_eq!(visible, "Cargo.toml\r\n");
+    }
+
+    /// 终端应答序列（方向是终端 → 应用）绝不能进入给用户看的输出。
+    ///
+    /// zsh 的 ZLE 被唤醒重绘时（夭折探针写入等），zsh-syntax-highlighting
+    /// 与主题会发 OSC 11 查背景色、DSR 6n 查光标位置，终端应答随即混入 PTY
+    /// 输出流。过滤器不处理的话，用户会在长命令输出中途看到
+    /// `]11;rgb:1e1e/1e1e/2e2e` 与 `[24;1R` 这类乱码。
+    #[test]
+    fn marker_filter_剥离终端应答序列() {
+        let mut filter = RawOutputFilter::new(Arc::new(Mutex::new(HashMap::new())));
+        let visible = filter
+            .filter("\u{1b}]11;rgb:1e1e/1e1e/2e2e\u{1b}\\building...\r\n\u{1b}[24;1Rdone\r\n");
+        assert_eq!(
+            visible, "building...\r\ndone\r\n",
+            "OSC 颜色应答与 DSR 光标上报必须被剥离: {visible:?}"
+        );
+    }
+
+    /// 剥离只针对应答序列，正常渲染序列（SGR 颜色、光标移动、擦除）必须
+    /// 原样保留——它们是 UI 正确着色与重绘的依据。
+    #[test]
+    fn marker_filter_不误伤正常渲染序列() {
+        let kept = strip_terminal_reports(
+            "\u{1b}[1;32mgreen\u{1b}[0m\u{1b}[2J\u{1b}[H\u{1b}[K\u{1b}[10Dmoved",
+        );
+        assert_eq!(
+            kept, "\u{1b}[1;32mgreen\u{1b}[0m\u{1b}[2J\u{1b}[H\u{1b}[K\u{1b}[10Dmoved",
+            "正常渲染序列不得被剥离: {kept:?}"
+        );
+        // OSC 0/2（设置标题）是应用 → 终端方向，不属于应答，保留。
+        let title = strip_terminal_reports("\u{1b}]0;my title\u{7}text");
+        assert_eq!(
+            title, "\u{1b}]0;my title\u{7}text",
+            "设置标题序列不得被剥离"
+        );
     }
 
     /// 命令行必须由 start marker 就地替换产生，紧贴自己的输出。
