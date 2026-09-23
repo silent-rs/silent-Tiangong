@@ -206,7 +206,7 @@ pub(super) fn terminate_process_tree(process: &StdioProcess, child: &mut Child) 
 }
 
 #[cfg(windows)]
-enum WindowsLifecycle {
+pub(super) enum WindowsLifecycle {
     Job(WindowsJob),
     Sandbox(WindowsStopEvent),
 }
@@ -231,7 +231,7 @@ impl WindowsLifecycle {
 }
 
 #[cfg(windows)]
-struct WindowsStopEvent {
+pub(super) struct WindowsStopEvent {
     handle: std::os::windows::io::OwnedHandle,
     name: String,
 }

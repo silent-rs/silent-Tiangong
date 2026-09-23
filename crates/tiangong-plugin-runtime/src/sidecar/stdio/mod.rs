@@ -33,12 +33,12 @@ use serde_json::Value;
 mod process;
 mod sandbox_exemptions;
 
-#[cfg(all(test, windows))]
-use process::WindowsJob;
 use process::{
     SpawnAttemptError, apply_user_environment_policy, configure_process_lifecycle, preparation,
     prepare_policy_fd, sanitize_spawn_environment, terminate_process_tree,
 };
+#[cfg(windows)]
+use process::{WindowsJob, WindowsLifecycle, WindowsStopEvent};
 use sandbox_exemptions::{
     apply_user_cache_write, exempt_authorized_reads, exempt_authorized_user_credentials,
     exempt_mcp_config_write, resolve_launcher, retain_existing_writable_roots,
