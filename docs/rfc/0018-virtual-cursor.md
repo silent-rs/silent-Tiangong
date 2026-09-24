@@ -107,5 +107,22 @@ desktop_keyboard { action: type | key | combo, text?, key?, keys? }
 
 ## 4. 平台与限制
 
-- macOS 实装（虚拟指针 + desktop_mouse 手势）；Windows/Linux 后续按同模式扩展
-- 限制：仅主屏坐标正确（多屏待后续）；无 AX 树区域的点击兜底为 warp+归还；定向投递的滚轮在个别自绘应用可能不生效；Windows/Linux 两工具均返回不支持
+### 4.1 统一模型（2026-09-24 定稿）
+
+**虚拟指针 + 闪移借用是平台无关的产品模型**，两职责：
+
+1. **可视化**：虚拟指针平滑滑行到落点，让用户知道 agent 在操作什么；
+2. **不与用户鼠标冲突**：绝不平滑挪动用户的系统鼠标——点击绕不开系统鼠标（各平台按钮事件均作用于指针当前位置），因此以**最短占用**方式借用：闪移到目标 → down/up → 闪移归还（≈100ms，用户无感，鼠标位置不丢）。
+
+序列编排平台无关：虚拟指针滑行**并等待真正到达**（`glide_and_wait` 到位回执）→ 停顿 → 闪移借用点击 → 归还。drag 轨迹例外：拖拽会话必须由系统指针承载，借用期间系统指针承载轨迹、虚拟指针跟随。
+
+| 平台 | 视觉主角（overlay） | 闪移借用实现 | 状态 |
+|---|---|---|---|
+| macOS | NSStatusWindow 置顶窗 | down/up 事件**自带绝对坐标**，无需瞬移指针（借用最优雅的特例） | ✅ 实装 |
+| Windows | 分层置顶穿透窗（layered window） | `SetCursorPos` → `SendInput` down/up → `SetCursorPos` 归还 | 待实装 |
+| Linux X11 | override-redirect 窗 | `XTestFakeMotionEvent` → `XTestFakeButtonEvent` → 归还 | 待实装 |
+| Wayland | — | 合成输入被安全模型禁止 | 维持 AT-SPI 语义动作 |
+
+实装建议：手势序列编排（插值节奏、到位等待、先移动后点击、归还）抽平台无关层，平台层仅提供 `post_motion(x,y)` / `post_button(down/up)` / overlay 三组原语。
+
+- 限制：仅主屏坐标正确（多屏待后续）；定向投递的滚轮在个别自绘应用可能不生效；Windows/Linux 两工具均返回不支持（清晰失败，agent 自动转语义动作路径）
