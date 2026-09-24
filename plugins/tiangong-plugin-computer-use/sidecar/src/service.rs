@@ -6,9 +6,11 @@ use anyhow::{Context, Result};
 
 use tiangong_plugin_computer_use_protocol::ops::{
     self, ActionRequest, ActionResponse, CAPABILITY, DESKTOP_ACTION_OPERATION,
-    DESKTOP_FIND_OPERATION, DESKTOP_LIST_WINDOWS_OPERATION, DESKTOP_SNAPSHOT_OPERATION,
-    DESKTOP_STATUS_OPERATION, DESKTOP_WAIT_OPERATION, DesktopStatusResponse, FindResponse,
-    ListWindowsResponse, SET_ACCESS_OPERATION, SetAccessRequest, SnapshotResponse, WaitResponse,
+    DESKTOP_FIND_OPERATION, DESKTOP_KEYBOARD_OPERATION, DESKTOP_LIST_WINDOWS_OPERATION,
+    DESKTOP_MOUSE_OPERATION, DESKTOP_SNAPSHOT_OPERATION, DESKTOP_STATUS_OPERATION,
+    DESKTOP_WAIT_OPERATION, DesktopStatusResponse, FindResponse, KeyboardResponse,
+    ListWindowsResponse, MouseResponse, SET_ACCESS_OPERATION, SetAccessRequest, SnapshotResponse,
+    VIRTUAL_CURSOR_OPERATION, VirtualCursorRequest, VirtualCursorResponse, WaitResponse,
 };
 use tiangong_plugin_computer_use_protocol::{
     Ack, COMPUTER_USE_PROTOCOL_VERSION, DesktopResult, PLUGIN_ID, PLUGIN_VERSION,
@@ -135,6 +137,43 @@ impl ComputerUseService {
                     .with_context(|| "序列化 desktop_wait 响应失败")
             }
 
+            ops::DESKTOP_SCREENSHOT_OPERATION => {
+                let req: ops::ScreenshotRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_screenshot 请求失败")?;
+                let result = self.backend.screenshot(&req).await;
+                serde_json::to_value(result).with_context(|| "序列化 desktop_screenshot 响应失败")
+            }
+
+            ops::DESKTOP_OPEN_APP_OPERATION => {
+                let req: ops::OpenAppRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_open_app 请求失败")?;
+                let result = self.backend.open_app(&req).await;
+                serde_json::to_value(result).with_context(|| "序列化 desktop_open_app 响应失败")
+            }
+            DESKTOP_MOUSE_OPERATION => {
+                let req: ops::MouseRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_mouse 请求失败")?;
+                let result = self.backend.mouse(&req).await;
+                serde_json::to_value(map_mouse(result))
+                    .with_context(|| "序列化 desktop_mouse 响应失败")
+            }
+            DESKTOP_KEYBOARD_OPERATION => {
+                let req: ops::KeyboardRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_keyboard 请求失败")?;
+                let result = self.backend.keyboard(&req).await;
+                serde_json::to_value(map_keyboard(result))
+                    .with_context(|| "序列化 desktop_keyboard 响应失败")
+            }
+            VIRTUAL_CURSOR_OPERATION => {
+                let req: VirtualCursorRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 virtual_cursor 请求失败")?;
+                // 指针开关是纯 UI 状态：直接投递 overlay，立即回显生效值。
+                apply_virtual_cursor(req.enabled)?;
+                serde_json::to_value(DesktopResult::Ok(VirtualCursorResponse {
+                    enabled: req.enabled,
+                }))
+                .with_context(|| "序列化 virtual_cursor 响应失败")
+            }
             SET_ACCESS_OPERATION => {
                 let req: SetAccessRequest =
                     serde_json::from_value(payload).with_context(|| "解析 set_access 请求失败")?;
@@ -147,6 +186,20 @@ impl ComputerUseService {
             operation => Err(anyhow::anyhow!("不支持的 Computer Use 操作: {operation}")),
         }
     }
+}
+
+/// 虚拟指针开关（RFC 0018）：macOS 投递 overlay；其他平台尚无 overlay，
+/// 返回明确错误（wasm 侧轮次结束收起时忽略该错误）。按平台拆成两个
+/// 实现，避免在同一函数体内 `bail!` 后留下不可达代码（-D warnings）。
+#[cfg(target_os = "macos")]
+fn apply_virtual_cursor(enabled: bool) -> anyhow::Result<()> {
+    crate::backend::overlay::set_enabled(enabled);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_virtual_cursor(_enabled: bool) -> anyhow::Result<()> {
+    anyhow::bail!("virtual_cursor 仅 macOS 支持")
 }
 
 // ── backend Info → 协议 Response 的映射 ────────────────────────
@@ -211,6 +264,27 @@ fn map_action(
     }
 }
 
+fn map_mouse(result: DesktopResult<crate::backend::MouseResult>) -> DesktopResult<MouseResponse> {
+    match result {
+        DesktopResult::Ok(info) => DesktopResult::Ok(MouseResponse {
+            performed: info.performed,
+            summary: info.summary,
+        }),
+        DesktopResult::Err(error) => DesktopResult::Err(error),
+    }
+}
+
+fn map_keyboard(
+    result: DesktopResult<crate::backend::KeyboardResult>,
+) -> DesktopResult<KeyboardResponse> {
+    match result {
+        DesktopResult::Ok(info) => DesktopResult::Ok(KeyboardResponse {
+            performed: info.performed,
+            summary: info.summary,
+        }),
+        DesktopResult::Err(error) => DesktopResult::Err(error),
+    }
+}
 fn map_wait(result: DesktopResult<crate::backend::WaitResult>) -> DesktopResult<WaitResponse> {
     match result {
         DesktopResult::Ok(info) => DesktopResult::Ok(WaitResponse {

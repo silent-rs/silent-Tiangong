@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96" viewBox="0 0 128 96">
+  <!-- 天工虚拟指针（RFC 0018）：computer-use 插件与嵌入式浏览器共用资源。
+       规格：白底箭头 + 靛紫渐变描边 + 柔光，右下角「天工」胶囊徽标。
+       hotspot（箭头尖端）位于 (16, 12)。侧车 PNG 为本图 4x 渲染。 -->
+  <defs>
+    <linearGradient id="tg-stroke" x1="16" y1="12" x2="80" y2="88" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <filter id="tg-shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="1.5" dy="2.5" stdDeviation="2.5" flood-color="#312e81" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <g filter="url(#tg-shadow)">
+    <path d="M16 12 L16 76 L31 62 L42 88 L52 84 L41 59 L64 56 Z"
+          fill="#ffffff" stroke="url(#tg-stroke)" stroke-width="4" stroke-linejoin="round"/>
+  </g>
+  <g filter="url(#tg-shadow)">
+    <rect x="46" y="60" width="60" height="26" rx="13" fill="#1e1b39" fill-opacity="0.88" stroke="#8b5cf6" stroke-opacity="0.5" stroke-width="1.5"/>
+    <text x="76" y="78" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif" font-size="16" font-weight="600" fill="#ffffff" letter-spacing="2">天工</text>
+  </g>
+</svg>

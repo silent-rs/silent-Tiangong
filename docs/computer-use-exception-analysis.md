@@ -80,3 +80,48 @@ desktop_action / desktop_wait`——**没有截屏，没有合成输入（CGEven
 3. 合成输入：监督模式下未经批准不落键；对微信输入框真实生效。
 4. 回归：terminal 沙箱策略逐字不变（`seatbelt.rs` 测试快照不变）。
 5. 全 workspace `cargo check` / `clippy -D warnings` / 相关测试通过。
+
+## 5. 后续异常：正式版无法打开开发分支会话（2026-09-23）
+
+- 现象：正式版天工打不开会话「电脑操作异常分析」（`03gwww09n2l9or2msgq34nuwp`，
+  1681 条消息，JSON 本身完好）。
+- 根因：分支为 RFC 0017 宿主注入图片新增 `MessagePhase::HostInjected`
+  （序列化 `"hostinjected"`）；正式版（main）枚举只有
+  `Normal/React/Summary/CompressedResume`，serde 反序列化遇到未知变体
+  直接失败，导致**整个会话**加载失败。逐字段核对：会话其余结构
+  （含 `ContentBlock::Image` / `StoredAsset`）均与 main 兼容，唯一拦路的
+  是 2 条注入图片消息的 `phase`。这是「开发分支写入格式超前于正式版
+  读取能力」的前向兼容缺陷。
+- 修复：
+  1. 数据抢救：2 条消息 `phase` 由 `hostinjected` 降级 `normal`
+     （原文件备份 `*.json.bak.20260923222211`），正式版恢复可打开。
+  2. 代码根治：`MessagePhase` 改手写 `Deserialize`，未知阶段值降级
+     `Normal`（`#[serde(other)]` 要求置于末位变体、无法映射 Normal，
+     故不用），补未知值降级测试；后续合入 main 后正式版即可读新格式。
+- 关联改动（同日）：`desktop_screenshot` 应用定位由 pid 交集改为
+  CGWindowList owner 名主路径（`window_frame_for_app`），解决微信 4.x
+  等多进程应用主窗口挂 helper 进程时按名定位漏窗的问题；diagnose
+  诊断程序增加 app_name 截图路径。
+- 遗留风险：~~宿主注入截图产物当前落在系统临时目录~~（已修复：宿主对免沙箱
+  sidecar 无条件注入 `TIANGONG_STORAGE_ROOT`，截图落统一媒体目录
+  `~/.tiangong/media/screenshots`，tcp/stdio 两条 spawn 路径同口径）。
+  owner 名定位路径的端到端行为需在具备 TCC 授权的宿主环境复核。
+
+## 6. "最后一公里"证据链（2026-09-24，三级实证）
+
+现象：注入图片在前端消息中正常展示，但 agent（模型）表现得不知道图片到达。
+
+| # | 环节 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | 上下文组装 | ✅ 完好 | 序列级回归测试 `host_injected_message_survives_full_request_assembly`：完整工具轮序列（user → assistant(tool_calls) → tool → 注入消息）经 `build_provider_messages` 后 provenance 文本与图片内容均保留、位于 Tool 结果之后，未被跳头/sanitize 配对整形丢弃 |
+| 2 | HTTP 序列化 | ✅ 完好 | 抓包级回归测试 `openai_request_body_carries_host_injected_image`：MockServer 捕获的真实请求 body 含 `image_url` 原生图片内容与 provenance 文本 |
+| 3 | 落库/前端 | ✅ 完好 | 会话文件 Image 块完整（data=None 设计内）；前端 assistant 侧展示正常 |
+
+**结论：天工侧链路完好，断点在上游**——glm-5.3 非多模态，OpenAI 兼容网关
+对文本模型的 `image_url` 静默丢弃（provenance 文本是否随之受损取决于网关
+对混合内容消息的处理）。
+
+设计取向（维持，不做降级）：provenance 让 agent 知道图片到达及其本地路径；
+agent 需要看图时自行调用 `analyze_attachment`（走多模态路由）解读——
+前提是模型配置了 Multimodal 路由槽位。曾实现"端点能力快照三态降级"，
+因改动面过大（7 crate）且与 analyze-attachment 在册信号重复而回退。

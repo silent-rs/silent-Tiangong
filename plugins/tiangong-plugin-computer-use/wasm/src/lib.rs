@@ -19,13 +19,14 @@ use serde::Serialize;
 use serde_json::json;
 use tiangong_plugin_computer_use_protocol::ops::{
     Action, ActionRequest, ActionRequestKind, DesktopStatus, DesktopStatusRequest, Find,
-    FindConditions, FindRequest, ListWindows, ListWindowsRequest, SetAccess, SetAccessRequest,
-    Snapshot, SnapshotRequest, Wait, WaitRequest,
+    FindConditions, FindRequest, Keyboard, KeyboardActionKind, KeyboardRequest, ListWindows,
+    ListWindowsRequest, Mouse, MouseGesture, MouseRequest, OpenApp, OpenAppRequest, Screenshot,
+    ScreenshotRequest, SetAccess, SetAccessRequest, Snapshot, SnapshotRequest, VirtualCursor,
+    VirtualCursorRequest, Wait, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
-    ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_ACTION,
-    TOOL_DESKTOP_FIND, TOOL_DESKTOP_LIST_WINDOWS, TOOL_DESKTOP_SNAPSHOT, TOOL_DESKTOP_STATUS,
-    TOOL_DESKTOP_WAIT,
+    Bounds, ComputerUseOperation, DesktopResult, ElementRef, MatchMode, TOOL_DESKTOP_APP,
+    TOOL_DESKTOP_INPUT, TOOL_DESKTOP_SCREENSHOT, TOOL_DESKTOP_UI, TOOL_DESKTOP_WAIT,
 };
 
 mod descriptor {
@@ -40,14 +41,26 @@ mod state {
 
     struct PluginState {
         full_trust: bool,
+        /// 本轮是否执行过鼠标手势（天工指针分身已出现），轮次结束据此收起。
+        cursor_summoned: bool,
     }
 
     thread_local! {
-        static STATE: RefCell<PluginState> = const { RefCell::new(PluginState { full_trust: false }) };
+        static STATE: RefCell<PluginState> = const {
+            RefCell::new(PluginState { full_trust: false, cursor_summoned: false })
+        };
     }
 
     pub fn set_full_trust(full_trust: bool) {
         STATE.with(|s| s.borrow_mut().full_trust = full_trust);
+    }
+
+    pub fn cursor_summoned() -> bool {
+        STATE.with(|s| s.borrow().cursor_summoned)
+    }
+
+    pub fn set_cursor_summoned(value: bool) {
+        STATE.with(|s| s.borrow_mut().cursor_summoned = value);
     }
 
     pub fn access_context() -> tiangong_plugin_computer_use_protocol::AccessContext {
@@ -75,51 +88,79 @@ impl Guest for Component {
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
         Ok(vec![
             ToolSpec {
-                name: TOOL_DESKTOP_STATUS.to_string(),
-                description: "查询当前平台、图形会话、无障碍能力与受支持动作，不触发任何应用动作。"
-                    .to_string(),
-                input_schema: schema_string(json!({ "type": "object", "properties": {} })),
-            },
-            ToolSpec {
-                name: TOOL_DESKTOP_LIST_WINDOWS.to_string(),
-                description: "列出当前可访问的应用和顶层窗口，支持按应用名、进程号和是否前台筛选。"
+                name: TOOL_DESKTOP_APP.to_string(),
+                description: "应用与窗口管理。action=open：唤起或启动应用（首选；已运行则取消隐藏/激活/恢复最小化并置前，未运行经系统搜索定位后启动，支持中文本地化名如「微信」），返回前台窗口屏幕坐标 window，可直接作为 desktop_screenshot 的 region；action=list：列出运行中的应用（可按 app_name/pid/foreground_only 筛选）；action=status：查询平台、图形会话与辅助功能授权（仅在其他工具报权限错误时需要）。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
                     "properties": {
-                        "app_name": { "type": "string", "description": "按应用名称筛选（包含匹配）" },
-                        "pid": { "type": "integer", "description": "按进程编号筛选", "minimum": 0 },
-                        "foreground_only": { "type": "boolean", "description": "仅返回前台窗口" }
+                        "action": { "type": "string", "enum": ["open", "list", "status"], "description": "open 唤起/启动；list 列举应用；status 能力探测" },
+                        "app_name": { "type": "string", "description": "open：应用名（显示名/本地化名/文件名）；list：按名称筛选" },
+                        "bundle_id": { "type": "string", "description": "open：Bundle ID（如 com.tencent.xinWeChat），优先于 app_name" },
+                        "pid": { "type": "integer", "description": "list：按进程号筛选", "minimum": 0 },
+                        "foreground_only": { "type": "boolean", "description": "list：仅前台应用" }
+                    },
+                    "required": ["action"]
+                })),
+            },
+            ToolSpec {
+                name: TOOL_DESKTOP_SCREENSHOT.to_string(),
+                description: "截屏并自动注入对话供你直接阅读（无需 OCR）。范围优先级：region 显式区域 > app_name/pid/foreground_only 应用窗口 > 主显示器全屏。产物为 JPEG，按屏幕逻辑尺寸输出（1 图片像素 = 1 point）；逻辑长边超过 max_dimension（默认 1568）时不裁剪，按 1/2、1/4… 整数倍缩小。结果给出 logical_bounds（原图屏幕区域）与 scale：屏幕坐标 = logical_bounds.x/y + 图片坐标 × scale。需要精确点击时对目标区域截小图（scale=1）。需要屏幕录制授权。"
+                    .to_string(),
+                input_schema: schema_string(json!({
+                    "type": "object",
+                    "properties": {
+                        "app_name": { "type": "string", "description": "截取该应用最前窗口（包含匹配）" },
+                        "pid": { "type": "integer", "description": "截取该进程最前窗口", "minimum": 0 },
+                        "foreground_only": { "type": "boolean", "description": "截取前台应用窗口" },
+                        "region": region_schema("显式区域（屏幕逻辑坐标 points，优先于 app 定位）"),
+                        "max_dimension": { "type": "integer", "description": "产物长边上限（像素，默认 1568）；超过时按 1/2 整数倍缩小，不裁剪", "minimum": 1 }
                     }
                 })),
             },
             ToolSpec {
-                name: TOOL_DESKTOP_SNAPSHOT.to_string(),
-                description: "读取指定应用或窗口的控件树，支持限制最大深度、节点数及是否包含不可见控件。"
+                name: TOOL_DESKTOP_INPUT.to_string(),
+                description: "真实输入（CGEvent 合成，行为与用户手动操作一致），点击、输入等交互的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/drag/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
                     "properties": {
-                        "window": element_ref_schema(),
-                        "app_name": { "type": "string", "description": "按应用名称定位窗口（window 未提供时使用）" },
-                        "pid": { "type": "integer", "description": "按进程编号定位窗口", "minimum": 0 },
-                        "max_depth": { "type": "integer", "description": "最大遍历深度，0 使用默认", "minimum": 0 },
-                        "max_nodes": { "type": "integer", "description": "最大节点数，0 使用默认", "minimum": 0 },
-                        "include_invisible": { "type": "boolean", "description": "是否包含不可见控件" }
-                    }
+                        "action": {
+                            "type": "string",
+                            "enum": ["click", "double_click", "right_click", "move", "drag", "scroll", "type", "key", "combo"],
+                            "description": "鼠标手势或键盘动作"
+                        },
+                        "x": { "type": "number", "description": "鼠标动作必填：目标点 X（屏幕逻辑坐标）" },
+                        "y": { "type": "number", "description": "鼠标动作必填：目标点 Y" },
+                        "to_x": { "type": "number", "description": "drag 必填：终点 X" },
+                        "to_y": { "type": "number", "description": "drag 必填：终点 Y" },
+                        "delta_y": { "type": "number", "description": "scroll：垂直滚动像素，正=向下（与 delta_x 至少一个）" },
+                        "delta_x": { "type": "number", "description": "scroll：水平滚动像素，正=向右" },
+                        "text": { "type": "string", "description": "type 必填：要输入的文本" },
+                        "key": { "type": "string", "description": "key 必填：键名（enter/esc/tab/pageup/方向键/字母数字等，别名不敏感）" },
+                        "keys": { "type": "array", "items": { "type": "string" }, "description": "combo 必填：键名数组，修饰键在前，如 [\"cmd\",\"c\"]" },
+                        "screenshot_after": { "type": "boolean", "description": "操作后自动截图（默认 false）" },
+                        "screenshot_region": region_schema("screenshot_after 的截图区域（缺省按 screenshot_app_name 或全屏）"),
+                        "screenshot_app_name": { "type": "string", "description": "screenshot_after 时截取该应用窗口" }
+                    },
+                    "required": ["action"]
                 })),
             },
             ToolSpec {
-                name: TOOL_DESKTOP_FIND.to_string(),
-                description: "在窗口或快照内按稳定标识、类型、名称、值等组合查找控件；多匹配时返回候选不默认操作。"
+                name: TOOL_DESKTOP_UI.to_string(),
+                description: "无障碍控件树（适合原生控件；微信等自绘界面通常只暴露菜单栏，此时改用截图 + desktop_input）。action=snapshot：读取应用控件树，可带 conditions 只返回匹配控件（传 snapshot 则在已有快照内查找）；action=perform：对快照内控件引用执行语义动作（press/focus/set_value/toggle/select），引用只在所属快照内有效。同名控件多个候选时不得默认操作第一个。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["snapshot", "perform"] },
+                        "app_name": { "type": "string", "description": "snapshot：按应用名定位（多进程重名时报歧义并列出 pid）" },
+                        "pid": { "type": "integer", "description": "snapshot：按进程号定位", "minimum": 0 },
                         "window": element_ref_schema(),
-                        "snapshot": { "type": "integer", "description": "在指定快照版本内查找", "minimum": 0 },
+                        "snapshot": { "type": "integer", "description": "snapshot + conditions：在已有快照版本内查找，不重新读取", "minimum": 0 },
                         "conditions": {
                             "type": "object",
+                            "description": "snapshot：查找条件（提供时只返回匹配控件）",
                             "properties": {
                                 "automation_id": { "type": "string" },
                                 "role": { "type": "string" },
@@ -131,32 +172,25 @@ impl Guest for Component {
                                 "mode": { "type": "string", "enum": ["exact", "contains"], "default": "exact" }
                             }
                         },
-                        "max_candidates": { "type": "integer", "description": "最大返回候选数，0 使用默认", "minimum": 0 }
-                    },
-                    "required": ["conditions"]
-                })),
-            },
-            ToolSpec {
-                name: TOOL_DESKTOP_ACTION.to_string(),
-                description: "对明确的临时控件引用执行结构化动作（focus/press/set_value/toggle/select/expand/collapse/scroll_into_view）。"
-                    .to_string(),
-                input_schema: schema_string(json!({
-                    "type": "object",
-                    "properties": {
+                        "max_depth": { "type": "integer", "description": "snapshot：最大遍历深度，0 使用默认", "minimum": 0 },
+                        "max_nodes": { "type": "integer", "description": "snapshot：最大节点数，0 使用默认", "minimum": 0 },
+                        "include_invisible": { "type": "boolean", "description": "snapshot：包含不可见控件" },
+                        "max_candidates": { "type": "integer", "description": "snapshot + conditions：最大候选数", "minimum": 0 },
                         "element": element_ref_schema(),
-                        "action": {
+                        "operation": {
                             "type": "string",
-                            "enum": ["focus", "press", "set_value", "toggle", "select", "expand", "collapse", "scroll_into_view"]
+                            "enum": ["press", "focus", "set_value", "toggle", "select", "expand", "collapse", "scroll_into_view"],
+                            "description": "perform 必填：语义动作"
                         },
-                        "value": { "type": "string", "description": "set_value 的值" },
-                        "selection": { "type": "string", "description": "select 的选项标识" }
+                        "value": { "type": "string", "description": "perform set_value 的值" },
+                        "selection": { "type": "string", "description": "perform select 的选项标识" }
                     },
-                    "required": ["element", "action"]
+                    "required": ["action"]
                 })),
             },
             ToolSpec {
                 name: TOOL_DESKTOP_WAIT.to_string(),
-                description: "等待窗口或控件满足出现、消失、获得焦点、可用状态变化或值变化，有明确超时。"
+                description: "等待状态变化（有明确超时）：appear/disappear 按 target 应用名判定屏幕上是否有其可见窗口；focus/available/value 按控件引用判定。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
@@ -188,18 +222,17 @@ impl Guest for Component {
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
         Ok(vec![
-            "桌面应用控制优先使用 computer-use 插件：先 desktop_status 确认能力，再 desktop_list_windows 定位窗口，desktop_snapshot 读取控件树，desktop_find 精确匹配控件后用 desktop_action 执行动作，动作后用 desktop_wait 确认状态。网页内容继续优先交给浏览器插件。".to_string(),
-            "桌面控件以语义定位为主：优先用稳定标识（automation_id）与控件类型（role）匹配，名称仅作补充；同名控件返回多个候选时不得默认操作第一个，需进一步限定。控件引用只在本次快照内有效，动作前必须重新确认目标。".to_string(),
+            "桌面应用的交互一律使用 computer-use 插件（5 个工具）：唤起窗口、看界面、点击输入都属本插件职责。终端沙箱无法与图形界面交互（osascript、open -a、screencapture 均不可行），不要在终端里尝试。典型流程：desktop_app(action=open) 把目标应用唤起到前台（未运行会自动启动，返回窗口坐标）→ desktop_screenshot 截取窗口看界面 → desktop_input 点击/输入（可带 screenshot_after 直接看到结果）。原生控件可用 desktop_ui 读取控件树并执行语义动作；需要等界面变化时用 desktop_wait。权限问题会在工具失败时直接报告，无需预先查询状态。网页内容继续优先交给浏览器插件。".to_string(),
+            "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域，points）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。".to_string(),
         ])
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
         match call.name.as_str() {
-            TOOL_DESKTOP_STATUS => handle_desktop_status(call.arguments),
-            TOOL_DESKTOP_LIST_WINDOWS => handle_list_windows(call.arguments),
-            TOOL_DESKTOP_SNAPSHOT => handle_snapshot(call.arguments),
-            TOOL_DESKTOP_FIND => handle_find(call.arguments),
-            TOOL_DESKTOP_ACTION => handle_action(call.arguments),
+            TOOL_DESKTOP_APP => handle_desktop_app(call.arguments),
+            TOOL_DESKTOP_SCREENSHOT => handle_screenshot(call.arguments),
+            TOOL_DESKTOP_INPUT => handle_desktop_input(call.arguments),
+            TOOL_DESKTOP_UI => handle_desktop_ui(call.arguments),
             TOOL_DESKTOP_WAIT => handle_wait(call.arguments),
             other => Err(plugin_err(format!("未知的 Computer Use 工具: {other}"))),
         }
@@ -230,6 +263,13 @@ impl Guest for Component {
     }
 
     fn on_turn_finished(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        // 本轮结束收起天工指针分身（未出现时为无操作）。失败静默：
+        // 指针是纯可视化，sidecar 未启动时无需拉起，overlay 也有空闲兜底。
+        if state::cursor_summoned() {
+            state::set_cursor_summoned(false);
+            let _ =
+                sidecar_client::invoke::<VirtualCursor>(&VirtualCursorRequest { enabled: false });
+        }
         Ok(())
     }
 
@@ -239,6 +279,181 @@ impl Guest for Component {
 }
 
 // ── 工具处理 ───────────────────────────────────────────────────
+
+/// desktop_app：status / list / open 分派。
+fn handle_desktop_app(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_app", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    match args.get("action").and_then(serde_json::Value::as_str) {
+        Some("open") => handle_open_app(arguments),
+        Some("list") => handle_list_windows(arguments),
+        Some("status") => handle_desktop_status(arguments),
+        other => Ok(tool_failure(
+            &format!(
+                "desktop_app 的 action 需为 open/list/status，收到：{}",
+                other.unwrap_or("（缺失）")
+            ),
+            "bad action",
+        )),
+    }
+}
+
+/// desktop_ui：snapshot（可带 conditions 查找）/ perform 分派。
+fn handle_desktop_ui(arguments: String) -> Result<ToolResult, PluginError> {
+    let mut args = match parse_args("desktop_ui", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let action = args
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    match action.as_deref() {
+        Some("snapshot") => {
+            let has_conditions = args
+                .get("conditions")
+                .is_some_and(|c| c.as_object().is_some_and(|o| !o.is_empty()));
+            if !has_conditions {
+                return handle_snapshot(arguments);
+            }
+            // 带条件查找：未给快照版本/窗口引用时先按 app_name/pid 取一次
+            // 快照，再在该快照内查找（底层 find 只接受 snapshot 或 window）。
+            let has_scope = args.get("snapshot").is_some_and(|v| !v.is_null())
+                || args.get("window").is_some_and(|v| !v.is_null());
+            if !has_scope {
+                let snapshot_result = handle_snapshot(arguments)?;
+                if !snapshot_result.ok {
+                    return Ok(snapshot_result);
+                }
+                let snapshot_id =
+                    serde_json::from_str::<serde_json::Value>(&snapshot_result.stdout)
+                        .ok()
+                        .and_then(|v| v.get("snapshot").and_then(serde_json::Value::as_u64));
+                let Some(snapshot_id) = snapshot_id else {
+                    return Ok(tool_failure(
+                        "desktop_ui 读取快照成功但未返回快照版本，无法查找",
+                        "missing snapshot id",
+                    ));
+                };
+                if let Some(object) = args.as_object_mut() {
+                    object.insert("snapshot".to_string(), json!(snapshot_id));
+                }
+                return handle_find(args.to_string());
+            }
+            handle_find(arguments)
+        }
+        Some("perform") => {
+            // 语义动作字段名 operation → 底层 action。
+            let Some(operation) = args.get("operation").cloned() else {
+                return Ok(tool_failure(
+                    "desktop_ui perform 需要 operation（press/focus/set_value/toggle/select）",
+                    "missing operation",
+                ));
+            };
+            if let Some(object) = args.as_object_mut() {
+                object.insert("action".to_string(), operation);
+            }
+            handle_action(args.to_string())
+        }
+        other => Ok(tool_failure(
+            &format!(
+                "desktop_ui 的 action 需为 snapshot/perform，收到：{}",
+                other.unwrap_or("（缺失）")
+            ),
+            "bad action",
+        )),
+    }
+}
+
+/// desktop_input：鼠标手势 / 键盘动作分派，可选操作后自动截图。
+fn handle_desktop_input(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_input", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let action = args
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let mut result = if let Some(gesture) = parse_mouse_gesture(action) {
+        let result = run_mouse(&args, gesture)?;
+        if result.ok {
+            state::set_cursor_summoned(true);
+        }
+        result
+    } else if let Some(kind) = parse_keyboard_action(action) {
+        run_keyboard(&args, kind)?
+    } else {
+        return Ok(tool_failure(
+            &format!(
+                "desktop_input 的 action 无法识别：{}（鼠标 click/double_click/right_click/move/drag/scroll，键盘 type/key/combo）",
+                if action.is_empty() {
+                    "（缺失）"
+                } else {
+                    action
+                }
+            ),
+            "bad action",
+        ));
+    };
+    let wants_shot = args
+        .get("screenshot_after")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !result.ok || !wants_shot {
+        return Ok(result);
+    }
+    // 操作后自动截图：留 300ms 给界面刷新；截图注入声明在 stdout JSON 的
+    // injected_assets 字段，与操作结果合并为一个 JSON 对象。
+    let region = args.get("screenshot_region").and_then(parse_region);
+    let shot_request = ScreenshotRequest {
+        app_name: args.get("screenshot_app_name").and_then(as_str_owned),
+        region,
+        delay_ms: Some(300),
+        access: state::access_context(),
+        ..Default::default()
+    };
+    let shot = sidecar_client::invoke::<Screenshot>(&shot_request)
+        .map_err(|e| plugin_err(format!("desktop_input 截图调用 sidecar 失败: {e}")))?;
+    match shot {
+        DesktopResult::Ok(resp) => {
+            let operation: serde_json::Value =
+                serde_json::from_str(&result.stdout).unwrap_or(serde_json::Value::Null);
+            let mut merged = serde_json::to_value(&resp).unwrap_or_else(|_| json!({}));
+            if let Some(object) = merged.as_object_mut() {
+                object.insert("operation".to_string(), operation);
+            }
+            result.stdout = serde_json::to_string_pretty(&merged).unwrap_or_default();
+            result.summary = format!(
+                "{}；已自动截图（{}×{}）。{}",
+                operation_summary(&result.summary, &merged),
+                resp.width,
+                resp.height,
+                resp.coordinate_hint().unwrap_or_default()
+            );
+        }
+        DesktopResult::Err(error) => {
+            result.summary = format!(
+                "{}；操作后截图失败：{}",
+                result.summary,
+                error.agent_message()
+            );
+        }
+    }
+    Ok(result)
+}
+
+/// 操作摘要：优先取操作响应里的 summary 字段（「已在 (x,y) 执行左键点击」）。
+fn operation_summary(fallback: &str, merged: &serde_json::Value) -> String {
+    merged
+        .get("operation")
+        .and_then(|op| op.get("summary"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
 
 fn handle_desktop_status(arguments: String) -> Result<ToolResult, PluginError> {
     // desktop_status 无必填参数，但仍校验 JSON 合法性，非法输入返回错误。
@@ -439,6 +654,128 @@ fn handle_action(arguments: String) -> Result<ToolResult, PluginError> {
     run_desktop_op::<Action, _>(&request, "desktop_action")
 }
 
+fn run_mouse(args: &serde_json::Value, gesture: MouseGesture) -> Result<ToolResult, PluginError> {
+    let (Some(x), Some(y)) = (
+        args.get("x").and_then(|value| value.as_f64()),
+        args.get("y").and_then(|value| value.as_f64()),
+    ) else {
+        return Ok(tool_failure("鼠标动作缺少 x/y 坐标", "missing x/y"));
+    };
+    // 手势参数完整性：drag 需终点，scroll 需滚动量。
+    let (to_x, to_y) = (
+        args.get("to_x").and_then(|value| value.as_f64()),
+        args.get("to_y").and_then(|value| value.as_f64()),
+    );
+    let (delta_y, delta_x) = (
+        args.get("delta_y").and_then(|value| value.as_f64()),
+        args.get("delta_x").and_then(|value| value.as_f64()),
+    );
+    if gesture == MouseGesture::Drag && (to_x.is_none() || to_y.is_none()) {
+        return Ok(tool_failure(
+            "drag 必须同时提供 to_x 与 to_y",
+            "missing drag target",
+        ));
+    }
+    if gesture == MouseGesture::Scroll && delta_y.is_none() && delta_x.is_none() {
+        return Ok(tool_failure(
+            "scroll 必须提供 delta_y 或 delta_x",
+            "missing scroll delta",
+        ));
+    }
+    let request = MouseRequest {
+        gesture,
+        x,
+        y,
+        to_x,
+        to_y,
+        delta_y,
+        delta_x,
+        access: state::access_context(),
+    };
+    run_desktop_op::<Mouse, _>(&request, "desktop_mouse")
+}
+fn parse_mouse_gesture(value: &str) -> Option<MouseGesture> {
+    match value {
+        "move" => Some(MouseGesture::Move),
+        "click" => Some(MouseGesture::Click),
+        "right_click" => Some(MouseGesture::RightClick),
+        "double_click" => Some(MouseGesture::DoubleClick),
+        "drag" => Some(MouseGesture::Drag),
+        "scroll" => Some(MouseGesture::Scroll),
+        _ => None,
+    }
+}
+/// 解析 desktop_screenshot 的 region 参数：四个有限数且 width/height > 0。
+fn parse_region(value: &serde_json::Value) -> Option<Bounds> {
+    let object = value.as_object()?;
+    let number = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|n| n.is_finite())
+    };
+    let (x, y, width, height) = (
+        number("x")?,
+        number("y")?,
+        number("width")?,
+        number("height")?,
+    );
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(Bounds {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+fn run_keyboard(
+    args: &serde_json::Value,
+    action: KeyboardActionKind,
+) -> Result<ToolResult, PluginError> {
+    let text = args.get("text").and_then(as_str_owned);
+    let key = args.get("key").and_then(as_str_owned);
+    let keys: Option<Vec<String>> = args.get("keys").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    });
+    // 手势参数完整性（键名合法性由 sidecar 单点裁决，此处只查结构）。
+    if action == KeyboardActionKind::Type && text.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Ok(tool_failure("type 必须提供非空 text", "missing text"));
+    }
+    if action == KeyboardActionKind::Key && key.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Ok(tool_failure("key 手势必须提供非空 key 键名", "missing key"));
+    }
+    if action == KeyboardActionKind::Combo {
+        let valid = keys.as_ref().is_some_and(|k| k.len() >= 2);
+        if !valid {
+            return Ok(tool_failure(
+                "combo 必须提供 keys 数组（至少修饰键 + 普通键两个）",
+                "missing keys",
+            ));
+        }
+    }
+    let request = KeyboardRequest {
+        action,
+        text,
+        key,
+        keys,
+        access: state::access_context(),
+    };
+    run_desktop_op::<Keyboard, _>(&request, "desktop_keyboard")
+}
+fn parse_keyboard_action(value: &str) -> Option<KeyboardActionKind> {
+    match value {
+        "type" => Some(KeyboardActionKind::Type),
+        "key" => Some(KeyboardActionKind::Key),
+        "combo" => Some(KeyboardActionKind::Combo),
+        _ => None,
+    }
+}
 fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
     let args = match parse_args("desktop_wait", &arguments) {
         Ok(v) => v,
@@ -475,7 +812,133 @@ fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
     run_desktop_op::<Wait, _>(&request, "desktop_wait")
 }
 
+/// desktop_screenshot：图源工具（RFC 0017）。响应 JSON 里的
+/// `injected_assets` 数组是注入声明：core 在工具批次闭合后据此落成
+/// 宿主注入消息——工具文本只留引用与元数据，媒体由前端 assistant 侧展示。
+fn handle_screenshot(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_screenshot", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let pid = args.get("pid").and_then(as_u32_bounded).filter(|p| *p > 0);
+    if args
+        .get("pid")
+        .is_some_and(|value| value.as_u64().is_none_or(|p| p > u32::MAX as u64))
+    {
+        return Ok(tool_failure(
+            "desktop_screenshot 的 pid 超出有效范围",
+            "pid out of range",
+        ));
+    }
+    // region 显式区域（优先于 app 定位）；四个分量必须为有限正数。
+    let region = args.get("region").and_then(parse_region);
+    if args.get("region").is_some() && region.is_none() {
+        return Ok(tool_failure(
+            "desktop_screenshot 的 region 需要有限的 x/y/width/height（width/height > 0）",
+            "bad region",
+        ));
+    }
+    let max_dimension = match args.get("max_dimension") {
+        Some(v) if !v.is_null() => match as_u32_bounded(v) {
+            Some(d) if d > 0 => Some(d),
+            _ => {
+                return Ok(tool_failure(
+                    "desktop_screenshot 的 max_dimension 需为正整数",
+                    "bad max_dimension",
+                ));
+            }
+        },
+        _ => None,
+    };
+    let request = ScreenshotRequest {
+        app_name: args.get("app_name").and_then(as_str_owned),
+        pid,
+        foreground_only: args
+            .get("foreground_only")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        region,
+        max_dimension,
+        delay_ms: None,
+        access: state::access_context(),
+    };
+    let result = sidecar_client::invoke::<Screenshot>(&request)
+        .map_err(|e| plugin_err(format!("desktop_screenshot 调用 sidecar 失败: {e}")))?;
+    match result {
+        DesktopResult::Ok(resp) => {
+            let stdout = serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".to_string());
+            let app_label = if resp.app_name.is_empty() {
+                "屏幕".to_string()
+            } else {
+                resp.app_name.clone()
+            };
+            let mut summary = format!(
+                "已截取{app_label}（{}×{}，{} 字节）；图片将以原生视觉内容注入对话，直接阅读即可",
+                resp.width, resp.height, resp.size_bytes
+            );
+            if let Some(hint) = resp.coordinate_hint() {
+                summary.push('。');
+                summary.push_str(&hint);
+            }
+            Ok(ToolResult {
+                ok: true,
+                summary,
+                stdout,
+                stderr: String::new(),
+                exit_code: 0,
+                execution: None,
+            })
+        }
+        DesktopResult::Err(error) => {
+            let message = error.agent_message();
+            Ok(ToolResult {
+                ok: false,
+                summary: message.clone(),
+                stdout: String::new(),
+                stderr: message,
+                exit_code: 1,
+                execution: None,
+            })
+        }
+    }
+}
+
 /// 统一执行一个桌面操作：调 sidecar，把 DesktopResult<T> 转 ToolResult。
+/// desktop_open_app：唤起/启动应用。summary 直接给出窗口坐标，便于
+/// Agent 接着按区域截图。
+fn handle_open_app(arguments: String) -> Result<ToolResult, PluginError> {
+    let args = match parse_args("desktop_open_app", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let request = OpenAppRequest {
+        app_name: args.get("app_name").and_then(as_str_owned),
+        bundle_id: args.get("bundle_id").and_then(as_str_owned),
+        access: state::access_context(),
+    };
+    if request
+        .app_name
+        .as_deref()
+        .is_none_or(|s| s.trim().is_empty())
+        && request
+            .bundle_id
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+    {
+        return Ok(tool_failure(
+            "desktop_open_app 需要 app_name 或 bundle_id",
+            "missing app_name/bundle_id",
+        ));
+    }
+    let result = sidecar_client::invoke::<OpenApp>(&request)
+        .map_err(|e| plugin_err(format!("desktop_open_app 调用 sidecar 失败: {e}")))?;
+    let mut tool_result = desktop_result_to_tool_result(result.clone());
+    if let DesktopResult::Ok(resp) = result {
+        tool_result.summary = resp.summary;
+    }
+    Ok(tool_result)
+}
+
 fn run_desktop_op<O, T>(request: &O::Request, tool: &str) -> Result<ToolResult, PluginError>
 where
     O: ComputerUseOperation<Response = DesktopResult<T>>,
@@ -555,6 +1018,21 @@ fn parse_element_ref(v: &serde_json::Value) -> Option<ElementRef> {
     let id = obj.get("id")?.as_str()?.to_string();
     let snapshot = obj.get("snapshot")?.as_u64()?;
     Some(ElementRef { id, snapshot })
+}
+
+/// 屏幕区域参数 schema（逻辑坐标 points）。
+fn region_schema(description: &str) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number", "minimum": 0 },
+            "height": { "type": "number", "minimum": 0 }
+        },
+        "required": ["x", "y", "width", "height"]
+    })
 }
 
 fn element_ref_schema() -> serde_json::Value {

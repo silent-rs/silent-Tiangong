@@ -17,9 +17,11 @@ path = "src/lib.rs"
 tiangong-plugin-computer-use-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-sidecar = { workspace = true }
+tiangong-types = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+scru128 = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "io-util", "sync"] }
 tracing = { workspace = true }
@@ -29,9 +31,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # AXUIElement C API 返回的 CFString/CFArray/CFBoolean/CFNumber 值。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", features = ["exception"] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo", "NSData", "NSDate", "NSRunLoop"] }
+# NSImageView/NSImage/NSColor/NSScreen 用于虚拟指针 overlay（RFC 0018）。
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow", "NSImageView", "NSImage", "NSColor", "NSScreen", "NSBox", "NSTextField", "NSControl", "NSView", "NSResponder", "NSFont", "NSFontDescriptor", "NSText"] }
 core-foundation = "0.10"
+# CGEvent 合成输入（desktop_mouse 手势，RFC 0018 §2.3）；highsierra
+# feature 提供像素级滚轮事件（CGEventCreateScrollWheelEvent2）。
+core-graphics = { version = "0.25", features = ["highsierra", "elcapitan"] }
 
 # Linux 后端：纯 Rust AT-SPI2 实现（zbus 基于 D-Bus）。
 [target.'cfg(target_os = "linux")'.dependencies]

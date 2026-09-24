@@ -3,7 +3,9 @@
 //!
 //! 用法：cargo run -p tiangong-plugin-computer-use-sidecar --example diagnose
 
-use tiangong_plugin_computer_use_protocol::ops::{ListWindowsRequest, SnapshotRequest};
+use tiangong_plugin_computer_use_protocol::ops::{
+    ListWindowsRequest, ScreenshotRequest, SnapshotRequest,
+};
 use tiangong_plugin_computer_use_protocol::{DesktopResult, Platform};
 use tiangong_plugin_computer_use_sidecar::backend::{self, Backend};
 
@@ -124,6 +126,133 @@ async fn main() {
             }
         }
         None => println!("未找到可快照的应用"),
+    }
+
+    // desktop_screenshot：窗口级（前台应用）+ 区域 + 缩放三条路径。
+    println!("\n--- desktop_screenshot ---");
+    match backend
+        .screenshot(&ScreenshotRequest {
+            foreground_only: true,
+            ..Default::default()
+        })
+        .await
+    {
+        DesktopResult::Ok(resp) => {
+            println!(
+                "窗口截图: {}x{} ({} 字节) app={} 路径={}",
+                resp.width, resp.height, resp.size_bytes, resp.app_name, resp.path
+            );
+            // 区域 + 缩放：取窗口中心 400x300 区域，长边限 800px 验证 sips 缩放。
+            let region = tiangong_plugin_computer_use_protocol::Bounds {
+                x: 100.0,
+                y: 100.0,
+                width: 400.0,
+                height: 300.0,
+            };
+            match backend
+                .screenshot(&ScreenshotRequest {
+                    region: Some(region),
+                    max_dimension: Some(800),
+                    ..Default::default()
+                })
+                .await
+            {
+                DesktopResult::Ok(resp) => println!(
+                    "区域截图(400x300@100,100 限边800): {}x{} ({} 字节) 路径={}",
+                    resp.width, resp.height, resp.size_bytes, resp.path
+                ),
+                DesktopResult::Err(e) => println!("区域截图错误: {}", e.agent_message()),
+            }
+        }
+        DesktopResult::Err(e) => println!("截图错误: {}", e.agent_message()),
+    }
+
+    // desktop_screenshot：app_name 定位（CGWindowList owner 名主路径，
+    // 验证多进程应用——如微信 4.x——主窗口挂 helper 进程时仍可命中）。
+    // 全屏：验证 Retina 归一 + 超上限按 1/2 整数倍缩小 + JPEG 与坐标元数据。
+    println!("\n--- desktop_screenshot(全屏，默认上限) ---");
+    match backend.screenshot(&ScreenshotRequest::default()).await {
+        DesktopResult::Ok(resp) => println!(
+            "全屏截图: {}x{} ({} 字节) scale={} logical={:?} 路径={}\n  换算说明: {}",
+            resp.width,
+            resp.height,
+            resp.size_bytes,
+            resp.scale,
+            resp.logical_bounds,
+            resp.path,
+            resp.coordinate_hint().unwrap_or_default()
+        ),
+        DesktopResult::Err(e) => println!("全屏截图错误: {}", e.agent_message()),
+    }
+
+    // desktop_open_app：仅在显式设置 DIAGNOSE_OPEN_APP 时执行（会唤起/启动应用）。
+    if let Ok(name) = std::env::var("DIAGNOSE_OPEN_APP") {
+        println!("\n--- desktop_open_app({name}) ---");
+        let started = std::time::Instant::now();
+        match backend
+            .open_app(
+                &tiangong_plugin_computer_use_protocol::ops::OpenAppRequest {
+                    app_name: Some(name.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            DesktopResult::Ok(resp) => {
+                println!(
+                    "open_app 用时 {}ms: {}",
+                    started.elapsed().as_millis(),
+                    resp.summary
+                );
+                println!("  响应: {resp:?}");
+                if let Some(window) = resp.window {
+                    match backend
+                        .screenshot(&ScreenshotRequest {
+                            region: Some(window),
+                            ..Default::default()
+                        })
+                        .await
+                    {
+                        DesktopResult::Ok(shot) => println!(
+                            "  窗口区域截图: {}x{} ({} 字节) scale={} 路径={}",
+                            shot.width, shot.height, shot.size_bytes, shot.scale, shot.path
+                        ),
+                        DesktopResult::Err(e) => {
+                            println!("  窗口区域截图错误: {}", e.agent_message())
+                        }
+                    }
+                }
+            }
+            DesktopResult::Err(e) => println!("open_app 错误: {}", e.agent_message()),
+        }
+    }
+
+    println!("\n--- desktop_screenshot(app_name) ---");
+    let app_for_name = match backend.list_windows(&ListWindowsRequest::default()).await {
+        DesktopResult::Ok(r) => r
+            .windows
+            .iter()
+            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .or_else(|| r.windows.iter().find(|w| !w.app_name.is_empty()))
+            .map(|w| w.app_name.clone()),
+        _ => None,
+    };
+    if let Some(name) = app_for_name {
+        match backend
+            .screenshot(&ScreenshotRequest {
+                app_name: Some(name.clone()),
+                ..Default::default()
+            })
+            .await
+        {
+            DesktopResult::Ok(resp) => println!(
+                "应用名截图 app={name}: {}x{} ({} 字节) 路径={}",
+                resp.width, resp.height, resp.size_bytes, resp.path
+            ),
+            DesktopResult::Err(e) => println!("应用名截图错误: {}", e.agent_message()),
+        }
+    } else {
+        println!("无可定位的应用名，跳过");
     }
 
     // find + action：取快照后用 find 在快照内查找按钮，再对其执行 focus。
