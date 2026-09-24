@@ -141,7 +141,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_ACTION.to_string(),
-                description: "对明确的临时控件引用执行结构化动作（focus/press/set_value/toggle/select/expand/collapse/scroll_into_view）。"
+                description: "对明确的临时控件引用执行结构化动作（focus/press/set_value/toggle/select/expand/collapse/scroll_into_view）。适合表单填写与状态切换；点击类交互（按钮、链接、图标、菜单项）优先用 desktop_mouse 坐标点击——真实输入管线的仿真操作，行为与用户手动操作一致。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
@@ -188,7 +188,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_MOUSE.to_string(),
-                description: "坐标级鼠标手势（CGEvent 合成，走真实输入管线）：移动、左/右键单击、双击、拖拽、滚轮。可唤出右键菜单、操作 Canvas 等无障碍树外的界面，是 desktop_action 语义动作的补充。坐标用 desktop_snapshot 的 bounds 换算；开启 virtual_cursor 后指针实时跟随并有点击动画。"
+                description: "坐标级鼠标手势（CGEvent 合成，走真实输入管线）：移动、左/右键单击、双击、拖拽、滚轮。**点击、拖动等交互行为的首选路径**——事件经真实输入管线分发，行为与用户手动操作一致（仿真操作），也能唤出右键菜单、操作 Canvas 等无障碍树外的界面。坐标用 desktop_snapshot 的 bounds 换算；建议先开启 virtual_cursor，指针实时移动与点击动画让操作过程完全可视化。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
@@ -221,7 +221,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_VIRTUAL_CURSOR.to_string(),
-                description: "开关天工虚拟鼠标的持久显示（默认关闭）。开启后指针出现在系统鼠标当前位置并常驻，desktop_action 执行时平滑移动到目标控件中心向用户突出展示操作落点；关闭后淡出。适合向用户演示或汇报桌面操作的场景，普通自动化操作无需开启。"
+                description: "开关天工虚拟鼠标的持久显示（默认关闭）。开启后指针出现在系统鼠标当前位置并常驻，desktop_action 执行时平滑移动到目标控件中心、desktop_mouse 手势实时跟随移动并带点击动画，操作落点全程可视。**执行桌面操作（点击、拖动、滚动等）时建议开启**，让操作过程可视化、贴近真人操作；任务收尾或纯后台批处理时再关闭。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
