@@ -264,26 +264,64 @@ pub(crate) fn parse_injected_images(
             tracing::warn!(tool_name, kind = ?asset.kind, "非图片注入声明暂不支持，跳过");
             continue;
         }
-        if let Err(reason) = validate_injected_asset(&asset, media_root.as_deref()) {
-            tracing::warn!(tool_name, %reason, "注入声明未通过安全校验，跳过");
-            continue;
+        match adopt_injected_asset(&asset, media_root.as_deref()) {
+            Ok(stored) => injections.push(PendingImageInjection {
+                // 工具名固定使用调用名（评审问题 4）：声明的 source 字段不进
+                // provenance，防止工具冒充来源。
+                tool_name: tool_name.to_string(),
+                tool_call_id: tool_call_id.to_string(),
+                asset: stored,
+            }),
+            Err(reason) => {
+                tracing::warn!(tool_name, %reason, "注入声明未通过安全校验或宿主接管失败，跳过");
+            }
         }
-        injections.push(PendingImageInjection {
-            // 工具名固定使用调用名（评审问题 4）：声明的 source 字段不进
-            // provenance，防止工具冒充来源。
-            tool_name: tool_name.to_string(),
-            tool_call_id: tool_call_id.to_string(),
-            asset: asset.to_stored_asset(format!("inject-{}", scru128::new())),
-        });
     }
     injections
 }
 
+/// 宿主接管注入图片（复评问题 A）：安全校验通过后立即把文件复制到
+/// 宿主自己管理的 `media/injected/<随机名>`，消息只引用副本——
+/// 之后原文件被符号链接改指、覆盖或膨胀都不再影响任何请求（副本
+/// 内容在接管瞬间定格）。此后链路与用户上传附件同一管理模式，
+/// provider 每轮读取的都是宿主副本。
+///
+/// 副本大小以文件系统实际值为准（复评小问题 1），不用工具自填的
+/// `size_bytes`。
+fn adopt_injected_asset(
+    asset: &tiangong_types::InjectedAsset,
+    media_root: Option<&std::path::Path>,
+) -> Result<tiangong_types::StoredAsset, String> {
+    let (source, media_root) = validate_injected_asset(asset, media_root)?;
+    let injected_dir = media_root.join("injected");
+    std::fs::create_dir_all(&injected_dir)
+        .map_err(|error| format!("创建注入接管目录失败：{error}"))?;
+    let asset_id = format!("inject-{}", scru128::new());
+    let extension = tiangong_types::attachment::extension_for_mime(&asset.mime_type);
+    let dest = injected_dir.join(format!("{asset_id}.{extension}"));
+    std::fs::copy(&source, &dest).map_err(|error| format!("复制注入图片失败：{error}"))?;
+    let size = std::fs::metadata(&dest)
+        .map_err(|error| format!("读取副本属性失败：{error}"))?
+        .len();
+    Ok(tiangong_types::StoredAsset {
+        asset_id,
+        local_path: dest.to_string_lossy().into_owned(),
+        original_name: asset
+            .original_name
+            .clone()
+            .unwrap_or_else(|| "injected-image".to_string()),
+        mime_type: asset.mime_type.clone(),
+        size,
+        kind: tiangong_types::MediaKind::Image,
+    })
+}
+
 /// 注入声明的安全校验（评审问题 1）：目录限定 + mime + 文件头 + 大小。
+/// 通过时返回（规范化后的源路径, 规范化后的媒体目录）。
 fn validate_injected_asset(
     asset: &tiangong_types::InjectedAsset,
     media_root: Option<&std::path::Path>,
-) -> Result<(), String> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     if !asset.mime_type.starts_with("image/") {
         return Err(format!("mime_type 非图片：{}", asset.mime_type));
     }
@@ -309,7 +347,7 @@ fn validate_injected_asset(
     if !has_image_magic(&path) {
         return Err("文件头与常见图片格式不符（PNG/JPEG/GIF/WebP）".to_string());
     }
-    Ok(())
+    Ok((path, media_root))
 }
 
 /// 常见图片格式的文件头校验（PNG/JPEG/GIF/WebP）。
@@ -330,12 +368,22 @@ fn has_image_magic(path: &std::path::Path) -> bool {
     png || jpeg || gif || webp
 }
 
-/// provenance 中工具可控字段的净化（评审问题 4）：压缩控制字符与换行、
-/// 按字符边界截断，防止借文件名/路径注入提示词。
+/// provenance 中工具可控字段的净化（评审问题 4）：压缩控制字符与
+/// 换行、Unicode 行分隔符（U+2028/U+2029）与双向文本控制符
+/// （U+200E/U+200F/U+202A–U+202E/U+2066–U+2069——`is_control` 不含
+/// 这些，但在模型看来可伪装换行或颠倒语序），并按字符边界截断。
 fn sanitize_provenance_field(value: &str) -> String {
+    fn is_suspicious(c: char) -> bool {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }
     let sanitized: String = value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_suspicious(c) { ' ' } else { c })
         .collect();
     if sanitized.chars().count() <= PROVENANCE_FIELD_MAX_CHARS {
         sanitized
@@ -930,6 +978,51 @@ mod tests {
 
         // 未绑定存储根：拒绝一切文件注入。
         assert!(parse_injected_images("t", "c", &stdout_for(&inside), None).is_empty());
+    }
+
+    /// 复评问题 A 回归（TOCTOU）：声明通过校验后宿主立即复制接管，
+    /// 消息引用副本；之后原文件被覆盖/替换/删除都不影响注入内容，
+    /// 也不会把新内容发给模型服务商。
+    #[test]
+    fn adopted_image_is_immutable_to_later_source_mutation() {
+        let storage = tempfile::tempdir().unwrap();
+        let media = storage.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let source = media.join("shot.png");
+        let original_bytes = [137_u8, 80, 78, 71, 1, 2, 3, 4];
+        std::fs::write(&source, original_bytes).unwrap();
+        let stdout = serde_json::json!({
+            "injected_assets": [{
+                "local_path": source,
+                "mime_type": "image/png",
+                "original_name": "shot.png",
+                "size_bytes": 999,
+                "kind": "image"
+            }]
+        })
+        .to_string();
+
+        let images = parse_injected_images("t", "c", &stdout, Some(media.clone()));
+        assert_eq!(images.len(), 1);
+        let adopted = &images[0].asset;
+        // 引用的是宿主接管副本，不是原路径。
+        assert!(
+            adopted.local_path.contains("injected"),
+            "必须引用宿主副本: {}",
+            adopted.local_path
+        );
+        assert_ne!(adopted.local_path, source.to_string_lossy());
+        // 大小以文件系统实际为准（声明填 999 不可信）。
+        assert_eq!(adopted.size, original_bytes.len() as u64);
+
+        // 攻击者随后改写原文件（覆盖为任意内容）甚至删除：副本不受影响。
+        std::fs::write(&source, b"attacker controlled payload").unwrap();
+        std::fs::remove_file(&source).ok();
+        assert_eq!(
+            std::fs::read(&adopted.local_path).unwrap(),
+            original_bytes,
+            "接管副本内容必须定格在校验瞬间"
+        );
     }
 
     /// provenance 净化（评审问题 4）：工具可控字段含控制符/超长时被

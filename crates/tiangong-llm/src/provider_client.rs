@@ -859,10 +859,12 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
                         if msg.phase == tiangong_types::MessagePhase::HostInjected {
                             // 评审问题 2：宿主注入消息的图片文件缺失（被清理/
                             // 声明失效）时降级为文字说明，不让整个请求失败——
-                            // 否则该会话之后每一轮请求都会报错。
+                            // 否则该会话之后每一轮请求都会报错。路径为工具
+                            // 可控字段，净化后拼接（复评小问题 3）。
                             content.push(LlmMessageContent::Text(format!(
                                 "[injected-image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
-                                asset.asset_id, asset.local_path
+                                asset.asset_id,
+                                escape_asset_text(&asset.local_path)
                             )));
                         } else {
                             return Err(anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id));
@@ -923,6 +925,24 @@ fn image_content_from_ready_image(
         general_purpose::STANDARD.encode(bytes)
     );
     Some(crate::message::ImageContent { mime_type, data })
+}
+
+/// 降级说明中资产路径的净化（复评小问题 3）：压缩控制字符与 Unicode
+/// 行/双向控制符、按字符边界截断。
+fn escape_asset_text(value: &str) -> String {
+    fn is_suspicious(c: char) -> bool {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }
+    value
+        .chars()
+        .map(|c| if is_suspicious(c) { ' ' } else { c })
+        .take(160)
+        .collect()
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
