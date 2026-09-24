@@ -292,12 +292,13 @@ fn adopt_injected_asset(
     asset: &tiangong_types::InjectedAsset,
     media_root: Option<&std::path::Path>,
 ) -> Result<tiangong_types::StoredAsset, String> {
-    let (source, media_root) = validate_injected_asset(asset, media_root)?;
+    let (source, media_root, format) = validate_injected_asset(asset, media_root)?;
     let injected_dir = media_root.join("injected");
     std::fs::create_dir_all(&injected_dir)
         .map_err(|error| format!("创建注入接管目录失败：{error}"))?;
     let asset_id = format!("inject-{}", scru128::new());
-    let extension = tiangong_types::attachment::extension_for_mime(&asset.mime_type);
+    // 扩展名来自文件头识别结果（比声明的 mime 可信），不依赖媒体归档层。
+    let extension = format;
     let dest = injected_dir.join(format!("{asset_id}.{extension}"));
     std::fs::copy(&source, &dest).map_err(|error| format!("复制注入图片失败：{error}"))?;
     let size = std::fs::metadata(&dest)
@@ -321,7 +322,7 @@ fn adopt_injected_asset(
 fn validate_injected_asset(
     asset: &tiangong_types::InjectedAsset,
     media_root: Option<&std::path::Path>,
-) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf, &'static str), String> {
     if !asset.mime_type.starts_with("image/") {
         return Err(format!("mime_type 非图片：{}", asset.mime_type));
     }
@@ -344,28 +345,32 @@ fn validate_injected_asset(
     if size > MAX_INJECTED_IMAGE_BYTES {
         return Err(format!("文件超过大小上限（{size} 字节）"));
     }
-    if !has_image_magic(&path) {
-        return Err("文件头与常见图片格式不符（PNG/JPEG/GIF/WebP）".to_string());
-    }
-    Ok((path, media_root))
+    let format = detect_image_format(&path)
+        .ok_or_else(|| "文件头与常见图片格式不符（PNG/JPEG/GIF/WebP）".to_string())?;
+    Ok((path, media_root, format))
 }
 
-/// 常见图片格式的文件头校验（PNG/JPEG/GIF/WebP）。
-fn has_image_magic(path: &std::path::Path) -> bool {
+/// 常见图片格式的文件头识别（PNG/JPEG/GIF/WebP）。
+///
+/// 识别结果同时作为接管副本的扩展名来源——文件头比工具声明的
+/// mime_type 更可信。
+fn detect_image_format(path: &std::path::Path) -> Option<&'static str> {
     use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut file = std::fs::File::open(path).ok()?;
     let mut header = [0_u8; 12];
-    let Ok(read) = file.read(&mut header) else {
-        return false;
-    };
+    let read = file.read(&mut header).ok()?;
     let header = &header[..read];
-    let png = header.starts_with(&[0x89, b'P', b'N', b'G']);
-    let jpeg = header.starts_with(&[0xFF, 0xD8, 0xFF]);
-    let gif = header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a");
-    let webp = header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WEBP";
-    png || jpeg || gif || webp
+    if header.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if header.starts_with(b"RIFF") && header.len() >= 12 && &header[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
 }
 
 /// provenance 中工具可控字段的净化（评审问题 4）：压缩控制字符与

@@ -7,40 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ContentBlock, MediaKind};
 
-/// 常见媒体类型的归档扩展名（未知类型统一 `bin`）。
-///
-/// 宿主附件归档（media-archive）与工具注入接管（core）共用的权威
-/// 映射，避免两侧各持一份漂移。
-pub fn extension_for_mime(mime: &str) -> &'static str {
-    match mime {
-        "image/jpeg" | "image/jpg" => "jpg",
-        "image/png" => "png",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/svg+xml" => "svg",
-        "application/pdf" => "pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "text/plain" => "txt",
-        "text/markdown" => "md",
-        "text/csv" => "csv",
-        "text/html" => "html",
-        "application/json" => "json",
-        "application/xml" => "xml",
-        "audio/mpeg" => "mp3",
-        "audio/wav" => "wav",
-        "audio/ogg" => "ogg",
-        "audio/mp4" => "m4a",
-        "video/mp4" => "mp4",
-        "video/webm" => "webm",
-        "video/quicktime" => "mov",
-        "application/zip" => "zip",
-        "application/gzip" => "gz",
-        _ => "bin",
-    }
-}
-
 /// 已由宿主保存的稳定资源引用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredAsset {

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tiangong_types::attachment::extension_for_mime;
 
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
@@ -679,6 +678,39 @@ fn mime_from_reference(value: &str) -> Option<String> {
         _ => return None,
     };
     Some(mime.to_string())
+}
+
+/// 常见媒体类型的归档扩展名（未知类型统一 `bin`）。
+///
+/// 宿主附件归档与工具注入接管（core）共用的权威映射，避免两侧各持一份漂移。
+pub fn extension_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" => "xml",
+        "audio/mpeg" => "mp3",
+        "audio/wav" => "wav",
+        "audio/ogg" => "ogg",
+        "audio/mp4" => "m4a",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        _ => "bin",
+    }
 }
 
 fn subdir_for_kind(kind: MediaKind) -> &'static str {
