@@ -61,6 +61,11 @@ pub(crate) fn build_turn_memory_result(
                 MessageRole::Notice => return None,
                 MessageRole::Tool => "tool",
             };
+            // 宿主注入消息（插件反馈图片 HostInjected、压缩恢复锚点
+            // CompressedResume）不是用户意图，不进入反刍轮次消息。
+            if !message.phase.is_user_input() {
+                return None;
+            }
             let content = compact_single_memory_text(&message.text_content(), 400);
             (!content.is_empty()).then(|| TurnMessage {
                 role: role.to_string(),
@@ -364,6 +369,62 @@ fn should_record_tool_result(tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiangong_types::MessagePhase;
+
+    fn test_session(messages: Vec<Message>) -> PluginSession {
+        PluginSession {
+            id: "s-1".to_string(),
+            title: String::new(),
+            cwd: "/tmp/ws".to_string(),
+            workspace_id: "ws".to_string(),
+            parent_session_id: None,
+            turn_start_message_id: None,
+            reasoning_effort: None,
+            messages,
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 构造 RFC 0017 的插件反馈图片注入消息（role=User、phase=HostInjected，
+    /// ModelInstruction + Image 块，text_content 为空）。
+    fn host_injected_image_message() -> Message {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::model_instruction("[injected-images provenance]"),
+            ContentBlock::image(
+                tiangong_types::StoredAsset {
+                    asset_id: "a-1".to_string(),
+                    local_path: "/media/shot.png".to_string(),
+                    original_name: "shot.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 1024,
+                    kind: tiangong_types::MediaKind::Image,
+                },
+                None,
+            ),
+        ];
+        message.with_phase(MessagePhase::HostInjected)
+    }
+
+    #[test]
+    fn turn_messages_exclude_host_injected_image_message() {
+        let user = Message::new(MessageRole::User, "帮我看下这张截图");
+        let session = test_session(vec![user, host_injected_image_message()]);
+        let messages: Vec<&Message> = session.messages.iter().collect();
+        let result = build_turn_memory_result(
+            &session,
+            &messages,
+            "帮我看下这张截图",
+            TurnStatus::Completed,
+        );
+        // 注入图片消息不进入反刍轮次消息，也不产生空 user 轮次。
+        assert_eq!(result.turn_messages.len(), 1);
+        assert_eq!(result.turn_messages[0].role, "user");
+        assert_eq!(result.turn_messages[0].content, "帮我看下这张截图");
+        assert_eq!(result.user_input, "帮我看下这张截图");
+    }
 
     #[test]
     fn compact_text_removes_empty_lines_and_uses_ascii_ellipsis() {

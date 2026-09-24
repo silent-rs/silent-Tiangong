@@ -327,6 +327,27 @@ fn handle_search_code(call: &ToolCall) -> Result<ToolResult, PluginError> {
 fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: PluginSession = serde_json::from_str(session_json)
         .map_err(|e| plugin_err(format!("解析 session 失败: {e}")))?;
+    let turns = collect_turn_data(&session, turn_start_idx);
+    if turns.is_empty() {
+        return Ok(());
+    }
+    let request = IndexTurnBatchRequest {
+        session_id: session.id,
+        turns,
+    };
+    sidecar_client::invoke::<IndexTurnBatch>(&request)
+        .map_err(|error| plugin_err(format!("on_turn_finished 调用 sidecar 失败: {error}")))?;
+    Ok(())
+}
+
+/// 收集本轮需要写入会话索引的消息。
+///
+/// 排除两类数据（否则会产生索引垃圾/异常数据）：
+/// - 宿主注入的 role=User 消息（`HostInjected` 插件反馈图片注入、
+///   `CompressedResume` 压缩恢复锚点）：不是用户意图，图片消息经
+///   `text_content()` 提取后内容为空，索引后是空内容条目；
+/// - 文本内容为空的消息（纯媒体内容），避免空文档进入 Tantivy。
+fn collect_turn_data(session: &PluginSession, turn_start_idx: u32) -> Vec<TurnData> {
     // 优先按本轮起始消息 ID 定位（不受快照消息增删影响）；旧宿主未提供时回退 idx。
     let start = match &session.turn_start_message_id {
         Some(id) => session
@@ -336,7 +357,7 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
             .unwrap_or(turn_start_idx as usize),
         None => turn_start_idx as usize,
     };
-    let turns: Vec<TurnData> = session
+    session
         .messages
         .get(start..)
         .unwrap_or(&[])
@@ -349,26 +370,23 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
                 MessageRole::System => return None,
                 MessageRole::Notice => return None,
             };
+            if !msg.phase.is_user_input() {
+                return None;
+            }
+            let content = msg.text_content();
+            if content.trim().is_empty() {
+                return None;
+            }
             Some(TurnData {
                 turn_id: msg.id.clone(),
                 workspace_id: session.cwd.clone(),
                 role: role.to_string(),
-                content: msg.text_content(),
+                content,
                 topics: Vec::new(),
                 entity_names: Vec::new(),
             })
         })
-        .collect();
-    if turns.is_empty() {
-        return Ok(());
-    }
-    let request = IndexTurnBatchRequest {
-        session_id: session.id,
-        turns,
-    };
-    sidecar_client::invoke::<IndexTurnBatch>(&request)
-        .map_err(|error| plugin_err(format!("on_turn_finished 调用 sidecar 失败: {error}")))?;
-    Ok(())
+        .collect()
 }
 
 /// on_session_ended：通知 sidecar finalize 会话索引。
@@ -571,4 +589,74 @@ where
     let response = sidecar_client::invoke::<O>(request).map_err(|e| plugin_err(e.to_string()))?;
     serde_json::to_string(&response).map_err(|e| plugin_err(e.to_string()))
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_types::{ContentBlock, Message, MessagePhase};
+
+    fn test_session(messages: Vec<Message>) -> PluginSession {
+        PluginSession {
+            id: "s-1".to_string(),
+            title: String::new(),
+            cwd: "/tmp/ws".to_string(),
+            workspace_id: "ws".to_string(),
+            parent_session_id: None,
+            turn_start_message_id: None,
+            reasoning_effort: None,
+            messages,
+            context_summary: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 构造 RFC 0017 的插件反馈图片注入消息（role=User、phase=HostInjected，
+    /// ModelInstruction + Image 块，text_content 为空）。
+    fn host_injected_image_message() -> Message {
+        let mut message = Message::new(MessageRole::User, String::new());
+        message.content = vec![
+            ContentBlock::model_instruction("[injected-images provenance]"),
+            ContentBlock::image(
+                tiangong_types::StoredAsset {
+                    asset_id: "a-1".to_string(),
+                    local_path: "/media/shot.png".to_string(),
+                    original_name: "shot.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 1024,
+                    kind: tiangong_types::MediaKind::Image,
+                },
+                None,
+            ),
+        ];
+        message.with_phase(MessagePhase::HostInjected)
+    }
+
+    #[test]
+    fn collect_turn_data_skips_host_injected_and_empty_messages() {
+        let session = test_session(vec![
+            Message::new(MessageRole::User, "帮我看下这张截图"),
+            host_injected_image_message(),
+            Message::new(MessageRole::Assistant, "已查看截图内容"),
+            // 纯媒体消息：无文本，不应产生空内容索引条目。
+            host_injected_image_message(),
+        ]);
+        let turns = collect_turn_data(&session, 0);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].content, "帮我看下这张截图");
+        assert_eq!(turns[1].role, "assistant");
+        assert!(turns.iter().all(|turn| !turn.content.trim().is_empty()));
+    }
+
+    #[test]
+    fn collect_turn_data_skips_compressed_resume_message() {
+        let resume = Message::new(MessageRole::User, "压缩恢复锚点")
+            .with_phase(MessagePhase::CompressedResume);
+        let session = test_session(vec![resume, Message::new(MessageRole::User, "真实输入")]);
+        let turns = collect_turn_data(&session, 0);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].content, "真实输入");
+    }
+}
+
 bindings::export!(Component with_types_in bindings);
