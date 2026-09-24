@@ -264,11 +264,14 @@ jobs:
       - name: Verify macOS signature and notarization
         if: runner.os == 'macOS'
         run: |
-          app="$(find target src-tauri/target -maxdepth 6 -type d -path '*/release/bundle/macos/*.app' 2>/dev/null | head -n 1)"
-          if [[ -z "$app" ]]; then
+          # 用 glob 而非 find：步骤以 -e -o pipefail 运行，find 遇到不存在的目录会返回非 0 使步骤静默失败
+          shopt -s nullglob
+          apps=(target/*/release/bundle/macos/*.app target/release/bundle/macos/*.app)
+          if (( ${#apps[@]} == 0 )); then
             echo "::error::未找到 macOS .app 产物"
             exit 1
           fi
+          app="${apps[0]}"
           echo "Verifying $app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$app"
