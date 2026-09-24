@@ -261,7 +261,7 @@ impl Guest for Component {
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
         Ok(vec![
-            "桌面应用控制优先使用 computer-use 插件：先 desktop_status 确认能力，再 desktop_list_windows 定位窗口，desktop_snapshot 读取控件树，desktop_find 精确匹配控件后用 desktop_action 执行动作，动作后用 desktop_wait 确认状态。网页内容继续优先交给浏览器插件。".to_string(),
+            "桌面应用的交互一律使用 computer-use 插件：激活/唤起窗口、点击、输入、读取界面内容都属本插件职责。终端沙箱无法与图形界面交互（Apple Events、窗口管理被拒，osascript、open -a 控制其他应用不可行），不要在终端里尝试。流程：先 desktop_status 确认能力，再 desktop_list_windows 定位窗口，desktop_snapshot 读取控件树，desktop_find 精确匹配控件后用 desktop_action 执行动作，动作后用 desktop_wait 确认状态。网页内容继续优先交给浏览器插件。".to_string(),
             "桌面控件以语义定位为主：优先用稳定标识（automation_id）与控件类型（role）匹配，名称仅作补充；同名控件返回多个候选时不得默认操作第一个，需进一步限定。控件引用只在本次快照内有效，动作前必须重新确认目标。".to_string(),
             "需要看屏幕内容（截图、OCR、阅读界面文字）时用 desktop_screenshot：图片会以原生视觉内容注入对话，直接阅读即可，不要试图用终端执行 screencapture（沙箱限制不可达 WindowServer）。支持应用窗口与显式 region 区域截图，小范围内容优先用窗口/region 而非全屏。".to_string(),
             "无障碍树外的控件（Canvas、Qt 自绘、游戏界面）用坐标路径：desktop_screenshot 看界面 → desktop_mouse 坐标点击/拖拽 → desktop_keyboard 输入文本或按键。键盘输入前先用 click 建立焦点；文本输入用 type（不经输入法），快捷键用 combo（修饰键在前）。".to_string(),

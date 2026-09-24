@@ -389,16 +389,17 @@ impl Backend for MacosBackend {
                     Some(pid) => Some(pid),
                     None => match &req.scope.app_name {
                         Some(name) => {
-                            let matches = find_app_pids_by_name(name);
-                            if matches.len() > 1 {
+                            let entries = find_app_entries_by_name(name);
+                            if entries.len() > 1 {
+                                // 逐进程列出候选（含 pid），Agent 可一步改为按 pid 指定。
                                 return DesktopResult::Err(DesktopError::AmbiguousMatch {
-                                    candidates: vec![format!(
-                                        "{name}（{} 个匹配进程）",
-                                        matches.len()
-                                    )],
+                                    candidates: entries
+                                        .into_iter()
+                                        .map(|(pid, app_name)| format!("{app_name}（pid={pid}）"))
+                                        .collect(),
                                 });
                             }
-                            matches.first().copied()
+                            entries.first().map(|(pid, _)| *pid)
                         }
                         None => None,
                     },
@@ -406,12 +407,13 @@ impl Backend for MacosBackend {
                 match pid {
                     Some(pid) => AxElement::for_application(pid as i32),
                     None => {
+                        let name = req.scope.app_name.as_deref().unwrap_or("未指定目标");
                         return DesktopResult::Err(DesktopError::ApplicationNotFound {
-                            query: req
-                                .scope
-                                .app_name
-                                .clone()
-                                .unwrap_or_else(|| "未指定目标".to_string()),
+                            query: format!(
+                                "{name}（未在运行应用中找到。系统 UI 进程（如 Dock/菜单栏）\
+                                 不出现在应用列表：可先用 desktop_list_windows 查看全部窗口进程，\
+                                 或用 desktop_screenshot 截屏后按视觉定位）"
+                            ),
                         });
                     }
                 }
@@ -797,8 +799,11 @@ fn parse_pid_from_id(id: &str) -> Option<i32> {
     }
 }
 
-/// 按应用名查找所有匹配的进程号（包含匹配），供调用方判断歧义。
-fn find_app_pids_by_name(name: &str) -> Vec<u32> {
+/// 按应用名查找所有匹配的（pid, 应用名）对（包含匹配，大小写不敏感）。
+///
+/// 返回应用名供歧义错误逐进程列出候选（多进程应用如浏览器/IM 常见），
+/// Agent 可一步改为按 pid 指定，不必逐个试探。
+fn find_app_entries_by_name(name: &str) -> Vec<(u32, String)> {
     let workspace = NSWorkspace::sharedWorkspace();
     let apps = workspace.runningApplications();
     let needle = name.to_lowercase();
@@ -809,7 +814,7 @@ fn find_app_pids_by_name(name: &str) -> Vec<u32> {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
             if app_name.to_lowercase().contains(&needle) {
-                Some(app.processIdentifier() as u32)
+                Some((app.processIdentifier() as u32, app_name))
             } else {
                 None
             }
