@@ -5,11 +5,12 @@
 //! 的按住状态泄漏。坐标与 AX/CGDisplay 同系（主屏左上原点，points），
 //! 无需翻转。合成事件需要辅助功能授权（与 AX 动作同一 TCC 授权）。
 //!
-//! 系统鼠标「借用并归还」：点击与拖拽走真实 HID 序列（窗口激活、
-//! 上下文菜单、拖拽会话与真人完全一致——定向 postToPid 无法唤出依赖
-//! WindowServer 状态的菜单），借用后立即把系统鼠标移回原位；滚轮无
-//! 激活依赖，经 AX 定位目标进程后定向投递、系统鼠标不动。虚拟指针
-//! 全程独立滑到目标处指示。
+//! 系统鼠标「借用并归还」：手势自带完整序列——click/drag 先把系统指针
+//! 平滑滑到目标（真实 HID 移动，仿真操作），到位停顿后才按下/抬起
+//!（窗口激活、上下文菜单、拖拽会话与真人完全一致——定向 postToPid
+//! 无法唤出依赖 WindowServer 状态的菜单），借用后立即把系统鼠标移回
+//! 原位；滚轮无激活依赖，经 AX 定位目标进程后定向投递、系统鼠标不动。
+//! 虚拟指针全程独立滑到目标处指示。
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ use super::overlay;
 
 /// down → up 间隔：足够应用完成点击归一（不触成长按）。
 const CLICK_DOWN_UP: Duration = Duration::from_millis(60);
+/// 指针滑到目标后的停顿：视觉上「到位—再按」，也与真人操作一致。
+const CLICK_SETTLE: Duration = Duration::from_millis(60);
 /// 双击两段间隔。
 const DOUBLE_CLICK_GAP: Duration = Duration::from_millis(90);
 /// drag：down 后先停顿（应用建立拖拽会话）再开始轨迹。
@@ -71,6 +74,28 @@ impl MouseIo {
     fn move_to(&self, x: f64, y: f64) -> Result<(), String> {
         self.post(CGEventType::MouseMoved, CGMouseButton::Left, x, y)
     }
+    /// 平滑滑动系统指针到目标（仿真移动）：ease-out 插值步进 post
+    /// MouseMoved，同步推进虚拟指针；到达即返回。步长/间隔与 drag
+    /// 轨迹一致（≈80px/100ms）。距离过近（<1px）时直接就位。
+    fn glide_to(&self, x: f64, y: f64) -> Result<(), String> {
+        let (cx, cy) = current_cursor_position();
+        let distance = (x - cx).hypot(y - cy);
+        if distance < 1.0 {
+            overlay::move_to(x, y);
+            return Ok(());
+        }
+        let steps = ((distance / DRAG_STEP_PX).ceil() as usize).clamp(2, 120);
+        for step in 1..=steps {
+            let progress = step as f64 / steps as f64;
+            let ease = progress * (2.0 - progress);
+            let nx = cx + (x - cx) * ease;
+            let ny = cy + (y - cy) * ease;
+            self.move_to(nx, ny)?;
+            overlay::move_to(nx, ny);
+            sleep(DRAG_STEP_INTERVAL);
+        }
+        Ok(())
+    }
     fn click_at(&self, x: f64, y: f64, button: CGMouseButton) -> Result<(), String> {
         let (down, up) = match button {
             CGMouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
@@ -80,7 +105,13 @@ impl MouseIo {
         // 菜单、菜单跟踪都正确——定向 postToPid 无法唤出依赖 WindowServer
         // 状态的菜单），借用系统鼠标后立即归还（≈100ms 闪回原位）。
         // 菜单弹出后的指针跟踪不受归还影响：菜单仅由点击关闭。
+        //
+        // 时序必须是「先移动、后点击」：指针先平滑滑到目标（同步，到达
+        // 才返回——overlay 动画是异步的，不能只靠它指示落点），停顿后再
+        // down/up；否则录屏会看到点击先于指针移动。
         let (origin_x, origin_y) = current_cursor_position();
+        self.glide_to(x, y)?;
+        sleep(CLICK_SETTLE);
         self.post(down, button, x, y)?;
         sleep(CLICK_DOWN_UP);
         self.post(up, button, x, y)?;
@@ -104,9 +135,8 @@ pub fn perform(
             Ok(format!("指针已移动到 ({x:.0}, {y:.0})"))
         }
         MouseGesture::Click | MouseGesture::RightClick | MouseGesture::DoubleClick => {
-            // down/up 事件自带目标坐标，系统鼠标不动；虚拟指针滑过去指示。
-            overlay::move_to(x, y);
-            sleep(Duration::from_millis(40));
+            // 时序在 click_at 内保证：指针先平滑滑到目标（系统指针可见移动，
+            // 虚拟指针沿途跟随），到位停顿后才 down/up 点击。
             let button = if matches!(gesture, MouseGesture::RightClick) {
                 CGMouseButton::Right
             } else {
@@ -130,9 +160,10 @@ pub fn perform(
             let (tx, ty) = to.ok_or("drag 缺少 to_x/to_y 终点")?;
             // 真实拖拽会话必须跟随系统指针：记录起点，结束后归还。
             let (origin_x, origin_y) = current_cursor_position();
-            io.move_to(x, y)?;
-            overlay::move_to(x, y);
-            sleep(Duration::from_millis(40));
+            // 手势自带完整序列：先平滑滑到起点，再 down → 停顿建立拖拽
+            // 会话 → 插值轨迹 → up → 归还系统鼠标（先移动、后动作）。
+            io.glide_to(x, y)?;
+            sleep(DRAG_SETTLE);
             // down → 停顿建立拖拽会话 → 插值轨迹 → up → 归还系统鼠标。
             io.post(CGEventType::LeftMouseDown, CGMouseButton::Left, x, y)?;
             sleep(DRAG_SETTLE);

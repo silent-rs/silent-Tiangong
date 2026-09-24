@@ -188,7 +188,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_MOUSE.to_string(),
-                description: "坐标级鼠标手势（CGEvent 合成，走真实输入管线）：移动、左/右键单击、双击、拖拽、滚轮。**点击、拖动等交互行为的首选路径**——事件经真实输入管线分发，行为与用户手动操作一致（仿真操作），也能唤出右键菜单、操作 Canvas 等无障碍树外的界面。坐标用 desktop_snapshot 的 bounds 换算；建议先开启 virtual_cursor，指针实时移动与点击动画让操作过程完全可视化。"
+                description: "坐标级鼠标手势（CGEvent 合成，走真实输入管线）：移动、左/右键单击、双击、拖拽、滚轮。**点击、拖动等交互行为的首选路径**——click/drag 手势自带完整序列：指针先平滑移动到目标坐标、到位停顿后再按下/抬起（与真人操作一致），因此**无需先调 move 再点击**；move 仅用于纯悬停指示。也能唤出右键菜单、操作 Canvas 等无障碍树外的界面。坐标用 desktop_snapshot 的 bounds 换算；建议先开启 virtual_cursor，指针实时移动与点击动画让操作过程完全可视化。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
