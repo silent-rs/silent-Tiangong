@@ -27,7 +27,8 @@ use objc2::rc::{Allocated, Retained};
 use objc2::{MainThreadMarker, class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSImage, NSImageView, NSScreen, NSStatusWindowLevel, NSWindow, NSWindowStyleMask,
+    NSEventMask, NSImage, NSImageView, NSScreen, NSStatusWindowLevel, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSData, NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize};
 
@@ -76,14 +77,14 @@ enum Command {
     SetEnabled(bool),
     /// 点击脉冲：指针移动到目标并播放一次按压回弹动画（点击反馈）。
     ClickPulse { x: f64, y: f64 },
-    /// 按键 HUD：在主屏中下部短暂显示按键符号（key/combo，不含文本输入）。
-    KeyCast(String),
+    /// 按键 HUD：在主屏中下部短暂显示键帽序列（key/combo，不含文本输入）。
+    KeyCast(Vec<String>),
 }
 
-/// 显示按键 HUD（非阻塞投递；overlay 未运行时丢弃）。
-pub fn key_cast(text: String) {
+/// 显示按键 HUD（键帽符号序列；非阻塞投递，overlay 未运行时丢弃）。
+pub fn key_cast(keys: Vec<String>) {
     if let Some(sender) = SENDER.get() {
-        let _ = sender.send(Command::KeyCast(text));
+        let _ = sender.send(Command::KeyCast(keys));
     }
 }
 
@@ -260,9 +261,9 @@ pub fn run_main_loop() {
                             dirty = true;
                         }
                     }
-                    Command::KeyCast(text) => {
+                    Command::KeyCast(keys) => {
                         if let Some(hud) = keycast.as_mut() {
-                            hud.show(&text, mtm);
+                            hud.show(&keys, mtm);
                         }
                     }
                     Command::ClickPulse { x, y } => {
@@ -434,6 +435,13 @@ fn build_window(_mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
         );
         // NSStatusWindowLevel：盖过普通应用窗口与工具栏。
         window.setLevel(NSStatusWindowLevel);
+        // 所有桌面空间可见、可覆盖全屏应用（VS Code 等全屏时仍能看到）。
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
         window.setIgnoresMouseEvents(true);
