@@ -33,7 +33,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo", "NSData", "NSDate", "NSRunLoop"] }
 # NSImageView/NSImage/NSColor/NSScreen 用于虚拟指针 overlay（RFC 0018）。
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow", "NSImageView", "NSImage", "NSColor", "NSScreen"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow", "NSImageView", "NSImage", "NSColor", "NSScreen", "NSBox", "NSTextField", "NSControl", "NSView", "NSResponder", "NSFont", "NSText"] }
 core-foundation = "0.10"
 # CGEvent 合成输入（desktop_mouse 手势，RFC 0018 §2.3）；highsierra
 # feature 提供像素级滚轮事件（CGEventCreateScrollWheelEvent2）。

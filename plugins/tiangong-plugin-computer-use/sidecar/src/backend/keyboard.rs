@@ -205,6 +205,8 @@ pub fn perform(
                 .ok_or("key 缺少键名")?;
             let keycode = plain_keycode(&name)
                 .ok_or_else(|| format!("不支持的键名: {name}（修饰键请用 combo）"))?;
+            // 按键 HUD 先于事件显示，用户看到提示与界面响应同步。
+            super::overlay::key_cast(super::keycast::key_symbol(&name));
             io.post_key(keycode, true)?;
             sleep(KEY_DOWN_UP);
             io.post_key(keycode, false)?;
@@ -237,6 +239,7 @@ pub fn perform(
             let plain_name = plains[0].clone();
             let plain = plain_keycode(&plain_name)
                 .ok_or_else(|| format!("combo 不支持的键名: {plain_name}"))?;
+            super::overlay::key_cast(super::keycast::combo_label(&names));
             // 修饰键 down（保持给定顺序）→ 普通键 down/up → 修饰键逆序 up。
             for m in &modifiers {
                 io.post_key(modifier_keycode(m).expect("已过滤为修饰键"), true)?;

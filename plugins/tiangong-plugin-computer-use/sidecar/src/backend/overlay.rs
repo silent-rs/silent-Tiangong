@@ -76,6 +76,15 @@ enum Command {
     SetEnabled(bool),
     /// 点击脉冲：指针移动到目标并播放一次按压回弹动画（点击反馈）。
     ClickPulse { x: f64, y: f64 },
+    /// 按键 HUD：在主屏中下部短暂显示按键符号（key/combo，不含文本输入）。
+    KeyCast(String),
+}
+
+/// 显示按键 HUD（非阻塞投递；overlay 未运行时丢弃）。
+pub fn key_cast(text: String) {
+    if let Some(sender) = SENDER.get() {
+        let _ = sender.send(Command::KeyCast(text));
+    }
 }
 
 /// 平滑移动指针到屏幕坐标（points，AX 全局坐标系：主屏左上原点）。
@@ -179,6 +188,11 @@ pub fn run_main_loop() {
     };
     let receiver = RECEIVER.lock().unwrap().take();
     OVERLAY_READY.store(true, Ordering::Release);
+    // 按键 HUD 与指针窗口相互独立；创建失败只影响按键显示。
+    let mut keycast = super::keycast::KeyCastHud::new(mtm);
+    if keycast.is_none() {
+        tracing::warn!("按键 HUD 窗口创建失败，按键可视化不可用");
+    }
     let mut visible_until: Option<Instant> = None;
     let mut alpha: f64 = 0.0;
     // 分身显示状态：默认隐藏；本轮首次鼠标手势时从系统鼠标位置分身
@@ -244,6 +258,11 @@ pub fn run_main_loop() {
                             // 立即进入淡出。
                             visible_until = Some(Instant::now());
                             dirty = true;
+                        }
+                    }
+                    Command::KeyCast(text) => {
+                        if let Some(hud) = keycast.as_mut() {
+                            hud.show(&text, mtm);
                         }
                     }
                     Command::ClickPulse { x, y } => {
@@ -323,6 +342,9 @@ pub fn run_main_loop() {
             last_scale = scale;
         }
         pump_events(&app);
+        if let Some(hud) = keycast.as_mut() {
+            hud.tick();
+        }
         // 缓存系统鼠标当前位置（AX 坐标），供 desktop_mouse 的 drag
         // 手势「借用并归还」读取（NSEvent 仅主线程可用）。
         let location = NSEvent::mouseLocation();

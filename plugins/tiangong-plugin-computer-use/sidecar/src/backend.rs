@@ -195,6 +195,8 @@ pub mod ax;
 /// 键盘合成输入（CGEvent，RFC 0018 §2.4，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod keyboard;
+#[cfg(target_os = "macos")]
+pub mod keycast;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
