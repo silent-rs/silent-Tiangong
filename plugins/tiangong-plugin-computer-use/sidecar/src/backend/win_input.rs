@@ -138,10 +138,16 @@ fn cursor_position() -> Option<(i32, i32)> {
         .map(|()| (point.x, point.y))
 }
 
+/// 系统鼠标闪移到目标。`SetCursorPos` 被拒绝（如受限令牌、桌面切换）时
+/// 回退为 `SendInput` 绝对移动事件，两者都失败才报错。
 fn warp(x: f64, y: f64) -> Result<(), String> {
     // SAFETY：纯设置调用。
-    unsafe { SetCursorPos(x.round() as i32, y.round() as i32) }
-        .map_err(|e| format!("移动系统鼠标失败：{e}"))
+    match unsafe { SetCursorPos(x.round() as i32, y.round() as i32) } {
+        Ok(()) => Ok(()),
+        Err(primary) => absolute_move(x, y).map_err(|fallback| {
+            format!("移动系统鼠标失败：{primary}；回退 SendInput 亦失败：{fallback}")
+        }),
+    }
 }
 
 fn restore_cursor(origin: Option<(i32, i32)>) {

@@ -220,30 +220,79 @@ pub(crate) fn foreground_pid() -> Option<u32> {
     }
 }
 
-/// 名称匹配（大小写不敏感的包含匹配，同时比较可执行文件名与窗口标题）。
-fn window_matches(window: &TopWindow, needle: &str) -> bool {
-    let needle = needle.trim().to_lowercase();
-    if needle.is_empty() {
-        return false;
-    }
-    let stem = window.exe_stem.to_lowercase();
-    stem == needle || stem.contains(&needle) || window.title.to_lowercase().contains(&needle)
+/// 系统内置应用的中文/英文显示名 → 可执行文件名。这些应用在开始菜单
+/// 中多为系统/UWP 入口（无同名 .lnk），仅靠快捷方式无法解析中文名。
+const BUILTIN_ALIASES: &[(&str, &str)] = &[
+    ("记事本", "notepad"),
+    ("画图", "mspaint"),
+    ("计算器", "calc"),
+    ("命令提示符", "cmd"),
+    ("文件资源管理器", "explorer"),
+    ("资源管理器", "explorer"),
+    ("写字板", "wordpad"),
+    ("截图工具", "snippingtool"),
+    ("任务管理器", "taskmgr"),
+    ("控制面板", "control"),
+    ("注册表编辑器", "regedit"),
+    ("paint", "mspaint"),
+    ("calculator", "calc"),
+    ("file explorer", "explorer"),
+    ("task manager", "taskmgr"),
+];
+
+/// 名称 → 可执行文件名别名（无对照时返回 None）。
+pub(crate) fn builtin_exe_alias(name: &str) -> Option<&'static str> {
+    let needle = name.trim().to_lowercase();
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == needle)
+        .map(|(_, exe)| *exe)
 }
 
-/// 定位目标应用最前的窗口：pid 优先，其次名称。
+/// 名称匹配（大小写不敏感）：可执行文件名（含内置别名）与窗口标题任一
+/// 命中即可。所有按 app_name 定位窗口的工具（open/screenshot/snapshot/
+/// list/wait）统一走此规则，保证同一名称在各工具中结果一致。
+pub(crate) fn name_matches(exe_stem: &str, title: &str, needle: &str) -> bool {
+    name_match_rank(exe_stem, title, needle).is_some()
+}
+
+/// 名称匹配优先级：0 = 可执行文件名/别名精确，1 = 可执行文件名包含，
+/// 2 = 窗口标题包含；未命中返回 None。
+pub(crate) fn name_match_rank(exe_stem: &str, title: &str, needle: &str) -> Option<u8> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    let stem = exe_stem.to_lowercase();
+    if !stem.is_empty() {
+        if stem == needle || builtin_exe_alias(&needle).is_some_and(|exe| stem == exe) {
+            return Some(0);
+        }
+        if stem.contains(&needle) {
+            return Some(1);
+        }
+    }
+    title.to_lowercase().contains(&needle).then_some(2)
+}
+
+#[cfg(test)]
+fn window_matches(window: &TopWindow, needle: &str) -> bool {
+    name_matches(&window.exe_stem, &window.title, needle)
+}
+
+/// 定位目标应用最前的窗口：pid 优先，其次名称（按匹配优先级取最佳，
+/// 同级取 Z 序最前）。
 pub(crate) fn find_app_window(pid: Option<u32>, name: Option<&str>) -> Option<TopWindow> {
     let windows = enum_top_windows();
     if let Some(pid) = pid {
         return windows.into_iter().find(|w| w.pid == pid);
     }
     let name = name?;
-    // 可执行文件名精确匹配优先于标题包含匹配。
-    let lower = name.trim().to_lowercase();
     windows
         .iter()
-        .find(|w| w.exe_stem.to_lowercase() == lower)
-        .or_else(|| windows.iter().find(|w| window_matches(w, name)))
-        .cloned()
+        .filter_map(|w| name_match_rank(&w.exe_stem, &w.title, name).map(|r| (r, w)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, w)| w.clone())
 }
 
 // ── 截图 ──────────────────────────────────────────────────────
@@ -707,12 +756,16 @@ pub(crate) async fn open_app(req: &OpenAppRequest) -> DesktopResult<OpenAppRespo
         return DesktopResult::Ok(open_response(&window, false, summary));
     }
 
-    // 未运行：开始菜单快捷方式（显示名/本地化名）→ App Paths 注册名。
+    // 未运行：开始菜单快捷方式（显示名/本地化名）→ 内置应用别名 → App
+    // Paths 注册名。
     let mut attempts = Vec::new();
     let shortcut = find_start_menu_shortcut(&name);
     let mut candidates: Vec<String> = Vec::new();
     if let Some(path) = &shortcut {
         candidates.push(path.display().to_string());
+    }
+    if let Some(exe) = builtin_exe_alias(&name) {
+        candidates.push(exe.to_string());
     }
     candidates.push(name.clone());
     for target in candidates {
@@ -779,9 +832,10 @@ mod tests {
             pick_shortcut(&list, "visual"),
             Some(PathBuf::from(r"C:\Start\Programs\Visual Studio Code.lnk"))
         );
+        // 「Code Helper」含 help 被当作帮助类快捷方式排除，回落到包含匹配。
         assert_eq!(
             pick_shortcut(&list, "code"),
-            Some(PathBuf::from(r"C:\Start\Programs\Code Helper.lnk"))
+            Some(PathBuf::from(r"C:\Start\Programs\Visual Studio Code.lnk"))
         );
         assert_eq!(pick_shortcut(&list, "不存在"), None);
     }
@@ -800,5 +854,22 @@ mod tests {
         assert!(window_matches(&window, "微信"));
         assert!(!window_matches(&window, "QQ"));
         assert!(!window_matches(&window, "  "));
+    }
+
+    #[test]
+    fn builtin_chinese_names_match_system_apps() {
+        assert_eq!(builtin_exe_alias("记事本"), Some("notepad"));
+        assert_eq!(builtin_exe_alias(" 画图 "), Some("mspaint"));
+        assert_eq!(builtin_exe_alias("不存在"), None);
+        assert!(name_matches("notepad", "*无标题 - 记事本", "notepad"));
+        assert!(name_matches("notepad", "README.md - Notepad", "记事本"));
+        assert!(name_matches("mspaint", "无标题 - 画图", "画图"));
+        assert!(!name_matches("notepad", "无标题 - 记事本", "画图"));
+        assert_eq!(name_match_rank("notepad", "x", "记事本"), Some(0));
+        assert_eq!(
+            name_match_rank("code", "记事本.txt - VS Code", "记事本"),
+            Some(2)
+        );
+        assert_eq!(name_match_rank("notepad", "x", "note"), Some(1));
     }
 }

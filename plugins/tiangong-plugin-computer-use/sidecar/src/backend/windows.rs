@@ -38,6 +38,14 @@ use tiangong_plugin_computer_use_protocol::{
 
 const DEFAULT_MAX_DEPTH: u32 = 8;
 const DEFAULT_MAX_NODES: usize = 400;
+/// 控件树读取的总时限：超出后停止遍历并返回已读部分（truncated=true）。
+const SNAPSHOT_BUDGET: Duration = Duration::from_secs(8);
+/// UIA 单次跨进程调用的连接/事务超时（毫秒）。目标进程无响应时 UIA 默认
+/// 会阻塞很久，设置后单次调用最多阻塞约此时长。
+const UIA_CALL_TIMEOUT_MS: u32 = 2_000;
+/// 快照线程整体等待上限（总时限 + 单次调用超时余量）；超过即判定超时，
+/// 后台线程自行结束，不阻塞工具返回。
+const SNAPSHOT_HARD_LIMIT: Duration = Duration::from_secs(12);
 
 /// `UIElement` 的线程安全包装。
 ///
@@ -71,20 +79,14 @@ impl From<UIElement> for SendElement {
     }
 }
 
-impl SendElement {
-    /// 取出内部 `UIElement`（用于不跨线程的局部变量）。
-    fn into_inner(self) -> UIElement {
-        self.0
-    }
-}
-
 pub struct WindowsBackend {
     snapshot_seq: AtomicU64,
     /// 快照内控件引用缓存：((snapshot, id) -> SendElement)。
     /// UIElement 内部持有 COM 对象引用，Clone 增引用计数。
     elements: RwLock<HashMap<(u64, String), SendElement>>,
-    /// `list_windows` 返回的真实窗口引用，避免后续按易变的枚举序号重新猜测目标。
-    window_elements: RwLock<HashMap<(u64, String), SendElement>>,
+    /// `list_windows` 返回的真实窗口句柄（HWND 数值），避免后续按易变的
+    /// 枚举序号重新猜测目标。
+    window_handles: RwLock<HashMap<(u64, String), isize>>,
     /// 快照节点表缓存：(snapshot -> Vec<ControlNode>)，供 find 筛选。
     snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于淘汰旧缓存。
@@ -104,7 +106,7 @@ impl WindowsBackend {
         Self {
             snapshot_seq: AtomicU64::new(1),
             elements: RwLock::new(HashMap::new()),
-            window_elements: RwLock::new(HashMap::new()),
+            window_handles: RwLock::new(HashMap::new()),
             snapshot_nodes: RwLock::new(HashMap::new()),
             recent_snapshots: Mutex::new(Vec::new()),
             recent_window_snapshots: Mutex::new(Vec::new()),
@@ -134,7 +136,7 @@ impl WindowsBackend {
         recent.push(snapshot);
         while recent.len() > 4 {
             let old = recent.remove(0);
-            self.window_elements
+            self.window_handles
                 .write()
                 .unwrap()
                 .retain(|(s, _), _| *s != old);
@@ -142,10 +144,27 @@ impl WindowsBackend {
     }
 
     /// 创建 UIA 实例。失败说明无图形会话或 UIA 服务不可用。
+    ///
+    /// 同时设置连接/事务超时（IUIAutomation2），避免目标进程无响应时单次
+    /// 跨进程调用无限阻塞；系统不支持 IUIAutomation2 时保持默认。
     fn automation() -> Result<UIAutomation, DesktopError> {
-        UIAutomation::new().map_err(|e| DesktopError::DesktopSessionUnavailable {
-            reason: format!("无法初始化 UI Automation: {e}"),
-        })
+        let automation =
+            UIAutomation::new().map_err(|e| DesktopError::DesktopSessionUnavailable {
+                reason: format!("无法初始化 UI Automation: {e}"),
+            })?;
+        {
+            use windows::Win32::UI::Accessibility::{IUIAutomation, IUIAutomation2};
+            use windows::core::Interface;
+            let raw: &IUIAutomation = automation.as_ref();
+            if let Ok(v2) = raw.cast::<IUIAutomation2>() {
+                // SAFETY：标准 COM 属性设置。
+                unsafe {
+                    let _ = v2.SetConnectionTimeout(UIA_CALL_TIMEOUT_MS);
+                    let _ = v2.SetTransactionTimeout(UIA_CALL_TIMEOUT_MS);
+                }
+            }
+        }
+        Ok(automation)
     }
 
     /// 读取 UIElement 边界并转为 Bounds（读取失败返回默认）。
@@ -160,27 +179,81 @@ impl WindowsBackend {
             })
     }
 
-    /// 列举顶层窗口元素。
-    fn top_level_windows(automation: &UIAutomation) -> Result<Vec<UIElement>, DesktopError> {
-        let root = automation
-            .get_root_element()
-            .map_err(|e| DesktopError::BackendUnavailable {
-                reason: format!("获取桌面根元素失败: {e}"),
-            })?;
-        let condition = automation
-            .create_property_condition(
-                uiautomation::types::UIProperty::ControlType,
-                uiautomation::variants::Variant::from(ControlType::Window as i32),
-                None,
-            )
-            .map_err(|e| DesktopError::BackendUnavailable {
-                reason: format!("创建窗口筛选条件失败: {e}"),
-            })?;
-        root.find_all(TreeScope::Children, &condition).map_err(|e| {
+    /// 解析快照目标窗口句柄：窗口引用（list_windows 缓存）优先，其次 pid、
+    /// app_name。定位规则与 desktop_app/desktop_screenshot 完全一致。
+    fn resolve_snapshot_window(&self, req: &SnapshotRequest) -> Result<isize, DesktopError> {
+        if let Some(window_ref) = &req.scope.window {
+            return self
+                .window_handles
+                .read()
+                .unwrap()
+                .get(&(window_ref.snapshot, window_ref.id.clone()))
+                .copied()
+                .ok_or(DesktopError::StaleElement {
+                    snapshot: window_ref.snapshot,
+                });
+        }
+        let pid = req.scope.pid.filter(|p| *p > 0);
+        let name = req
+            .scope
+            .app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        if pid.is_none() && name.is_none() {
+            return Err(DesktopError::WindowNotFound {
+                query: "snapshot 需要指定 window、pid 或 app_name".to_string(),
+            });
+        }
+        super::win_desktop::find_app_window(pid, name)
+            .map(|w| w.hwnd.0 as isize)
+            .ok_or_else(|| DesktopError::WindowNotFound {
+                query: match (pid, name) {
+                    (Some(pid), _) => format!("pid {pid}"),
+                    (None, Some(name)) => name.to_string(),
+                    (None, None) => String::new(),
+                },
+            })
+    }
+
+    /// 在独立线程中读取控件树（线程内自建 UIA 实例与 COM 单元）。
+    fn read_tree(
+        hwnd: isize,
+        snapshot: u64,
+        max_depth: u32,
+        max_nodes: usize,
+        include_invisible: bool,
+    ) -> Result<TreeReadout, DesktopError> {
+        let automation = Self::automation()?;
+        let hwnd = windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void);
+        let root = automation.element_from_handle(hwnd.into()).map_err(|e| {
             DesktopError::BackendUnavailable {
-                reason: format!("查找顶层窗口失败: {e}"),
+                reason: format!("读取窗口控件失败（窗口可能已关闭）: {e}"),
             }
-        })
+        })?;
+        let deadline = Instant::now() + SNAPSHOT_BUDGET;
+        let mut out = TreeReadout::default();
+        Self::walk(
+            &root,
+            &automation,
+            &mut WalkState {
+                snapshot,
+                max_depth,
+                max_nodes,
+                include_invisible,
+                deadline,
+            },
+            0,
+            None,
+            &mut out,
+        );
+        if out.timed_out {
+            out.warnings.push(format!(
+                "控件树读取超过 {} 秒，已返回部分结果",
+                SNAPSHOT_BUDGET.as_secs()
+            ));
+        }
+        Ok(out)
     }
 
     /// 探测控件真实支持的 pattern，返回对应的统一动作集合。
@@ -277,138 +350,66 @@ impl Backend for WindowsBackend {
         &self,
         req: &ListWindowsRequest,
     ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ListWindowsResponse> {
-        let automation = match Self::automation() {
-            Ok(a) => a,
-            Err(e) => return DesktopResult::Err(e),
-        };
-        let elements = match Self::top_level_windows(&automation) {
-            Ok(ws) => ws,
-            Err(e) => return DesktopResult::Err(e),
+        // 窗口枚举走 Win32（EnumWindows），不做跨进程 UIA 调用：速度快、
+        // 不会被无响应的目标进程阻塞，且与 open/screenshot 使用同一套窗口
+        // 过滤、名称匹配与坐标口径（DWM 可见边框）。
+        let top = match tokio::task::spawn_blocking(super::win_desktop::enum_top_windows).await {
+            Ok(top) => top,
+            Err(e) => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: format!("窗口枚举线程异常：{e}"),
+                });
+            }
         };
         let snapshot = self.next_snapshot();
         let foreground = super::win_desktop::foreground_pid();
         let mut windows = Vec::new();
-        for (idx, element) in elements.into_iter().enumerate() {
-            let name = element.get_name().unwrap_or_default();
-            let pid = element.get_process_id().unwrap_or(0);
-            let app_name = if name.is_empty() {
-                format!("进程 {pid}")
-            } else {
-                name.clone()
-            };
-            let id = format!("uia-win-{pid}-{idx}");
-            self.window_elements
+        for window in top {
+            if let Some(name) = req.app_name.as_deref()
+                && !super::win_desktop::name_matches(&window.exe_stem, &window.title, name)
+            {
+                continue;
+            }
+            if req.pid.is_some_and(|pid| pid != window.pid) {
+                continue;
+            }
+            let is_foreground = foreground == Some(window.pid);
+            if req.foreground_only && !is_foreground {
+                continue;
+            }
+            let hwnd_value = window.hwnd.0 as isize;
+            let id = format!("uia-win-{}-{hwnd_value:x}", window.pid);
+            self.window_handles
                 .write()
                 .unwrap()
-                .insert((snapshot, id.clone()), SendElement::from(element.clone()));
+                .insert((snapshot, id.clone()), hwnd_value);
             windows.push(WindowInfo {
-                app_name: app_name.clone(),
-                pid: pid as u32,
+                app_name: if window.exe_stem.is_empty() {
+                    window.title.clone()
+                } else {
+                    window.exe_stem.clone()
+                },
+                pid: window.pid,
                 element: ElementRef { id, snapshot },
-                title: name,
-                is_foreground: foreground == Some(pid as u32),
-                bounds: Self::bounds_of(&element),
-                visible: true,
+                title: window.title,
+                is_foreground,
+                bounds: window.bounds,
+                visible: !window.minimized,
                 enabled: true,
                 identifiers: StableIdentifiers {
-                    automation_id: element.get_automation_id().ok(),
+                    automation_id: None,
                     role: Some("Window".to_string()),
                 },
             });
         }
         self.remember_window_snapshot(snapshot);
-        if let Some(app_name) = req.app_name.as_deref() {
-            let needle = app_name.to_lowercase();
-            windows.retain(|w| w.app_name.to_lowercase().contains(&needle));
-        }
-        if let Some(pid) = req.pid {
-            windows.retain(|w| w.pid == pid);
-        }
-        if req.foreground_only {
-            let foreground = super::win_desktop::foreground_pid();
-            windows.retain(|w| Some(w.pid) == foreground);
-        }
         DesktopResult::Ok(tiangong_plugin_computer_use_protocol::ListWindowsResponse { windows })
     }
 
     async fn snapshot(&self, req: &SnapshotRequest) -> DesktopResult<SnapshotInfo> {
-        let automation = match Self::automation() {
-            Ok(a) => a,
+        let hwnd = match self.resolve_snapshot_window(req) {
+            Ok(h) => h,
             Err(e) => return DesktopResult::Err(e),
-        };
-        let windows = match Self::top_level_windows(&automation) {
-            Ok(ws) => ws,
-            Err(e) => return DesktopResult::Err(e),
-        };
-        // 定位根元素：窗口引用必须从 list_windows 缓存还原真实 UIElement，不能依赖
-        // 两次枚举之间可能变化的窗口顺序。其次才允许按 pid 或 app_name 重新发现。
-        let root = if let Some(window_ref) = &req.scope.window {
-            let cached = self
-                .window_elements
-                .read()
-                .unwrap()
-                .get(&(window_ref.snapshot, window_ref.id.clone()))
-                .cloned();
-            match cached {
-                Some(window) if window.get_process_id().is_ok() => window.into_inner(),
-                _ => {
-                    return DesktopResult::Err(DesktopError::StaleElement {
-                        snapshot: window_ref.snapshot,
-                    });
-                }
-            }
-        } else if let Some(pid) = req.scope.pid {
-            // 按 pid 匹配：收集候选，多于一个返回歧义。
-            let candidates: Vec<String> = windows
-                .iter()
-                .filter(|w| w.get_process_id().unwrap_or(0) == pid as i32)
-                .map(|w| w.get_name().unwrap_or_default())
-                .filter(|n| !n.is_empty())
-                .collect();
-            if candidates.len() > 1 {
-                return DesktopResult::Err(DesktopError::AmbiguousMatch { candidates });
-            }
-            match windows
-                .into_iter()
-                .find(|w| w.get_process_id().unwrap_or(0) == pid as i32)
-            {
-                Some(w) => w,
-                None => {
-                    return DesktopResult::Err(DesktopError::WindowNotFound {
-                        query: format!("pid {pid}"),
-                    });
-                }
-            }
-        } else if let Some(name) = req.scope.app_name.as_deref() {
-            // 按 app_name 匹配，收集候选，多于一个返回歧义。
-            let needle = name.to_lowercase();
-            let candidates: Vec<String> = windows
-                .iter()
-                .filter_map(|w| {
-                    let title = w.get_name().unwrap_or_default();
-                    title.to_lowercase().contains(&needle).then_some(title)
-                })
-                .collect();
-            if candidates.len() > 1 {
-                return DesktopResult::Err(DesktopError::AmbiguousMatch { candidates });
-            }
-            match windows.into_iter().find(|w| {
-                w.get_name()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&needle)
-            }) {
-                Some(w) => w,
-                None => {
-                    return DesktopResult::Err(DesktopError::WindowNotFound {
-                        query: name.to_string(),
-                    });
-                }
-            }
-        } else {
-            return DesktopResult::Err(DesktopError::WindowNotFound {
-                query: "snapshot 需要指定 window、pid 或 app_name".to_string(),
-            });
         };
         let max_depth = if req.max_depth > 0 {
             req.max_depth
@@ -421,33 +422,45 @@ impl Backend for WindowsBackend {
             DEFAULT_MAX_NODES
         };
         let snapshot = self.next_snapshot();
-        let mut nodes = Vec::new();
-        let mut truncated = false;
-        let warnings = Vec::new();
-        Self::walk(
-            &root,
-            &automation,
-            self,
-            snapshot,
-            0,
-            max_depth,
-            max_nodes,
-            req.include_invisible,
-            None,
-            &mut nodes,
-            &mut truncated,
-        );
-        // 先构建完成，再登记版本与提交节点表，避免并发残留。
+        let include_invisible = req.include_invisible;
+        // 控件树读取是一连串跨进程 UIA 调用，放到独立线程并设硬时限：
+        // 目标进程卡住时工具按时返回超时，后台线程自行收尾后退出。
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let result = Self::read_tree(hwnd, snapshot, max_depth, max_nodes, include_invisible);
+            let _ = tx.send(result);
+        });
+        let readout = match tokio::time::timeout(SNAPSHOT_HARD_LIMIT, rx).await {
+            Ok(Ok(Ok(readout))) => readout,
+            Ok(Ok(Err(e))) => return DesktopResult::Err(e),
+            Ok(Err(_)) => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: "控件树读取线程异常退出".to_string(),
+                });
+            }
+            Err(_) => {
+                return DesktopResult::Err(DesktopError::Timeout {
+                    waited_ms: SNAPSHOT_HARD_LIMIT.as_millis() as u64,
+                });
+            }
+        };
+        // 先构建完成，再登记版本与提交节点表、元素缓存，避免并发残留。
+        {
+            let mut cache = self.elements.write().unwrap();
+            for (id, element) in readout.elements {
+                cache.insert((snapshot, id), element);
+            }
+        }
         self.remember_snapshot(snapshot);
         self.snapshot_nodes
             .write()
             .unwrap()
-            .insert(snapshot, nodes.clone());
+            .insert(snapshot, readout.nodes.clone());
         DesktopResult::Ok(SnapshotInfo {
             snapshot,
-            nodes,
-            truncated,
-            warnings,
+            nodes: readout.nodes,
+            truncated: readout.truncated,
+            warnings: readout.warnings,
         })
     }
 
@@ -607,18 +620,21 @@ impl Backend for WindowsBackend {
                 let deadline = Instant::now() + Duration::from_millis(req.timeout_ms);
                 let start = Instant::now();
                 loop {
-                    let list_req = ListWindowsRequest::default();
-                    let exists = match self.list_windows(&list_req).await {
-                        DesktopResult::Ok(r) => r.windows.iter().any(|w| {
-                            target.app_name.as_deref().is_some_and(|n| {
-                                w.app_name.to_lowercase().contains(&n.to_lowercase())
-                            }) || target
-                                .title
-                                .as_deref()
-                                .is_some_and(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
-                        }),
-                        DesktopResult::Err(e) => return DesktopResult::Err(e),
-                    };
+                    // Win32 窗口枚举（非 UIA），每轮耗时毫秒级，保证按时返回。
+                    // 「可见」口径与 desktop_screenshot 一致：最小化窗口视为已消失。
+                    let target = target.clone();
+                    let exists = tokio::task::spawn_blocking(move || {
+                        super::win_desktop::enum_top_windows().iter().any(|w| {
+                            !w.minimized
+                                && (target.app_name.as_deref().is_some_and(|n| {
+                                    super::win_desktop::name_matches(&w.exe_stem, &w.title, n)
+                                }) || target.title.as_deref().is_some_and(|t| {
+                                    w.title.to_lowercase().contains(&t.to_lowercase())
+                                }))
+                        })
+                    })
+                    .await
+                    .unwrap_or(false);
                     if looking_appear == exists {
                         return DesktopResult::Ok(WaitResult {
                             satisfied: true,
@@ -626,14 +642,15 @@ impl Backend for WindowsBackend {
                             matched_element: None,
                         });
                     }
-                    if Instant::now() >= deadline {
+                    let now = Instant::now();
+                    if now >= deadline {
                         return DesktopResult::Ok(WaitResult {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
                         });
                     }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::time::sleep((deadline - now).min(Duration::from_millis(200))).await;
                 }
             }
             _ => {
@@ -805,29 +822,33 @@ impl Backend for WindowsBackend {
 }
 
 impl WindowsBackend {
-    /// 递归读取控件树（前序遍历），同时缓存 UIElement 供 action/wait 还原。
-    #[allow(clippy::too_many_arguments)]
+    /// 递归读取控件树（前序遍历），同时收集 UIElement 供 action/wait 还原。
+    /// 超过节点/深度上限或总时限时截断。
     fn walk(
         element: &UIElement,
         automation: &UIAutomation,
-        backend: &WindowsBackend,
-        snapshot: u64,
+        state: &mut WalkState,
         depth: u32,
-        max_depth: u32,
-        max_nodes: usize,
-        _include_invisible: bool,
         parent_id: Option<String>,
-        nodes: &mut Vec<ControlNode>,
-        truncated: &mut bool,
+        out: &mut TreeReadout,
     ) {
-        if nodes.len() >= max_nodes || depth > max_depth {
-            *truncated = true;
+        if out.nodes.len() >= state.max_nodes || depth > state.max_depth {
+            out.truncated = true;
+            return;
+        }
+        if Instant::now() >= state.deadline {
+            out.truncated = true;
+            out.timed_out = true;
             return;
         }
         let control_type = element.get_control_type().unwrap_or(ControlType::Custom);
+        let offscreen = element.is_offscreen().unwrap_or(false);
+        if offscreen && !state.include_invisible && depth > 0 {
+            return;
+        }
         let role = format!("{control_type:?}");
         let name = element.get_name().unwrap_or_default();
-        let automation_id = element.get_automation_id().ok();
+        let automation_id = element.get_automation_id().ok().filter(|id| !id.is_empty());
         let enabled = element.is_enabled().unwrap_or(true);
         let focused = element.has_keyboard_focus().unwrap_or(false);
         let bounds = Self::bounds_of(element);
@@ -843,18 +864,14 @@ impl WindowsBackend {
                 .and_then(|p| p.get_value().ok())
         };
 
-        let id = format!("uia-{snapshot}-{}", nodes.len());
-        let parent_index = nodes.len();
-        // 缓存 UIElement 供 action/wait 还原。
-        backend
-            .elements
-            .write()
-            .unwrap()
-            .insert((snapshot, id.clone()), SendElement::from(element.clone()));
-        nodes.push(ControlNode {
+        let id = format!("uia-{}-{}", state.snapshot, out.nodes.len());
+        let parent_index = out.nodes.len();
+        out.elements
+            .push((id.clone(), SendElement::from(element.clone())));
+        out.nodes.push(ControlNode {
             element: ElementRef {
                 id: id.clone(),
-                snapshot,
+                snapshot: state.snapshot,
             },
             role: role.clone(),
             name,
@@ -864,12 +881,15 @@ impl WindowsBackend {
             },
             value,
             sensitive,
-            visible: true,
+            visible: !offscreen,
             enabled,
             focused,
             bounds,
             actions,
-            parent: parent_id.map(|pid| ElementRef { id: pid, snapshot }),
+            parent: parent_id.map(|pid| ElementRef {
+                id: pid,
+                snapshot: state.snapshot,
+            }),
             children: Vec::new(),
         });
 
@@ -884,28 +904,38 @@ impl WindowsBackend {
         };
         let mut child_refs = Vec::with_capacity(children.len());
         for child in children {
-            let before = nodes.len();
-            Self::walk(
-                &child,
-                automation,
-                backend,
-                snapshot,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                _include_invisible,
-                Some(id.clone()),
-                nodes,
-                truncated,
-            );
-            if nodes.len() > before {
-                child_refs.push(nodes[before].element.clone());
+            let before = out.nodes.len();
+            Self::walk(&child, automation, state, depth + 1, Some(id.clone()), out);
+            if out.nodes.len() > before {
+                child_refs.push(out.nodes[before].element.clone());
+            }
+            if out.timed_out {
+                break;
             }
         }
-        if let Some(node) = nodes.get_mut(parent_index) {
+        if let Some(node) = out.nodes.get_mut(parent_index) {
             node.children = child_refs;
         }
     }
+}
+
+/// 控件树遍历参数。
+struct WalkState {
+    snapshot: u64,
+    max_depth: u32,
+    max_nodes: usize,
+    include_invisible: bool,
+    deadline: Instant,
+}
+
+/// 控件树读取产物（在读取线程内构建，完成后整体交回）。
+#[derive(Default)]
+struct TreeReadout {
+    nodes: Vec<ControlNode>,
+    elements: Vec<(String, SendElement)>,
+    truncated: bool,
+    timed_out: bool,
+    warnings: Vec<String>,
 }
 
 /// 按条件筛选节点（平台无关逻辑）。
