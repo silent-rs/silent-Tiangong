@@ -220,6 +220,15 @@ impl Session {
         self.storage_root.as_deref()
     }
 
+    /// 存储根下的统一媒体目录（`<storage_root>/media`）。
+    ///
+    /// RFC 0017 安全边界：工具声明注入的图片必须位于该目录下才会被
+    /// 采纳（沙箱内工具的写域不含此目录，媒体产物由宿主管理的免沙箱
+    /// 插件写入），配合文件头校验与大小上限阻断任意文件外发。
+    pub fn media_root(&self) -> Option<std::path::PathBuf> {
+        self.storage_root.as_ref().map(|root| root.join("media"))
+    }
+
     /// 从指定存储根加载 Session，并保留该根作为后续持久化位置。
     pub fn load_from_storage(storage_root: &Path, session_id: &str) -> Result<Self, String> {
         let mut components = Path::new(session_id).components();
@@ -645,13 +654,17 @@ impl Session {
         remove_count
     }
 
-    /// 获取最新用户消息的index
+    /// 获取最新用户消息的 index（轮次锚点）。
+    ///
+    /// 宿主注入的 role=User 消息（图片注入、压缩恢复锚点）不是用户
+    /// 意图，不得作为锚点——否则轮次的 elapsed_ms/turn_status 会写到
+    /// 前端不展示的消息上，执行总时长与轮次状态随之丢失。
     pub fn latest_user_message_index(&self) -> Option<usize> {
         self.messages
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, m)| m.role == MessageRole::User)
+            .find(|(_, m)| m.role == MessageRole::User && m.phase.is_user_input())
             .map(|(idx, _)| idx)
     }
 }
@@ -665,6 +678,31 @@ mod persistence_tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    /// 轮次锚点必须落在用户真实输入上：宿主注入的 role=User 消息
+    /// （图片注入、压缩恢复锚点）不是用户意图，不得劫持 latest 锚点。
+    #[test]
+    fn latest_user_message_index_skips_host_injected_user_messages() {
+        let mut session = Session::new("anchor");
+        session.append_message(MessageRole::User, "真实问题");
+        session.append_message(MessageRole::Assistant, "回答");
+        let mut injected = Message::new(MessageRole::User, "[injected-images]");
+        injected.phase = MessagePhase::HostInjected;
+        session.messages.push(injected);
+        assert_eq!(
+            session.latest_user_message_index(),
+            Some(0),
+            "图片注入消息不得成为轮次锚点"
+        );
+        let mut resume = Message::new(MessageRole::User, "上一轮续接状态");
+        resume.phase = MessagePhase::CompressedResume;
+        session.messages.push(resume);
+        assert_eq!(
+            session.latest_user_message_index(),
+            Some(0),
+            "压缩恢复锚点不得劫持轮次锚点"
+        );
+    }
 
     #[test]
     fn atomic_replace_file_serializes_complete_replacements() -> io::Result<()> {

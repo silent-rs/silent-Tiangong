@@ -991,7 +991,11 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
-        if self.config.sensitive_storage.any() {
+        // 免沙箱 sidecar（宿主策略直启以继承 TCC 等授权，本就持有完整
+        // 文件系统访问）无条件注入存储根：这只是路径指针而非提权；缺省
+        // 时其媒体产物（如 computer-use 截图）只能退回系统临时目录，
+        // 会话中的引用会随系统清理失效。
+        if self.config.sensitive_storage.any() || !self.config.sandbox {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
         // 注入本机 server 连接信息（scheduler 等需回调 host 的 sidecar 使用）。

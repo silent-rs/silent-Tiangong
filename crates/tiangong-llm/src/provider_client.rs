@@ -853,9 +853,24 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
                 }
             }
             ContentBlock::Image { asset, data } => {
-                let img_content = image_content_from_ready_image(asset, data.as_deref())
-                    .ok_or_else(|| anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id))?;
-                content.push(LlmMessageContent::Image(img_content));
+                match image_content_from_ready_image(asset, data.as_deref()) {
+                    Some(img_content) => content.push(LlmMessageContent::Image(img_content)),
+                    None => {
+                        if msg.phase == tiangong_types::MessagePhase::HostInjected {
+                            // 评审问题 2：宿主注入消息的图片文件缺失（被清理/
+                            // 声明失效）时降级为文字说明，不让整个请求失败——
+                            // 否则该会话之后每一轮请求都会报错。路径为工具
+                            // 可控字段，净化后拼接（复评小问题 3）。
+                            content.push(LlmMessageContent::Text(format!(
+                                "[injected-image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
+                                asset.asset_id,
+                                escape_asset_text(&asset.local_path)
+                            )));
+                        } else {
+                            return Err(anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id));
+                        }
+                    }
+                }
             }
             ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
         }
@@ -910,6 +925,24 @@ fn image_content_from_ready_image(
         general_purpose::STANDARD.encode(bytes)
     );
     Some(crate::message::ImageContent { mime_type, data })
+}
+
+/// 降级说明中资产路径的净化（复评小问题 3）：压缩控制字符与 Unicode
+/// 行/双向控制符、按字符边界截断。
+fn escape_asset_text(value: &str) -> String {
+    fn is_suspicious(c: char) -> bool {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }
+    value
+        .chars()
+        .map(|c| if is_suspicious(c) { ' ' } else { c })
+        .take(160)
+        .collect()
 }
 
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -2243,6 +2276,228 @@ mod tests {
         assert_eq!(image.data, "data:image/png;base64,CURRENT_RUNTIME_BASE64");
     }
 
+    /// 评审问题 2 回归：HostInjected 消息的图片文件缺失（被清理/声明
+    /// 失效）时，provider 映射降级为文字说明，整个请求不得失败——
+    /// 否则该会话之后每一轮请求都会报错。
+    #[test]
+    fn host_injected_image_with_missing_file_degrades_to_text() {
+        let mut msg = test_message(vec![
+            ContentBlock::model_instruction("[injected-images provenance]\n- 工具截图产出图片"),
+            ContentBlock::Image {
+                asset: test_asset(
+                    MediaKind::Image,
+                    "/nonexistent/path/deleted-by-cleanup.png",
+                    "image/png",
+                ),
+                data: None,
+            },
+        ]);
+        msg.role = MessageRole::User;
+        msg.phase = tiangong_types::MessagePhase::HostInjected;
+
+        let result = provider_message_from_session(&msg)
+            .expect("映射不得失败")
+            .expect("应生成消息");
+        assert!(
+            result.content.iter().any(|content| matches!(
+                content,
+                LlmMessageContent::Text(text) if text.contains("injected-image unavailable")
+            )),
+            "缺失图片应降级为文字说明"
+        );
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::Image(_)))
+        );
+    }
+
+    /// 抓包式判据：含 HostInjected 图片消息的请求经 OpenAI Chat
+    /// Completions 协议真实发出时，HTTP body 必须包含 image_url 形式的
+    /// 原生图片内容与 provenance 文本——排除序列化层静默丢图。
+    #[tokio::test]
+    async fn openai_request_body_carries_host_injected_image() {
+        use wiremock::{Mock, ResponseTemplate, matchers::method};
+        let server = MockServer::start().await;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("tiangong-wire-{}-{unique}.png", std::process::id()));
+        std::fs::write(&path, [5_u8, 6, 7, 8]).unwrap();
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-ok",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = SingleProviderClient::new(ModelEndpoint {
+            headers: Default::default(),
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: Value::Object(serde_json::Map::new()),
+            context_window: None,
+        });
+        let mut injected = test_message(vec![
+            ContentBlock::model_instruction(
+                "[injected-images provenance]\n- 工具 desktop_screenshot 产出图片",
+            ),
+            ContentBlock::Image {
+                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
+                data: None,
+            },
+        ]);
+        injected.role = MessageRole::User;
+        injected.phase = tiangong_types::MessagePhase::HostInjected;
+        let request = ModelRequest {
+            session_id: None,
+            user_input: String::new(),
+            context: vec![
+                Message::new(MessageRole::System, "system"),
+                Message::new(MessageRole::User, "看看屏幕"),
+                injected,
+            ],
+            reasoning_effort: ReasoningEffort::None,
+            max_output_tokens: None,
+            ..Default::default()
+        };
+        let _response = client.complete_async(&request).await.expect("请求应成功");
+
+        let bodies = server.received_requests().await.expect("应捕获到请求");
+        let body = String::from_utf8(bodies[0].body.clone()).expect("body 应为 UTF-8");
+        assert!(
+            body.contains("image_url"),
+            "HTTP body 必须包含 image_url 原生图片内容，实际 body 前 500 字：{}",
+            &body[..body.len().min(500)]
+        );
+        assert!(
+            body.contains("injected-images"),
+            "provenance 文本必须随请求发出"
+        );
+    }
+
+    /// 端到端序列判据（RFC 0017 注入消息「进入 agent 上下文」）：完整
+    /// 工具轮序列 user → assistant(tool_calls) → tool 结果 → HostInjected
+    /// 注入消息（provenance + Image）经 build_provider_messages 组装后，
+    /// 注入消息必须保留——provenance 文本与原生图片内容都在，且位于
+    /// Tool 消息之后。任何环节（映射、跳头、sanitize 配对整形）把它
+    /// 丢弃都视为回归。
+    #[test]
+    fn host_injected_message_survives_full_request_assembly() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tiangong-inject-seq-{}-{unique}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
+
+        let system_msg = Message {
+            id: "sys".to_string(),
+            role: MessageRole::System,
+            content: vec![ContentBlock::text("你是通用助手。")],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            usage: None,
+            worker_id: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            phase: MessagePhase::Normal,
+            created_at: String::new(),
+            elapsed_ms: None,
+            reasoning_elapsed_ms: None,
+            text_elapsed_ms: None,
+            duration_ms: None,
+            turn_status: None,
+        };
+        let mut anchor_user = test_message(vec![ContentBlock::text("看看屏幕")]);
+        anchor_user.role = MessageRole::User;
+
+        let mut assistant = test_message(Vec::new());
+        assistant.role = MessageRole::Assistant;
+        assistant.tool_calls = vec![tiangong_types::MessageToolCall {
+            id: "call-1".to_string(),
+            name: "desktop_screenshot".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+
+        let mut tool_result =
+            test_message(vec![ContentBlock::text("{\"path\": \"/tmp/shot.png\"}")]);
+        tool_result.role = MessageRole::Tool;
+        tool_result.tool_call_id = Some("call-1".to_string());
+        tool_result.tool_name = Some("desktop_screenshot".to_string());
+
+        let mut injected = test_message(vec![
+            ContentBlock::model_instruction(
+                "[injected-images provenance]\n- 工具 desktop_screenshot（call-1）产出图片 shot.png",
+            ),
+            ContentBlock::Image {
+                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
+                data: None,
+            },
+        ]);
+        injected.role = MessageRole::User;
+        injected.phase = tiangong_types::MessagePhase::HostInjected;
+
+        let req = ModelRequest {
+            session_id: None,
+            user_input: String::new(),
+            context: vec![system_msg, anchor_user, assistant, tool_result, injected],
+            reasoning_effort: ReasoningEffort::None,
+            max_output_tokens: None,
+            ..Default::default()
+        };
+        let (_system, messages) = build_provider_messages(&req).unwrap();
+
+        // 定位注入消息：必须是 User 角色、含 provenance 文本和图片内容。
+        let position = messages
+            .iter()
+            .position(|m| {
+                m.role == LlmMessageRole::User
+                    && m.content.iter().any(|content| {
+                        matches!(
+                            content,
+                            LlmMessageContent::Text(text) if text.contains("injected-images")
+                        )
+                    })
+            })
+            .expect("注入消息必须存在于组装后的请求");
+        assert!(
+            messages[position]
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::Image(_))),
+            "注入消息必须携带原生图片内容"
+        );
+        // 位置判据：必须在 Tool 结果消息之后（不被配对整形吞掉或前移）。
+        let tool_position = messages
+            .iter()
+            .position(|m| m.role == LlmMessageRole::Tool)
+            .expect("工具结果消息必须存在");
+        assert!(position > tool_position, "注入消息应位于工具结果之后");
+    }
+
     #[test]
     fn historical_ready_image_is_encoded_from_local_path() {
         let unique = std::time::SystemTime::now()
@@ -2279,6 +2534,52 @@ mod tests {
         let error = provider_message_from_session(&msg).unwrap_err();
         assert!(error.to_string().contains("已就绪图片无法读取"));
         assert!(error.to_string().contains("asset-ready"));
+    }
+
+    /// RFC 0017「看见而非知道」判据的回归保护：HostInjected 注入消息
+    /// （provenance + Image、data=None）映射后必须携带原生图片内容
+    /// （从 local_path 读取编码），不得退化为文本提及路径。
+    #[test]
+    fn host_injected_message_carries_native_image() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tiangong-model-only-{}-{unique}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [9_u8, 8, 7, 6]).unwrap();
+        let mut msg = test_message(vec![
+            ContentBlock::model_instruction(
+                "[injected-images provenance]\n- 工具 desktop_screenshot",
+            ),
+            ContentBlock::Image {
+                asset: test_asset(MediaKind::Image, path.to_str().unwrap(), "image/png"),
+                data: None,
+            },
+        ]);
+        msg.role = MessageRole::User;
+        msg.phase = tiangong_types::MessagePhase::HostInjected;
+
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text) if text.contains("injected-images")
+        )));
+        let image = result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                LlmMessageContent::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("注入消息必须携带原生图片内容");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, "data:image/png;base64,CQgHBg==");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

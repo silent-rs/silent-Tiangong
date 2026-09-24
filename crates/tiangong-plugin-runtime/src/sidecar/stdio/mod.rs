@@ -786,7 +786,10 @@ impl StdioSidecarConnection {
         if let Some(stop) = &sandbox_stop {
             command.env(tiangong_sandbox::WINDOWS_STOP_EVENT_ENV, stop.name());
         }
-        if self.config.sensitive_storage.any() {
+        // 与 tcp sidecar 的 spawn 同口径：免沙箱 sidecar 无条件注入存储根
+        //（路径指针而非提权），保证其媒体产物进入统一媒体目录而非系统
+        // 临时目录。
+        if self.config.sensitive_storage.any() || !self.config.sandbox {
             command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
         }
         if let Some(env) = self.exec_env.lock().ok().filter(|env| !env.is_empty())

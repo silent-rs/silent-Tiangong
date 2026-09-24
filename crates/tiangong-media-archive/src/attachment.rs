@@ -680,7 +680,10 @@ fn mime_from_reference(value: &str) -> Option<String> {
     Some(mime.to_string())
 }
 
-fn extension_for_mime(mime: &str) -> &'static str {
+/// 常见媒体类型的归档扩展名（未知类型统一 `bin`）。
+///
+/// 宿主附件归档与工具注入接管（core）共用的权威映射，避免两侧各持一份漂移。
+pub fn extension_for_mime(mime: &str) -> &'static str {
     match mime {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/png" => "png",

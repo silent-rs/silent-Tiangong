@@ -16,7 +16,8 @@ pub mod token;
 pub mod trust_mode;
 
 pub use attachment::{
-    StoredAsset, content_blocks_are_empty, content_blocks_text, stable_content_blocks,
+    INJECTED_ASSETS_FIELD, InjectedAsset, StoredAsset, ToolResultInjection,
+    content_blocks_are_empty, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
 };
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};

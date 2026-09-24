@@ -2456,3 +2456,105 @@ async fn stalling_plugin_finish_does_not_swallow_terminal() {
         .count();
     assert_eq!(done, 1, "Done 事件必须已到达事件流");
 }
+
+/// 复评小问题 4 回归：失败的工具（result.ok == false）即使 stdout 带
+/// injected_assets 声明也不得注入——错误输出（含失败前的半成品产物）
+/// 不进模型上下文。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_tool_call_does_not_inject_images() {
+    use crate::react::execute::{CompletedToolCall, ToolCallHistory, record_completed_tool_call};
+    use crate::tools::result::ToolResult;
+    use tiangong_llm::tool::ToolCall;
+
+    let storage = tempfile::tempdir().unwrap();
+    let media = storage.path().join("media");
+    std::fs::create_dir_all(&media).unwrap();
+    let image_path = media.join("shot.png");
+    std::fs::write(&image_path, [137_u8, 80, 78, 71, 1, 2, 3]).unwrap();
+    let stdout = serde_json::json!({
+        "path": image_path,
+        "injected_assets": [{
+            "local_path": image_path,
+            "mime_type": "image/png",
+            "original_name": "shot.png",
+            "size_bytes": 7,
+            "kind": "image"
+        }]
+    })
+    .to_string();
+
+    let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+    let client = SingleProviderClient::new(ModelEndpoint {
+        headers: Default::default(),
+        base_url: "http://127.0.0.1:1".to_string(),
+        api_key: "test-key".to_string(),
+        model: "test-model".to_string(),
+        protocol: ProviderProtocol::OpenAiChatCompletions,
+        timeout_ms: 1_000,
+        options: serde_json::Value::Object(serde_json::Map::new()),
+        context_window: None,
+    });
+    let mut ctx = TurnContext::builder()
+        .client(client)
+        .session(crate::session::Session::new("inject-gate").with_storage_root(storage.path()))
+        .stream_tx(stream_tx)
+        .plugins(Vec::new())
+        .context_limit(200_000)
+        .agent_config(crate::config::agent::AgentConfig::default())
+        .trust_mode(crate::permission::TrustMode::FullTrust)
+        .observer(crate::observe::Observer::new(std::env::temp_dir()))
+        .tool_overrides(Default::default())
+        .tools(Vec::new())
+        .build();
+
+    let call = ToolCall {
+        id: "call-fail".to_string(),
+        name: "desktop_screenshot".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let failed = ToolResult {
+        ok: false,
+        summary: "截图失败".to_string(),
+        stdout: stdout.clone(),
+        stderr: String::new(),
+        exit_code: 1,
+        execution: None,
+    };
+    let mut history = ToolCallHistory::default();
+    let mut pending = Vec::new();
+    let needs_recovery = record_completed_tool_call(
+        &mut ctx,
+        CompletedToolCall {
+            call: &call,
+            args_summary: "",
+            result: &failed,
+            duration_ms: 5,
+        },
+        &mut history,
+        &mut pending,
+    );
+    assert!(needs_recovery, "失败结果应要求恢复提示");
+    assert!(pending.is_empty(), "失败的工具不得注入图片");
+
+    // 同一份 stdout、成功结果：正常注入。
+    let ok_result = ToolResult {
+        ok: true,
+        summary: "截图成功".to_string(),
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+        execution: None,
+    };
+    record_completed_tool_call(
+        &mut ctx,
+        CompletedToolCall {
+            call: &call,
+            args_summary: "",
+            result: &ok_result,
+            duration_ms: 5,
+        },
+        &mut history,
+        &mut pending,
+    );
+    assert_eq!(pending.len(), 1, "成功结果应注入图片");
+}

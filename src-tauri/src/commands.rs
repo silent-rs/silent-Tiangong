@@ -1216,6 +1216,9 @@ fn validate_editable_message(
     if message.phase == tiangong_core::session::MessagePhase::CompressedResume {
         return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
     }
+    if message.phase == tiangong_core::session::MessagePhase::HostInjected {
+        return Err(anyhow::anyhow!("该消息为宿主注入消息，无法编辑"));
+    }
     if message.content != base_content {
         return Err(anyhow::anyhow!("消息已被更新，请基于最新内容重新编辑"));
     }

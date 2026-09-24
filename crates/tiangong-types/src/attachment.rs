@@ -169,3 +169,68 @@ mod tests {
         assert!(!content_blocks_are_empty(&[image_block(None)]));
     }
 }
+
+// ── 工具结果注入声明（RFC 0017 通用协议）─────────────────────────
+
+/// 声明数组在工具结果 stdout JSON 中的字段名。
+pub const INJECTED_ASSETS_FIELD: &str = "injected_assets";
+
+/// 工具结果 stdout 注入声明中的单个资产（RFC 0017 通用协议）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedAsset {
+    pub local_path: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default = "default_injected_kind")]
+    pub kind: MediaKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+fn default_injected_kind() -> MediaKind {
+    MediaKind::Image
+}
+
+impl InjectedAsset {
+    pub fn is_valid(&self) -> bool {
+        !self.local_path.trim().is_empty() && !self.mime_type.trim().is_empty()
+    }
+
+    pub fn to_stored_asset(&self, asset_id: String) -> StoredAsset {
+        StoredAsset {
+            asset_id,
+            local_path: self.local_path.clone(),
+            original_name: self.original_name.clone().unwrap_or_else(|| {
+                std::path::Path::new(&self.local_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("injected-asset")
+                    .to_string()
+            }),
+            mime_type: self.mime_type.clone(),
+            size: self.size_bytes,
+            kind: self.kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultInjection {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_assets: Vec<InjectedAsset>,
+}
+
+impl ToolResultInjection {
+    pub fn has_declaration_marker(stdout: &str) -> bool {
+        static MARKER: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(|| format!("\"{INJECTED_ASSETS_FIELD}\""));
+        stdout.contains(&*MARKER)
+    }
+
+    pub fn parse(stdout: &str) -> Option<Self> {
+        serde_json::from_str(stdout).ok()
+    }
+}

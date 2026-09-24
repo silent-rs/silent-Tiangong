@@ -63,10 +63,15 @@ pub struct DeferredToolInjection {
 ///
 /// 用于前端区分 ReAct 工具执行阶段的过程消息与总结阶段的最终回复，
 /// 实现消息分层展示。向后兼容：旧 session 缺失该字段时默认为 `Normal`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// 前向兼容：未知阶段值（更高版本写入的新变体）降级为 `Normal`，
+/// 而不是反序列化失败导致整个会话无法打开（曾发生于：开发版会话
+/// 携带 `hostinjected` 消息，正式版无该变体，会话打不开）。序列化
+/// 仍由 derive 生成小写标签；`Deserialize` 为手写实现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MessagePhase {
-    /// 默认值：旧消息或未标记阶段的消息。
+    /// 默认值：旧消息或未标记阶段的消息；也是未知阶段值的降级目标。
     #[default]
     Normal,
     /// ReAct 工具执行阶段的消息（工具调用、工具结果、过程文本）。
@@ -79,6 +84,43 @@ pub enum MessagePhase {
     /// 由 core 持久化一条承载「最近用户提问 + 已完成结果 + 进行中工具」
     /// 的 User 消息。该消息始终发送给模型，前端不展示、搜索或编辑。
     CompressedResume,
+    /// 宿主注入的媒体消息（RFC 0017）。
+    ///
+    /// 工具产物图片等宿主注入内容：以原生视觉部件发送给模型（像素直达，
+    /// 而非文本提及路径），前端把它作为助手轮次内的过程片段在 assistant
+    /// 侧展示（不进搜索、不可编辑），会话检查器可审计。它不是用户
+    /// 意图，不作轮次锚点；与 CompressedResume 一样随压缩边界降级，
+    /// 但不要求「始终发送」。
+    HostInjected,
+}
+
+impl<'de> Deserialize<'de> for MessagePhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let phase = String::deserialize(deserializer)?;
+        Ok(match phase.as_str() {
+            "react" => Self::React,
+            "summary" => Self::Summary,
+            "compressedresume" => Self::CompressedResume,
+            "hostinjected" => Self::HostInjected,
+            _ => Self::Normal,
+        })
+    }
+}
+
+impl MessagePhase {
+    /// 是否为用户真实输入。
+    ///
+    /// 宿主注入的 role=User 消息（图片注入 `HostInjected`、压缩恢复锚点
+    /// `CompressedResume`）是模型上下文的载体，不代表一次用户意图，
+    /// 不得作为轮次锚点（`elapsed_ms` / `turn_status` 的落点）。
+    /// UI 可见性与本判据正交：React/Summary 过程消息属于用户发起的
+    /// 轮次，仍视为真实输入。
+    pub fn is_user_input(&self) -> bool {
+        !matches!(self, Self::HostInjected | Self::CompressedResume)
+    }
 }
 
 /// 消息内容块

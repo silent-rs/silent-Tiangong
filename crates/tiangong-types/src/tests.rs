@@ -451,6 +451,24 @@ fn message_phase_serde() {
         serde_json::to_string(&MessagePhase::Summary).unwrap(),
         r#""summary""#
     );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::CompressedResume).unwrap(),
+        r#""compressedresume""#
+    );
+    assert_eq!(
+        serde_json::to_string(&MessagePhase::HostInjected).unwrap(),
+        r#""hostinjected""#
+    );
+    assert_eq!(
+        serde_json::from_str::<MessagePhase>(r#""hostinjected""#).unwrap(),
+        MessagePhase::HostInjected
+    );
+    // 前向兼容：未知阶段值（更高版本写入的新变体）降级为 Normal，
+    // 不得反序列化失败导致整个会话打不开。
+    assert_eq!(
+        serde_json::from_str::<MessagePhase>(r#""somefuturephase""#).unwrap(),
+        MessagePhase::Normal
+    );
 }
 
 #[test]
@@ -503,5 +521,67 @@ fn missing_created_at_is_rejected() {
         result.is_err(),
         "缺少 created_at 应失败，实际得到：{:?}",
         result.ok()
+    );
+}
+
+#[test]
+fn tool_result_injection_serde_locks_protocol_shape() {
+    // 权威 JSON 形状（RFC 0017）：工具 stdout 与业务字段共存，未知字段容忍。
+    let stdout = r#"{
+        "path": "/tmp/desktop-1.png",
+        "width": 100,
+        "injected_assets": [{
+            "local_path": "/tmp/desktop-1.png",
+            "mime_type": "image/png",
+            "original_name": "desktop-1.png",
+            "size_bytes": 2048,
+            "kind": "image",
+            "source": "desktop_screenshot"
+        }]
+    }"#;
+    assert!(ToolResultInjection::has_declaration_marker(stdout));
+    let decl = ToolResultInjection::parse(stdout).expect("合法 JSON 必须解析成功");
+    assert_eq!(decl.injected_assets.len(), 1);
+    let asset = &decl.injected_assets[0];
+    assert_eq!(asset.local_path, "/tmp/desktop-1.png");
+    assert_eq!(asset.kind, MediaKind::Image);
+    assert!(asset.is_valid());
+    let stored = asset.to_stored_asset("inject-1".to_string());
+    assert_eq!(stored.asset_id, "inject-1");
+    assert_eq!(stored.size, 2048);
+    assert_eq!(stored.kind, MediaKind::Image);
+
+    // 最小声明：除必要字段外全部缺省（kind 默认 image、名字从路径派生）。
+    let minimal =
+        r#"{"injected_assets": [{"local_path": "/tmp/shot.png", "mime_type": "image/png"}]}"#;
+    let decl = ToolResultInjection::parse(minimal).expect("最小声明必须可解析");
+    let asset = &decl.injected_assets[0];
+    assert_eq!(asset.kind, MediaKind::Image);
+    assert_eq!(asset.size_bytes, 0);
+    assert!(asset.source.is_none());
+    assert_eq!(
+        asset.to_stored_asset("a".to_string()).original_name,
+        "shot.png"
+    );
+
+    // 非图片类型保留扩展位：文件声明可反序列化，不在此层拒绝。
+    let file_decl = r#"{"injected_assets": [{"local_path": "/tmp/report.pdf", "mime_type": "application/pdf", "kind": "file"}]}"#;
+    let decl = ToolResultInjection::parse(file_decl).expect("文件声明必须可解析");
+    assert_eq!(decl.injected_assets[0].kind, MediaKind::File);
+
+    // 无声明/非 JSON：parse 的三种失败面。
+    assert!(!ToolResultInjection::has_declaration_marker(
+        "{\"path\": \"/tmp/a\"}"
+    ));
+    assert!(ToolResultInjection::parse("不是 JSON").is_none());
+    // 有标记但损坏：None（调用方据此告警）。
+    assert!(ToolResultInjection::parse("垃圾 \"injected_assets\" 内容").is_none());
+
+    // 序列化往返稳定（skip 规则：空数组不序列化）。
+    let empty = ToolResultInjection::default();
+    assert!(
+        !serde_json::to_string(&empty)
+            .unwrap()
+            .contains("injected_assets")
     );
 }

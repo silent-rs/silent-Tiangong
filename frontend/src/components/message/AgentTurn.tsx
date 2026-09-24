@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { FileText, ChevronRight, ChevronDown } from "lucide-react";
+import { FileText, ChevronRight, ChevronDown, Camera } from "lucide-react";
 import { useSearchStore } from "@/store/useSearchStore";
 import { useStore } from "@/store/useStore";
 import { findTextOccurrences } from "@/utils/search";
@@ -78,6 +78,7 @@ function AgentTurnView({
     | { type: "explanation"; text: string; time?: string }
     | { type: "thinking"; content: string; time?: string; elapsedMs?: number | null }
     | { type: "tool_group"; key: string; tools: MessageItem[] }
+    | { type: "injected_media"; msg: MessageItem }
     | { type: "user"; msg: MessageItem }
     | { type: "assistant"; msg: MessageItem; isStreaming: boolean }
     | { type: "error_system"; msg: MessageItem }
@@ -134,7 +135,12 @@ function AgentTurnView({
 
     for (const msg of messages) {
       if (msg.role === "notice" && msg.usage) continue;
-      if (msg.role === "user" && textOf(msg).startsWith("[Subagent·")) {
+      if (msg.role === "user" && msg.phase === "hostinjected") {
+        // 宿主注入媒体（RFC 0017）：归助手轮次过程片段，媒体本体在
+        // assistant 侧展示，provenance 文本不进 UI。
+        flushTools();
+        fragments.push({ type: "injected_media", msg });
+      } else if (msg.role === "user" && textOf(msg).startsWith("[Subagent·")) {
         flushTools();
         const raw = textOf(msg);
         const match = raw.match(/^\[Subagent·([^\]]+)\]\s*(.*)$/s);
@@ -332,6 +338,24 @@ function AgentTurnView({
               argsOf={argsOfToolMessage}
               runningCalls={frag.key === lastToolGroupKey && runningToolCalls.length > 0 ? runningToolCalls : undefined}
             />
+          );
+        }
+        if (frag.type === "injected_media") {
+          const msg = frag.msg;
+          const content = Array.isArray(msg.content) ? msg.content : [];
+          const hasImage = content.some(
+            (block) =>
+              (block.type === "media" && block.kind === "image") ||
+              ((block.type === "asset_reference" || block.type === "image") && block.asset.kind === "image"),
+          );
+          return (
+            <div key={msg.id} className="my-1.5 rounded-lg border border-border/70 bg-muted/20 px-3 py-2" title={formatMessageTime(msg.created_at)}>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Camera className="h-3.5 w-3.5 shrink-0" />
+                <span>{hasImage ? "截图已注入 · 模型可见" : "媒体已注入 · 模型可见"}</span>
+              </div>
+              <ContentMedia message={msg} />
+            </div>
           );
         }
         if (frag.type === "user") {
