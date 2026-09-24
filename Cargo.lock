@@ -11124,7 +11124,6 @@ version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
- "tiangong-types",
 ]
 
 [[package]]
@@ -11138,13 +11137,11 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "scru128",
  "serde",
  "serde_json",
  "tiangong-plugin-computer-use-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",
- "tiangong-types",
  "tokio",
  "tracing",
  "tracing-subscriber",
