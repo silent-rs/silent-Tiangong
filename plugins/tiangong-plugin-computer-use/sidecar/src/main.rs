@@ -1,7 +1,7 @@
 //! Computer Use 独立 sidecar 进程。
 //!
 //! 作为 Computer Use 的唯一常驻进程运行，承载当前系统的原生无障碍接口访问：
-//! - Windows：UI Automation
+//! - Windows：UI Automation（键鼠 SendInput、截图 GDI/WIC、指针/HUD 分层窗口）
 //! - macOS：AXUIElement / AXObserver
 //! - Linux：AT-SPI2
 //!
@@ -56,6 +56,15 @@ fn main() -> anyhow::Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // Windows：声明 Per-Monitor-V2 DPI 感知，使 UIA bounds、SendInput/
+        // SetCursorPos 与截图统一为物理像素坐标（未声明时高 DPI 屏会被虚拟化）。
+        #[cfg(target_os = "windows")]
+        // SAFETY：进程级一次性设置；已由清单声明时返回错误，可忽略。
+        unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            );
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;

@@ -11150,6 +11150,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uiautomation",
+ "windows 0.59.0",
 ]
 
 [[package]]

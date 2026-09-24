@@ -52,66 +52,6 @@ const KEY_GAP: f64 = 6.0;
 const COUNT_FONT: f64 = 18.0;
 const COUNT_GAP: f64 = 10.0;
 
-/// 单键显示符号。修饰键用 macOS 标准符号，特殊键用符号或短名，
-/// 字母大写，其余原样。
-pub fn key_symbol(name: &str) -> String {
-    let symbol = match name {
-        "cmd" | "rcmd" => "⌘",
-        "shift" | "rshift" => "⇧",
-        "alt" | "ralt" => "⌥",
-        "ctrl" | "rctrl" => "⌃",
-        "return" => "↩",
-        "tab" => "⇥",
-        "space" => "Space",
-        "delete" => "⌫",
-        "forward_delete" => "⌦",
-        "escape" => "Esc",
-        "left" => "←",
-        "right" => "→",
-        "up" => "↑",
-        "down" => "↓",
-        "home" => "Home",
-        "end" => "End",
-        "page_up" => "PgUp",
-        "page_down" => "PgDn",
-        "help" => "Help",
-        other => return other.to_uppercase(),
-    };
-    symbol.to_string()
-}
-
-/// 修饰键在 macOS 菜单中的标准排列顺序：⌃ ⌥ ⇧ ⌘。
-fn modifier_rank(name: &str) -> Option<u8> {
-    match name {
-        "ctrl" | "rctrl" => Some(0),
-        "alt" | "ralt" => Some(1),
-        "shift" | "rshift" => Some(2),
-        "cmd" | "rcmd" => Some(3),
-        _ => None,
-    }
-}
-
-/// 组合键 → 键帽序列：修饰键按标准顺序在前（左右同义去重），普通键在后，
-/// 如 `["cmd","shift","z"]` → `["⇧","⌘","Z"]`。
-pub fn combo_keys(names: &[String]) -> Vec<String> {
-    let mut modifiers: Vec<&String> = names
-        .iter()
-        .filter(|n| modifier_rank(n).is_some())
-        .collect();
-    modifiers.sort_by_key(|n| modifier_rank(n));
-    modifiers.dedup_by_key(|n| modifier_rank(n));
-    modifiers
-        .into_iter()
-        .map(|n| key_symbol(n))
-        .chain(
-            names
-                .iter()
-                .filter(|n| modifier_rank(n).is_none())
-                .map(|n| key_symbol(n)),
-        )
-        .collect()
-}
-
 /// 天工品牌主色（靛紫，与虚拟指针描边同色系）。
 fn brand_color() -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(0.42, 0.36, 0.95, 1.0)
@@ -359,39 +299,6 @@ fn hud_origin(visible: NSRect, width: f64) -> NSPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn names(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn key_symbol_maps_special_keys_and_uppercases_letters() {
-        assert_eq!(key_symbol("down"), "↓");
-        assert_eq!(key_symbol("page_up"), "PgUp");
-        assert_eq!(key_symbol("return"), "↩");
-        assert_eq!(key_symbol("escape"), "Esc");
-        assert_eq!(key_symbol("c"), "C");
-        assert_eq!(key_symbol("f5"), "F5");
-    }
-
-    #[test]
-    fn combo_keys_orders_modifiers_like_macos_menus() {
-        assert_eq!(combo_keys(&names(&["cmd", "c"])), names(&["⌘", "C"]));
-        // 输入顺序无关：统一按 ⌃⌥⇧⌘ 排列。
-        assert_eq!(
-            combo_keys(&names(&["cmd", "shift", "z"])),
-            names(&["⇧", "⌘", "Z"])
-        );
-        assert_eq!(
-            combo_keys(&names(&["ctrl", "alt", "cmd", "left"])),
-            names(&["⌃", "⌥", "⌘", "←"])
-        );
-        // 左右修饰键同义不重复显示。
-        assert_eq!(
-            combo_keys(&names(&["cmd", "rcmd", "v"])),
-            names(&["⌘", "V"])
-        );
-    }
 
     #[test]
     fn hud_is_centered_in_lower_part_of_visible_frame() {

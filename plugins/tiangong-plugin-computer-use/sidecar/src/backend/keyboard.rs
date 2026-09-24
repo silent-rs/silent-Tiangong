@@ -21,6 +21,8 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use tiangong_plugin_computer_use_protocol::ops::KeyboardActionKind;
 
+use super::keys::normalize_key_name;
+
 /// key 手势 down → up 间隔。
 const KEY_DOWN_UP: Duration = Duration::from_millis(50);
 /// type 手势相邻字符间隔。
@@ -55,36 +57,11 @@ impl KeyboardIo {
     }
 }
 
-/// 键名归一化：小写、去空白、常见别名折算。
-pub(crate) fn normalize_key_name(raw: &str) -> String {
-    let trimmed = raw.trim().to_lowercase();
-    match trimmed.as_str() {
-        "enter" => "return".to_string(),
-        "esc" => "escape".to_string(),
-        "backspace" => "delete".to_string(),
-        "del" => "forward_delete".to_string(),
-        "pageup" => "page_up".to_string(),
-        "pagedown" => "page_down".to_string(),
-        "command" | "super" | "win" => "cmd".to_string(),
-        "control" => "ctrl".to_string(),
-        "option" | "opt" | "meta" => "alt".to_string(),
-        "right_cmd" | "rcmd" => "rcmd".to_string(),
-        "right_ctrl" | "rctrl" => "rctrl".to_string(),
-        "right_alt" | "roption" | "ralt" => "ralt".to_string(),
-        "right_shift" | "rshift" => "rshift".to_string(),
-        "arrow_left" | "left_arrow" | "arrowleft" => "left".to_string(),
-        "arrow_right" | "right_arrow" | "arrowright" => "right".to_string(),
-        "arrow_up" | "up_arrow" | "arrowup" => "up".to_string(),
-        "arrow_down" | "down_arrow" | "arrowdown" => "down".to_string(),
-        other => other.to_string(),
-    }
-}
-
 /// 修饰键虚拟键码（HIToolbox：cmd=55 rcmd=54 shift=56 rshift=60
-/// alt=58 ralt=61 ctrl=59 rctrl=62）。
+/// alt=58 ralt=61 ctrl=59 rctrl=62）。win（Windows 徽标键）在 macOS 上等同 cmd。
 fn modifier_keycode(name: &str) -> Option<CGKeyCode> {
     Some(match name {
-        "cmd" => 55,
+        "cmd" | "win" => 55,
         "rcmd" => 54,
         "shift" => 56,
         "rshift" => 60,
@@ -206,7 +183,7 @@ pub fn perform(
             let keycode = plain_keycode(&name)
                 .ok_or_else(|| format!("不支持的键名: {name}（修饰键请用 combo）"))?;
             // 按键 HUD 先于事件显示，用户看到提示与界面响应同步。
-            super::overlay::key_cast(vec![super::keycast::key_symbol(&name)]);
+            super::overlay::key_cast(vec![super::keys::key_symbol(&name)]);
             io.post_key(keycode, true)?;
             sleep(KEY_DOWN_UP);
             io.post_key(keycode, false)?;
@@ -239,7 +216,7 @@ pub fn perform(
             let plain_name = plains[0].clone();
             let plain = plain_keycode(&plain_name)
                 .ok_or_else(|| format!("combo 不支持的键名: {plain_name}"))?;
-            super::overlay::key_cast(super::keycast::combo_keys(&names));
+            super::overlay::key_cast(super::keys::combo_keys(&names));
             // 修饰键 down（保持给定顺序）→ 普通键 down/up → 修饰键逆序 up。
             for m in &modifiers {
                 io.post_key(modifier_keycode(m).expect("已过滤为修饰键"), true)?;
@@ -262,23 +239,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_common_aliases() {
-        assert_eq!(normalize_key_name("Enter"), "return");
-        assert_eq!(normalize_key_name(" ESC "), "escape");
-        assert_eq!(normalize_key_name("Backspace"), "delete");
-        assert_eq!(normalize_key_name("Del"), "forward_delete");
-        assert_eq!(normalize_key_name("Command"), "cmd");
-        assert_eq!(normalize_key_name("Option"), "alt");
-        assert_eq!(normalize_key_name("ArrowLeft"), "left");
-        assert_eq!(normalize_key_name(" A "), "a");
-    }
-
-    #[test]
     fn known_keys_cover_letters_digits_and_specials() {
         for k in ["a", "Z", "0", "9", "return", "esc", "f5", "up"] {
             assert!(is_known_key(k), "{k} 应识别");
         }
-        for k in ["cmd", "ctrl", "shift", "alt", "rcmd"] {
+        for k in ["cmd", "ctrl", "shift", "alt", "rcmd", "win"] {
             assert!(is_known_key(k), "{k} 应识别为修饰键");
         }
         assert!(!is_known_key("hup"), "未知键应拒绝");

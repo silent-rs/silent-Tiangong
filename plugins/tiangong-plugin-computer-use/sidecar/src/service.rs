@@ -188,18 +188,24 @@ impl ComputerUseService {
     }
 }
 
-/// 虚拟指针开关（RFC 0018）：macOS 投递 overlay；其他平台尚无 overlay，
-/// 返回明确错误（wasm 侧轮次结束收起时忽略该错误）。按平台拆成两个
-/// 实现，避免在同一函数体内 `bail!` 后留下不可达代码（-D warnings）。
+/// 虚拟指针开关（RFC 0018）：macOS / Windows 投递 overlay；Linux 尚无
+/// overlay，返回明确错误（wasm 侧轮次结束收起时忽略该错误）。按平台拆成
+/// 多个实现，避免在同一函数体内 `bail!` 后留下不可达代码（-D warnings）。
 #[cfg(target_os = "macos")]
 fn apply_virtual_cursor(enabled: bool) -> anyhow::Result<()> {
     crate::backend::overlay::set_enabled(enabled);
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn apply_virtual_cursor(enabled: bool) -> anyhow::Result<()> {
+    crate::backend::win_overlay::set_enabled(enabled);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn apply_virtual_cursor(_enabled: bool) -> anyhow::Result<()> {
-    anyhow::bail!("virtual_cursor 仅 macOS 支持")
+    anyhow::bail!("virtual_cursor 仅 macOS / Windows 支持")
 }
 
 // ── backend Info → 协议 Response 的映射 ────────────────────────

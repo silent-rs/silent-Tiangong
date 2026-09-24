@@ -21,14 +21,19 @@ use uiautomation::patterns::{
 };
 use uiautomation::types::TreeScope;
 
-use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
+use super::{
+    ActionResult, Backend, FindInfo, KeyboardResult, MouseResult, SnapshotInfo, StatusInfo,
+    WaitResult,
+};
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindConditions, FindRequest, ListWindowsRequest, SnapshotRequest, WaitCondition,
+    ActionRequest, FindConditions, FindRequest, KeyboardRequest, ListWindowsRequest, MouseRequest,
+    OpenAppRequest, OpenAppResponse, ScreenshotRequest, SnapshotRequest, WaitCondition,
     WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, Bounds, ControlNode, DesktopError, DesktopResult,
-    DesktopSession, ElementRef, MatchMode, Platform, StableIdentifiers, WindowInfo,
+    DesktopSession, ElementRef, MatchMode, Platform, ScreenshotResponse, StableIdentifiers,
+    WindowInfo,
 };
 
 const DEFAULT_MAX_DEPTH: u32 = 8;
@@ -281,6 +286,7 @@ impl Backend for WindowsBackend {
             Err(e) => return DesktopResult::Err(e),
         };
         let snapshot = self.next_snapshot();
+        let foreground = super::win_desktop::foreground_pid();
         let mut windows = Vec::new();
         for (idx, element) in elements.into_iter().enumerate() {
             let name = element.get_name().unwrap_or_default();
@@ -300,7 +306,7 @@ impl Backend for WindowsBackend {
                 pid: pid as u32,
                 element: ElementRef { id, snapshot },
                 title: name,
-                is_foreground: false,
+                is_foreground: foreground == Some(pid as u32),
                 bounds: Self::bounds_of(&element),
                 visible: true,
                 enabled: true,
@@ -319,9 +325,8 @@ impl Backend for WindowsBackend {
             windows.retain(|w| w.pid == pid);
         }
         if req.foreground_only {
-            return DesktopResult::Err(DesktopError::BackendUnavailable {
-                reason: "Windows 后端暂不支持 foreground_only 筛选".to_string(),
-            });
+            let foreground = super::win_desktop::foreground_pid();
+            windows.retain(|w| Some(w.pid) == foreground);
         }
         DesktopResult::Ok(tiangong_plugin_computer_use_protocol::ListWindowsResponse { windows })
     }
@@ -540,7 +545,9 @@ impl Backend for WindowsBackend {
                 supported: supported.iter().map(|a| format!("{a:?}")).collect(),
             });
         }
-        // 按 pattern 执行动作。
+        // 按 pattern 执行动作。UIA 语义动作不移动系统鼠标，天工指针（已
+        // 显示时）跟随到控件中心，让用户看到操作落点。
+        let target_bounds = Self::bounds_of(&element);
         let result = match action_kind {
             ActionKind::Focus => element.set_focus().map_err(|e| e.to_string()),
             ActionKind::Press => element
@@ -576,11 +583,19 @@ impl Backend for WindowsBackend {
                 .and_then(|p| p.scroll_into_view().map_err(|e| e.to_string())),
         };
         match result {
-            Ok(()) => DesktopResult::Ok(ActionResult {
-                performed: true,
-                summary: format!("已执行 {action_kind:?}"),
-                new_window: None,
-            }),
+            Ok(()) => {
+                if target_bounds.width > 0.0 && target_bounds.height > 0.0 {
+                    super::win_overlay::follow_to(
+                        target_bounds.x + target_bounds.width / 2.0,
+                        target_bounds.y + target_bounds.height / 2.0,
+                    );
+                }
+                DesktopResult::Ok(ActionResult {
+                    performed: true,
+                    summary: format!("已执行 {action_kind:?}"),
+                    new_window: None,
+                })
+            }
             Err(e) => DesktopResult::Err(DesktopError::BackendUnavailable { reason: e }),
         }
     }
@@ -719,6 +734,73 @@ impl Backend for WindowsBackend {
                 }
             }
         }
+    }
+
+    async fn mouse(&self, req: &MouseRequest) -> DesktopResult<MouseResult> {
+        let to = match (req.to_x, req.to_y) {
+            (Some(tx), Some(ty)) => Some((tx, ty)),
+            (None, None) => None,
+            _ => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: "drag 的 to_x/to_y 必须同时提供".to_string(),
+                });
+            }
+        };
+        let gesture = req.gesture;
+        let (x, y) = (req.x, req.y);
+        let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
+        // 手势内含阻塞等待（指针滑行、按压间隔），放到阻塞线程池执行。
+        let outcome = tokio::task::spawn_blocking(move || {
+            super::win_input::perform_mouse(gesture, x, y, to, scroll)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        match outcome {
+            Ok(summary) => DesktopResult::Ok(MouseResult {
+                performed: true,
+                summary,
+            }),
+            Err(reason) => DesktopResult::Err(DesktopError::BackendUnavailable { reason }),
+        }
+    }
+
+    async fn keyboard(&self, req: &KeyboardRequest) -> DesktopResult<KeyboardResult> {
+        let (action, text, key, keys) = (
+            req.action,
+            req.text.clone(),
+            req.key.clone(),
+            req.keys.clone(),
+        );
+        let outcome = tokio::task::spawn_blocking(move || {
+            super::win_input::perform_keyboard(action, text, key, keys)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));
+        match outcome {
+            Ok(summary) => DesktopResult::Ok(KeyboardResult {
+                performed: true,
+                summary,
+            }),
+            Err(reason) => DesktopResult::Err(DesktopError::BackendUnavailable { reason }),
+        }
+    }
+
+    async fn screenshot(&self, req: &ScreenshotRequest) -> DesktopResult<ScreenshotResponse> {
+        if let Some(delay) = req.delay_ms.filter(|d| *d > 0) {
+            tokio::time::sleep(Duration::from_millis(u64::from(delay.min(2000)))).await;
+        }
+        let req = req.clone();
+        tokio::task::spawn_blocking(move || super::win_desktop::capture_screenshot(&req))
+            .await
+            .unwrap_or_else(|e| {
+                DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: format!("截图执行线程异常：{e}"),
+                })
+            })
+    }
+
+    async fn open_app(&self, req: &OpenAppRequest) -> DesktopResult<OpenAppResponse> {
+        super::win_desktop::open_app(req).await
     }
 }
 
