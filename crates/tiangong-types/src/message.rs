@@ -123,19 +123,6 @@ impl MessagePhase {
     }
 }
 
-impl MessagePhase {
-    /// 是否为用户真实输入。
-    ///
-    /// 宿主注入的 role=User 消息（图片注入 `ModelOnly`、压缩恢复锚点
-    /// `CompressedResume`）是模型上下文的载体，不代表一次用户意图，
-    /// 不得作为轮次锚点（`elapsed_ms` / `turn_status` 的落点）。
-    /// UI 可见性与本判据正交：React/Summary 过程消息属于用户发起的
-    /// 轮次，仍视为真实输入。
-    pub fn is_user_input(&self) -> bool {
-        !matches!(self, Self::ModelOnly | Self::CompressedResume)
-    }
-}
-
 /// 消息内容块
 ///
 /// 统一表达消息中的文本、图片、视频、音频、文件等内容。
