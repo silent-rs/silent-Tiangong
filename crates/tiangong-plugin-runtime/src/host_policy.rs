@@ -70,14 +70,17 @@ pub fn resolve(plugin_id: &str, official_signed: bool) -> HostExecutionPolicy {
     } else {
         UserCredentialReadAccess::default()
     };
-    // macOS 辅助功能授权归属于天工 App。官方 computer-use 若再套一层
-    // Seatbelt，AXIsProcessTrusted 无法继承宿主授权。仅对已通过官方发布者
-    // 签名校验的同名插件保留宿主直启；第三方、自签和本地插件不得按名称
-    // 获得例外。通信仍固定使用 stdio，生命周期仍由宿主管理。
-    #[cfg(target_os = "macos")]
+    // 官方 computer-use 在所有平台都不进 OS 沙箱，必须与用户桌面处于同一
+    // 权限级别，否则桌面控制能力整体失效：
+    // - macOS：辅助功能授权归属于天工 App，再套 Seatbelt 时 AXIsProcessTrusted
+    //   无法继承宿主授权；
+    // - Windows：AppContainer 令牌为低完整性级别，SetCursorPos 被拒绝
+    //   （0x80070005），跨进程 UI Automation 调用受 UIPI 限制而阻塞，且经它
+    //   启动的应用会继承沙箱令牌；
+    // - Linux：bubblewrap 隔离会切断 AT-SPI2 会话总线与图形会话访问。
+    // 仅对已通过官方发布者签名校验的同名插件保留宿主直启；第三方、自签和
+    // 本地插件不得按名称获得例外。通信仍固定使用 stdio，生命周期仍由宿主管理。
     let accessibility_host_child = official_signed && plugin_id == "computer-use";
-    #[cfg(not(target_os = "macos"))]
-    let accessibility_host_child = false;
     HostExecutionPolicy {
         sandbox: !accessibility_host_child,
         allow_network: true,
@@ -147,16 +150,11 @@ mod tests {
         let official = resolve("computer-use", true);
         let third_party = resolve("computer-use", false);
 
-        #[cfg(target_os = "macos")]
-        {
-            assert!(
-                !official.sandbox,
-                "macOS 官方 computer-use 应继承天工辅助功能授权"
-            );
-            assert_eq!(official.transport, SidecarTransport::Stdio);
-        }
-        #[cfg(not(target_os = "macos"))]
-        assert!(official.sandbox, "非 macOS 平台不得获得辅助功能例外");
+        assert!(
+            !official.sandbox,
+            "官方 computer-use 在所有平台都应与用户桌面同权限运行"
+        );
+        assert_eq!(official.transport, SidecarTransport::Stdio);
 
         assert!(third_party.sandbox, "非官方同名插件必须保持 OS 沙箱");
         assert_eq!(third_party.transport, SidecarTransport::Stdio);
