@@ -1,7 +1,7 @@
 //! 天工虚拟指针 overlay（Windows）：与 macOS `overlay` 同接口同语义。
 //!
-//! 指针是一个置顶、点击穿透、不激活、不进入截图（`WDA_EXCLUDEFROMCAPTURE`）
-//! 的分层窗口（`WS_EX_LAYERED | WS_EX_TRANSPARENT`），逐像素 alpha 由
+//! 指针是一个置顶、点击穿透、不激活的分层窗口（`WS_EX_LAYERED |
+//! WS_EX_TRANSPARENT`），逐像素 alpha 由
 //! `UpdateLayeredWindow` 呈现。指针图片与 macOS 共用 `virtual-cursor.png`，
 //! 经 WIC 按主屏 DPI 缩放并转为预乘 BGRA；点击脉冲预生成若干放大帧。
 //!
@@ -9,12 +9,18 @@
 //! 惰性启动专用 overlay 线程，接口经 channel 非阻塞投递命令；`glide_and_wait`
 //! 通过到达回执同步等待动画完成（先移动到位、后触发点击）。按键 HUD 由
 //! 同一线程驱动（见 `win_keycast`）。
+//!
+//! 截图排除：不使用 `WDA_EXCLUDEFROMCAPTURE`——它同样会把指针/HUD 从
+//! RustDesk、向日葵、OBS 等基于屏幕捕获的远程桌面与录屏画面中抹掉，演示
+//! 时对方看不到。改为天工自己截图时经 [`hide_for_capture`] 同步短暂隐藏，
+//! 截完立即恢复。
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP,
@@ -33,9 +39,9 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, HWND_TOPMOST, MSG, PM_REMOVE,
     PeekMessageW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
-    UpdateLayeredWindow, WDA_EXCLUDEFROMCAPTURE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOSIZE, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -60,6 +66,10 @@ const PULSE_FRAMES: usize = 6;
 const IDLE_HIDE: Duration = Duration::from_secs(120);
 /// 每隔该时长重申一次置顶（其他置顶窗口出现后仍保持在最上层）。
 const TOPMOST_REFRESH: Duration = Duration::from_millis(500);
+/// 截图隐藏的回执等待上限（overlay 线程异常时不阻塞截图）。
+const CAPTURE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+/// 截图隐藏的兜底恢复时长（恢复命令丢失时指针/HUD 不会永久消失）。
+const CAPTURE_MAX_SUSPEND: Duration = Duration::from_secs(3);
 
 const CURSOR_PNG: &[u8] = include_bytes!("../../../resources/virtual-cursor.png");
 const WINDOW_CLASS: PCWSTR = w!("TiangongComputerUseOverlay");
@@ -70,10 +80,21 @@ static ARRIVAL: Mutex<(u64, (f64, f64))> = Mutex::new((0, (0.0, 0.0)));
 static ARRIVAL_CVAR: Condvar = Condvar::new();
 
 enum Command {
-    MoveTo { x: f64, y: f64, summon: bool },
+    MoveTo {
+        x: f64,
+        y: f64,
+        summon: bool,
+    },
     SetEnabled(bool),
-    ClickPulse { x: f64, y: f64 },
+    ClickPulse {
+        x: f64,
+        y: f64,
+    },
     KeyCast(Vec<String>),
+    /// 截图前隐藏指针与 HUD；处理完毕（含 DWM 合成刷新）后经回执通知。
+    SuspendForCapture(Sender<()>),
+    /// 截图完成，恢复显示。
+    ResumeAfterCapture,
 }
 
 /// 惰性启动 overlay 线程并返回命令通道；线程启动失败时返回 None（可视化
@@ -99,6 +120,35 @@ fn post(command: Command) {
     if let Some(sender) = sender() {
         let _ = sender.send(command);
     }
+}
+
+/// 截图期间的隐藏守卫：析构时恢复指针与 HUD。
+pub struct CaptureGuard {
+    active: bool,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        if self.active
+            && let Some(sender) = SENDER.get()
+        {
+            let _ = sender.send(Command::ResumeAfterCapture);
+        }
+    }
+}
+
+/// 截图前同步隐藏天工指针与按键 HUD，返回的守卫析构时恢复。overlay 线程
+/// 未启动（本轮未显示过）时直接返回空守卫，不为截图惰性创建窗口。
+pub fn hide_for_capture() -> CaptureGuard {
+    let Some(sender) = SENDER.get() else {
+        return CaptureGuard { active: false };
+    };
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if sender.send(Command::SuspendForCapture(ack_tx)).is_err() {
+        return CaptureGuard { active: false };
+    }
+    let _ = ack_rx.recv_timeout(CAPTURE_ACK_TIMEOUT);
+    CaptureGuard { active: true }
 }
 
 /// 显示按键 HUD（键帽符号序列）。
@@ -323,8 +373,6 @@ pub(super) fn create_layered_window() -> Option<HWND> {
             None,
         )
         .ok()?;
-        // 截图不包含天工自己的指针与 HUD（Windows 10 2004+，旧系统忽略）。
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
         Some(hwnd)
     }
 }
@@ -463,6 +511,9 @@ fn run_loop(receiver: Receiver<Command>) {
     let mut current: Option<(f64, f64)> = None;
     let mut target: Option<(f64, f64)> = None;
     let mut pulse_until: Option<Instant> = None;
+    // 截图隐藏计数（并发截图可嵌套）与起始时间（兜底恢复用）。
+    let mut capture_depth: u32 = 0;
+    let mut capture_since = Instant::now();
 
     loop {
         let mut dirty = false;
@@ -512,10 +563,40 @@ fn run_loop(receiver: Receiver<Command>) {
                         hud.show(&keys);
                     }
                 }
+                Ok(Command::SuspendForCapture(ack)) => {
+                    if capture_depth == 0 {
+                        if let (Some(hwnd), true) = (window, shown) {
+                            hide(hwnd);
+                        }
+                        if let Some(hud) = keycast.as_mut() {
+                            hud.set_suspended(true);
+                        }
+                        // 等 DWM 合成出不含指针/HUD 的一帧，再让截图继续。
+                        // SAFETY：无参数的同步调用。
+                        let _ = unsafe { DwmFlush() };
+                    }
+                    capture_depth += 1;
+                    capture_since = Instant::now();
+                    let _ = ack.send(());
+                }
+                Ok(Command::ResumeAfterCapture) => {
+                    if capture_depth > 0 {
+                        capture_depth -= 1;
+                        if capture_depth == 0 {
+                            resume_after_capture(window, shown, keycast.as_mut());
+                            last_topmost = Instant::now();
+                        }
+                    }
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 // 服务退出（发送端全部释放）：结束线程。
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
+        }
+        if capture_depth > 0 && capture_since.elapsed() >= CAPTURE_MAX_SUSPEND {
+            capture_depth = 0;
+            resume_after_capture(window, shown, keycast.as_mut());
+            last_topmost = Instant::now();
         }
         if enabled && target.is_none() && last_activity.elapsed() >= IDLE_HIDE {
             enabled = false;
@@ -580,9 +661,11 @@ fn run_loop(receiver: Receiver<Command>) {
                     let (x, y) = window_origin(cx, cy, dpi_scale, pulse);
                     frame.present(hwnd, x, y, alpha);
                     if !shown {
-                        show_topmost(hwnd);
                         shown = true;
-                        last_topmost = Instant::now();
+                        if capture_depth == 0 {
+                            show_topmost(hwnd);
+                            last_topmost = Instant::now();
+                        }
                     }
                 }
                 _ => {
@@ -595,6 +678,7 @@ fn run_loop(receiver: Receiver<Command>) {
         }
         if let Some(hwnd) = window
             && shown
+            && capture_depth == 0
             && last_topmost.elapsed() >= TOPMOST_REFRESH
         {
             show_topmost(hwnd);
@@ -605,6 +689,20 @@ fn run_loop(receiver: Receiver<Command>) {
         }
         pump_messages();
         std::thread::sleep(PUMP_INTERVAL);
+    }
+}
+
+/// 截图结束：恢复逻辑上应显示的指针与 HUD。
+fn resume_after_capture(
+    window: Option<HWND>,
+    shown: bool,
+    keycast: Option<&mut super::win_keycast::KeyCastHud>,
+) {
+    if let (Some(hwnd), true) = (window, shown) {
+        show_topmost(hwnd);
+    }
+    if let Some(hud) = keycast {
+        hud.set_suspended(false);
     }
 }
 

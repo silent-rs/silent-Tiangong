@@ -4,7 +4,8 @@
 //! 后淡出；`type` 文本输入不显示。面板与键帽的圆角填充由本模块逐像素
 //! 抗锯齿绘制（预乘 BGRA），文字用 GDI 灰度抗锯齿渲染到蒙版后按覆盖率
 //! 合成，最终经 `UpdateLayeredWindow` 以逐像素 alpha 呈现在置顶、点击穿透、
-//! 不激活、不进入截图的分层窗口上。由 overlay 线程创建与驱动。
+//! 不激活的分层窗口上（天工截图时由 overlay 线程短暂隐藏，远程桌面与录屏
+//! 可见）。由 overlay 线程创建与驱动。
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::COLORREF;
@@ -412,6 +413,8 @@ pub struct KeyCastHud {
     repeat: u32,
     hide_at: Option<Instant>,
     alpha: f64,
+    /// 天工截图期间暂时隐藏（内容与淡出计时照常推进）。
+    suspended: bool,
 }
 
 impl KeyCastHud {
@@ -428,6 +431,7 @@ impl KeyCastHud {
             repeat: 0,
             hide_at: None,
             alpha: 0.0,
+            suspended: false,
         })
     }
 
@@ -452,9 +456,24 @@ impl KeyCastHud {
         self.origin = hud_origin(primary_work_area(), layout.width, layout.height);
         surface.present(self.hwnd, self.origin.0, self.origin.1, 1.0);
         self.surface = Some(surface);
-        show_topmost(self.hwnd);
+        if !self.suspended {
+            show_topmost(self.hwnd);
+        }
         self.alpha = 1.0;
         self.hide_at = Some(Instant::now() + HOLD);
+    }
+
+    /// 截图期间隐藏 / 截图后恢复（仅在 HUD 正处于显示周期时恢复）。
+    pub fn set_suspended(&mut self, suspended: bool) {
+        self.suspended = suspended;
+        if self.hide_at.is_none() {
+            return;
+        }
+        if suspended {
+            hide(self.hwnd);
+        } else {
+            show_topmost(self.hwnd);
+        }
     }
 
     /// 每帧推进：超过显示时长后逐帧淡出，完全透明后隐藏。

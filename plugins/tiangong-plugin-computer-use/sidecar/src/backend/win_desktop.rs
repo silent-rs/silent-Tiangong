@@ -5,7 +5,8 @@
 //! 1 屏幕像素，超过长边上限时按 1/2、1/4… 缩小，`scale` 给出倍率。
 //!
 //! 截图：GDI `BitBlt(SRCCOPY | CAPTUREBLT)` 从屏幕 DC 取所见即所得画面
-//! （包含遮挡物，与真人看到的一致；天工指针/HUD 已排除在截图之外），
+//! （包含遮挡物，与真人看到的一致；天工指针/HUD 在截取瞬间短暂隐藏，
+//! 不进入截图，但对远程桌面与录屏保持可见），
 //! WIC 高质量缩放后编码 JPEG。
 //!
 //! 唤起：已运行的应用（按进程名/窗口标题匹配）恢复最小化并置前；未运行时
@@ -501,7 +502,10 @@ fn capture_screenshot_inner(req: &ScreenshotRequest) -> Result<ScreenshotRespons
     if width == 0 || height == 0 {
         return Err(backend_error("截取区域为空"));
     }
-    let pixels = grab_screen(rect.x as i32, rect.y as i32, width as i32, height as i32)?;
+    let pixels = {
+        let _hidden = super::win_overlay::hide_for_capture();
+        grab_screen(rect.x as i32, rect.y as i32, width as i32, height as i32)?
+    };
     let max_dimension = req
         .max_dimension
         .filter(|m| *m > 0)
