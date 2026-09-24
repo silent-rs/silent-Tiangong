@@ -623,33 +623,34 @@ impl Backend for WindowsBackend {
                     // Win32 窗口枚举（非 UIA），每轮耗时毫秒级，保证按时返回。
                     // 「可见」口径与 desktop_screenshot 一致：最小化窗口视为已消失。
                     let target = target.clone();
-                    let exists = tokio::task::spawn_blocking(move || {
-                        super::win_desktop::enum_top_windows().iter().any(|w| {
-                            !w.minimized
-                                && (target.app_name.as_deref().is_some_and(|n| {
+                    let (total, visible) = tokio::task::spawn_blocking(move || {
+                        let matched: Vec<bool> = super::win_desktop::enum_top_windows()
+                            .iter()
+                            .filter(|w| {
+                                target.app_name.as_deref().is_some_and(|n| {
                                     super::win_desktop::name_matches(&w.exe_stem, &w.title, n)
                                 }) || target.title.as_deref().is_some_and(|t| {
                                     w.title.to_lowercase().contains(&t.to_lowercase())
-                                }))
-                        })
+                                })
+                            })
+                            .map(|w| !w.minimized)
+                            .collect();
+                        let visible = matched.iter().filter(|v| **v).count();
+                        (matched.len(), visible)
                     })
                     .await
-                    .unwrap_or(false);
-                    if looking_appear == exists {
+                    .unwrap_or((0, 0));
+                    let exists = visible > 0;
+                    let finished = looking_appear == exists || Instant::now() >= deadline;
+                    if finished {
                         return DesktopResult::Ok(WaitResult {
-                            satisfied: true,
+                            satisfied: looking_appear == exists,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: Some(window_wait_detail(total, visible)),
                         });
                     }
                     let now = Instant::now();
-                    if now >= deadline {
-                        return DesktopResult::Ok(WaitResult {
-                            satisfied: false,
-                            waited_ms: start.elapsed().as_millis() as u64,
-                            matched_element: None,
-                        });
-                    }
                     tokio::time::sleep((deadline - now).min(Duration::from_millis(200))).await;
                 }
             }
@@ -738,6 +739,7 @@ impl Backend for WindowsBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: Some(element.clone()),
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -745,6 +747,7 @@ impl Backend for WindowsBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1000,4 +1003,31 @@ fn filter_nodes(nodes: &[ControlNode], conditions: &FindConditions) -> Vec<Contr
         })
         .cloned()
         .collect()
+}
+
+/// 窗口出现/消失等待的判定依据（匹配窗口总数与其中未最小化的数量）。
+fn window_wait_detail(total: usize, visible: usize) -> String {
+    match (total, visible) {
+        (0, _) => "没有匹配的窗口".to_string(),
+        (t, 0) => format!("匹配到 {t} 个窗口，均已最小化"),
+        (t, v) if t == v => format!("匹配到 {t} 个窗口，均可见"),
+        (t, v) => format!("匹配到 {t} 个窗口，其中 {v} 个可见、{} 个已最小化", t - v),
+    }
+}
+
+#[cfg(test)]
+mod wait_detail_tests {
+    #[test]
+    fn window_wait_detail_describes_visibility() {
+        assert_eq!(super::window_wait_detail(0, 0), "没有匹配的窗口");
+        assert_eq!(
+            super::window_wait_detail(1, 0),
+            "匹配到 1 个窗口，均已最小化"
+        );
+        assert_eq!(super::window_wait_detail(2, 2), "匹配到 2 个窗口，均可见");
+        assert_eq!(
+            super::window_wait_detail(3, 1),
+            "匹配到 3 个窗口，其中 1 个可见、2 个已最小化"
+        );
+    }
 }

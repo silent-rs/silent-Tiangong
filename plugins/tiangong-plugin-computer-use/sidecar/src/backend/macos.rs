@@ -637,6 +637,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     if !looking_appear && !exists {
@@ -644,6 +645,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -651,6 +653,7 @@ impl Backend for MacosBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -713,6 +716,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: Some(element.clone()),
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -720,6 +724,7 @@ impl Backend for MacosBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;

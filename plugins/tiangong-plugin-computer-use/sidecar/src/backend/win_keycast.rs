@@ -1,7 +1,9 @@
 //! 按键可视化 HUD（Windows）：与 macOS `keycast` 同样式同时序。
 //!
-//! 主屏工作区中下部短暂显示 [「天工」靛紫胶囊徽标 | 键帽… | ×N]，约 1.2 秒
-//! 后淡出；`type` 文本输入不显示。面板与键帽的圆角填充由本模块逐像素
+//! 主屏工作区中下部显示 [「天工」靛紫胶囊徽标 | 键帽… | ×N] 卡片；`type`
+//! 文本输入不显示。连续按键时每一步各占一张卡片：新卡片出现在底部槽位，
+//! 已有卡片平滑向上挤，每张卡片按自己的出现时间独立计时淡出（同一组键
+//! 连按合并为 ×N 计数），避免单个 HUD 反复重绘造成的快速闪烁。面板与键帽的圆角填充由本模块逐像素
 //! 抗锯齿绘制（预乘 BGRA），文字用 GDI 灰度抗锯齿渲染到蒙版后按覆盖率
 //! 合成，最终经 `UpdateLayeredWindow` 以逐像素 alpha 呈现在置顶、点击穿透、
 //! 不激活的分层窗口上（天工截图时由 overlay 线程短暂隐藏，远程桌面与录屏
@@ -21,10 +23,22 @@ use windows::core::w;
 
 use super::win_overlay::{Surface, create_layered_window, hide, show_topmost};
 
-/// 完全显示时长，之后开始淡出。
+/// 每张卡片完全显示时长（自出现起计），之后开始淡出。
 const HOLD: Duration = Duration::from_millis(1200);
 /// 每帧（≈16ms）淡出步长。
 const FADE_STEP: f64 = 0.08;
+/// 每帧淡入步长（新卡片约 4 帧完全显现）。
+const FADE_IN_STEP: f64 = 0.25;
+/// 超出栈容量被挤出的卡片加速淡出步长。
+const EVICT_FADE_STEP: f64 = 0.2;
+/// 同时显示的卡片上限；超出时最早的卡片加速淡出。
+const MAX_CARDS: usize = 5;
+/// 卡片之间的竖直间距（96 DPI 像素）。
+const STACK_GAP: f64 = 10.0;
+/// 上挤动画：每帧向目标位置指数趋近的比例。
+const SLIDE_EASE: f64 = 0.3;
+/// 新卡片从槽位下方该距离（96 DPI 像素）滑入。
+const ENTER_OFFSET: f64 = 16.0;
 /// HUD 底边距工作区底边的比例（中下部）。
 const BOTTOM_RATIO: f64 = 0.18;
 
@@ -402,95 +416,281 @@ fn render(layout: &Layout, fonts: &Fonts, scale: f64) -> Option<Surface> {
     Some(surface)
 }
 
-/// 按键 HUD 窗口。
-pub struct KeyCastHud {
+// ── 卡片栈（纯逻辑，便于单测）─────────────────────────────────
+
+/// 卡片生命周期阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// 淡入/保持中，到期前不透明。
+    Visible,
+    /// 正常到期淡出。
+    Fading,
+    /// 被挤出栈，加速淡出。
+    Evicted,
+}
+
+/// 栈中一张卡片的状态（不含窗口资源）。
+#[derive(Debug, Clone, PartialEq)]
+struct Card {
+    id: u64,
+    keys: Vec<String>,
+    repeat: u32,
+    height: f64,
+    /// 到期时间：出现（或合并连按）时刻 + HOLD。
+    hold_until: Instant,
+    alpha: f64,
+    /// 当前竖直偏移（相对底部槽位顶边，向上为负）。
+    offset: f64,
+    phase: Phase,
+}
+
+/// `push` 的结果：新建卡片或合并到最新卡片（需要重绘 ×N）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pushed {
+    New(u64),
+    Merged(u64),
+}
+
+/// 卡片栈：`cards` 按出现先后排列（末尾最新，位于底部槽位）。
+#[derive(Debug, Default)]
+struct Stack {
+    cards: Vec<Card>,
+    next_id: u64,
+    gap: f64,
+    enter_offset: f64,
+}
+
+impl Stack {
+    fn new(scale: f64) -> Self {
+        Self {
+            cards: Vec::new(),
+            next_id: 0,
+            gap: STACK_GAP * scale,
+            enter_offset: ENTER_OFFSET * scale,
+        }
+    }
+
+    /// 压入一组按键。与最新卡片相同且其尚未开始淡出时合并计数并重置其计时；
+    /// 否则新建卡片置于底部，超出容量的最早卡片转为加速淡出。
+    fn push(&mut self, keys: &[String], height: f64, now: Instant) -> Pushed {
+        if let Some(last) = self.cards.last_mut()
+            && last.phase == Phase::Visible
+            && last.keys == keys
+        {
+            last.repeat += 1;
+            last.hold_until = now + HOLD;
+            last.alpha = 1.0;
+            return Pushed::Merged(last.id);
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.cards.push(Card {
+            id,
+            keys: keys.to_vec(),
+            repeat: 1,
+            height,
+            hold_until: now + HOLD,
+            alpha: 0.0,
+            offset: self.enter_offset,
+            phase: Phase::Visible,
+        });
+        let alive = self
+            .cards
+            .iter()
+            .filter(|c| c.phase != Phase::Evicted)
+            .count();
+        if alive > MAX_CARDS {
+            let overflow = alive - MAX_CARDS;
+            for card in self
+                .cards
+                .iter_mut()
+                .filter(|c| c.phase != Phase::Evicted)
+                .take(overflow)
+            {
+                card.phase = Phase::Evicted;
+            }
+        }
+        Pushed::New(id)
+    }
+
+    /// 各卡片的目标偏移：最新卡片为 0，越早的卡片越靠上（负值）。
+    fn targets(&self) -> Vec<f64> {
+        let mut targets = vec![0.0; self.cards.len()];
+        let mut y = 0.0;
+        for (i, card) in self.cards.iter().enumerate().rev() {
+            if i + 1 < self.cards.len() {
+                y -= card.height + self.gap;
+            }
+            targets[i] = y;
+        }
+        targets
+    }
+
+    /// 推进一帧：淡入、到期淡出、上挤滑动；返回本帧被移除的卡片 id。
+    fn advance(&mut self, now: Instant) -> Vec<u64> {
+        let targets = self.targets();
+        for (card, target) in self.cards.iter_mut().zip(targets) {
+            match card.phase {
+                Phase::Visible if now >= card.hold_until => card.phase = Phase::Fading,
+                _ => {}
+            }
+            card.alpha = match card.phase {
+                Phase::Visible => (card.alpha + FADE_IN_STEP).min(1.0),
+                Phase::Fading => (card.alpha - FADE_STEP).max(0.0),
+                Phase::Evicted => (card.alpha - EVICT_FADE_STEP).max(0.0),
+            };
+            let next = card.offset + (target - card.offset) * SLIDE_EASE;
+            card.offset = if (next - target).abs() < 0.5 {
+                target
+            } else {
+                next
+            };
+        }
+        let mut removed = Vec::new();
+        self.cards.retain(|card| {
+            let done = card.phase != Phase::Visible && card.alpha <= 0.0;
+            if done {
+                removed.push(card.id);
+            }
+            !done
+        });
+        removed
+    }
+}
+
+// ── 窗口层 ────────────────────────────────────────────────────
+
+/// 一张卡片的窗口资源。
+struct CardWindow {
+    id: u64,
     hwnd: HWND,
+    surface: Surface,
+    width: f64,
+    shown: bool,
+}
+
+/// 按键 HUD：卡片栈 + 每张卡片一个分层窗口（窗口可复用）。
+pub struct KeyCastHud {
     fonts: Fonts,
     scale: f64,
-    surface: Option<Surface>,
-    origin: (i32, i32),
-    last: Vec<String>,
-    repeat: u32,
-    hide_at: Option<Instant>,
-    alpha: f64,
+    stack: Stack,
+    windows: Vec<CardWindow>,
+    /// 空闲窗口池（卡片移除后回收）。
+    pool: Vec<HWND>,
     /// 天工截图期间暂时隐藏（内容与淡出计时照常推进）。
     suspended: bool,
 }
 
 impl KeyCastHud {
-    /// 创建隐藏的 HUD 窗口（在 overlay 线程调用）。
+    /// 创建 HUD（在 overlay 线程调用）。预先建一个窗口，确认分层窗口可用。
     pub fn new(scale: f64) -> Option<Self> {
-        let hwnd = create_layered_window()?;
+        let first = create_layered_window()?;
         Some(Self {
-            hwnd,
             fonts: Fonts::new(scale),
             scale,
-            surface: None,
-            origin: (0, 0),
-            last: Vec::new(),
-            repeat: 0,
-            hide_at: None,
-            alpha: 0.0,
+            stack: Stack::new(scale),
+            windows: Vec::new(),
+            pool: vec![first],
             suspended: false,
         })
     }
 
-    /// 显示一组键帽：重建内容并居中于主屏工作区中下部，重置淡出计时。
+    fn render_card(&self, keys: &[String], repeat: u32) -> Option<(Surface, f64, f64)> {
+        let fonts = &self.fonts;
+        let layout = layout(keys, repeat, self.scale, &mut |text, kind| {
+            measure_text(fonts.get(kind), text)
+        });
+        let surface = render(&layout, &self.fonts, self.scale)?;
+        Some((surface, layout.width, layout.height))
+    }
+
+    /// 显示一组键帽：新卡片进入底部槽位，已有卡片向上挤。
     pub fn show(&mut self, keys: &[String]) {
         if keys.is_empty() {
             return;
         }
-        if self.hide_at.is_some() && keys == self.last.as_slice() {
-            self.repeat += 1;
-        } else {
-            self.repeat = 1;
-            self.last = keys.to_vec();
+        let height = (PANEL_HEIGHT * self.scale).round();
+        match self.stack.push(keys, height, Instant::now()) {
+            Pushed::Merged(id) => {
+                let Some(card) = self.stack.cards.iter().find(|c| c.id == id) else {
+                    return;
+                };
+                let (keys, repeat) = (card.keys.clone(), card.repeat);
+                if let Some((surface, width, _)) = self.render_card(&keys, repeat)
+                    && let Some(window) = self.windows.iter_mut().find(|w| w.id == id)
+                {
+                    window.surface = surface;
+                    window.width = width;
+                }
+            }
+            Pushed::New(id) => {
+                let Some((surface, width, _)) = self.render_card(keys, 1) else {
+                    self.stack.cards.retain(|c| c.id != id);
+                    return;
+                };
+                let Some(hwnd) = self.pool.pop().or_else(create_layered_window) else {
+                    self.stack.cards.retain(|c| c.id != id);
+                    return;
+                };
+                self.windows.push(CardWindow {
+                    id,
+                    hwnd,
+                    surface,
+                    width,
+                    shown: false,
+                });
+            }
         }
-        let fonts = &self.fonts;
-        let layout = layout(keys, self.repeat, self.scale, &mut |text, kind| {
-            measure_text(fonts.get(kind), text)
-        });
-        let Some(surface) = render(&layout, &self.fonts, self.scale) else {
-            return;
-        };
-        self.origin = hud_origin(primary_work_area(), layout.width, layout.height);
-        surface.present(self.hwnd, self.origin.0, self.origin.1, 1.0);
-        self.surface = Some(surface);
-        if !self.suspended {
-            show_topmost(self.hwnd);
-        }
-        self.alpha = 1.0;
-        self.hide_at = Some(Instant::now() + HOLD);
+        self.present_all();
     }
 
-    /// 截图期间隐藏 / 截图后恢复（仅在 HUD 正处于显示周期时恢复）。
+    /// 截图期间隐藏 / 截图后恢复。
     pub fn set_suspended(&mut self, suspended: bool) {
         self.suspended = suspended;
-        if self.hide_at.is_none() {
-            return;
-        }
-        if suspended {
-            hide(self.hwnd);
-        } else {
-            show_topmost(self.hwnd);
+        for window in &self.windows {
+            if !window.shown {
+                continue;
+            }
+            if suspended {
+                hide(window.hwnd);
+            } else {
+                show_topmost(window.hwnd);
+            }
         }
     }
 
-    /// 每帧推进：超过显示时长后逐帧淡出，完全透明后隐藏。
+    /// 每帧推进：各卡片独立淡入/淡出，上挤滑动，淡出完毕的窗口回收。
     pub fn tick(&mut self) {
-        let Some(deadline) = self.hide_at else {
-            return;
-        };
-        if Instant::now() < deadline {
+        if self.stack.cards.is_empty() {
             return;
         }
-        self.alpha = (self.alpha - FADE_STEP).max(0.0);
-        if let Some(surface) = &self.surface {
-            surface.present(self.hwnd, self.origin.0, self.origin.1, self.alpha);
+        for id in self.stack.advance(Instant::now()) {
+            if let Some(index) = self.windows.iter().position(|w| w.id == id) {
+                let window = self.windows.remove(index);
+                hide(window.hwnd);
+                self.pool.push(window.hwnd);
+            }
         }
-        if self.alpha == 0.0 {
-            self.hide_at = None;
-            hide(self.hwnd);
+        self.present_all();
+    }
+
+    /// 按卡片当前位置与透明度呈现全部窗口。
+    fn present_all(&mut self) {
+        let work = primary_work_area();
+        let slot_height = (PANEL_HEIGHT * self.scale).round();
+        for card in &self.stack.cards {
+            let Some(window) = self.windows.iter_mut().find(|w| w.id == card.id) else {
+                continue;
+            };
+            let (x, y) = hud_origin(work, window.width, slot_height);
+            let y = y + card.offset.round() as i32;
+            window.surface.present(window.hwnd, x, y, card.alpha);
+            if !window.shown {
+                window.shown = true;
+                if !self.suspended {
+                    show_topmost(window.hwnd);
+                }
+            }
         }
     }
 }
@@ -506,6 +706,103 @@ mod tests {
     /// 每字符 10 像素的假测量。
     fn fake_measure(text: &str, _kind: FontKind) -> f64 {
         text.chars().count() as f64 * 10.0
+    }
+
+    fn keys(list: &[&str]) -> Vec<String> {
+        names(list)
+    }
+
+    #[test]
+    fn stack_pushes_new_cards_to_bottom_and_older_upwards() {
+        let now = Instant::now();
+        let mut stack = Stack::new(1.0);
+        stack.push(&keys(&["Ctrl", "A"]), 64.0, now);
+        stack.push(&keys(&["Ctrl", "C"]), 64.0, now);
+        stack.push(&keys(&["End"]), 64.0, now);
+        assert_eq!(stack.targets(), vec![-148.0, -74.0, 0.0]);
+    }
+
+    #[test]
+    fn stack_merges_repeated_keys_into_newest_card() {
+        let now = Instant::now();
+        let mut stack = Stack::new(1.0);
+        assert_eq!(stack.push(&keys(&["Enter"]), 64.0, now), Pushed::New(0));
+        assert_eq!(
+            stack.push(&keys(&["Enter"]), 64.0, now + Duration::from_millis(300)),
+            Pushed::Merged(0)
+        );
+        assert_eq!(stack.cards.len(), 1);
+        assert_eq!(stack.cards[0].repeat, 2);
+        assert_eq!(
+            stack.cards[0].hold_until,
+            now + Duration::from_millis(300) + HOLD
+        );
+        // 不同键 → 新卡片；再按 Enter 不会合并到旧卡片。
+        assert_eq!(stack.push(&keys(&["Tab"]), 64.0, now), Pushed::New(1));
+        assert_eq!(stack.push(&keys(&["Enter"]), 64.0, now), Pushed::New(2));
+    }
+
+    #[test]
+    fn cards_expire_independently_by_their_own_appear_time() {
+        let t0 = Instant::now();
+        let mut stack = Stack::new(1.0);
+        stack.push(&keys(&["A"]), 64.0, t0);
+        stack.push(&keys(&["B"]), 64.0, t0 + Duration::from_millis(500));
+        // 先推进若干帧让两张卡片淡入完毕。
+        for _ in 0..5 {
+            stack.advance(t0 + Duration::from_millis(600));
+        }
+        // 第一张到期，第二张仍在保持期。
+        let t1 = t0 + HOLD + Duration::from_millis(10);
+        stack.advance(t1);
+        assert_eq!(stack.cards[0].phase, Phase::Fading);
+        assert_eq!(stack.cards[1].phase, Phase::Visible);
+        let mut removed = Vec::new();
+        for _ in 0..30 {
+            removed.extend(stack.advance(t1));
+        }
+        assert_eq!(removed, vec![0]);
+        assert_eq!(stack.cards.len(), 1);
+        assert_eq!(stack.cards[0].id, 1);
+        assert_eq!(stack.cards[0].alpha, 1.0);
+        // 剩下的卡片目标回到底部槽位（未被移除的卡片不上移）。
+        assert_eq!(stack.targets(), vec![0.0]);
+    }
+
+    #[test]
+    fn overflow_evicts_oldest_cards() {
+        let now = Instant::now();
+        let mut stack = Stack::new(1.0);
+        for i in 0..(MAX_CARDS + 2) {
+            stack.push(&[format!("F{i}")], 64.0, now);
+        }
+        let evicted: Vec<u64> = stack
+            .cards
+            .iter()
+            .filter(|c| c.phase == Phase::Evicted)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(evicted, vec![0, 1]);
+        let mut removed = Vec::new();
+        for _ in 0..10 {
+            removed.extend(stack.advance(now));
+        }
+        assert_eq!(removed, vec![0, 1]);
+        assert_eq!(stack.cards.len(), MAX_CARDS);
+    }
+
+    #[test]
+    fn new_card_slides_in_and_fades_in() {
+        let now = Instant::now();
+        let mut stack = Stack::new(1.0);
+        stack.push(&keys(&["A"]), 64.0, now);
+        assert_eq!(stack.cards[0].alpha, 0.0);
+        assert_eq!(stack.cards[0].offset, ENTER_OFFSET);
+        for _ in 0..20 {
+            stack.advance(now);
+        }
+        assert_eq!(stack.cards[0].alpha, 1.0);
+        assert_eq!(stack.cards[0].offset, 0.0);
     }
 
     #[test]

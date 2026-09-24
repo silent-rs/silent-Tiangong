@@ -16,7 +16,12 @@
 //!
 //! UIPI：无法向更高完整性级别（如管理员运行）的窗口注入输入，系统会静默
 //! 丢弃；`SendInput` 返回值不足时明确报错。
+//!
+//! 串行化：所有键鼠手势经进程级 [`INPUT_LOCK`] 互斥执行。宿主可能并发下发
+//! 同批次的多个工具调用，若不互斥，`combo` 按住修饰键期间插入的单键会变成
+//! 组合键（如 Ctrl 按住时的 Enter），表现为按键「丢失」。
 use std::mem::size_of;
+use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -51,6 +56,10 @@ const DRAG_SETTLE: Duration = Duration::from_millis(60);
 /// drag 轨迹：步长与步进间隔。
 const DRAG_STEP_PX: f64 = 12.0;
 const DRAG_STEP_INTERVAL: Duration = Duration::from_millis(12);
+/// 右键抬起后到归还系统鼠标的等待：多数应用在处理 WM_CONTEXTMENU 时按
+/// 「当前」鼠标位置弹出菜单（WinUI/XAML 应用还是异步弹出），过早归还会让
+/// 菜单出现在用户原来的鼠标位置。
+const CONTEXT_MENU_SETTLE: Duration = Duration::from_millis(350);
 /// 滚轮投递后到归还系统鼠标的等待（输入线程完成目标窗口判定）。
 const SCROLL_SETTLE: Duration = Duration::from_millis(50);
 /// 滚轮：100 像素折算为一格（WHEEL_DELTA=120）。
@@ -63,6 +72,16 @@ const KEY_DOWN_UP: Duration = Duration::from_millis(50);
 const TYPE_GAP: Duration = Duration::from_millis(15);
 /// combo 修饰键相邻事件间隔。
 const MOD_GAP: Duration = Duration::from_millis(20);
+
+/// 键鼠手势互斥锁：同一时刻只执行一个手势，事件不交错。
+static INPUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// 获取手势锁；前一个手势 panic 导致中毒时照常继续（锁内无共享数据）。
+fn input_guard() -> std::sync::MutexGuard<'static, ()> {
+    INPUT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// 批量投递输入事件；系统拦截（UIPI、安全桌面）时返回错误。
 fn send(inputs: &[INPUT]) -> Result<(), String> {
@@ -180,6 +199,7 @@ pub fn perform_mouse(
     to: Option<(f64, f64)>,
     scroll: (f64, f64),
 ) -> Result<String, String> {
+    let _guard = input_guard();
     match gesture {
         MouseGesture::Move => {
             // 纯虚拟移动：只动天工指针，系统鼠标不动（hover 指示语义）。
@@ -208,6 +228,9 @@ pub fn perform_mouse(
                     sleep(CLICK_DOWN_UP);
                     mouse_button(MOUSEEVENTF_LEFTUP)?;
                     overlay::click_pulse(x, y);
+                }
+                if matches!(gesture, MouseGesture::RightClick) {
+                    sleep(CONTEXT_MENU_SETTLE);
                 }
                 Ok::<(), String>(())
             })();
@@ -409,6 +432,7 @@ pub fn perform_keyboard(
     key: Option<String>,
     keys: Option<Vec<String>>,
 ) -> Result<String, String> {
+    let _guard = input_guard();
     match action {
         KeyboardActionKind::Type => {
             let text = text

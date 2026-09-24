@@ -297,6 +297,7 @@ fn map_wait(result: DesktopResult<crate::backend::WaitResult>) -> DesktopResult<
             satisfied: info.satisfied,
             waited_ms: info.waited_ms,
             matched_element: info.matched_element,
+            detail: info.detail,
         }),
         DesktopResult::Err(error) => DesktopResult::Err(error),
     }

@@ -126,6 +126,8 @@ pub struct WaitResult {
     pub satisfied: bool,
     pub waited_ms: u64,
     pub matched_element: Option<tiangong_plugin_computer_use_protocol::ElementRef>,
+    /// 判定依据（人读），无则省略。
+    pub detail: Option<String>,
 }
 
 /// 三平台均受支持的动作集合（统一暴露给 Agent）。
