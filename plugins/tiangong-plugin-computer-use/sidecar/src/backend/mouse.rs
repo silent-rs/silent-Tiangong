@@ -8,9 +8,9 @@
 //! 系统鼠标「借用并归还」：手势自带完整序列——click/drag 先把系统指针
 //! 平滑滑到目标（真实 HID 移动，仿真操作），到位停顿后才按下/抬起
 //!（窗口激活、上下文菜单、拖拽会话与真人完全一致——定向 postToPid
-//! 无法唤出依赖 WindowServer 状态的菜单），借用后立即把系统鼠标移回
-//! 原位；滚轮无激活依赖，经 AX 定位目标进程后定向投递、系统鼠标不动。
-//! 虚拟指针全程独立滑到目标处指示。
+//! 无法唤出依赖 WindowServer 状态的菜单），结束后指针平滑滑回原位
+//! 归还（全程无瞬移闪现）；滚轮无激活依赖，经 AX 定位目标进程后定向
+//! 投递、系统鼠标不动。虚拟指针全程独立跟随指示。
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -96,26 +96,16 @@ impl MouseIo {
         }
         Ok(())
     }
-    fn click_at(&self, x: f64, y: f64, button: CGMouseButton) -> Result<(), String> {
+    /// 借用序列的按压段：down → 间隔 → up（不带移动；调用方在
+    /// glide_to 到位后调用，双击在同一次借用内连续两次）。
+    fn press_release(&self, x: f64, y: f64, button: CGMouseButton) -> Result<(), String> {
         let (down, up) = match button {
             CGMouseButton::Right => (CGEventType::RightMouseDown, CGEventType::RightMouseUp),
             _ => (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp),
         };
-        // 真实 HID 序列（warp 行为与真人点击完全一致：窗口激活、上下文
-        // 菜单、菜单跟踪都正确——定向 postToPid 无法唤出依赖 WindowServer
-        // 状态的菜单），借用系统鼠标后立即归还（≈100ms 闪回原位）。
-        // 菜单弹出后的指针跟踪不受归还影响：菜单仅由点击关闭。
-        //
-        // 时序必须是「先移动、后点击」：指针先平滑滑到目标（同步，到达
-        // 才返回——overlay 动画是异步的，不能只靠它指示落点），停顿后再
-        // down/up；否则录屏会看到点击先于指针移动。
-        let (origin_x, origin_y) = current_cursor_position();
-        self.glide_to(x, y)?;
-        sleep(CLICK_SETTLE);
         self.post(down, button, x, y)?;
         sleep(CLICK_DOWN_UP);
-        self.post(up, button, x, y)?;
-        self.move_to(origin_x, origin_y)
+        self.post(up, button, x, y)
     }
 }
 
@@ -135,26 +125,34 @@ pub fn perform(
             Ok(format!("指针已移动到 ({x:.0}, {y:.0})"))
         }
         MouseGesture::Click | MouseGesture::RightClick | MouseGesture::DoubleClick => {
-            // 时序在 click_at 内保证：指针先平滑滑到目标（系统指针可见移动，
-            // 虚拟指针沿途跟随），到位停顿后才 down/up 点击。
+            // 一次借用完成完整序列：记录起点 → 指针平滑滑到目标（系统
+            // 指针可见移动，虚拟指针沿途跟随）→ 到位停顿 → down/up
+            //（双击在同一次借用内连续两段，不闪回）→ 平滑滑回归还。
+            let (origin_x, origin_y) = current_cursor_position();
             let button = if matches!(gesture, MouseGesture::RightClick) {
                 CGMouseButton::Right
             } else {
                 CGMouseButton::Left
             };
-            io.click_at(x, y, button)?;
+            io.glide_to(x, y)?;
+            sleep(CLICK_SETTLE);
+            io.press_release(x, y, button)?;
             overlay::click_pulse(x, y);
             if matches!(gesture, MouseGesture::DoubleClick) {
                 sleep(DOUBLE_CLICK_GAP);
-                io.click_at(x, y, CGMouseButton::Left)?;
+                io.press_release(x, y, CGMouseButton::Left)?;
                 overlay::click_pulse(x, y);
             }
+            // 平滑归还：借用结束后指针滑回原位，全程无瞬移闪现。
+            io.glide_to(origin_x, origin_y)?;
             let label = match gesture {
                 MouseGesture::RightClick => "右键",
                 MouseGesture::DoubleClick => "双击",
                 _ => "左键",
             };
-            Ok(format!("已在 ({x:.0}, {y:.0}) 执行{label}点击"))
+            Ok(format!(
+                "已在 ({x:.0}, {y:.0}) 执行{label}点击（系统鼠标已滑回原位）"
+            ))
         }
         MouseGesture::Drag => {
             let (tx, ty) = to.ok_or("drag 缺少 to_x/to_y 终点")?;
@@ -179,8 +177,8 @@ pub fn perform(
                 sleep(DRAG_STEP_INTERVAL);
             }
             io.post(CGEventType::LeftMouseUp, CGMouseButton::Left, tx, ty)?;
-            // 归还：系统鼠标移回拖拽前的位置，用户指针无感。
-            io.move_to(origin_x, origin_y)?;
+            // 平滑归还：系统鼠标从拖拽终点滑回原位，全程无瞬移闪现。
+            io.glide_to(origin_x, origin_y)?;
             Ok(format!(
                 "已从 ({x:.0}, {y:.0}) 拖拽到 ({tx:.0}, {ty:.0})（系统鼠标已归位）"
             ))
