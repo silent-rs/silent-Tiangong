@@ -169,6 +169,64 @@ async fn main() {
 
     // desktop_screenshot：app_name 定位（CGWindowList owner 名主路径，
     // 验证多进程应用——如微信 4.x——主窗口挂 helper 进程时仍可命中）。
+    // 全屏：验证 Retina 归一 + 超上限按 1/2 整数倍缩小 + JPEG 与坐标元数据。
+    println!("\n--- desktop_screenshot(全屏，默认上限) ---");
+    match backend.screenshot(&ScreenshotRequest::default()).await {
+        DesktopResult::Ok(resp) => println!(
+            "全屏截图: {}x{} ({} 字节) scale={} logical={:?} 路径={}\n  换算说明: {}",
+            resp.width,
+            resp.height,
+            resp.size_bytes,
+            resp.scale,
+            resp.logical_bounds,
+            resp.path,
+            resp.coordinate_hint().unwrap_or_default()
+        ),
+        DesktopResult::Err(e) => println!("全屏截图错误: {}", e.agent_message()),
+    }
+
+    // desktop_open_app：仅在显式设置 DIAGNOSE_OPEN_APP 时执行（会唤起/启动应用）。
+    if let Ok(name) = std::env::var("DIAGNOSE_OPEN_APP") {
+        println!("\n--- desktop_open_app({name}) ---");
+        let started = std::time::Instant::now();
+        match backend
+            .open_app(
+                &tiangong_plugin_computer_use_protocol::ops::OpenAppRequest {
+                    app_name: Some(name.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            DesktopResult::Ok(resp) => {
+                println!(
+                    "open_app 用时 {}ms: {}",
+                    started.elapsed().as_millis(),
+                    resp.summary
+                );
+                println!("  响应: {resp:?}");
+                if let Some(window) = resp.window {
+                    match backend
+                        .screenshot(&ScreenshotRequest {
+                            region: Some(window),
+                            ..Default::default()
+                        })
+                        .await
+                    {
+                        DesktopResult::Ok(shot) => println!(
+                            "  窗口区域截图: {}x{} ({} 字节) scale={} 路径={}",
+                            shot.width, shot.height, shot.size_bytes, shot.scale, shot.path
+                        ),
+                        DesktopResult::Err(e) => {
+                            println!("  窗口区域截图错误: {}", e.agent_message())
+                        }
+                    }
+                }
+            }
+            DesktopResult::Err(e) => println!("open_app 错误: {}", e.agent_message()),
+        }
+    }
+
     println!("\n--- desktop_screenshot(app_name) ---");
     let app_for_name = match backend.list_windows(&ListWindowsRequest::default()).await {
         DesktopResult::Ok(r) => r

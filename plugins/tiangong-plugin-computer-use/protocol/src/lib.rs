@@ -22,17 +22,19 @@ pub const PLUGIN_ID: &str = "computer-use";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMPUTER_USE_PROTOCOL_VERSION: u32 = 1;
 
-/// 工具名常量（与工具规格、handle_tool 路由对齐）。
-pub const TOOL_DESKTOP_STATUS: &str = "desktop_status";
-pub const TOOL_DESKTOP_LIST_WINDOWS: &str = "desktop_list_windows";
-pub const TOOL_DESKTOP_SNAPSHOT: &str = "desktop_snapshot";
-pub const TOOL_DESKTOP_FIND: &str = "desktop_find";
-pub const TOOL_DESKTOP_ACTION: &str = "desktop_action";
-pub const TOOL_DESKTOP_WAIT: &str = "desktop_wait";
+/// 对 Agent 暴露的工具名（5 个，按职责合并；与 handle_tool 路由对齐）。
+///
+/// 业务操作（`*_OPERATION`）保持细粒度，wasm 按工具参数分派到对应操作。
+/// - `desktop_app`：status / list / open（能力探测、窗口列举、唤起启动）
+/// - `desktop_screenshot`：截图（图片注入）
+/// - `desktop_input`：鼠标手势 + 键盘输入（可选操作后自动截图）
+/// - `desktop_ui`：无障碍控件树读取/查找 + 语义动作
+/// - `desktop_wait`：等待窗口/控件状态
+pub const TOOL_DESKTOP_APP: &str = "desktop_app";
 pub const TOOL_DESKTOP_SCREENSHOT: &str = "desktop_screenshot";
-pub const TOOL_VIRTUAL_CURSOR: &str = "virtual_cursor";
-pub const TOOL_DESKTOP_MOUSE: &str = "desktop_mouse";
-pub const TOOL_DESKTOP_KEYBOARD: &str = "desktop_keyboard";
+pub const TOOL_DESKTOP_INPUT: &str = "desktop_input";
+pub const TOOL_DESKTOP_UI: &str = "desktop_ui";
+pub const TOOL_DESKTOP_WAIT: &str = "desktop_wait";
 
 /// 一个类型化 Computer Use 业务操作。
 ///
@@ -427,6 +429,13 @@ mod tests {
             height: 800,
             app_name: "微信".to_string(),
             size_bytes: 4096,
+            logical_bounds: Some(Bounds {
+                x: 100.0,
+                y: 50.0,
+                width: 2560.0,
+                height: 1600.0,
+            }),
+            scale: 2.0,
             injected_assets: vec![InjectedAsset {
                 local_path: "/tmp/desktop-1.png".to_string(),
                 mime_type: "image/png".to_string(),
@@ -450,6 +459,51 @@ mod tests {
             decoded.injected_assets[0].kind,
             tiangong_types::MediaKind::Image
         );
+        assert_eq!(decoded.scale, 2.0);
+        assert_eq!(decoded.logical_bounds.map(|b| b.width), Some(2560.0));
+        let hint = decoded
+            .coordinate_hint()
+            .expect("有 logical_bounds 时应给出换算说明");
+        assert!(hint.contains("屏幕x = 100 + 图片x × 2"), "{hint}");
+    }
+
+    #[test]
+    fn screenshot_response_legacy_json_defaults_scale_to_one() {
+        let legacy = r#"{"path":"/tmp/a.png","width":10,"height":10,"size_bytes":1}"#;
+        let decoded: ScreenshotResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.scale, 1.0);
+        assert!(decoded.logical_bounds.is_none());
+        assert!(decoded.coordinate_hint().is_none());
+    }
+
+    #[test]
+    fn screenshot_downscale_factor_uses_power_of_two_halving() {
+        use crate::ops::screenshot_downscale_factor as f;
+        // 逻辑长边不超过上限：保持 1:1，不缩放。
+        assert_eq!(f(1400.0, 900.0, 1568), 1);
+        assert_eq!(f(1568.0, 800.0, 1568), 1);
+        // 2560 宽主屏 → 1/2。
+        assert_eq!(f(2560.0, 1440.0, 1568), 2);
+        // 双屏拼接 5120 宽 → 1/4。
+        assert_eq!(f(5120.0, 1440.0, 1568), 4);
+        // 纵向长图同样按长边计算。
+        assert_eq!(f(300.0, 3200.0, 1568), 4);
+        // 退化输入不死循环。
+        assert_eq!(f(0.0, 0.0, 0), 1);
+    }
+
+    #[test]
+    fn open_app_request_accepts_either_identifier() {
+        let by_name: crate::ops::OpenAppRequest =
+            serde_json::from_value(serde_json::json!({ "app_name": "微信" })).unwrap();
+        assert_eq!(by_name.app_name.as_deref(), Some("微信"));
+        assert!(by_name.bundle_id.is_none());
+        let by_id: crate::ops::OpenAppRequest = serde_json::from_value(
+            serde_json::json!({ "bundle_id": "com.tencent.xinWeChat", "full_trust": true }),
+        )
+        .unwrap();
+        assert_eq!(by_id.bundle_id.as_deref(), Some("com.tencent.xinWeChat"));
+        assert!(by_id.access.full_trust);
     }
 
     #[test]
@@ -462,16 +516,27 @@ mod tests {
         assert!(DESKTOP_ACTION_OPERATION.starts_with("computer_use."));
         assert!(DESKTOP_WAIT_OPERATION.starts_with("computer_use."));
         assert!(DESKTOP_SCREENSHOT_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_OPEN_APP_OPERATION.starts_with("computer_use."));
     }
 
     #[test]
     fn all_tool_constants_match_protocol() {
-        assert_eq!(TOOL_DESKTOP_STATUS, "desktop_status");
-        assert_eq!(TOOL_DESKTOP_LIST_WINDOWS, "desktop_list_windows");
-        assert_eq!(TOOL_DESKTOP_SNAPSHOT, "desktop_snapshot");
-        assert_eq!(TOOL_DESKTOP_FIND, "desktop_find");
-        assert_eq!(TOOL_DESKTOP_ACTION, "desktop_action");
-        assert_eq!(TOOL_DESKTOP_WAIT, "desktop_wait");
-        assert_eq!(TOOL_DESKTOP_SCREENSHOT, "desktop_screenshot");
+        let tools = [
+            TOOL_DESKTOP_APP,
+            TOOL_DESKTOP_SCREENSHOT,
+            TOOL_DESKTOP_INPUT,
+            TOOL_DESKTOP_UI,
+            TOOL_DESKTOP_WAIT,
+        ];
+        assert_eq!(
+            tools,
+            [
+                "desktop_app",
+                "desktop_screenshot",
+                "desktop_input",
+                "desktop_ui",
+                "desktop_wait"
+            ]
+        );
     }
 }

@@ -15,6 +15,7 @@ use objc2_app_kit::NSWorkspace;
 
 use super::ax::{self, AxElement};
 use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
+use tiangong_plugin_computer_use_protocol::ops::DEFAULT_SCREENSHOT_MAX_DIMENSION;
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, Bounds, ControlNode, DesktopError, DesktopResult,
     DesktopSession, ElementRef, Platform, StableIdentifiers, WindowInfo,
@@ -507,6 +508,28 @@ impl Backend for MacosBackend {
                 reason: "尚未授予辅助功能权限".to_string(),
             });
         }
+        // desktop_list_windows 返回的应用级引用（macos-app-{pid}-{idx}）不入
+        // 控件缓存：focus 直接按 pid 唤起应用（激活 + 取消隐藏/最小化），
+        // 而不是误报「引用已过期」。
+        if let Some(pid) = parse_pid_from_id(&req.element.id) {
+            let action_kind = ActionKind::from(req.action);
+            if action_kind != ActionKind::Focus {
+                return DesktopResult::Err(DesktopError::ActionNotSupported {
+                    action: format!("{action_kind:?}（应用级引用）"),
+                    supported: vec!["focus".to_string()],
+                });
+            }
+            let steps = super::app_launch::bring_to_front(pid);
+            return DesktopResult::Ok(ActionResult {
+                performed: !steps.is_empty(),
+                summary: if steps.is_empty() {
+                    format!("未能唤起应用（pid={pid}），可改用 desktop_open_app")
+                } else {
+                    format!("已唤起应用（pid={pid}）：{}", steps.join("、"))
+                },
+                new_window: None,
+            });
+        }
         // 从缓存取回真实控件。
         let element = {
             let guard = self.elements.read().unwrap();
@@ -569,7 +592,7 @@ impl Backend for MacosBackend {
         match result {
             Ok(()) => {
                 if let Some((x, y)) = cursor_center {
-                    super::overlay::move_to(x, y);
+                    super::overlay::follow_to(x, y);
                 }
                 DesktopResult::Ok(ActionResult {
                     performed: true,
@@ -764,28 +787,36 @@ impl Backend for MacosBackend {
         &self,
         req: &tiangong_plugin_computer_use_protocol::ops::ScreenshotRequest,
     ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ScreenshotResponse> {
+        if let Some(delay) = req.delay_ms.filter(|d| *d > 0) {
+            tokio::time::sleep(Duration::from_millis(u64::from(delay.min(2000)))).await;
+        }
         capture_screenshot(req)
+    }
+    async fn open_app(
+        &self,
+        req: &tiangong_plugin_computer_use_protocol::ops::OpenAppRequest,
+    ) -> DesktopResult<tiangong_plugin_computer_use_protocol::ops::OpenAppResponse> {
+        super::app_launch::open_app(req).await
     }
 }
 
 impl MacosBackend {
+    /// appear/disappear 判定：目标应用须有**屏幕上可见**的普通层窗口
+    /// （CGWindowList OnScreenOnly），而不是进程在运行即算出现——后者
+    /// 会让最小化/其他空间/已关闭主窗口的应用立刻误报 satisfied。
+    ///
+    /// NSWorkspace 列举的「窗口」标题即应用名，title 条件同样按窗口
+    /// 所属应用名匹配。
     fn target_exists(
         &self,
         target: &tiangong_plugin_computer_use_protocol::ops::WaitTarget,
     ) -> bool {
-        let Ok(windows) = self.enumerate_windows() else {
-            return false;
-        };
-        windows.iter().any(|w| {
-            target
-                .app_name
-                .as_deref()
-                .is_some_and(|n| w.app_name.to_lowercase().contains(&n.to_lowercase()))
-                || target
-                    .title
-                    .as_deref()
-                    .is_some_and(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
-        })
+        [target.app_name.as_deref(), target.title.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .any(|name| window_frame_for_app(None, Some(name)).is_some())
     }
 }
 
@@ -952,7 +983,11 @@ fn capture_screenshot(
             reason: format!("创建截图目录失败 {}：{error}", dir.display()),
         });
     }
-    let path = dir.join(format!("desktop-{}.png", scru128::new()));
+    // screencapture 先落原始 PNG（Retina 为物理像素），归一缩放并转 JPEG
+    // 后删除中间产物。
+    let id = scru128::new();
+    let raw_path = dir.join(format!("desktop-{id}.raw.png"));
+    let path = dir.join(format!("desktop-{id}.jpg"));
 
     // 决定截取矩形（None = 全屏）。
     let rect: Option<(f64, f64, f64, f64)> = if let Some(region) = req
@@ -1000,7 +1035,7 @@ fn capture_screenshot(
     if let Some((x, y, w, h)) = rect {
         command.arg(format!("-R{x:.0},{y:.0},{w:.0},{h:.0}"));
     }
-    let output = match command.arg(&path).output() {
+    let output = match command.arg(&raw_path).output() {
         Ok(output) => output,
         Err(error) => {
             return DesktopResult::Err(DesktopError::BackendUnavailable {
@@ -1018,48 +1053,89 @@ fn capture_screenshot(
         });
     }
 
-    // 长边超限时等比缩小（sips -Z 按最大边缩放，原地修改）。
-    if let Some(max_dimension) = req.max_dimension.filter(|m| *m > 0)
-        && let Some((w, h)) = png_dimensions(&path)
-        && w.max(h) > max_dimension
-    {
-        let resized = std::process::Command::new("/usr/bin/sips")
-            .arg("-Z")
-            .arg(max_dimension.to_string())
-            .arg(&path)
-            .output();
-        match resized {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => {
-                return DesktopResult::Err(DesktopError::BackendUnavailable {
-                    reason: format!(
-                        "sips 缩放失败（退出码 {}）：{}",
-                        out.status.code().unwrap_or(-1),
-                        String::from_utf8_lossy(&out.stderr).trim(),
-                    ),
-                });
+    // 原始产物尺寸不可读说明截图无效（授权被撤销后 screencapture 可能
+    // 产出空文件），明确失败而不是返回 (0,0) 的失真元数据。
+    let Some((raw_width, raw_height)) = png_dimensions(&raw_path) else {
+        let _ = std::fs::remove_file(&raw_path);
+        return DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: format!("截图产物不是有效 PNG：{}", raw_path.display()),
+        });
+    };
+    // 截取范围的逻辑坐标（points）：区域/窗口即 rect（与 -R 参数同样取整），
+    // 全屏为主显示器 bounds（screencapture 单文件只截主屏）。
+    let logical = match rect {
+        Some((x, y, w, h)) => Bounds {
+            x: x.round(),
+            y: y.round(),
+            width: w.round(),
+            height: h.round(),
+        },
+        None => {
+            let b = core_graphics::display::CGDisplay::main().bounds();
+            Bounds {
+                x: b.origin.x,
+                y: b.origin.y,
+                width: b.size.width,
+                height: b.size.height,
             }
-            Err(error) => {
-                return DesktopResult::Err(DesktopError::BackendUnavailable {
-                    reason: format!("启动 sips 失败：{error}"),
-                });
-            }
+        }
+    };
+    let max_dimension = req
+        .max_dimension
+        .filter(|m| *m > 0)
+        .unwrap_or(DEFAULT_SCREENSHOT_MAX_DIMENSION);
+    let plan = plan_screenshot_output(
+        (raw_width, raw_height),
+        (logical.width, logical.height),
+        max_dimension,
+    );
+    // 统一经 sips 重采样到目标尺寸并转 JPEG：Retina 物理像素归一为逻辑
+    // 尺寸（1 像素 = 1 point），超上限时再按 1/2、1/4… 整数倍缩小，
+    // 不裁剪画面。
+    let converted = std::process::Command::new("/usr/bin/sips")
+        .arg("-s")
+        .arg("format")
+        .arg("jpeg")
+        .arg("-s")
+        .arg("formatOptions")
+        .arg(SCREENSHOT_JPEG_QUALITY.to_string())
+        .arg("-z")
+        .arg(plan.height.to_string())
+        .arg(plan.width.to_string())
+        .arg(&raw_path)
+        .arg("--out")
+        .arg(&path)
+        .output();
+    let _ = std::fs::remove_file(&raw_path);
+    match converted {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: format!(
+                    "sips 转换失败（退出码 {}）：{}",
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr).trim(),
+                ),
+            });
+        }
+        Err(error) => {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: format!("启动 sips 失败：{error}"),
+            });
         }
     }
 
     let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    // 尺寸不可读说明产物不是有效 PNG（授权被撤销后 screencapture 可能
-    // 产出空文件），明确失败而不是返回 (0,0) 的失真元数据。
-    let Some((width, height)) = png_dimensions(&path) else {
+    let Some((width, height)) = jpeg_dimensions(&path) else {
         return DesktopResult::Err(DesktopError::BackendUnavailable {
-            reason: format!("截图产物不是有效 PNG：{}", path.display()),
+            reason: format!("截图转换产物不是有效 JPEG：{}", path.display()),
         });
     };
     let app_name = screenshot_target_app_name(req);
     let original_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("screenshot.png")
+        .unwrap_or("screenshot.jpg")
         .to_string();
     DesktopResult::Ok(ScreenshotResponse {
         path: path.display().to_string(),
@@ -1067,17 +1143,100 @@ fn capture_screenshot(
         height,
         app_name,
         size_bytes,
+        logical_bounds: Some(logical),
+        scale: f64::from(plan.factor),
         // 注入声明（RFC 0017）：core 读到此数组后在工具批次闭合处
         // 落成宿主注入的图片消息。
         injected_assets: vec![tiangong_plugin_computer_use_protocol::InjectedAsset {
             local_path: path.display().to_string(),
-            mime_type: "image/png".to_string(),
+            mime_type: "image/jpeg".to_string(),
             original_name: Some(original_name.clone()),
             size_bytes,
             kind: tiangong_types::MediaKind::Image,
             source: Some("desktop_screenshot".to_string()),
         }],
     })
+}
+
+/// 截图 JPEG 质量（sips formatOptions，0-100）。
+const SCREENSHOT_JPEG_QUALITY: u32 = 75;
+
+/// 截图输出规划：目标像素尺寸与图片像素→points 倍率。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenshotPlan {
+    width: u32,
+    height: u32,
+    factor: u32,
+}
+
+/// 由原始像素尺寸、逻辑尺寸与长边上限计算输出尺寸。
+///
+/// 逻辑尺寸缺失（0）时退回原始像素（视作 1x 屏）；目标取逻辑尺寸
+/// 除以 2 的幂次因子，保证 `屏幕坐标 = 起点 + 图片坐标 × factor`。
+fn plan_screenshot_output(
+    raw: (u32, u32),
+    logical: (f64, f64),
+    max_dimension: u32,
+) -> ScreenshotPlan {
+    let (lw, lh) = if logical.0 >= 1.0 && logical.1 >= 1.0 {
+        logical
+    } else {
+        (f64::from(raw.0), f64::from(raw.1))
+    };
+    let factor = tiangong_plugin_computer_use_protocol::ops::screenshot_downscale_factor(
+        lw,
+        lh,
+        max_dimension,
+    );
+    let div = f64::from(factor);
+    ScreenshotPlan {
+        width: ((lw / div).round() as u32).max(1),
+        height: ((lh / div).round() as u32).max(1),
+        factor,
+    }
+}
+
+/// 读取 JPEG 像素尺寸：扫描到 SOF0..SOF15（排除 DHT/JPG/DAC）段取宽高。
+fn jpeg_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    parse_jpeg_dimensions(&bytes)
+}
+
+fn parse_jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        // 填充字节 / 无长度标记。
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let len = usize::from(u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]));
+        let is_sof = (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        if is_sof {
+            if i + 9 > bytes.len() {
+                return None;
+            }
+            let height = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        if len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 /// CGWindowList 窗口定位：按 pid（精确）或 owner 名（包含匹配，大小写
@@ -1088,7 +1247,10 @@ fn capture_screenshot(
 /// owner 名匹配是主路径：多进程应用（微信 4.x 等）的主窗口可能挂在
 /// NSWorkspace 应用名匹配不到的 helper 进程上，pid 交集会漏；CGWindowList
 /// 的 OwnerName 与窗口同源，不存在集合错位。
-fn window_frame_for_app(pid: Option<u32>, app_name: Option<&str>) -> Option<(f64, f64, f64, f64)> {
+pub(super) fn window_frame_for_app(
+    pid: Option<u32>,
+    app_name: Option<&str>,
+) -> Option<(f64, f64, f64, f64)> {
     use core_foundation::base::{CFType, FromVoid, TCFType};
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::number::CFNumber;
@@ -1210,4 +1372,63 @@ fn png_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
     let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
     let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
     Some((width, height))
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::{ScreenshotPlan, parse_jpeg_dimensions, plan_screenshot_output};
+
+    #[test]
+    fn retina_region_within_limit_normalizes_to_logical_size() {
+        // 800×600 points 区域在 2x 屏截出 1600×1200 物理像素 → 输出 800×600、scale 1。
+        let plan = plan_screenshot_output((1600, 1200), (800.0, 600.0), 1568);
+        assert_eq!(
+            plan,
+            ScreenshotPlan {
+                width: 800,
+                height: 600,
+                factor: 1
+            }
+        );
+    }
+
+    #[test]
+    fn full_screen_over_limit_halves_instead_of_cropping() {
+        // 2560×1440 主屏（5120×2880 物理）→ 1/2：1280×720，scale 2。
+        let plan = plan_screenshot_output((5120, 2880), (2560.0, 1440.0), 1568);
+        assert_eq!(
+            plan,
+            ScreenshotPlan {
+                width: 1280,
+                height: 720,
+                factor: 2
+            }
+        );
+        // 自定义更小上限 → 1/4。
+        let plan = plan_screenshot_output((5120, 2880), (2560.0, 1440.0), 800);
+        assert_eq!(plan.factor, 4);
+        assert_eq!((plan.width, plan.height), (640, 360));
+    }
+
+    #[test]
+    fn missing_logical_size_falls_back_to_raw_pixels() {
+        let plan = plan_screenshot_output((1000, 500), (0.0, 0.0), 1568);
+        assert_eq!((plan.width, plan.height, plan.factor), (1000, 500, 1));
+    }
+
+    #[test]
+    fn jpeg_dimensions_reads_sof_after_app_segments() {
+        // SOI + APP0(长度 16) + DQT 占位(长度 4) + SOF0(高 720 宽 1280)。
+        let mut bytes = vec![0xFF, 0xD8];
+        bytes.extend([0xFF, 0xE0, 0x00, 0x10]);
+        bytes.extend([0u8; 14]);
+        bytes.extend([0xFF, 0xDB, 0x00, 0x04, 0x00, 0x00]);
+        // DHT 不是 SOF，需跳过。
+        bytes.extend([0xFF, 0xC4, 0x00, 0x03, 0x00]);
+        bytes.extend([0xFF, 0xC0, 0x00, 0x11, 0x08, 0x02, 0xD0, 0x05, 0x00]);
+        bytes.extend([0u8; 12]);
+        assert_eq!(parse_jpeg_dimensions(&bytes), Some((1280, 720)));
+        assert_eq!(parse_jpeg_dimensions(b"\x89PNG"), None);
+        assert_eq!(parse_jpeg_dimensions(&[0xFF, 0xD8, 0xFF]), None);
+    }
 }

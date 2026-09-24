@@ -22,18 +22,19 @@
 
 不新增宿主窗口、不扩展 core/协议——虚拟鼠标整体是 computer-use 插件的自身能力。
 
-**持久开关（Agent 控制）**：指针默认关闭；Agent 经 `virtual_cursor` 工具持久开关——
-开启后指针出现在系统鼠标当前位置（`NSEvent.mouseLocation`）并常驻，`desktop_action`
-执行时平滑移动（≈60fps 逐帧指数趋近，自带减速缓动）到目标控件中心，不自动淡出；
-关闭后淡出，后续动作不再驱动指针。普通自动化不开启也不受影响。
+**按需分身（轮次生命周期）**：指针不再由 Agent 显式开关（`virtual_cursor` 工具已
+移除）。本轮首次鼠标手势（`desktop_input` 的鼠标动作）时，指针从系统鼠标当前位置
+（`NSEvent.mouseLocation`）以「分身」形式出现，平滑滑向目标（≈60fps 逐帧指数趋近，
+自带减速缓动）；之后本轮的鼠标手势与 AX 语义动作（`desktop_ui` perform）都驱动它
+跟随落点。轮次结束时插件 `on_turn_finished` 钩子通知 sidecar 收起（淡出）；没有鼠标
+操作的轮次指针不出现，AX 语义动作也不会单独召唤它。钩子未送达（取消、异常）时
+overlay 空闲 120 秒自动收起兜底。
 
 ```
-Agent: virtual_cursor {enabled: true}   → sidecar → overlay 常驻显示（接管系统鼠标位置）
-desktop_action(sidecar, AX 执行)
-  → 执行前读取目标控件 bounds（AXPosition + AXSize）
-  → 成功后 overlay::move_to(控件中心)（关闭态静默忽略）
-  → 指针平滑滑动、常驻
-Agent: virtual_cursor {enabled: false}  → 淡出
+desktop_input(click, x, y)         → overlay::glide_and_wait（未显示则从系统鼠标位置分身）
+                                   → 系统鼠标闪移借用完成点击 → 归还
+desktop_ui(perform, element)       → overlay::follow_to(控件中心)（仅已显示时跟随）
+on_turn_finished（wasm 钩子）       → virtual_cursor 操作 enabled=false → 淡出
 ```
 
 **线程模型**：AppKit 断言 NSApplication/NSWindow 只能在进程主线程使用（子线程触发

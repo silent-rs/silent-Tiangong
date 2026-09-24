@@ -355,12 +355,35 @@ pub struct ScreenshotRequest {
     /// 的 bounds 同系）；提供时忽略 app 定位。width/height 必须 > 0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<crate::Bounds>,
-    /// 产物长边最大像素（如 1568 为 Anthropic 推荐值）；超过时等比缩小
-    /// 以节省视觉 token。缺省不缩放。
+    /// 产物长边上限（像素），缺省 [`DEFAULT_SCREENSHOT_MAX_DIMENSION`]。
+    ///
+    /// 产物默认按屏幕逻辑尺寸输出（1 图片像素 = 1 point，Retina 物理像素
+    /// 先归一到逻辑尺寸）；逻辑长边超过上限时不裁剪，而是按 1/2、1/4…
+    /// 整数倍缩小到上限以内，响应的 `scale` 给出换算倍率。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_dimension: Option<u32>,
+    /// 截图前等待毫秒数（操作后自动截图时留给界面刷新），上限 2000。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u32>,
     #[serde(flatten)]
     pub access: AccessContext,
+}
+/// 截图产物长边默认上限（像素）。
+pub const DEFAULT_SCREENSHOT_MAX_DIMENSION: u32 = 1568;
+/// 计算截图整数倍缩小因子：逻辑长边 ≤ 上限时为 1（保持逻辑尺寸），
+/// 否则取使长边落入上限的最小 2 的幂（2、4、8…）。
+pub fn screenshot_downscale_factor(
+    logical_width: f64,
+    logical_height: f64,
+    max_dimension: u32,
+) -> u32 {
+    let long = logical_width.max(logical_height).max(1.0);
+    let limit = f64::from(max_dimension.max(1));
+    let mut factor = 1u32;
+    while long / f64::from(factor) > limit && factor < 1024 {
+        factor *= 2;
+    }
+    factor
 }
 
 /// `desktop_screenshot` 工具响应：图片落盘后的引用信息。
@@ -369,17 +392,51 @@ pub struct ScreenshotRequest {
 /// core 的注入落地（「看见」，RFC 0017）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenshotResponse {
-    /// 截图文件绝对路径（PNG）。
+    /// 截图文件绝对路径（JPEG）。
     pub path: String,
+    /// 产物图片像素尺寸。
     pub width: u32,
     pub height: u32,
     /// 截图目标应用名（全屏截图时为空或前台应用名）。
     #[serde(default)]
     pub app_name: String,
     pub size_bytes: u64,
+    /// 截取范围的屏幕逻辑坐标（points，主屏左上原点，与 desktop_mouse
+    /// 坐标同系），即原图的位置与大小。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_bounds: Option<crate::Bounds>,
+    /// 图片像素 → 屏幕 points 的倍率（1、2、4…）：
+    /// `屏幕x = logical_bounds.x + 图片x × scale`，y 同理。
+    #[serde(default = "default_screenshot_scale")]
+    pub scale: f64,
     /// 注入声明：非空时 core 落成宿主注入的图片消息。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub injected_assets: Vec<InjectedAsset>,
+}
+
+fn default_screenshot_scale() -> f64 {
+    1.0
+}
+
+impl ScreenshotResponse {
+    /// 面向 Agent 的坐标换算说明（写入工具 summary）。
+    pub fn coordinate_hint(&self) -> Option<String> {
+        let b = self.logical_bounds?;
+        Some(format!(
+            "原图为屏幕区域 x={:.0} y={:.0} 宽={:.0} 高={:.0}（points），产物 {}×{} 像素，scale={}；点击坐标换算：屏幕x = {:.0} + 图片x × {}，屏幕y = {:.0} + 图片y × {}",
+            b.x,
+            b.y,
+            b.width,
+            b.height,
+            self.width,
+            self.height,
+            self.scale,
+            b.x,
+            self.scale,
+            b.y,
+            self.scale
+        ))
+    }
 }
 
 pub struct Screenshot;
@@ -387,6 +444,50 @@ impl ComputerUseOperation for Screenshot {
     const NAME: &'static str = DESKTOP_SCREENSHOT_OPERATION;
     type Request = ScreenshotRequest;
     type Response = DesktopResult<ScreenshotResponse>;
+}
+
+// ── desktop_open_app：唤起或启动应用 ─────────────────────────────
+pub const DESKTOP_OPEN_APP_OPERATION: &str = "computer_use.desktop_open_app";
+
+/// `desktop_open_app` 工具请求：app_name 与 bundle_id 至少提供一个。
+///
+/// 应用已运行：取消隐藏、激活（系统自动切换到窗口所在空间）、恢复最小化
+/// 窗口并置前；未运行：经系统应用索引（Spotlight 元数据 + 应用目录的
+/// 显示名/本地化名）定位后启动。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAppRequest {
+    /// 应用名（显示名/本地化名/文件名均可，如「微信」「WeChat」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
+    /// Bundle ID（如 com.tencent.xinWeChat），优先于 app_name。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(flatten)]
+    pub access: AccessContext,
+}
+
+/// `desktop_open_app` 工具响应。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenAppResponse {
+    pub app_name: String,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    /// 本次是否新启动了应用（false 表示应用已在运行、仅唤起到前台）。
+    pub launched: bool,
+    /// 前台屏幕窗口的逻辑坐标；None 表示超时内未检测到屏幕窗口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<crate::Bounds>,
+    pub summary: String,
+}
+
+pub struct OpenApp;
+impl ComputerUseOperation for OpenApp {
+    const NAME: &'static str = DESKTOP_OPEN_APP_OPERATION;
+    type Request = OpenAppRequest;
+    type Response = DesktopResult<OpenAppResponse>;
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────

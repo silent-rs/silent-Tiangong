@@ -144,6 +144,12 @@ impl ComputerUseService {
                 serde_json::to_value(result).with_context(|| "序列化 desktop_screenshot 响应失败")
             }
 
+            ops::DESKTOP_OPEN_APP_OPERATION => {
+                let req: ops::OpenAppRequest = serde_json::from_value(payload)
+                    .with_context(|| "解析 desktop_open_app 请求失败")?;
+                let result = self.backend.open_app(&req).await;
+                serde_json::to_value(result).with_context(|| "序列化 desktop_open_app 响应失败")
+            }
             DESKTOP_MOUSE_OPERATION => {
                 let req: ops::MouseRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 desktop_mouse 请求失败")?;

@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindRequest, KeyboardRequest, ListWindowsRequest, MouseRequest,
-    ScreenshotRequest, SnapshotRequest, WaitRequest,
+    ActionRequest, FindRequest, KeyboardRequest, ListWindowsRequest, MouseRequest, OpenAppRequest,
+    OpenAppResponse, ScreenshotRequest, SnapshotRequest, WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, DesktopError, DesktopResult, DesktopSession,
@@ -63,6 +63,14 @@ pub trait Backend: Send + Sync {
     }
     async fn screenshot(&self, _req: &ScreenshotRequest) -> DesktopResult<ScreenshotResponse> {
         DesktopResult::Err(unsupported_screenshot(self.platform()))
+    }
+    /// 唤起或启动应用（激活、取消隐藏/最小化、系统搜索定位）。默认不支持，
+    /// macOS 实装。
+    async fn open_app(&self, _req: &OpenAppRequest) -> DesktopResult<OpenAppResponse> {
+        DesktopResult::Err(DesktopError::ActionNotSupported {
+            action: "desktop_open_app".to_string(),
+            supported: vec![],
+        })
     }
 }
 
@@ -180,6 +188,8 @@ fn cfg_if_current_backend() -> Box<dyn Backend> {
 
 // ── 各平台后端 ─────────────────────────────────────────────────
 
+#[cfg(target_os = "macos")]
+pub mod app_launch;
 #[cfg(target_os = "macos")]
 pub mod ax;
 /// 键盘合成输入（CGEvent，RFC 0018 §2.4，仅 macOS）。

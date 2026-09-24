@@ -282,7 +282,12 @@ impl AxElement {
 
     /// 读取子控件数组（AXChildren）。
     pub fn children(&self) -> Result<Vec<AxElement>, AxError> {
-        let value = match self.copy_attribute_value("AXChildren") {
+        self.elements_attribute("AXChildren")
+    }
+
+    /// 读取元素数组属性（AXChildren / AXWindows 等）。
+    pub fn elements_attribute(&self, name: &str) -> Result<Vec<AxElement>, AxError> {
+        let value = match self.copy_attribute_value(name) {
             Some(v) => v,
             None => return Err(AxError::AttributeUnsupported),
         };

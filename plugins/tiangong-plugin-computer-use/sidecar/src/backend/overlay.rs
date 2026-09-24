@@ -3,9 +3,10 @@
 //! `desktop_action` 走 AX 语义动作（AXPress/AXSetValue 等），系统鼠标
 //! 指针纹丝不动，用户无法感知 Agent 的操作落点。本模块在 sidecar 进程
 //! 内自建一个置顶、点击穿透的小窗口，把「天工指针」（白底箭头 + 靛紫
-//! 渐变描边 + 右下角「天工」徽标）平滑移动到目标控件中心。指针默认
-//! 关闭，由 Agent 经 `virtual_cursor` 工具持久开关（RFC 0018）：开启后
-//! 出现在系统鼠标当前位置并常驻跟随动作落点，不自动淡出；关闭后淡出。
+//! 渐变描边 + 右下角「天工」徽标）平滑移动到目标位置。指针以「分身」
+//! 形式按需出现：本轮首次鼠标手势时从系统鼠标当前位置出现并滑向
+//! 目标，之后跟随所有动作落点；轮次结束由插件生命周期钩子收起（淡出），
+//! 没有鼠标操作的轮次不出现。空闲超时兜底收起（RFC 0018）。
 //! 实现完全位于插件内，不依赖宿主与前端；指针图片源文件
 //! `resources/virtual-cursor.svg` 与嵌入式浏览器共用（RFC 0018 预留）。
 //!
@@ -55,18 +56,23 @@ const CURSOR_PNG: &[u8] = include_bytes!("../../../resources/virtual-cursor.png"
 static SENDER: OnceLock<Sender<Command>> = OnceLock::new();
 static RECEIVER: Mutex<Option<Receiver<Command>>> = Mutex::new(None);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-/// 指针开启状态镜像（主循环写、任意线程读）：未开启时移动等待直接跳过。
-static POINTER_ENABLED: AtomicBool = AtomicBool::new(false);
+/// overlay 窗口已就绪（主循环写、任意线程读）：未就绪（窗口创建失败、
+/// 测试进程无主循环）时移动等待直接跳过，避免每次点击空等超时。
+static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
 /// 指针到达回执：主循环落地目标时递增序号并记录落点，`glide_and_wait`
 /// 据此同步等待动画真正完成（时序前提：先移动到位、后触发点击）。
 static ARRIVAL: std::sync::Mutex<(u64, (f64, f64))> = std::sync::Mutex::new((0, (0.0, 0.0)));
 static ARRIVAL_CVAR: std::sync::Condvar = std::sync::Condvar::new();
 
+/// 分身空闲自动隐藏时长：轮次结束钩子未送达（取消、崩溃）时的兜底。
+const IDLE_HIDE: Duration = Duration::from_secs(120);
+
 /// overlay 命令。
 enum Command {
-    /// 平滑移动到目标（AX 坐标）；仅在开启状态下生效。
-    MoveTo { x: f64, y: f64 },
-    /// 持久开关：开启时常驻（接管系统鼠标位置），关闭时淡出。
+    /// 平滑移动到目标（AX 坐标）。`summon` 为真时，指针未显示则先在系统
+    /// 鼠标当前位置「分身」出现再滑向目标；为假时仅在已显示时跟随。
+    MoveTo { x: f64, y: f64, summon: bool },
+    /// 开关：开启时在系统鼠标当前位置出现，关闭时淡出（轮次结束收起）。
     SetEnabled(bool),
     /// 点击脉冲：指针移动到目标并播放一次按压回弹动画（点击反馈）。
     ClickPulse { x: f64, y: f64 },
@@ -74,31 +80,43 @@ enum Command {
 
 /// 平滑移动指针到屏幕坐标（points，AX 全局坐标系：主屏左上原点）。
 ///
-/// 目标点应为被操作控件的中心；箭头尖端对准该点。指针关闭时命令被
-/// 忽略。非阻塞投递、失败静默——指针是纯增益可视化，不允许拖垮
+/// 鼠标手势专用：本轮首次调用时指针从系统鼠标位置分身出现，再滑向
+/// 目标。非阻塞投递、失败静默——指针是纯增益可视化，不允许拖垮
 /// 桌面动作本身；overlay 主循环未运行（如单元测试进程）时丢弃。
 pub fn move_to(x: f64, y: f64) {
     if let Some(sender) = SENDER.get() {
-        let _ = sender.send(Command::MoveTo { x, y });
+        let _ = sender.send(Command::MoveTo { x, y, summon: true });
+    }
+}
+
+/// 仅在指针已显示时跟随到目标（AX 语义动作用）：没有鼠标操作的轮次
+/// 不出现指针。
+pub fn follow_to(x: f64, y: f64) {
+    if let Some(sender) = SENDER.get() {
+        let _ = sender.send(Command::MoveTo {
+            x,
+            y,
+            summon: false,
+        });
     }
 }
 
 /// 平滑移动指针到目标并**等待动画真正到达**（同步，带超时兜底）。
 ///
 /// 供鼠标手势保证「先移动到位、后触发点击」的时序：虚拟指针是视觉
-/// 主角（平滑滑行），系统鼠标仅在点击瞬间闪移借用。指针未开启、
-/// overlay 未运行或超时（动画异常）时立即返回——可视化是增益，
-/// 不得拖垮动作本身。
+/// 主角（首次从系统鼠标位置分身出发、平滑滑行），系统鼠标仅在点击
+/// 瞬间闪移借用。overlay 未就绪或超时（动画异常）时立即返回——
+/// 可视化是增益，不得拖垮动作本身。
 pub fn glide_and_wait(x: f64, y: f64) {
     const ARRIVAL_TIMEOUT: Duration = Duration::from_millis(1500);
-    if !POINTER_ENABLED.load(Ordering::Acquire) {
+    if !OVERLAY_READY.load(Ordering::Acquire) {
         return;
     }
     let Some(sender) = SENDER.get() else {
         return;
     };
     let before = ARRIVAL.lock().unwrap().0;
-    if sender.send(Command::MoveTo { x, y }).is_err() {
+    if sender.send(Command::MoveTo { x, y, summon: true }).is_err() {
         return;
     }
     let deadline = Instant::now() + ARRIVAL_TIMEOUT;
@@ -129,10 +147,8 @@ pub fn click_pulse(x: f64, y: f64) {
     }
 }
 
-/// 持久开关指针（Agent 经 `virtual_cursor` 工具驱动）。
-///
-/// 开启：指针出现在系统鼠标当前位置并常驻，后续 `move_to` 平滑跟随；
-/// 关闭：淡出并忽略 `move_to`。非阻塞投递。
+/// 开关指针：开启时在系统鼠标当前位置出现；关闭时淡出。轮次结束时
+/// 由插件生命周期钩子关闭（收起分身）。非阻塞投递。
 pub fn set_enabled(enabled: bool) {
     if let Some(sender) = SENDER.get() {
         let _ = sender.send(Command::SetEnabled(enabled));
@@ -162,10 +178,13 @@ pub fn run_main_loop() {
         return;
     };
     let receiver = RECEIVER.lock().unwrap().take();
+    OVERLAY_READY.store(true, Ordering::Release);
     let mut visible_until: Option<Instant> = None;
     let mut alpha: f64 = 0.0;
-    // 持久开关状态：默认关闭，Agent 经 virtual_cursor 工具切换。
+    // 分身显示状态：默认隐藏；本轮首次鼠标手势时从系统鼠标位置分身
+    // 出现，轮次结束（SetEnabled(false)）或空闲超时后淡出。
     let mut enabled = false;
+    let mut last_activity = Instant::now();
     // 平滑移动状态：current 为当前 AX 坐标，target 存在时逐帧趋近。
     // 首次出现或淡出后（不可见）直接落位，可见时连续滑动。
     let mut current: Option<(f64, f64)> = None;
@@ -181,47 +200,69 @@ pub fn run_main_loop() {
         if let Some(rx) = receiver.as_ref() {
             while let Ok(command) = rx.try_recv() {
                 match command {
-                    // 关闭态忽略移动；开启态更新目标（常驻不淡出）。
-                    Command::MoveTo { x, y } => {
+                    Command::MoveTo { x, y, summon } => {
+                        if !enabled && summon {
+                            // 分身：从系统鼠标当前位置（AppKit 左下原点 →
+                            // AX 左上原点）出现，随后平滑滑向目标。
+                            screen_top = main_screen_top(mtm);
+                            let location = NSEvent::mouseLocation();
+                            current = Some((location.x, screen_top - location.y));
+                            if let Some((cx, cy)) = current {
+                                window.setFrameOrigin(window_origin(cx, cy, screen_top));
+                            }
+                            enabled = true;
+                        }
                         if enabled {
                             target = Some((x, y));
                             alpha = 1.0;
                             visible_until = None;
+                            last_activity = Instant::now();
                             screen_top = main_screen_top(mtm);
                             dirty = true;
                         }
                     }
                     Command::SetEnabled(true) => {
+                        if !enabled {
+                            screen_top = main_screen_top(mtm);
+                            let location = NSEvent::mouseLocation();
+                            current = Some((location.x, screen_top - location.y));
+                            if let Some((cx, cy)) = current {
+                                window.setFrameOrigin(window_origin(cx, cy, screen_top));
+                            }
+                        }
                         enabled = true;
-                        POINTER_ENABLED.store(true, Ordering::Release);
-                        // 接管系统鼠标当前位置（AppKit 左下原点 → AX
-                        // 左上原点），指针在此常驻显示。
-                        let location = NSEvent::mouseLocation();
-                        current = Some((location.x, screen_top - location.y));
                         target = None;
                         alpha = 1.0;
                         visible_until = None;
-                        screen_top = main_screen_top(mtm);
+                        last_activity = Instant::now();
                         dirty = true;
                     }
                     Command::SetEnabled(false) => {
-                        enabled = false;
-                        POINTER_ENABLED.store(false, Ordering::Release);
-                        target = None;
-                        // 立即进入淡出。
-                        visible_until = Some(Instant::now());
-                        dirty = true;
+                        if enabled {
+                            enabled = false;
+                            target = None;
+                            // 立即进入淡出。
+                            visible_until = Some(Instant::now());
+                            dirty = true;
+                        }
                     }
                     Command::ClickPulse { x, y } => {
                         if enabled {
                             target = Some((x, y));
                             pulse_until = Some(Instant::now() + Duration::from_millis(PULSE_MS));
+                            last_activity = Instant::now();
                             screen_top = main_screen_top(mtm);
                             dirty = true;
                         }
                     }
                 }
             }
+        }
+        // 兜底：轮次结束钩子未送达（取消/异常）时空闲超时自动收起。
+        if enabled && target.is_none() && last_activity.elapsed() >= IDLE_HIDE {
+            enabled = false;
+            visible_until = Some(Instant::now());
+            dirty = true;
         }
         // 平滑移动：每帧向目标指数趋近（自带 ease-out），像真实鼠标
         // 连续滑动；到达后吸附并结束移动。
