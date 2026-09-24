@@ -1097,7 +1097,10 @@ async fn image_injection_reaches_model_and_keeps_turn_anchor_on_real_user_messag
 
     let (env, sid) = TestEnv::new("model-only-anchor");
     // provider 请求组装时会读取该文件并 base64 进模型请求。
-    let image_path = env.root.join("inject-shot.png");
+    // 注入图片必须位于存储根的媒体目录下（RFC 0017 安全边界）。
+    let media_dir = env.root.join("media");
+    std::fs::create_dir_all(&media_dir).unwrap();
+    let image_path = media_dir.join("inject-shot.png");
     std::fs::write(&image_path, [0x89_u8, b'P', b'N', b'G', 1, 2, 3, 4]).unwrap();
 
     struct ScreenshotTool {

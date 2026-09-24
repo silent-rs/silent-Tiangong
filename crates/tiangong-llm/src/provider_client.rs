@@ -853,9 +853,22 @@ fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
                 }
             }
             ContentBlock::Image { asset, data } => {
-                let img_content = image_content_from_ready_image(asset, data.as_deref())
-                    .ok_or_else(|| anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id))?;
-                content.push(LlmMessageContent::Image(img_content));
+                match image_content_from_ready_image(asset, data.as_deref()) {
+                    Some(img_content) => content.push(LlmMessageContent::Image(img_content)),
+                    None => {
+                        if msg.phase == tiangong_types::MessagePhase::HostInjected {
+                            // 评审问题 2：宿主注入消息的图片文件缺失（被清理/
+                            // 声明失效）时降级为文字说明，不让整个请求失败——
+                            // 否则该会话之后每一轮请求都会报错。
+                            content.push(LlmMessageContent::Text(format!(
+                                "[injected-image unavailable] 图片文件已不可读（asset_id={}，path={}），内容不可用",
+                                asset.asset_id, asset.local_path
+                            )));
+                        } else {
+                            return Err(anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id));
+                        }
+                    }
+                }
             }
             ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
         }
@@ -2241,6 +2254,43 @@ mod tests {
             })
             .expect("已就绪图片应进入请求");
         assert_eq!(image.data, "data:image/png;base64,CURRENT_RUNTIME_BASE64");
+    }
+
+    /// 评审问题 2 回归：HostInjected 消息的图片文件缺失（被清理/声明
+    /// 失效）时，provider 映射降级为文字说明，整个请求不得失败——
+    /// 否则该会话之后每一轮请求都会报错。
+    #[test]
+    fn host_injected_image_with_missing_file_degrades_to_text() {
+        let mut msg = test_message(vec![
+            ContentBlock::model_instruction("[injected-images provenance]\n- 工具截图产出图片"),
+            ContentBlock::Image {
+                asset: test_asset(
+                    MediaKind::Image,
+                    "/nonexistent/path/deleted-by-cleanup.png",
+                    "image/png",
+                ),
+                data: None,
+            },
+        ]);
+        msg.role = MessageRole::User;
+        msg.phase = tiangong_types::MessagePhase::HostInjected;
+
+        let result = provider_message_from_session(&msg)
+            .expect("映射不得失败")
+            .expect("应生成消息");
+        assert!(
+            result.content.iter().any(|content| matches!(
+                content,
+                LlmMessageContent::Text(text) if text.contains("injected-image unavailable")
+            )),
+            "缺失图片应降级为文字说明"
+        );
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::Image(_)))
+        );
     }
 
     /// 抓包式判据：含 HostInjected 图片消息的请求经 OpenAI Chat

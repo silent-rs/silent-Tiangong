@@ -437,13 +437,17 @@ fn build_anchor_resume_message(anchor_text: &str) -> Message {
 }
 
 /// 被折叠区间内最后一条可见用户消息的文本（锚点原文）。
+///
+/// 宿主注入消息（图片注入/压缩恢复锚点）role=User 但不是真实用户输入，
+/// 其 text_content 为空，必须排除——否则折叠区间末尾恰是注入消息时
+/// 锚点取到空文本被过滤，用户原始请求丢失（评审问题 3）。
 fn folded_anchor_text(session: &Session, folded_end: usize) -> Option<String> {
     let start = session.summary_up_to.min(folded_end);
     (start..folded_end)
         .rev()
         .find(|index| {
             let message = &session.messages[*index];
-            message.role == MessageRole::User
+            message.role == MessageRole::User && message.phase.is_user_input()
         })
         .map(|index| session.messages[index].text_content())
         .filter(|text| !text.trim().is_empty())
@@ -691,6 +695,34 @@ mod tests {
     use crate::session::MessageToolCall;
     use tiangong_llm::SingleProviderClient;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
+
+    /// 评审问题 3 回归：折叠区间末尾是宿主注入消息（role=User 但无
+    /// 真实输入文本）时，锚点必须越过它取到更早的真实用户消息，
+    /// 而不是取到空文本后放弃导致用户原请求丢失。
+    #[test]
+    fn folded_anchor_text_skips_host_injected_and_finds_real_user_message() {
+        let mut session = Session::new("anchor-test");
+        session
+            .messages
+            .push(Message::new(MessageRole::User, "帮我总结群聊"));
+        session
+            .messages
+            .push(Message::new(MessageRole::Assistant, "收到"));
+        // 宿主注入消息：role=User、phase=HostInjected、无普通文本。
+        let mut injected = Message::new(MessageRole::User, "");
+        injected.content = vec![tiangong_types::ContentBlock::model_instruction(
+            "[injected-images provenance]\n- 工具 desktop_screenshot 产出图片",
+        )];
+        injected.phase = MessagePhase::HostInjected;
+        session.messages.push(injected);
+
+        let anchor = folded_anchor_text(&session, session.messages.len());
+        assert_eq!(
+            anchor.as_deref(),
+            Some("帮我总结群聊"),
+            "锚点必须越过注入消息取到真实用户请求"
+        );
+    }
 
     fn test_context(mut session: Session) -> (TurnContext, tempfile::TempDir) {
         let root = tempfile::tempdir().expect("创建临时目录失败");

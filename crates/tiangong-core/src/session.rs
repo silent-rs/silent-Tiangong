@@ -220,6 +220,15 @@ impl Session {
         self.storage_root.as_deref()
     }
 
+    /// 存储根下的统一媒体目录（`<storage_root>/media`）。
+    ///
+    /// RFC 0017 安全边界：工具声明注入的图片必须位于该目录下才会被
+    /// 采纳（沙箱内工具的写域不含此目录，媒体产物由宿主管理的免沙箱
+    /// 插件写入），配合文件头校验与大小上限阻断任意文件外发。
+    pub fn media_root(&self) -> Option<std::path::PathBuf> {
+        self.storage_root.as_ref().map(|root| root.join("media"))
+    }
+
     /// 从指定存储根加载 Session，并保留该根作为后续持久化位置。
     pub fn load_from_storage(storage_root: &Path, session_id: &str) -> Result<Self, String> {
         let mut components = Path::new(session_id).components();
