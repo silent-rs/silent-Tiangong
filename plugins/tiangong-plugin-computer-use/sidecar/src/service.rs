@@ -168,13 +168,7 @@ impl ComputerUseService {
                 let req: VirtualCursorRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 virtual_cursor 请求失败")?;
                 // 指针开关是纯 UI 状态：直接投递 overlay，立即回显生效值。
-                #[cfg(target_os = "macos")]
-                crate::backend::overlay::set_enabled(req.enabled);
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = req.enabled;
-                    anyhow::bail!("virtual_cursor 仅 macOS 支持");
-                }
+                apply_virtual_cursor(req.enabled)?;
                 serde_json::to_value(DesktopResult::Ok(VirtualCursorResponse {
                     enabled: req.enabled,
                 }))
@@ -192,6 +186,20 @@ impl ComputerUseService {
             operation => Err(anyhow::anyhow!("不支持的 Computer Use 操作: {operation}")),
         }
     }
+}
+
+/// 虚拟指针开关（RFC 0018）：macOS 投递 overlay；其他平台尚无 overlay，
+/// 返回明确错误（wasm 侧轮次结束收起时忽略该错误）。按平台拆成两个
+/// 实现，避免在同一函数体内 `bail!` 后留下不可达代码（-D warnings）。
+#[cfg(target_os = "macos")]
+fn apply_virtual_cursor(enabled: bool) -> anyhow::Result<()> {
+    crate::backend::overlay::set_enabled(enabled);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_virtual_cursor(_enabled: bool) -> anyhow::Result<()> {
+    anyhow::bail!("virtual_cursor 仅 macOS 支持")
 }
 
 // ── backend Info → 协议 Response 的映射 ────────────────────────
