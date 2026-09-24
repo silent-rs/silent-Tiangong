@@ -54,7 +54,7 @@
     ],
     "macOS": {
       "bundleName": "天工",
-      "entitlements": null,
+      "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
     },
     "linux": {
