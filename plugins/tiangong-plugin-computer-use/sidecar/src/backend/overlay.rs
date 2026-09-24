@@ -55,6 +55,12 @@ const CURSOR_PNG: &[u8] = include_bytes!("../../../resources/virtual-cursor.png"
 static SENDER: OnceLock<Sender<Command>> = OnceLock::new();
 static RECEIVER: Mutex<Option<Receiver<Command>>> = Mutex::new(None);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// 指针开启状态镜像（主循环写、任意线程读）：未开启时移动等待直接跳过。
+static POINTER_ENABLED: AtomicBool = AtomicBool::new(false);
+/// 指针到达回执：主循环落地目标时递增序号并记录落点，`glide_and_wait`
+/// 据此同步等待动画真正完成（时序前提：先移动到位、后触发点击）。
+static ARRIVAL: std::sync::Mutex<(u64, (f64, f64))> = std::sync::Mutex::new((0, (0.0, 0.0)));
+static ARRIVAL_CVAR: std::sync::Condvar = std::sync::Condvar::new();
 
 /// overlay 命令。
 enum Command {
@@ -75,6 +81,44 @@ pub fn move_to(x: f64, y: f64) {
     if let Some(sender) = SENDER.get() {
         let _ = sender.send(Command::MoveTo { x, y });
     }
+}
+
+/// 平滑移动指针到目标并**等待动画真正到达**（同步，带超时兜底）。
+///
+/// 供鼠标手势保证「先移动到位、后触发点击」的时序：虚拟指针是视觉
+/// 主角（平滑滑行），系统鼠标仅在点击瞬间闪移借用。指针未开启、
+/// overlay 未运行或超时（动画异常）时立即返回——可视化是增益，
+/// 不得拖垮动作本身。
+pub fn glide_and_wait(x: f64, y: f64) {
+    const ARRIVAL_TIMEOUT: Duration = Duration::from_millis(1500);
+    if !POINTER_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(sender) = SENDER.get() else {
+        return;
+    };
+    let before = ARRIVAL.lock().unwrap().0;
+    if sender.send(Command::MoveTo { x, y }).is_err() {
+        return;
+    }
+    let deadline = Instant::now() + ARRIVAL_TIMEOUT;
+    let mut state = ARRIVAL.lock().unwrap();
+    while state.0 <= before || !arrived_at(state.1, (x, y)) {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let (guard, result) = ARRIVAL_CVAR.wait_timeout(state, deadline - now).unwrap();
+        state = guard;
+        if result.timed_out() && (state.0 <= before || !arrived_at(state.1, (x, y))) {
+            return;
+        }
+    }
+}
+
+/// 落点判定：与目标的距离在吸附阈值内即视为到达。
+fn arrived_at(point: (f64, f64), target: (f64, f64)) -> bool {
+    (point.0 - target.0).abs() < MOVE_EPSILON && (point.1 - target.1).abs() < MOVE_EPSILON
 }
 
 /// 点击脉冲：指针移动到目标并播放按压回弹动画（Agent 经
@@ -149,6 +193,7 @@ pub fn run_main_loop() {
                     }
                     Command::SetEnabled(true) => {
                         enabled = true;
+                        POINTER_ENABLED.store(true, Ordering::Release);
                         // 接管系统鼠标当前位置（AppKit 左下原点 → AX
                         // 左上原点），指针在此常驻显示。
                         let location = NSEvent::mouseLocation();
@@ -161,6 +206,7 @@ pub fn run_main_loop() {
                     }
                     Command::SetEnabled(false) => {
                         enabled = false;
+                        POINTER_ENABLED.store(false, Ordering::Release);
                         target = None;
                         // 立即进入淡出。
                         visible_until = Some(Instant::now());
@@ -197,6 +243,12 @@ pub fn run_main_loop() {
             if let Some(position) = landed {
                 current = Some(position);
                 target = None;
+                // 到达回执：唤醒 glide_and_wait 的等待者（序号+落点）。
+                if let Ok(mut state) = ARRIVAL.lock() {
+                    state.0 += 1;
+                    state.1 = position;
+                }
+                ARRIVAL_CVAR.notify_all();
             }
             if let Some((cx, cy)) = current {
                 let origin = window_origin(cx, cy, screen_top);
