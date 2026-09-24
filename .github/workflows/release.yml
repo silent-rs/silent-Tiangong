@@ -145,7 +145,7 @@ jobs:
           {
             echo "---"
             echo
-            echo "当前 Release 包含 macOS Apple Silicon、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 构建暂未接入签名和公证，首次安装时可能需要手动允许打开。"
+            echo "当前 Release 包含 macOS Apple Silicon、Windows 和 Linux 安装产物，并上传应用内更新所需的 latest.json 与签名文件。macOS 安装包已使用 Developer ID 签名并通过 Apple 公证。"
           } >> "$notes_file"
 
           {
@@ -210,12 +210,45 @@ jobs:
             exit 1
           fi
 
+      # Developer ID 签名与公证凭据：缺任何一项都直接失败，避免发出未签名的正式包。
+      - name: Prepare macOS signing and notarization
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            KEYCHAIN_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::缺少 macOS 签名/公证 secrets：${missing[*]}"
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 仅 macOS 注入 Apple 凭据；Tauri 检测到后自动导入证书、签名并公证
+          APPLE_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          KEYCHAIN_PASSWORD: ${{ runner.os == 'macOS' && secrets.KEYCHAIN_PASSWORD || '' }}
+          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY || '' }}
         with:
           projectPath: .
           tagName: ${{ steps.release.outputs.tag }}
@@ -227,6 +260,25 @@ jobs:
           updaterJsonPreferNsis: true
           assetNamePattern: "Tiangong_[version]_[platform]_[arch][setup][ext]"
           args: ${{ matrix.args }}
+
+      - name: Verify macOS signature and notarization
+        if: runner.os == 'macOS'
+        run: |
+          app="$(find target src-tauri/target -maxdepth 6 -type d -path '*/release/bundle/macos/*.app' 2>/dev/null | head -n 1)"
+          if [[ -z "$app" ]]; then
+            echo "::error::未找到 macOS .app 产物"
+            exit 1
+          fi
+          echo "Verifying $app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -E '^(Authority|TeamIdentifier|flags)='
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Remove notarization key
+        if: always() && runner.os == 'macOS'
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
   upload-to-oss:
     name: Upload to Aliyun OSS
