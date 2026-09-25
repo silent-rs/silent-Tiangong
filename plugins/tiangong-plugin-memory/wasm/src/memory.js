@@ -6,6 +6,7 @@
   const GRAPH_LIMIT_STEP = 120;
   const GRAPH_MAX_LIMIT = 500;
   const HOST_TIMEOUT_MS = 45000;
+  const LLM_REMOTE = '__remote__';
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
   const memoryTypes = [
@@ -147,9 +148,50 @@
       applyHostContext(event.data);
     }
   });
-  window.parent.postMessage({ type: 'plugin_host_ready' }, '*');
+  // 独立配置页（tiangong-memory-sidecar --config）：没有宿主 iframe，改走本机 HTTP。
+  // 仅当页面是顶层窗口（未嵌入宿主 iframe）且服务端注入了标记时才生效，
+  // 避免宿主内误入独立模式。
+  const standalone = window.top === window.self ? (window.__MEMORY_STANDALONE__ || null) : null;
+  if (standalone) {
+    document.documentElement.classList.add('standalone');
+    const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+    applyHostContext({ channel: 'standalone', theme: prefersDark ? 'dark' : 'light', tokens: {} });
+    mountStandaloneClose();
+  } else {
+    window.parent.postMessage({ type: 'plugin_host_ready' }, '*');
+  }
+
+  // "完成并关闭"只在独立配置页创建；天工内嵌页面中不存在该元素。
+  function mountStandaloneClose() {
+    const button = document.createElement('button');
+    button.id = 'standalone-close';
+    button.className = 'primary-button';
+    button.type = 'button';
+    button.textContent = '完成并关闭';
+    button.addEventListener('click', closeStandalone);
+    document.querySelector('.topbar')?.appendChild(button);
+  }
+
+  async function callStandalone(path, body) {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Memory-Token': standalone.token },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+    if (!response.ok) {
+      throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
+    }
+    return data;
+  }
 
   async function callHost(method, payload = '') {
+    if (standalone) {
+      const result = await callStandalone(`/view/${encodeURIComponent(method)}`, { payload });
+      return result == null ? '' : JSON.stringify(result);
+    }
     if (!hostChannel) await hostReady;
     return new Promise((resolve, reject) => {
       const id = `memory-${Date.now()}-${++requestSequence}`;
@@ -884,8 +926,8 @@
     };
   }
 
-  // LLM 下拉：首项"跟随默认（lite → chat）"，其后为路由与 chat 模型；
-  // 在线端点（旧配置迁移而来）只读展示，重新选择后即改为模型引用。
+  // LLM 下拉：首项"跟随默认（lite → chat）"，其后为路由与 chat 模型，
+  // 末项"自定义在线端点"——独立运行（无天工模型配置）时直接填写端点。
   function renderLlmSelect() {
     const select = byId('config-model');
     const llm = state.config.llm;
@@ -896,15 +938,12 @@
     const missing = llm.source === 'models_ref' && llm.key && !known
       ? `<option value="${escapeHtml(llm.key)}">${escapeHtml(llm.key)}（当前不可用）</option>`
       : '';
-    const remote = llm.source === 'remote' && llm.remote
-      ? `<option value="__remote__">在线端点 · ${escapeHtml(llm.remote.model)}（旧配置）</option>`
-      : '';
     const options = state.models.map((model) => {
       const kind = model.kind === 'route' ? '路由' : '模型';
       return `<option value="${escapeHtml(model.key)}">${escapeHtml(model.key)} · ${kind} · ${escapeHtml(model.provider)} / ${escapeHtml(model.model)}</option>`;
     }).join('');
-    select.innerHTML = `<option value="">${follow}</option>${remote}${missing}${options}`;
-    select.value = llm.source === 'remote' ? '__remote__' : (llm.key || '');
+    select.innerHTML = `<option value="">${follow}</option>${missing}${options}<option value="${LLM_REMOTE}">自定义在线端点</option>`;
+    select.value = llm.source === 'remote' ? LLM_REMOTE : (llm.key || '');
   }
 
   function renderRemoteFields(prefix, component) {
@@ -919,10 +958,14 @@
     if (prefix === 'embedding') {
       byId('embedding-dimension').value = remote.dimension || '';
     }
+    if (prefix === 'llm') {
+      byId('llm-protocol').value = remote.protocol || 'openai_chatcompletions';
+    }
   }
 
   function renderConfig() {
     renderLlmSelect();
+    renderRemoteFields('llm', state.config.llm);
     byId('config-tier').value = state.config.local_tier || 'mid';
     byId('config-embedding-source').value = state.config.embedding.source;
     byId('config-rerank-source').value = state.config.rerank.source;
@@ -933,6 +976,20 @@
   }
 
   function renderComponentMeta() {
+    const llmRemote = byId('config-model').value === LLM_REMOTE;
+    byId('llm-remote').classList.toggle('hidden', !llmRemote);
+    const llmMeta = byId('llm-meta');
+    llmMeta.classList.remove('warning');
+    if (llmRemote) {
+      const complete = byId('llm-url').value.trim() && byId('llm-model').value.trim();
+      llmMeta.textContent = complete ? '自定义在线端点' : '自定义在线端点 · 需填写地址与模型名';
+      if (!complete) llmMeta.classList.add('warning');
+    } else if (!byId('config-model').value && !state.defaultLlm) {
+      llmMeta.textContent = '未找到可用模型，请选择"自定义在线端点"';
+      llmMeta.classList.add('warning');
+    } else {
+      llmMeta.textContent = '片段提取、回忆规划、结果整理';
+    }
     const tierLabel = { low: '低', mid: '中', high: '高' }[byId('config-tier').value] || '中';
     const embeddingSource = byId('config-embedding-source').value;
     const embeddingMeta = byId('embedding-meta');
@@ -963,7 +1020,8 @@
   }
 
   const CONFIG_CONTROL_IDS = [
-    'config-model', 'config-tier', 'config-embedding-source', 'embedding-url', 'embedding-model',
+    'config-model', 'llm-url', 'llm-model', 'llm-protocol', 'llm-key', 'llm-probe',
+    'config-tier', 'config-embedding-source', 'embedding-url', 'embedding-model',
     'embedding-dimension', 'embedding-key', 'embedding-probe', 'config-rerank-source', 'rerank-url',
     'rerank-model', 'rerank-key', 'rerank-probe', 'config-vector-mode', 'save-config',
   ];
@@ -974,10 +1032,11 @@
 
   function readRemote(prefix, previous, withDimension) {
     const key = byId(`${prefix}-key`).value.trim();
+    const protocolInput = prefix === 'llm' ? byId('llm-protocol').value : '';
     const remote = {
       base_url: byId(`${prefix}-url`).value.trim(),
       model: byId(`${prefix}-model`).value.trim(),
-      protocol: previous?.protocol || 'openai_chatcompletions',
+      protocol: protocolInput || previous?.protocol || 'openai_chatcompletions',
       timeout_ms: previous?.timeout_ms || 0,
       has_api_key: Boolean(previous?.has_api_key),
     };
@@ -991,8 +1050,8 @@
 
   function currentConfig() {
     const llmValue = byId('config-model').value;
-    const llm = llmValue === '__remote__'
-      ? { source: 'remote', remote: state.config.llm.remote }
+    const llm = llmValue === LLM_REMOTE
+      ? { source: 'remote', remote: readRemote('llm', state.config.llm.remote, false) }
       : { source: 'models_ref', key: llmValue || null };
     const embeddingSource = byId('config-embedding-source').value;
     const rerankSource = byId('config-rerank-source').value;
@@ -1016,6 +1075,10 @@
   }
 
   function validateConfig(config) {
+    if (config.llm.source === 'remote') {
+      const remote = config.llm.remote;
+      if (!remote.base_url || !remote.model) return '记忆文本模型在线端点需要地址与模型名';
+    }
     if (config.embedding.source === 'remote') {
       const remote = config.embedding.remote;
       if (!remote.base_url || !remote.model) return '嵌入模型在线端点需要地址与模型名';
@@ -1030,12 +1093,13 @@
 
   // 保存成功后：已填写的密钥视为已保存，清空输入框避免重复提交。
   function afterConfigSaved(config) {
-    ['embedding', 'rerank'].forEach((prefix) => {
+    ['llm', 'embedding', 'rerank'].forEach((prefix) => {
       const remote = config[prefix].remote;
       if (remote?.api_key) remote.has_api_key = true;
       if (remote) delete remote.api_key;
     });
     state.config = normalizeConfig(config);
+    renderRemoteFields('llm', state.config.llm);
     renderRemoteFields('embedding', state.config.embedding);
     renderRemoteFields('rerank', state.config.rerank);
     renderComponentMeta();
@@ -1087,7 +1151,7 @@
     window.clearTimeout(configSaveTimer);
     configSaveTimer = null;
     const config = currentConfig();
-    if (durable && hostChannel && !validateConfig(config)) {
+    if (durable && hostChannel && !standalone && !validateConfig(config)) {
       const id = `memory-flush-${Date.now()}-${++requestSequence}`;
       window.parent.postMessage({
         type: 'plugin_call',
@@ -1484,11 +1548,13 @@
         });
       });
     // 在线端点文本字段：失焦时保存，避免输入过程中频繁热更新。
-    ['embedding-url', 'embedding-model', 'embedding-dimension', 'embedding-key', 'rerank-url', 'rerank-model', 'rerank-key']
+    ['llm-url', 'llm-model', 'llm-key', 'embedding-url', 'embedding-model', 'embedding-dimension', 'embedding-key', 'rerank-url', 'rerank-model', 'rerank-key']
       .forEach((id) => {
         byId(id).addEventListener('input', renderComponentMeta);
         byId(id).addEventListener('change', scheduleConfigSave);
       });
+    byId('llm-protocol').addEventListener('change', scheduleConfigSave);
+    byId('llm-probe').addEventListener('click', () => probeRemote('llm'));
     byId('embedding-probe').addEventListener('click', () => probeRemote('embedding'));
     byId('rerank-probe').addEventListener('click', () => probeRemote('rerank'));
 
@@ -1510,6 +1576,34 @@
         closeRecall();
       }
     });
+  }
+
+  // 独立配置页"完成并关闭"：先落盘未保存的配置，再通知服务退出。
+  async function closeStandalone() {
+    if (!standalone) return;
+    const button = byId('standalone-close');
+    button.disabled = true;
+    button.textContent = '正在关闭';
+    try {
+      if (configPending) {
+        const invalid = validateConfig(currentConfig());
+        if (invalid) {
+          showToast(`配置未完成：${invalid}`, 'error');
+          button.disabled = false;
+          button.textContent = '完成并关闭';
+          return;
+        }
+        await saveConfig(null, true);
+      }
+      await configSaveQueue;
+      await callStandalone('/close', {});
+      document.body.innerHTML = '<div class="standalone-closed"><h1>配置已保存</h1><p>服务已关闭，可以关闭此页面。</p></div>';
+      window.setTimeout(() => window.close(), 400);
+    } catch (error) {
+      showToast(`关闭失败：${errorText(error)}`, 'error');
+      button.disabled = false;
+      button.textContent = '完成并关闭';
+    }
   }
 
   function populateFixedOptions() {

@@ -192,7 +192,7 @@ pub(crate) enum ModelSubcommand {
         model_id: String,
         #[arg(
             long = "capability",
-            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts（embedding/rerank 已迁至 `tiangong memory config set`）"
+            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts（embedding/rerank 已迁至 `tiangong memory config` 配置页）"
         )]
         capability: Vec<String>,
     },
@@ -238,13 +238,8 @@ pub(crate) struct MemoryArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MemorySubcommand {
-    #[command(about = "管理 Memory 配置")]
-    Config {
-        #[command(subcommand)]
-        command: MemoryConfigSubcommand,
-    },
-    #[command(about = "交互式配置向导（引导选择 Memory 端点模型）")]
-    Configure,
+    #[command(about = "打开 Memory 配置页（模型、检索与数据管理）；配合 --host 可远程配置")]
+    Config(MemoryConfigArgs),
     #[command(about = "启用 Memory")]
     Enable,
     #[command(about = "禁用 Memory")]
@@ -255,74 +250,17 @@ pub(crate) enum MemorySubcommand {
     Test,
 }
 
-#[derive(Debug, Subcommand)]
-pub(crate) enum MemoryConfigSubcommand {
-    #[command(about = "查看 Memory 配置")]
-    Show,
-    #[command(
-        about = "修改 Memory 配置（LLM 从模型列表选择；Embedding/Rerank 选择内置或在线端点）"
-    )]
-    Set {
-        #[arg(
-            long,
-            help = "Memory LLM：models.json 中的 chat 模型 key 或 chat/lite 路由；default 表示跟随 lite → chat"
-        )]
-        llm: Option<String>,
-        #[arg(long, value_enum, help = "本地内置模型档位")]
-        tier: Option<MemoryTierArg>,
-        #[arg(long, value_enum, help = "Embedding 来源")]
-        embedding: Option<MemoryComponentSourceArg>,
-        #[arg(long, help = "Embedding 在线端点地址（OpenAI 兼容）")]
-        embedding_url: Option<String>,
-        #[arg(long, help = "Embedding 在线模型名")]
-        embedding_model: Option<String>,
-        #[arg(long, help = "Embedding 向量维度")]
-        embedding_dimension: Option<usize>,
-        #[arg(long, help = "Embedding API Key（留空保留原值，支持 ${ENV}）")]
-        embedding_key: Option<String>,
-        #[arg(long, value_enum, help = "Rerank 来源")]
-        rerank: Option<MemoryComponentSourceArg>,
-        #[arg(long, help = "Rerank 在线端点地址（OpenAI 兼容）")]
-        rerank_url: Option<String>,
-        #[arg(long, help = "Rerank 在线模型名")]
-        rerank_model: Option<String>,
-        #[arg(long, help = "Rerank API Key（留空保留原值，支持 ${ENV}）")]
-        rerank_key: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum MemoryTierArg {
-    Low,
-    Mid,
-    High,
-}
-
-impl MemoryTierArg {
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Mid => "mid",
-            Self::High => "high",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum MemoryComponentSourceArg {
-    Disabled,
-    Builtin,
-    Remote,
-}
-
-impl MemoryComponentSourceArg {
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Builtin => "builtin",
-            Self::Remote => "remote",
-        }
-    }
+#[derive(Debug, Args)]
+pub(crate) struct MemoryConfigArgs {
+    /// 监听地址（缺省 127.0.0.1；远程配置可设为 0.0.0.0 或本机网卡地址）
+    #[arg(long)]
+    pub(crate) host: Option<String>,
+    /// 监听端口（缺省随机）
+    #[arg(long)]
+    pub(crate) port: Option<u16>,
+    /// 不自动打开浏览器，仅打印访问地址（远程/无图形环境使用）
+    #[arg(long)]
+    pub(crate) no_open: bool,
 }
 
 /// 解析 ProviderProtocol 字符串

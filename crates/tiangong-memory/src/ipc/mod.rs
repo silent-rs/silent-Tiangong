@@ -885,6 +885,10 @@ async fn memory_config_probe(probe: plugin_ui::ProbeRequest) -> plugin_ui::Probe
 async fn run_config_probe(probe: plugin_ui::ProbeRequest) -> Result<plugin_ui::ProbeResponse> {
     let saved = crate::MemoryConfig::load_or_default();
     let previous = match probe.component.as_str() {
+        "llm" => match &saved.model {
+            Some(crate::MemoryLlmSource::Remote(endpoint)) => Some(endpoint.clone()),
+            _ => None,
+        },
         "embedding" => match &saved.embedding {
             Some(crate::MemoryEmbeddingSource::Remote { endpoint, .. }) => Some(endpoint.clone()),
             _ => None,
@@ -899,6 +903,37 @@ async fn run_config_probe(probe: plugin_ui::ProbeRequest) -> Result<plugin_ui::P
     let endpoint = remote.endpoint_for_probe(previous.as_ref())?;
     let api_key = tiangong_llm::models_config::ModelsConfig::resolve_api_key(&endpoint.api_key);
     let timeout = Duration::from_millis(endpoint.timeout_ms.min(30_000));
+
+    if probe.component == "llm" {
+        // 发一次极短的文本补全，确认地址、协议、密钥与模型名可用。
+        let config = tiangong_llm::LlmEndpointConfig {
+            source_provider: None,
+            base_url: endpoint.base_url.clone(),
+            api_key,
+            model: endpoint.model.clone(),
+            protocol: endpoint.protocol,
+            timeout,
+            max_retries: 0,
+        };
+        let reply = tiangong_llm::complete_text(
+            &config,
+            "You are a connectivity probe. Reply with the single word: ok",
+            "ping",
+            16,
+        )
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+        let preview = reply.trim().chars().take(24).collect::<String>();
+        return Ok(plugin_ui::ProbeResponse {
+            ok: true,
+            dimension: None,
+            message: if preview.is_empty() {
+                "连接成功".to_string()
+            } else {
+                format!("连接成功，模型回复：{preview}")
+            },
+        });
+    }
 
     if probe.component == "embedding" {
         // 维度未知：先用占位维度构造 provider，按实际返回向量长度确定维度。
@@ -1165,21 +1200,9 @@ fn persist_endpoint(path: &PathBuf, endpoint: &IpcEndpoint) -> Result<()> {
 }
 
 fn runtime_dir() -> Result<PathBuf> {
-    Ok(home_dir()
-        .ok_or_else(|| anyhow!("无法确定 HOME/USERPROFILE"))?
-        .join(".tiangong")
-        .join("memory")
-        .join("runtime"))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
+    // 与 leader.json 同在存储根下：不同存储根（TIANGONG_STORAGE_ROOT）的实例
+    // 各自选举，endpoint 文件也必须随之隔离，否则会互相覆盖/误连。
+    Ok(crate::paths::memory_data_dir().join("runtime"))
 }
 
 #[cfg(test)]
@@ -1221,6 +1244,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn endpoint_follows_storage_root() {
+        let home = TempDir::new().expect("创建 fake home 失败");
+        let root = TempDir::new().expect("创建存储根失败");
+        let _env = EnvGuard::enter(home.path());
+        let previous = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV);
+        unsafe {
+            std::env::remove_var("TIANGONG_PLUGIN_ENDPOINT");
+            std::env::set_var(
+                tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV,
+                root.path(),
+            );
+        }
+        let path = endpoint_path("memory").expect("endpoint 路径");
+        unsafe {
+            match previous {
+                Some(value) => {
+                    std::env::set_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV, value)
+                }
+                None => std::env::remove_var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV),
+            }
+        }
+        // 与 leader.json 同在存储根下，不同存储根的实例互不干扰。
+        assert_eq!(path, root.path().join("memory/runtime/memory.json"));
     }
 
     #[tokio::test(flavor = "current_thread")]

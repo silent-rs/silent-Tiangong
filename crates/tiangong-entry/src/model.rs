@@ -292,7 +292,7 @@ fn parse_capabilities(raw: &[String]) -> Result<Vec<ModelCapability>> {
     for item in raw {
         if tiangong_llm::models_config::RETIRED_MODEL_KEYS.contains(&item.as_str()) {
             return Err(anyhow!(
-                "{item} 能力已由 Memory 插件独立管理，请使用 `tiangong memory config set --{item} ...`"
+                "{item} 能力已由 Memory 插件独立管理，请使用 `tiangong memory config` 打开配置页设置"
             ));
         }
         let cap = ModelCapability::from_key(item).ok_or_else(|| anyhow!("无效的能力 {item}"))?;
@@ -306,7 +306,7 @@ fn parse_capabilities(raw: &[String]) -> Result<Vec<ModelCapability>> {
 fn parse_slot(raw: &str) -> Result<RoutingSlot> {
     if tiangong_llm::models_config::RETIRED_MODEL_KEYS.contains(&raw) {
         return Err(anyhow!(
-            "{raw} 已由 Memory 插件独立管理，请使用 `tiangong memory config set --{raw} ...`"
+            "{raw} 已由 Memory 插件独立管理，请使用 `tiangong memory config` 打开配置页设置"
         ));
     }
     RoutingSlot::from_key(raw).ok_or_else(|| {

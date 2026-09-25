@@ -1301,6 +1301,62 @@ mod tests {
     }
 
     #[test]
+    fn standalone_llm_remote_endpoint_is_configurable() {
+        // 独立运行无 models.json：LLM 直接配置在线端点，并可被解析使用。
+        let previous = MemoryConfig::default();
+        let selection = MemoryConfigSelection {
+            llm: MemoryLlmSelection {
+                source: "remote".into(),
+                key: None,
+                remote: Some(MemoryRemoteSelection {
+                    base_url: " https://api.example.com/v1 ".into(),
+                    model: "gpt-mini".into(),
+                    protocol: "anthropic".into(),
+                    api_key: Some("${EXAMPLE_KEY}".into()),
+                    ..Default::default()
+                }),
+            },
+            ..MemoryConfigSelection::from_memory(&previous)
+        };
+        let config = selection.to_memory(&previous).unwrap();
+        let Some(MemoryLlmSource::Remote(endpoint)) = &config.model else {
+            panic!("应保存为在线端点：{:?}", config.model);
+        };
+        assert_eq!(endpoint.base_url, "https://api.example.com/v1");
+        assert_eq!(endpoint.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(endpoint.api_key, "${EXAMPLE_KEY}");
+        assert_eq!(endpoint.timeout_ms, DEFAULT_TIMEOUT_MS);
+
+        let resolved = config
+            .resolve_llm(&ModelsConfig::default())
+            .unwrap()
+            .expect("无模型列表时仍可解析在线端点");
+        assert_eq!(resolved.model, "gpt-mini");
+
+        // 回显不含密钥；空密钥再次保存保留原值；切回模型引用清除在线端点。
+        let echoed = MemoryConfigSelection::from_memory(&config);
+        let remote = echoed.llm.remote.as_ref().unwrap();
+        assert_eq!(echoed.llm.source, "remote");
+        assert!(remote.has_api_key && remote.api_key.is_none());
+        assert_eq!(remote.protocol, "anthropic");
+        assert_eq!(echoed.to_memory(&config).unwrap().model, config.model);
+        let mut back = echoed.clone();
+        back.llm = MemoryLlmSelection {
+            source: "models_ref".into(),
+            key: None,
+            remote: None,
+        };
+        assert_eq!(
+            back.to_memory(&config).unwrap().model,
+            Some(MemoryLlmSource::ModelsRef { key: None })
+        );
+
+        let mut invalid = selection.clone();
+        invalid.llm.remote.as_mut().unwrap().model = String::new();
+        assert!(invalid.to_memory(&previous).is_err());
+    }
+
+    #[test]
     fn selection_switches_sources_and_validates() {
         let previous = MemoryConfig::default();
         let selection = MemoryConfigSelection {

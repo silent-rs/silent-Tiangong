@@ -116,7 +116,7 @@ impl MemoryOperation for SetConfig {
 /// 在线端点探测请求。`api_key` 为空时使用已保存配置中对应组件的密钥。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProbeRequest {
-    /// embedding | rerank
+    /// llm | embedding | rerank
     pub component: String,
     pub remote: MemoryRemoteSelection,
 }

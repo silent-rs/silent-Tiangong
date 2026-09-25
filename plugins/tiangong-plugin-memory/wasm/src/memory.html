@@ -202,6 +202,22 @@
             </div>
             <select id="config-model"></select>
           </div>
+          <div id="llm-remote" class="config-remote hidden">
+            <input id="llm-url" type="url" placeholder="地址，如 https://api.openai.com/v1" autocomplete="off">
+            <div class="config-remote-inline">
+              <input id="llm-model" type="text" placeholder="模型名，如 gpt-4o-mini" autocomplete="off">
+              <select id="llm-protocol" aria-label="接口协议">
+                <option value="openai_chatcompletions">OpenAI 兼容</option>
+                <option value="openai">OpenAI Responses</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
+            </div>
+            <div class="config-remote-inline">
+              <input id="llm-key" type="password" placeholder="API Key（支持 ${ENV}）" autocomplete="new-password">
+              <button id="llm-probe" class="secondary-button" type="button">探测</button>
+            </div>
+          </div>
           <div class="config-row">
             <div>
               <label for="config-tier">本地模型档位</label>
