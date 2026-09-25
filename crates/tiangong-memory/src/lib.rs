@@ -23,6 +23,7 @@ mod actor;
 mod db;
 mod injection;
 mod llm_metrics;
+pub mod local_model;
 mod options;
 mod paths;
 mod recall;

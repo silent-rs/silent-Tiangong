@@ -564,6 +564,7 @@ fn memory_ui_bootstrap() -> Result<serde_json::Value> {
         models: model_entries,
         default_llm,
         disabled: crate::is_memory_disabled(),
+        local_models: transcode(crate::local_model::local_model_statuses())?,
     })
     .with_context(|| "序列化 Memory 页面配置失败")
 }
@@ -763,11 +764,7 @@ fn memory_status() -> Result<serde_json::Value> {
         "local_tier": config.local_tier.key(),
         "llm": llm,
         "embedding": config.embedding.as_ref().map(|source| match source {
-            crate::MemoryEmbeddingSource::Builtin => serde_json::json!({
-                "source": "builtin",
-                "tier": config.local_tier.key(),
-                "configured": false,
-            }),
+            crate::MemoryEmbeddingSource::Builtin => builtin_status(&config, true),
             crate::MemoryEmbeddingSource::Remote { endpoint, dimension } => serde_json::json!({
                 "source": "remote",
                 "model": endpoint.model,
@@ -777,11 +774,7 @@ fn memory_status() -> Result<serde_json::Value> {
             }),
         }),
         "rerank": config.rerank.as_ref().map(|source| match source {
-            crate::MemoryRerankSource::Builtin => serde_json::json!({
-                "source": "builtin",
-                "tier": config.local_tier.key(),
-                "configured": false,
-            }),
+            crate::MemoryRerankSource::Builtin => builtin_status(&config, false),
             crate::MemoryRerankSource::Remote(endpoint) => serde_json::json!({
                 "source": "remote",
                 "model": endpoint.model,
@@ -790,6 +783,22 @@ fn memory_status() -> Result<serde_json::Value> {
             }),
         }),
     }))
+}
+
+/// 内置组件状态：模型、下载/加载进度（下载状态跨进程可见）。
+fn builtin_status(config: &crate::MemoryConfig, embedding: bool) -> serde_json::Value {
+    let status = crate::local_model::local_model_status(config.local_tier, embedding);
+    serde_json::json!({
+        "source": "builtin",
+        "tier": config.local_tier.key(),
+        "model": status.model,
+        "dimension": status.dimension,
+        "state": status.state,
+        "size": status.size,
+        "downloaded": status.downloaded,
+        "error": status.error,
+        "configured": true,
+    })
 }
 
 fn llm_source_label(config: &crate::MemoryConfig) -> &'static str {
@@ -827,7 +836,7 @@ fn memory_config_test() -> Result<serde_json::Value> {
             }
         }
         Some(crate::MemoryEmbeddingSource::Builtin) => {
-            issues.push("内置 Embedding 尚未提供本地推理，当前不会启用向量层".to_string());
+            push_builtin_issue(&mut issues, "Embedding", &config, true);
         }
         None => {}
     }
@@ -840,7 +849,7 @@ fn memory_config_test() -> Result<serde_json::Value> {
             }
         }
         Some(crate::MemoryRerankSource::Builtin) => {
-            issues.push("内置 Rerank 尚未提供本地推理，当前不会启用模型精排".to_string());
+            push_builtin_issue(&mut issues, "Rerank", &config, false);
         }
         None => {}
     }
@@ -848,6 +857,19 @@ fn memory_config_test() -> Result<serde_json::Value> {
         "ok": issues.is_empty(),
         "issues": issues,
     }))
+}
+
+/// 内置模型只有下载失败才算问题；未下载/下载中会在后台自动完成。
+fn push_builtin_issue(
+    issues: &mut Vec<String>,
+    label: &str,
+    config: &crate::MemoryConfig,
+    embedding: bool,
+) {
+    let status = crate::local_model::local_model_status(config.local_tier, embedding);
+    if let Some(error) = status.error {
+        issues.push(format!("内置 {label}（{}）不可用：{error}", status.model));
+    }
 }
 
 fn push_secret_issue(issues: &mut Vec<String>, label: &str, value: &str) {

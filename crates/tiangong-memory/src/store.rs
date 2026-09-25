@@ -10,10 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::FutureExt;
-use tiangong_llm::{
-    EmbeddingEndpointConfig, EmbeddingProvider, RerankEndpointConfig, RerankProvider,
-    embedding_provider_from_config, rerank_provider_from_config,
-};
+use tiangong_llm::{EmbeddingProvider, RerankProvider};
 
 use crate::command::InjectionLevel;
 use crate::db::MemoryDb;
@@ -110,8 +107,8 @@ impl MemoryStore {
     /// 维度或后端变化不会继续复用旧向量索引；新配置不可用时也能明确降级。
     pub(crate) async fn reconfigure_recall_engine(
         &mut self,
-        embedding: Option<&EmbeddingEndpointConfig>,
-        rerank: Option<&RerankEndpointConfig>,
+        embedding: Option<Arc<dyn EmbeddingProvider>>,
+        rerank: Option<Arc<dyn RerankProvider>>,
         vector_mode: MemoryVectorMode,
     ) {
         self.recall_engine = RecallEngine::bm25_only();
@@ -120,24 +117,16 @@ impl MemoryStore {
             .await;
     }
 
-    /// 基于上层传入的 embedding / rerank 配置启用召回增强层。
+    /// 基于已构造的 embedding / rerank provider 启用召回增强层。
     ///
     /// 失败时仅记录 warning，Memory 自动降级为 BM25-only。
     pub(crate) async fn try_enable_recall_engine(
         &mut self,
-        embedding: Option<&EmbeddingEndpointConfig>,
-        rerank: Option<&RerankEndpointConfig>,
+        embedding: Option<Arc<dyn EmbeddingProvider>>,
+        rerank_provider: Option<Arc<dyn RerankProvider>>,
         vector_mode: MemoryVectorMode,
     ) {
-        let rerank_provider = rerank.and_then(|rerank| match rerank_provider_from_config(rerank) {
-            Ok(provider) => Some(provider),
-            Err(err) => {
-                tracing::warn!("Memory rerank provider 初始化失败，跳过模型精排: {err}");
-                None
-            }
-        });
-
-        let Some(embedding) = embedding else {
+        let Some(embedding_provider) = embedding else {
             if let Some(rerank_provider) = rerank_provider {
                 let model = rerank_provider.model().to_string();
                 self.enable_rerank_only(rerank_provider);
@@ -147,8 +136,10 @@ impl MemoryStore {
             }
             return;
         };
+        let embedding_model = embedding_provider.model().to_string();
+        let embedding_dimension = embedding_provider.dimension();
 
-        if embedding.dimension == 0 {
+        if embedding_dimension == 0 {
             if let Some(rerank_provider) = rerank_provider {
                 let model = rerank_provider.model().to_string();
                 self.enable_rerank_only(rerank_provider);
@@ -161,23 +152,6 @@ impl MemoryStore {
             }
             return;
         }
-
-        let embedding_provider = match embedding_provider_from_config(embedding) {
-            Ok(provider) => provider,
-            Err(err) => {
-                if let Some(rerank_provider) = rerank_provider {
-                    let model = rerank_provider.model().to_string();
-                    self.enable_rerank_only(rerank_provider);
-                    tracing::warn!(
-                        model = %model,
-                        "Memory embedding provider 初始化失败，仅启用 rerank: {err}"
-                    );
-                } else {
-                    tracing::warn!("Memory embedding provider 初始化失败，跳过向量层: {err}");
-                }
-                return;
-            }
-        };
 
         let vector_mode = match vector_mode {
             MemoryVectorMode::Auto => default_vector_mode(),
@@ -198,7 +172,7 @@ impl MemoryStore {
             MemoryVectorMode::EmbeddedLanceDb => {
                 let base = memory_base_dir();
                 let needs_migration = migration::needs_vector_migration(&self.db, &base);
-                let identity = VectorIdentity::new(&embedding.model, embedding.dimension);
+                let identity = VectorIdentity::new(&embedding_model, embedding_dimension);
                 let opened = AssertUnwindSafe(LanceDbIndex::open(&base, &identity))
                     .catch_unwind()
                     .await
@@ -211,7 +185,7 @@ impl MemoryStore {
                 match opened {
                     Ok((index, state)) => {
                         if needs_migration {
-                            migration::migrate_vectors(&self.db, &index, embedding.dimension).await;
+                            migration::migrate_vectors(&self.db, &index, embedding_dimension).await;
                         }
                         self.vector_backfill = (!state.complete).then(|| {
                             tracing::info!(
@@ -270,11 +244,10 @@ impl MemoryStore {
             semantic_ready,
         );
         tracing::info!(
-            "Memory 向量双引擎召回已启用: backend={} embedding_model={} dimension={} timeout_ms={} rerank_model={} semantic_ready={}",
+            "Memory 向量双引擎召回已启用: backend={} embedding_model={} dimension={} rerank_model={} semantic_ready={}",
             backend,
-            embedding.model,
-            embedding.dimension,
-            embedding.timeout.as_millis(),
+            embedding_model,
+            embedding_dimension,
             rerank_model.as_deref().unwrap_or("none"),
             semantic_ready
         );

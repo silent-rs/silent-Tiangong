@@ -30,3 +30,8 @@ tiangong-memory-sidecar --check-update | --update    # 从官方插件目录检�
 ```
 
 接口、生命周期接入约定与更新校验流程见 [通用运行模式](../../docs/memory-system/14-通用运行模式.md)。
+## 内置本地模型
+
+嵌入 / 重排选择"内置"时在本机用 ONNX Runtime 推理，模型按低 / 中 / 高档位首次使用时后台下载（约 320 MB / 400 MB / 1.2 GB），下载源依次为官方 OSS、ModelScope、hf-mirror、HuggingFace，逐文件校验 sha256。详见 [通用运行模式 · 内置本地模型](../../docs/memory-system/14-通用运行模式.md#内置本地模型)。
+
+构建时 `ort-sys` 会从 `cdn.pyke.io` 下载预编译 ONNX Runtime 静态库；网络受限时可手动下载后设置 `ORT_LIB_PATH=<含 libonnxruntime.a 的目录>`。

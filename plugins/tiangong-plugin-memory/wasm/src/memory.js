@@ -268,8 +268,10 @@
       state.config = normalizeConfig(bootstrap.config);
       state.models = Array.isArray(bootstrap.models) ? bootstrap.models : [];
       state.defaultLlm = bootstrap.default_llm || null;
+      state.localModels = Array.isArray(bootstrap.local_models) ? bootstrap.local_models : [];
       state.configLoaded = true;
       renderConfig();
+      scheduleLocalModelPoll();
       byId('config-status').textContent = '';
       setConfigControlsDisabled(false);
     } catch (error) {
@@ -995,8 +997,9 @@
     const embeddingMeta = byId('embedding-meta');
     embeddingMeta.classList.remove('warning');
     if (embeddingSource === 'builtin') {
-      embeddingMeta.textContent = `内置 · ${tierLabel}档（本地推理即将提供，暂不启用向量层）`;
-      embeddingMeta.classList.add('warning');
+      const info = localModelMeta('embedding');
+      embeddingMeta.textContent = `内置 · ${tierLabel}档 · ${info.text}`;
+      if (info.warning) embeddingMeta.classList.add('warning');
     } else if (embeddingSource === 'remote') {
       const dimension = Number(byId('embedding-dimension').value || 0);
       embeddingMeta.textContent = dimension > 0 ? `在线端点 · 向量维度 ${dimension}` : '在线端点 · 缺少向量维度';
@@ -1008,8 +1011,9 @@
     const rerankMeta = byId('rerank-meta');
     rerankMeta.classList.remove('warning');
     if (rerankSource === 'builtin') {
-      rerankMeta.textContent = `内置 · ${tierLabel}档（本地推理即将提供，暂不启用精排）`;
-      rerankMeta.classList.add('warning');
+      const info = localModelMeta('rerank');
+      rerankMeta.textContent = `内置 · ${tierLabel}档 · ${info.text}`;
+      if (info.warning) rerankMeta.classList.add('warning');
     } else if (rerankSource === 'remote') {
       rerankMeta.textContent = '在线端点';
     } else {
@@ -1017,6 +1021,37 @@
     }
     byId('embedding-remote').classList.toggle('hidden', embeddingSource !== 'remote');
     byId('rerank-remote').classList.toggle('hidden', rerankSource !== 'remote');
+  }
+
+  function formatSize(bytes) {
+    const value = Number(bytes || 0);
+    if (value >= 1e9) return `${(value / 1e9).toFixed(1)} GB`;
+    return `${Math.max(1, Math.round(value / 1e6))} MB`;
+  }
+
+  // 当前档位内置模型的说明：模型名、维度、大小与下载/加载状态。
+  function localModelMeta(kind) {
+    const tier = byId('config-tier').value || 'mid';
+    const model = (state.localModels || []).find((item) => item.tier === tier && item.kind === kind);
+    if (!model) return { text: '本地推理', warning: false };
+    const name = model.dimension ? `${model.model}（${model.dimension} 维）` : model.model;
+    const size = formatSize(model.size);
+    switch (model.state) {
+      case 'ready':
+        return { text: `${name} · 已就绪`, warning: false };
+      case 'installed':
+        return { text: `${name} · 已下载`, warning: false };
+      case 'loading':
+        return { text: `${name} · 加载中`, warning: false };
+      case 'downloading': {
+        const percent = model.size ? Math.floor((model.downloaded / model.size) * 100) : 0;
+        return { text: `${name} · 下载中 ${percent}%（共 ${size}）`, warning: false };
+      }
+      case 'failed':
+        return { text: `${name} · ${model.error || '不可用'}`, warning: true };
+      default:
+        return { text: `${name} · 保存后自动下载约 ${size}`, warning: false };
+    }
   }
 
   const CONFIG_CONTROL_IDS = [
@@ -1103,6 +1138,32 @@
     renderRemoteFields('embedding', state.config.embedding);
     renderRemoteFields('rerank', state.config.rerank);
     renderComponentMeta();
+    scheduleLocalModelPoll();
+  }
+
+  let localModelPollTimer = null;
+
+  // 选择了内置来源且模型尚未就绪时，定期刷新下载/加载进度（只更新状态文字，不动表单）。
+  function scheduleLocalModelPoll() {
+    window.clearTimeout(localModelPollTimer);
+    const tier = state.config.local_tier || 'mid';
+    const pending = ['embedding', 'rerank'].some((kind) => {
+      if (state.config[kind]?.source !== 'builtin') return false;
+      const model = (state.localModels || []).find((item) => item.tier === tier && item.kind === kind);
+      return !model || !['ready', 'failed'].includes(model.state);
+    });
+    if (!pending) return;
+    localModelPollTimer = window.setTimeout(async () => {
+      try {
+        const raw = await callHost('bootstrap', '');
+        const bootstrap = raw ? JSON.parse(raw) : {};
+        if (Array.isArray(bootstrap.local_models)) state.localModels = bootstrap.local_models;
+        renderComponentMeta();
+      } catch (_) {
+        // 轮询失败不打扰用户，下次再试。
+      }
+      scheduleLocalModelPoll();
+    }, 3000);
   }
 
   async function probeRemote(component) {

@@ -95,6 +95,29 @@ pub struct MemoryBootstrap {
     pub default_llm: Option<String>,
     #[serde(default)]
     pub disabled: bool,
+    /// 内置本地模型（各档位 embedding / rerank）状态。
+    #[serde(default)]
+    pub local_models: Vec<MemoryLocalModel>,
+}
+
+/// 内置本地模型状态。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryLocalModel {
+    /// low | mid | high
+    pub tier: String,
+    /// embedding | rerank
+    pub kind: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<usize>,
+    /// 总字节数。
+    pub size: u64,
+    /// not_downloaded | downloading | loading | ready | installed | failed
+    pub state: String,
+    #[serde(default)]
+    pub downloaded: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub struct GetConfig;

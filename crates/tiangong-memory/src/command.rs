@@ -131,6 +131,12 @@ pub enum MemoryCommand {
         options: Box<MemoryOptions>,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// 内置本地模型后台加载完成（内部命令）；`generation` 过期时丢弃。
+    LocalModelsReady {
+        generation: u64,
+        embedding: Option<std::sync::Arc<dyn tiangong_llm::EmbeddingProvider>>,
+        rerank: Option<std::sync::Arc<dyn tiangong_llm::RerankProvider>>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },

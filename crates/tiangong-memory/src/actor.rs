@@ -3,6 +3,10 @@
 //! 所有 Memory 读写均串行经过 Actor，天然消除并发冲突。
 //! 外部通过 MemoryHandle 的 mpsc channel 发送命令。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tiangong_llm::{EmbeddingProvider, RerankProvider};
 use tokio::sync::mpsc;
 
 use crate::command::MemoryCommand;
@@ -38,6 +42,10 @@ pub(crate) struct MemoryActor {
     options: MemoryOptions,
     pending_candidates: Vec<MemoryCandidate>,
     rumination_tx: mpsc::Sender<RuminationJob>,
+    /// 回送本地模型加载结果用（弱引用，不阻止通道关闭）。
+    self_tx: mpsc::WeakSender<MemoryCommand>,
+    /// 配置代号：每次（重新）配置递增，丢弃过期的本地模型加载结果。
+    generation: Arc<AtomicU64>,
 }
 
 impl MemoryActor {
@@ -46,6 +54,7 @@ impl MemoryActor {
         store: MemoryStore,
         options: MemoryOptions,
         rumination_tx: mpsc::Sender<RuminationJob>,
+        self_tx: mpsc::WeakSender<MemoryCommand>,
     ) -> Self {
         Self {
             rx,
@@ -53,18 +62,14 @@ impl MemoryActor {
             options,
             pending_candidates: Vec::new(),
             rumination_tx,
+            self_tx,
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// 启动 Actor 消息循环
     pub(crate) async fn run(mut self) {
-        self.store
-            .try_enable_recall_engine(
-                self.options.embedding.as_ref(),
-                self.options.rerank.as_ref(),
-                self.options.vector_mode,
-            )
-            .await;
+        self.apply_recall_options(false).await;
         tracing::info!("Memory Actor 已启动");
         let mut last_backfill = tokio::time::Instant::now();
         let shutdown_reply = loop {
@@ -428,6 +433,26 @@ impl MemoryActor {
                 rumination::apply_meta(&mut self.store, *outcome).await;
             }
 
+            MemoryCommand::LocalModelsReady {
+                generation,
+                embedding,
+                rerank,
+            } => {
+                if generation != self.generation.load(Ordering::SeqCst) {
+                    tracing::debug!("Memory 丢弃过期的本地模型加载结果");
+                    return;
+                }
+                let (remote_embedding, remote_rerank) = remote_providers(&self.options);
+                self.store
+                    .reconfigure_recall_engine(
+                        remote_embedding.or(embedding),
+                        remote_rerank.or(rerank),
+                        self.options.vector_mode,
+                    )
+                    .await;
+                tracing::info!("Memory 内置本地模型已接入召回");
+            }
+
             MemoryCommand::Reconfigure { options, reply } => {
                 let result = self
                     .reconfigure(*options)
@@ -442,17 +467,163 @@ impl MemoryActor {
     }
 
     async fn reconfigure(&mut self, options: MemoryOptions) -> anyhow::Result<()> {
-        self.store
-            .reconfigure_recall_engine(
-                options.embedding.as_ref(),
-                options.rerank.as_ref(),
-                options.vector_mode,
-            )
-            .await;
         self.options = options;
+        self.apply_recall_options(true).await;
         tracing::info!("Memory Actor 配置热更新完成");
         Ok(())
     }
+
+    /// 按当前选项启用召回增强层：在线组件立即生效；内置本地模型在独立线程
+    /// 下载并加载，完成后经 `LocalModelsReady` 回到 Actor 再整体启用。
+    async fn apply_recall_options(&mut self, reset: bool) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (embedding, rerank) = remote_providers(&self.options);
+        if reset {
+            self.store
+                .reconfigure_recall_engine(embedding, rerank, self.options.vector_mode)
+                .await;
+        } else {
+            self.store
+                .try_enable_recall_engine(embedding, rerank, self.options.vector_mode)
+                .await;
+        }
+
+        let local_embedding = self
+            .options
+            .local_embedding
+            .filter(|_| self.options.embedding.is_none());
+        let local_rerank = self
+            .options
+            .local_rerank
+            .filter(|_| self.options.rerank.is_none());
+        if local_embedding.is_none() && local_rerank.is_none() {
+            return;
+        }
+        if let Err(error) = spawn_local_model_loader(
+            self.self_tx.clone(),
+            self.generation.clone(),
+            generation,
+            local_embedding,
+            local_rerank,
+        ) {
+            tracing::warn!("Memory 启动内置模型加载线程失败，保持降级召回: {error}");
+        }
+    }
+}
+
+/// 召回增强组件（embedding, rerank）。
+type RecallProviders = (
+    Option<Arc<dyn EmbeddingProvider>>,
+    Option<Arc<dyn RerankProvider>>,
+);
+
+/// 按在线端点配置构造 provider；构造失败仅告警（该组件按未配置处理）。
+fn remote_providers(options: &MemoryOptions) -> RecallProviders {
+    let embedding = options.embedding.as_ref().and_then(|config| {
+        tiangong_llm::embedding_provider_from_config(config)
+            .inspect_err(|err| {
+                tracing::warn!("Memory embedding provider 初始化失败，跳过向量层: {err}")
+            })
+            .ok()
+    });
+    let rerank = options.rerank.as_ref().and_then(|config| {
+        tiangong_llm::rerank_provider_from_config(config)
+            .inspect_err(|err| {
+                tracing::warn!("Memory rerank provider 初始化失败，跳过模型精排: {err}")
+            })
+            .ok()
+    });
+    (embedding, rerank)
+}
+
+/// 本地模型加载失败后的重试间隔（秒），用尽后停止，等待下次配置变更。
+const LOCAL_MODEL_RETRY_SECS: [u64; 5] = [30, 60, 120, 300, 600];
+
+/// 在独立线程下载并加载内置模型：下载与 ONNX 初始化耗时且含阻塞 IO，
+/// 放在 Actor 的单线程 runtime 外执行，避免阻塞记忆读写。
+fn spawn_local_model_loader(
+    actor_tx: mpsc::WeakSender<MemoryCommand>,
+    current: Arc<AtomicU64>,
+    generation: u64,
+    embedding_tier: Option<crate::config::MemoryLocalTier>,
+    rerank_tier: Option<crate::config::MemoryLocalTier>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("tiangong-memory-local-model".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::warn!("Memory 内置模型加载 runtime 构建失败: {error}");
+                    return;
+                }
+            };
+            let stale = || current.load(Ordering::SeqCst) != generation;
+            let mut embedding = None;
+            let mut rerank = None;
+            let mut attempt = 0;
+            loop {
+                if stale() {
+                    return;
+                }
+                if let Some(tier) = embedding_tier.filter(|_| embedding.is_none()) {
+                    match runtime.block_on(crate::local_model::load_embedding(tier)) {
+                        Ok(provider) => embedding = Some(provider),
+                        Err(error) => {
+                            tracing::warn!("Memory 内置 Embedding 暂不可用: {error:#}")
+                        }
+                    }
+                }
+                if stale() {
+                    return;
+                }
+                if let Some(tier) = rerank_tier.filter(|_| rerank.is_none()) {
+                    match runtime.block_on(crate::local_model::load_rerank(tier)) {
+                        Ok(provider) => rerank = Some(provider),
+                        Err(error) => tracing::warn!("Memory 内置 Rerank 暂不可用: {error:#}"),
+                    }
+                }
+                let done = (embedding_tier.is_none() || embedding.is_some())
+                    && (rerank_tier.is_none() || rerank.is_some());
+                // 部分就绪也先接入，失败的组件继续重试。
+                if embedding.is_some() || rerank.is_some() {
+                    let Some(tx) = actor_tx.upgrade() else {
+                        return;
+                    };
+                    if stale()
+                        || tx
+                            .blocking_send(MemoryCommand::LocalModelsReady {
+                                generation,
+                                embedding: embedding.clone(),
+                                rerank: rerank.clone(),
+                            })
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+                if done {
+                    return;
+                }
+                let Some(delay) = LOCAL_MODEL_RETRY_SECS.get(attempt) else {
+                    tracing::warn!("Memory 内置模型多次加载失败，保持降级召回，修改配置后重试");
+                    return;
+                };
+                attempt += 1;
+                // 分段休眠，配置变更后能尽快退出。
+                for _ in 0..*delay {
+                    if stale() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+        })
+        .map(|_| ())
 }
 
 /// 启动 Memory 系统，返回 MemoryHandle（同步接口）
@@ -596,7 +767,7 @@ pub(crate) fn spawn_memory_actor(
         e
     })?;
 
-    let actor = MemoryActor::new(rx, store, options.clone(), rumination_tx);
+    let actor = MemoryActor::new(rx, store, options.clone(), rumination_tx, tx.downgrade());
     let _rumination_join = spawn_rumination_worker(rumination_rx, tx.downgrade())?;
 
     let join_handle = std::thread::Builder::new()

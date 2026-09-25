@@ -43,6 +43,11 @@ tiangong-types = { workspace = true }
 lancedb = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+# 内置本地推理（builtin 档位）
+fastembed = { workspace = true }
+# 下载内置模型文件
+reqwest = { workspace = true, features = ["stream", "rustls"] }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }

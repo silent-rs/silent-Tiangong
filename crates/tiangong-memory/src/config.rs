@@ -408,9 +408,13 @@ impl MemoryConfig {
         }
         if let Some(embedding) = self.embedding_endpoint() {
             options = options.with_embedding(embedding);
+        } else if matches!(self.embedding, Some(MemoryEmbeddingSource::Builtin)) {
+            options = options.with_local_embedding(self.local_tier);
         }
         if let Some(rerank) = self.rerank_endpoint() {
             options = options.with_rerank(rerank);
+        } else if matches!(self.rerank, Some(MemoryRerankSource::Builtin)) {
+            options = options.with_local_rerank(self.local_tier);
         }
         options.with_vector_mode(self.vector_mode)
     }
@@ -446,13 +450,8 @@ impl MemoryConfig {
                 tracing::warn!("Memory Embedding 在线端点配置不完整（地址/模型/维度），跳过向量层");
                 None
             }
-            MemoryEmbeddingSource::Builtin => {
-                tracing::info!(
-                    tier = self.local_tier.key(),
-                    "Memory 内置 Embedding 尚未接入本地推理，暂不启用向量层"
-                );
-                None
-            }
+            // 内置模型由 Actor 后台下载加载，不走在线端点。
+            MemoryEmbeddingSource::Builtin => None,
         }
     }
 
@@ -471,13 +470,7 @@ impl MemoryConfig {
                 tracing::warn!("Memory Rerank 在线端点配置不完整（地址/模型），跳过模型精排");
                 None
             }
-            MemoryRerankSource::Builtin => {
-                tracing::info!(
-                    tier = self.local_tier.key(),
-                    "Memory 内置 Rerank 尚未接入本地推理，暂不启用模型精排"
-                );
-                None
-            }
+            MemoryRerankSource::Builtin => None,
         }
     }
 
@@ -496,7 +489,10 @@ impl MemoryConfig {
         };
         Self {
             version: MEMORY_CONFIG_VERSION,
-            local_tier: MemoryLocalTier::default(),
+            local_tier: options
+                .local_embedding
+                .or(options.local_rerank)
+                .unwrap_or_default(),
             model: options.model.as_ref().map(|model| {
                 let mut endpoint = remote(
                     &model.base_url,
@@ -508,28 +504,35 @@ impl MemoryConfig {
                 endpoint.provider_key = model.source_provider.clone();
                 MemoryLlmSource::Remote(endpoint)
             }),
-            embedding: options
-                .embedding
-                .as_ref()
-                .map(|embedding| MemoryEmbeddingSource::Remote {
-                    endpoint: remote(
-                        &embedding.base_url,
-                        &embedding.api_key,
-                        &embedding.model,
-                        embedding.protocol,
-                        embedding.timeout,
-                    ),
-                    dimension: embedding.dimension,
+            embedding: match (&options.embedding, options.local_embedding) {
+                (None, Some(_)) => Some(MemoryEmbeddingSource::Builtin),
+                (embedding, _) => {
+                    embedding
+                        .as_ref()
+                        .map(|embedding| MemoryEmbeddingSource::Remote {
+                            endpoint: remote(
+                                &embedding.base_url,
+                                &embedding.api_key,
+                                &embedding.model,
+                                embedding.protocol,
+                                embedding.timeout,
+                            ),
+                            dimension: embedding.dimension,
+                        })
+                }
+            },
+            rerank: match (&options.rerank, options.local_rerank) {
+                (None, Some(_)) => Some(MemoryRerankSource::Builtin),
+                (rerank, _) => rerank.as_ref().map(|rerank| {
+                    MemoryRerankSource::Remote(remote(
+                        &rerank.base_url,
+                        &rerank.api_key,
+                        &rerank.model,
+                        rerank.protocol,
+                        rerank.timeout,
+                    ))
                 }),
-            rerank: options.rerank.as_ref().map(|rerank| {
-                MemoryRerankSource::Remote(remote(
-                    &rerank.base_url,
-                    &rerank.api_key,
-                    &rerank.model,
-                    rerank.protocol,
-                    rerank.timeout,
-                ))
-            }),
+            },
             vector_mode: options.vector_mode,
         }
     }
@@ -1395,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn to_options_resolves_remote_components_and_skips_builtin() {
+    fn to_options_resolves_remote_and_builtin_components() {
         let config = MemoryConfig {
             embedding: Some(MemoryEmbeddingSource::Remote {
                 endpoint: MemoryRemoteEndpoint {
@@ -1410,9 +1413,19 @@ mod tests {
             ..Default::default()
         };
         let options = config.to_options_with(&models_with_routes(true, true));
-        assert_eq!(options.model.unwrap().model, "step-mini");
-        assert_eq!(options.embedding.unwrap().dimension, 1024);
-        assert!(options.rerank.is_none(), "内置 rerank 阶段 1 暂不启用");
+        assert_eq!(options.model.as_ref().unwrap().model, "step-mini");
+        assert_eq!(options.embedding.as_ref().unwrap().dimension, 1024);
+        assert!(options.rerank.is_none(), "内置 rerank 不走在线端点");
+        assert_eq!(options.local_rerank, Some(MemoryLocalTier::Mid));
+        assert_eq!(options.local_embedding, None, "在线 embedding 优先");
+        assert!(options.needs_local_models());
+        // IPC 往返后仍保持内置来源。
+        let roundtrip = MemoryConfig::from_options(&options);
+        assert_eq!(roundtrip.rerank, Some(MemoryRerankSource::Builtin));
+        assert!(matches!(
+            roundtrip.embedding,
+            Some(MemoryEmbeddingSource::Remote { .. })
+        ));
         assert_eq!(options.vector_mode, MemoryVectorMode::EmbeddedLanceDb);
     }
 
