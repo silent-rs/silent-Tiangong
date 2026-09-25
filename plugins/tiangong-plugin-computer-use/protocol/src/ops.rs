@@ -324,6 +324,9 @@ pub struct WaitResponse {
     pub waited_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_element: Option<ElementRef>,
+    /// 判定依据（人读）：如「匹配窗口均已最小化」「没有匹配的窗口」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 pub struct Wait;

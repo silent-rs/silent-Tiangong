@@ -96,7 +96,7 @@ impl Guest for Component {
                     "properties": {
                         "action": { "type": "string", "enum": ["open", "list", "status"], "description": "open 唤起/启动；list 列举应用；status 能力探测" },
                         "app_name": { "type": "string", "description": "open：应用名（显示名/本地化名/文件名）；list：按名称筛选" },
-                        "bundle_id": { "type": "string", "description": "open：Bundle ID（如 com.tencent.xinWeChat），优先于 app_name" },
+                        "bundle_id": { "type": "string", "description": "open：macOS Bundle ID（如 com.tencent.xinWeChat），优先于 app_name；Windows 上视作可执行文件名" },
                         "pid": { "type": "integer", "description": "list：按进程号筛选", "minimum": 0 },
                         "foreground_only": { "type": "boolean", "description": "list：仅前台应用" }
                     },
@@ -105,7 +105,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_SCREENSHOT.to_string(),
-                description: "截屏并自动注入对话供你直接阅读（无需 OCR）。范围优先级：region 显式区域 > app_name/pid/foreground_only 应用窗口 > 主显示器全屏。产物为 JPEG，按屏幕逻辑尺寸输出（1 图片像素 = 1 point）；逻辑长边超过 max_dimension（默认 1568）时不裁剪，按 1/2、1/4… 整数倍缩小。结果给出 logical_bounds（原图屏幕区域）与 scale：屏幕坐标 = logical_bounds.x/y + 图片坐标 × scale。需要精确点击时对目标区域截小图（scale=1）。需要屏幕录制授权。"
+                description: "截屏并自动注入对话供你直接阅读（无需 OCR）。范围优先级：region 显式区域 > app_name/pid/foreground_only 应用窗口 > 主显示器全屏。产物为 JPEG，按屏幕逻辑尺寸输出（1 图片像素 = 1 point）；逻辑长边超过 max_dimension（默认 1568）时不裁剪，按 1/2、1/4… 整数倍缩小。结果给出 logical_bounds（原图屏幕区域）与 scale：屏幕坐标 = logical_bounds.x/y + 图片坐标 × scale。需要精确点击时对目标区域截小图（scale=1）。macOS 需要屏幕录制授权。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
@@ -120,7 +120,7 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_DESKTOP_INPUT.to_string(),
-                description: "真实输入（CGEvent 合成，行为与用户手动操作一致），点击、输入等交互的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/drag/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。"
+                description: "真实输入（系统级键鼠合成：macOS CGEvent / Windows SendInput，行为与用户手动操作一致），点击、输入等交互的首选路径，适用于 Canvas/Qt 自绘等无障碍树外的界面。鼠标：click/double_click/right_click/move/drag/scroll，坐标为屏幕逻辑坐标（由截图 logical_bounds 与 scale 换算）；点击自带平滑移动与到位停顿，无需先 move。首次鼠标操作时天工指针从系统鼠标位置分身出现并演示操作，本轮结束自动收起。键盘：type 输入任意文本（中文不经输入法）、key 按单键、combo 组合键（修饰键在前），先点击建立焦点。screenshot_after=true 时操作完成后自动截图，省去一次单独截图。"
                     .to_string(),
                 input_schema: schema_string(json!({
                     "type": "object",
@@ -138,7 +138,7 @@ impl Guest for Component {
                         "delta_x": { "type": "number", "description": "scroll：水平滚动像素，正=向右" },
                         "text": { "type": "string", "description": "type 必填：要输入的文本" },
                         "key": { "type": "string", "description": "key 必填：键名（enter/esc/tab/pageup/方向键/字母数字等，别名不敏感）" },
-                        "keys": { "type": "array", "items": { "type": "string" }, "description": "combo 必填：键名数组，修饰键在前，如 [\"cmd\",\"c\"]" },
+                        "keys": { "type": "array", "items": { "type": "string" }, "description": "combo 必填：键名数组，修饰键在前，如 [\"cmd\",\"c\"]（Windows 上 cmd 等同 ctrl，徽标键用 win）" },
                         "screenshot_after": { "type": "boolean", "description": "操作后自动截图（默认 false）" },
                         "screenshot_region": region_schema("screenshot_after 的截图区域（缺省按 screenshot_app_name 或全屏）"),
                         "screenshot_app_name": { "type": "string", "description": "screenshot_after 时截取该应用窗口" }
@@ -223,7 +223,7 @@ impl Guest for Component {
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
         Ok(vec![
             "桌面应用的交互一律使用 computer-use 插件（5 个工具）：唤起窗口、看界面、点击输入都属本插件职责。终端沙箱无法与图形界面交互（osascript、open -a、screencapture 均不可行），不要在终端里尝试。典型流程：desktop_app(action=open) 把目标应用唤起到前台（未运行会自动启动，返回窗口坐标）→ desktop_screenshot 截取窗口看界面 → desktop_input 点击/输入（可带 screenshot_after 直接看到结果）。原生控件可用 desktop_ui 读取控件树并执行语义动作；需要等界面变化时用 desktop_wait。权限问题会在工具失败时直接报告，无需预先查询状态。网页内容继续优先交给浏览器插件。".to_string(),
-            "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域，points）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。".to_string(),
+            "坐标换算：截图结果给出 logical_bounds（原图对应的屏幕区域；macOS 为 points，Windows 为物理像素，均与鼠标坐标同系）与 scale，屏幕坐标 = logical_bounds.x + 图片x × scale（y 同理）。先截窗口或全屏粗定位，需要精确点击时对目标附近区域截小图（scale=1，图片坐标加区域起点即屏幕坐标）。滚动聊天记录等内容时先确保鼠标位于内容区域内再 scroll，无效时改用 key=pageup/pagedown。".to_string(),
         ])
     }
 

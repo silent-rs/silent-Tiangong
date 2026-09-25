@@ -637,6 +637,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     if !looking_appear && !exists {
@@ -644,6 +645,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -651,6 +653,7 @@ impl Backend for MacosBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -713,6 +716,7 @@ impl Backend for MacosBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: Some(element.clone()),
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -720,6 +724,7 @@ impl Backend for MacosBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -747,13 +752,13 @@ impl Backend for MacosBackend {
                 });
             }
         };
-        match super::mouse::perform(
-            req.gesture,
-            req.x,
-            req.y,
-            to,
-            (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0)),
-        ) {
+        let (gesture, x, y) = (req.gesture, req.x, req.y);
+        let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
+        let outcome =
+            tokio::task::spawn_blocking(move || super::mouse::perform(gesture, x, y, to, scroll))
+                .await
+                .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::MouseResult {
                 performed: true,
                 summary,
@@ -770,12 +775,18 @@ impl Backend for MacosBackend {
                 reason: "尚未授予辅助功能权限".to_string(),
             });
         }
-        match super::keyboard::perform(
+        let (action, text, key, keys) = (
             req.action,
             req.text.clone(),
             req.key.clone(),
             req.keys.clone(),
-        ) {
+        );
+        // 手势内含阻塞等待与进程级互斥锁，放到阻塞线程池执行。
+        let outcome =
+            tokio::task::spawn_blocking(move || super::keyboard::perform(action, text, key, keys))
+                .await
+                .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));
+        match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::KeyboardResult {
                 performed: true,
                 summary,
@@ -923,17 +934,6 @@ fn filter_nodes(
 }
 
 // ── desktop_screenshot（RFC 0017 图片注入的图源，Phase 1：主显示器全屏）──
-
-/// 截图落点：`<存储根>/media/screenshots`。存储根由宿主经
-/// `TIANGONG_STORAGE_ROOT` 注入；缺失时退回系统临时目录（截图仍可用，
-/// 但不参与媒体目录的统一管理）。
-fn screenshot_output_dir() -> std::path::PathBuf {
-    let root = std::env::var(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
-        .ok()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    root.join("media").join("screenshots")
-}
 
 // 屏幕录制 TCC（macOS 10.15+）。macOS 没有屏幕录制的 Info.plist 用途
 // 声明键（Apple 文档不存在 NSScreenCaptureUsageDescription）：授权对话
@@ -1158,43 +1158,9 @@ fn capture_screenshot(
     })
 }
 
-/// 截图 JPEG 质量（sips formatOptions，0-100）。
-const SCREENSHOT_JPEG_QUALITY: u32 = 75;
-
-/// 截图输出规划：目标像素尺寸与图片像素→points 倍率。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScreenshotPlan {
-    width: u32,
-    height: u32,
-    factor: u32,
-}
-
-/// 由原始像素尺寸、逻辑尺寸与长边上限计算输出尺寸。
-///
-/// 逻辑尺寸缺失（0）时退回原始像素（视作 1x 屏）；目标取逻辑尺寸
-/// 除以 2 的幂次因子，保证 `屏幕坐标 = 起点 + 图片坐标 × factor`。
-fn plan_screenshot_output(
-    raw: (u32, u32),
-    logical: (f64, f64),
-    max_dimension: u32,
-) -> ScreenshotPlan {
-    let (lw, lh) = if logical.0 >= 1.0 && logical.1 >= 1.0 {
-        logical
-    } else {
-        (f64::from(raw.0), f64::from(raw.1))
-    };
-    let factor = tiangong_plugin_computer_use_protocol::ops::screenshot_downscale_factor(
-        lw,
-        lh,
-        max_dimension,
-    );
-    let div = f64::from(factor);
-    ScreenshotPlan {
-        width: ((lw / div).round() as u32).max(1),
-        height: ((lh / div).round() as u32).max(1),
-        factor,
-    }
-}
+use super::screenshot_plan::{
+    SCREENSHOT_JPEG_QUALITY, plan_screenshot_output, screenshot_output_dir,
+};
 
 /// 读取 JPEG 像素尺寸：扫描到 SOF0..SOF15（排除 DHT/JPG/DAC）段取宽高。
 fn jpeg_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
@@ -1376,45 +1342,7 @@ fn png_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod screenshot_tests {
-    use super::{ScreenshotPlan, parse_jpeg_dimensions, plan_screenshot_output};
-
-    #[test]
-    fn retina_region_within_limit_normalizes_to_logical_size() {
-        // 800×600 points 区域在 2x 屏截出 1600×1200 物理像素 → 输出 800×600、scale 1。
-        let plan = plan_screenshot_output((1600, 1200), (800.0, 600.0), 1568);
-        assert_eq!(
-            plan,
-            ScreenshotPlan {
-                width: 800,
-                height: 600,
-                factor: 1
-            }
-        );
-    }
-
-    #[test]
-    fn full_screen_over_limit_halves_instead_of_cropping() {
-        // 2560×1440 主屏（5120×2880 物理）→ 1/2：1280×720，scale 2。
-        let plan = plan_screenshot_output((5120, 2880), (2560.0, 1440.0), 1568);
-        assert_eq!(
-            plan,
-            ScreenshotPlan {
-                width: 1280,
-                height: 720,
-                factor: 2
-            }
-        );
-        // 自定义更小上限 → 1/4。
-        let plan = plan_screenshot_output((5120, 2880), (2560.0, 1440.0), 800);
-        assert_eq!(plan.factor, 4);
-        assert_eq!((plan.width, plan.height), (640, 360));
-    }
-
-    #[test]
-    fn missing_logical_size_falls_back_to_raw_pixels() {
-        let plan = plan_screenshot_output((1000, 500), (0.0, 0.0), 1568);
-        assert_eq!((plan.width, plan.height, plan.factor), (1000, 500, 1));
-    }
+    use super::parse_jpeg_dimensions;
 
     #[test]
     fn jpeg_dimensions_reads_sof_after_app_segments() {

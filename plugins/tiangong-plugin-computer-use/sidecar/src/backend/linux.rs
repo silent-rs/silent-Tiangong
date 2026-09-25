@@ -671,6 +671,7 @@ impl Backend for LinuxBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -678,6 +679,7 @@ impl Backend for LinuxBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -791,6 +793,7 @@ impl Backend for LinuxBackend {
                             satisfied: true,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: Some(element_ref.clone()),
+                            detail: None,
                         });
                     }
                     if Instant::now() >= deadline {
@@ -798,6 +801,7 @@ impl Backend for LinuxBackend {
                             satisfied: false,
                             waited_ms: start.elapsed().as_millis() as u64,
                             matched_element: None,
+                            detail: None,
                         });
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;

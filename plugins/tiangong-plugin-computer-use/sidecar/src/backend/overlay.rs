@@ -344,7 +344,7 @@ pub fn run_main_loop() {
         }
         pump_events(&app);
         if let Some(hud) = keycast.as_mut() {
-            hud.tick();
+            hud.tick(mtm);
         }
         // 缓存系统鼠标当前位置（AX 坐标），供 desktop_mouse 的 drag
         // 手势「借用并归还」读取（NSEvent 仅主线程可用）。

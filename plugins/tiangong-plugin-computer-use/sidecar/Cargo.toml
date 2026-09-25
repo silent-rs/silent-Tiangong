@@ -46,3 +46,22 @@ atspi = { version = "0.22", features = ["tokio", "proxies", "connection", "zbus"
 # Windows 后端：UI Automation 封装（基于 windows-rs）。
 [target.'cfg(target_os = "windows")'.dependencies]
 uiautomation = "0.16"
+# 与 uiautomation 同版本的 windows-rs（lockfile 已有，不新增依赖包）：
+# SendInput 键鼠合成、GDI 截图 + WIC JPEG 编码、分层窗口指针/按键 HUD、
+# 应用唤起（ShellExecuteEx）与 Per-Monitor DPI 感知。
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

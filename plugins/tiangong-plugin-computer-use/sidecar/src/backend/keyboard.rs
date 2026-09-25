@@ -13,13 +13,24 @@
 //!
 //! 键名大小写不敏感，接受常见别名（enter→return、esc→escape、
 //! backspace→delete、del→forward_delete 等）。
+//!
+//! 修饰键状态：每个事件都**显式设置 flags**，不继承事件源状态——
+//! 修饰键 down 携带「截至此刻已按下」的修饰集合，普通键携带全部修饰键，
+//! 修饰键 up 携带「剩余」修饰集合，type 字符携带空集合。否则抬起事件会
+//! 沿用按下时的状态标志，系统判定修饰键仍被按住（后续字符变成快捷键）。
+//!
+//! 串行化：键鼠手势经进程级 [`input_guard`] 互斥执行，宿主并发下发的
+//! 多个工具调用不会让事件交错（如 ⌘ 按住期间插入的字符变成 ⌘A）。
+use std::sync::{Mutex, MutexGuard};
 use std::thread::sleep;
 use std::time::Duration;
 
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use tiangong_plugin_computer_use_protocol::ops::KeyboardActionKind;
+
+use super::keys::normalize_key_name;
 
 /// key 手势 down → up 间隔。
 const KEY_DOWN_UP: Duration = Duration::from_millis(50);
@@ -27,6 +38,18 @@ const KEY_DOWN_UP: Duration = Duration::from_millis(50);
 const TYPE_GAP: Duration = Duration::from_millis(15);
 /// combo 修饰键相邻事件间隔。
 const MOD_GAP: Duration = Duration::from_millis(20);
+/// 手势结束后的收尾间隔：让目标应用处理完本手势的事件，再开始下一个。
+const GESTURE_SETTLE: Duration = Duration::from_millis(30);
+
+/// 键鼠手势互斥锁：同一时刻只执行一个手势，事件不交错。
+static INPUT_LOCK: Mutex<()> = Mutex::new(());
+
+/// 获取手势锁；前一个手势 panic 导致中毒时照常继续（锁内无共享数据）。
+pub(crate) fn input_guard() -> MutexGuard<'static, ()> {
+    INPUT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct KeyboardIo {
     source: CGEventSource,
@@ -38,53 +61,72 @@ impl KeyboardIo {
             .map_err(|()| "创建 CGEventSource 失败".to_string())?;
         Ok(Self { source })
     }
-    fn post_key(&self, keycode: CGKeyCode, key_down: bool) -> Result<(), String> {
+    /// 投递按键事件，flags 显式指定（不继承事件源的修饰键状态）。
+    fn post_key(
+        &self,
+        keycode: CGKeyCode,
+        key_down: bool,
+        flags: CGEventFlags,
+    ) -> Result<(), String> {
         let event = CGEvent::new_keyboard_event(self.source.clone(), keycode, key_down)
             .map_err(|()| "创建键盘事件失败".to_string())?;
+        event.set_flags(flags);
         event.post(CGEventTapLocation::HID);
         Ok(())
     }
     /// 投递一个 Unicode 字符：down/up 成对携带同一字符串（部分应用只读
-    /// keyDown 的字符串，成对最稳）。虚拟键码为 0（字符串分派不依赖布局）。
+    /// keyDown 的字符串，成对最稳）。虚拟键码为 0（字符串分派不依赖布局），
+    /// flags 为空，避免残留修饰键把字符变成快捷键。
     fn post_char(&self, ch: &str, key_down: bool) -> Result<(), String> {
         let event = CGEvent::new_keyboard_event(self.source.clone(), 0, key_down)
             .map_err(|()| "创建键盘事件失败".to_string())?;
         event.set_string(ch);
+        event.set_flags(CGEventFlags::CGEventFlagNull);
         event.post(CGEventTapLocation::HID);
         Ok(())
     }
 }
 
-/// 键名归一化：小写、去空白、常见别名折算。
-pub(crate) fn normalize_key_name(raw: &str) -> String {
-    let trimmed = raw.trim().to_lowercase();
-    match trimmed.as_str() {
-        "enter" => "return".to_string(),
-        "esc" => "escape".to_string(),
-        "backspace" => "delete".to_string(),
-        "del" => "forward_delete".to_string(),
-        "pageup" => "page_up".to_string(),
-        "pagedown" => "page_down".to_string(),
-        "command" | "super" | "win" => "cmd".to_string(),
-        "control" => "ctrl".to_string(),
-        "option" | "opt" | "meta" => "alt".to_string(),
-        "right_cmd" | "rcmd" => "rcmd".to_string(),
-        "right_ctrl" | "rctrl" => "rctrl".to_string(),
-        "right_alt" | "roption" | "ralt" => "ralt".to_string(),
-        "right_shift" | "rshift" => "rshift".to_string(),
-        "arrow_left" | "left_arrow" | "arrowleft" => "left".to_string(),
-        "arrow_right" | "right_arrow" | "arrowright" => "right".to_string(),
-        "arrow_up" | "up_arrow" | "arrowup" => "up".to_string(),
-        "arrow_down" | "down_arrow" | "arrowdown" => "down".to_string(),
-        other => other.to_string(),
+/// 修饰键对应的事件标志位。
+fn modifier_flag(name: &str) -> CGEventFlags {
+    match name {
+        "cmd" | "rcmd" | "win" => CGEventFlags::CGEventFlagCommand,
+        "shift" | "rshift" => CGEventFlags::CGEventFlagShift,
+        "alt" | "ralt" => CGEventFlags::CGEventFlagAlternate,
+        "ctrl" | "rctrl" => CGEventFlags::CGEventFlagControl,
+        _ => CGEventFlags::CGEventFlagNull,
     }
 }
 
+/// combo 事件序列：(键码, 是否按下, 事件 flags)。修饰键 down 携带累积集合，
+/// 普通键 down/up 携带全部修饰键，修饰键逆序 up 携带剩余集合（最后为空）。
+fn combo_events(modifiers: &[&str], plain: CGKeyCode) -> Vec<(CGKeyCode, bool, CGEventFlags)> {
+    let codes: Vec<(CGKeyCode, CGEventFlags)> = modifiers
+        .iter()
+        .filter_map(|m| modifier_keycode(m).map(|code| (code, modifier_flag(m))))
+        .collect();
+    let mut events = Vec::with_capacity(codes.len() * 2 + 2);
+    let mut held = CGEventFlags::CGEventFlagNull;
+    for (code, flag) in &codes {
+        held |= *flag;
+        events.push((*code, true, held));
+    }
+    events.push((plain, true, held));
+    events.push((plain, false, held));
+    for (i, (code, _)) in codes.iter().enumerate().rev() {
+        let remaining = codes[..i]
+            .iter()
+            .fold(CGEventFlags::CGEventFlagNull, |acc, (_, f)| acc | *f);
+        events.push((*code, false, remaining));
+    }
+    events
+}
+
 /// 修饰键虚拟键码（HIToolbox：cmd=55 rcmd=54 shift=56 rshift=60
-/// alt=58 ralt=61 ctrl=59 rctrl=62）。
+/// alt=58 ralt=61 ctrl=59 rctrl=62）。win（Windows 徽标键）在 macOS 上等同 cmd。
 fn modifier_keycode(name: &str) -> Option<CGKeyCode> {
     Some(match name {
-        "cmd" => 55,
+        "cmd" | "win" => 55,
         "rcmd" => 54,
         "shift" => 56,
         "rshift" => 60,
@@ -180,7 +222,20 @@ pub fn perform(
     key: Option<String>,
     keys: Option<Vec<String>>,
 ) -> Result<String, String> {
+    let _guard = input_guard();
     let io = KeyboardIo::new()?;
+    let result = perform_locked(&io, action, text, key, keys);
+    sleep(GESTURE_SETTLE);
+    result
+}
+
+fn perform_locked(
+    io: &KeyboardIo,
+    action: KeyboardActionKind,
+    text: Option<String>,
+    key: Option<String>,
+    keys: Option<Vec<String>>,
+) -> Result<String, String> {
     match action {
         KeyboardActionKind::Type => {
             let text = text
@@ -206,10 +261,10 @@ pub fn perform(
             let keycode = plain_keycode(&name)
                 .ok_or_else(|| format!("不支持的键名: {name}（修饰键请用 combo）"))?;
             // 按键 HUD 先于事件显示，用户看到提示与界面响应同步。
-            super::overlay::key_cast(vec![super::keycast::key_symbol(&name)]);
-            io.post_key(keycode, true)?;
+            super::overlay::key_cast(vec![super::keys::key_symbol(&name)]);
+            io.post_key(keycode, true, CGEventFlags::CGEventFlagNull)?;
             sleep(KEY_DOWN_UP);
-            io.post_key(keycode, false)?;
+            io.post_key(keycode, false, CGEventFlags::CGEventFlagNull)?;
             Ok(format!("已按 {name}"))
         }
         KeyboardActionKind::Combo => {
@@ -239,19 +294,32 @@ pub fn perform(
             let plain_name = plains[0].clone();
             let plain = plain_keycode(&plain_name)
                 .ok_or_else(|| format!("combo 不支持的键名: {plain_name}"))?;
-            super::overlay::key_cast(super::keycast::combo_keys(&names));
-            // 修饰键 down（保持给定顺序）→ 普通键 down/up → 修饰键逆序 up。
-            for m in &modifiers {
-                io.post_key(modifier_keycode(m).expect("已过滤为修饰键"), true)?;
-                sleep(MOD_GAP);
+            super::overlay::key_cast(super::keys::combo_keys(&names));
+            // 修饰键 down（保持给定顺序）→ 普通键 down/up → 修饰键逆序 up，
+            // 每个事件显式携带当时的修饰集合；中途失败也补发全部抬起。
+            let modifier_names: Vec<&str> = modifiers.iter().map(|m| m.as_str()).collect();
+            let events = combo_events(&modifier_names, plain);
+            let mut result = Ok(());
+            for (index, (code, down, flags)) in events.iter().enumerate() {
+                if let Err(error) = io.post_key(*code, *down, *flags) {
+                    result = Err(error);
+                    break;
+                }
+                let next_is_plain_up = events
+                    .get(index + 1)
+                    .is_some_and(|(c, d, _)| *c == plain && !*d);
+                sleep(if next_is_plain_up {
+                    KEY_DOWN_UP
+                } else {
+                    MOD_GAP
+                });
             }
-            io.post_key(plain, true)?;
-            sleep(KEY_DOWN_UP);
-            io.post_key(plain, false)?;
-            for m in modifiers.iter().rev() {
-                sleep(MOD_GAP);
-                io.post_key(modifier_keycode(m).expect("已过滤为修饰键"), false)?;
+            if result.is_err() {
+                for (code, _, _) in events.iter().filter(|(_, down, _)| *down) {
+                    let _ = io.post_key(*code, false, CGEventFlags::CGEventFlagNull);
+                }
             }
+            result?;
             Ok(format!("已执行组合键 {}", names.join("+")))
         }
     }
@@ -262,15 +330,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_common_aliases() {
-        assert_eq!(normalize_key_name("Enter"), "return");
-        assert_eq!(normalize_key_name(" ESC "), "escape");
-        assert_eq!(normalize_key_name("Backspace"), "delete");
-        assert_eq!(normalize_key_name("Del"), "forward_delete");
-        assert_eq!(normalize_key_name("Command"), "cmd");
-        assert_eq!(normalize_key_name("Option"), "alt");
-        assert_eq!(normalize_key_name("ArrowLeft"), "left");
-        assert_eq!(normalize_key_name(" A "), "a");
+    fn combo_events_carry_explicit_modifier_flags() {
+        let cmd = CGEventFlags::CGEventFlagCommand;
+        let shift = CGEventFlags::CGEventFlagShift;
+        let none = CGEventFlags::CGEventFlagNull;
+        // ⌘⇧Z：⌘↓(⌘) ⇧↓(⌘⇧) Z↓(⌘⇧) Z↑(⌘⇧) ⇧↑(⌘) ⌘↑(空)。
+        let events = combo_events(&["cmd", "shift"], 0x06);
+        assert_eq!(
+            events,
+            vec![
+                (55, true, cmd),
+                (56, true, cmd | shift),
+                (0x06, true, cmd | shift),
+                (0x06, false, cmd | shift),
+                (56, false, cmd),
+                (55, false, none),
+            ]
+        );
+        // 最后一个事件必须不带任何修饰键，否则系统认为仍被按住。
+        assert_eq!(events.last().map(|e| e.2), Some(none));
     }
 
     #[test]
@@ -278,7 +356,7 @@ mod tests {
         for k in ["a", "Z", "0", "9", "return", "esc", "f5", "up"] {
             assert!(is_known_key(k), "{k} 应识别");
         }
-        for k in ["cmd", "ctrl", "shift", "alt", "rcmd"] {
+        for k in ["cmd", "ctrl", "shift", "alt", "rcmd", "win"] {
             assert!(is_known_key(k), "{k} 应识别为修饰键");
         }
         assert!(!is_known_key("hup"), "未知键应拒绝");

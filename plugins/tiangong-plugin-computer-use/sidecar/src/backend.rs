@@ -2,7 +2,8 @@
 //!
 //! trait [`Backend`] 定义统一的桌面访问能力，各平台按条件编译提供实现：
 //! - macOS：通过 objc2 探测图形会话与辅助功能授权，列举运行中的应用窗口。
-//! - Windows / Linux：当前制品返回明确的能力不足结果，运行时不影响宿主启动。
+//! - Windows：UI Automation 控件树 + SendInput 键鼠 + GDI/WIC 截图 + 指针/HUD。
+//! - Linux：AT-SPI2 控件树（键鼠、截图等返回明确的能力不足结果）。
 
 use async_trait::async_trait;
 
@@ -125,6 +126,8 @@ pub struct WaitResult {
     pub satisfied: bool,
     pub waited_ms: u64,
     pub matched_element: Option<tiangong_plugin_computer_use_protocol::ElementRef>,
+    /// 判定依据（人读），无则省略。
+    pub detail: Option<String>,
 }
 
 /// 三平台均受支持的动作集合（统一暴露给 Agent）。
@@ -197,6 +200,12 @@ pub mod ax;
 pub mod keyboard;
 #[cfg(target_os = "macos")]
 pub mod keycast;
+/// 按键 HUD 卡片栈（平台无关逻辑）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod keycast_stack;
+/// 键名归一化与 HUD 显示符号（平台无关）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod keys;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -207,6 +216,21 @@ pub mod mouse;
 /// 天工虚拟指针 overlay（RFC 0018，仅 macOS）。
 #[cfg(target_os = "macos")]
 pub mod overlay;
+/// 截图产物规划（平台无关）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod screenshot_plan;
+/// Windows 截图、窗口枚举与应用唤起。
+#[cfg(target_os = "windows")]
+pub mod win_desktop;
+/// Windows SendInput 键鼠合成。
+#[cfg(target_os = "windows")]
+pub mod win_input;
+/// Windows 按键 HUD。
+#[cfg(target_os = "windows")]
+pub mod win_keycast;
+/// Windows 天工虚拟指针 overlay。
+#[cfg(target_os = "windows")]
+pub mod win_overlay;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

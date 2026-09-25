@@ -42,7 +42,7 @@ Objective-C 异常直接 abort）。sidecar `main` 把服务循环交给工作�
 overlay 事件循环（手动泵 + 16ms 帧）；`move_to`/`set_enabled` 经全局 channel 非阻塞
 投递，可在任意线程调用；服务退出经 `request_shutdown` 归还主线程。
 
-overlay 窗口属性（`sidecar/src/backend/overlay.rs`，仅 macOS）：
+overlay 窗口属性（`sidecar/src/backend/overlay.rs`，macOS；Windows 实现见下文平台对照表）：
 
 - `NSStatusWindowLevel`（25）置顶；borderless、透明背景、无阴影
 - `ignoresMouseEvents = true`：点击完全穿透，不干扰用户与目标应用
@@ -120,10 +120,12 @@ desktop_keyboard { action: type | key | combo, text?, key?, keys? }
 | 平台 | 视觉主角（overlay） | 闪移借用实现 | 状态 |
 |---|---|---|---|
 | macOS | NSStatusWindow 置顶窗 | down/up 事件**自带绝对坐标**，无需瞬移指针（借用最优雅的特例） | ✅ 实装 |
-| Windows | 分层置顶穿透窗（layered window） | `SetCursorPos` → `SendInput` down/up → `SetCursorPos` 归还 | 待实装 |
+| Windows | 分层置顶穿透窗（`WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_NOACTIVATE`，`UpdateLayeredWindow` 逐像素 alpha，`WDA_EXCLUDEFROMCAPTURE` 不进截图；专用 overlay 线程泵消息） | `SetCursorPos` → `SendInput` down/up → `SetCursorPos` 归还；滚轮同样借用后归还 | ✅ 实装（`win_input.rs` / `win_overlay.rs` / `win_keycast.rs`） |
 | Linux X11 | override-redirect 窗 | `XTestFakeMotionEvent` → `XTestFakeButtonEvent` → 归还 | 待实装 |
 | Wayland | — | 合成输入被安全模型禁止 | 维持 AT-SPI 语义动作 |
 
 实装建议：手势序列编排（插值节奏、到位等待、先移动后点击、归还）抽平台无关层，平台层仅提供 `post_motion(x,y)` / `post_button(down/up)` / overlay 三组原语。
 
-- 限制：仅主屏坐标正确（多屏待后续）；定向投递的滚轮在个别自绘应用可能不生效；Windows/Linux 两工具均返回不支持（清晰失败，agent 自动转语义动作路径）
+Windows 补充：sidecar 启动时声明 Per-Monitor-V2 DPI 感知，UIA bounds、鼠标坐标与截图 `logical_bounds` 统一为虚拟桌面物理像素（`scale` 语义不变）；键盘 `type` 用 `KEYEVENTF_UNICODE` 逐 UTF-16 单元分派，`cmd` 等同 Ctrl，徽标键为 `win`，按键 HUD 显示 `Ctrl/Alt/Shift/Win` 文字键帽；截图为 GDI `BitBlt(CAPTUREBLT)` + WIC JPEG；`open` 先匹配运行中窗口（进程名/标题）恢复并置前，未运行时查开始菜单快捷方式（显示名/本地化名）再交给 `ShellExecuteEx`。UIPI 限制：无法向以管理员身份运行的窗口注入输入（`SendInput` 明确报错）。
+
+- 限制：macOS 仅主屏坐标正确（多屏待后续）；定向投递的滚轮在个别自绘应用可能不生效；Linux 键鼠工具返回不支持（清晰失败，agent 自动转语义动作路径）
