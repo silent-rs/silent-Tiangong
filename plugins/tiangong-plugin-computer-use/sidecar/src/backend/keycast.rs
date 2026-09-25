@@ -1,18 +1,18 @@
-//! 按键可视化 HUD（keycast，仅 macOS）。
+//! 按键可视化 HUD（keycast，macOS）：与 Windows `win_keycast` 同样式同时序。
 //!
-//! Agent 经 `desktop_input` 执行 key/combo 时，在主屏中下部短暂显示按键：
-//! 左侧「天工」品牌徽标（靛紫渐变同色系，与天工虚拟指针一致），让用户
-//! 一眼看出是天工在操作；右侧每个按键渲染为独立键帽（`⌘` `⇧` `Z`），
-//! 连续按同一键时追加 `×3` 计数。约 1.2 秒后淡出。`type` 文本输入不显示
-//! （内容可能敏感，且逐字显示无意义）。
+//! Agent 经 `desktop_input` 执行 key/combo 时，在主屏中下部显示按键卡片：
+//! 左侧「天工」品牌徽标（靛紫，与天工虚拟指针一致），右侧每个按键渲染为
+//! 独立键帽（`⌘` `⇧` `Z`）。`type` 文本输入不显示（内容可能敏感）。
 //!
-//! 布局全部由本模块按绝对坐标计算（各元素实测文字宽度后逐个排布），
-//! 窗口宽度即内容总宽，保证在主屏可见区域内精确水平居中。
+//! 连续按键时每一步各占一张卡片（共享 [`super::keycast_stack`] 逻辑）：新卡片
+//! 出现在底部槽位，已有卡片平滑向上挤，每张卡片按自己的出现时间独立计时
+//! 淡出；同一组键连按合并为 ×N 计数；同屏最多 5 张，溢出的最早卡片加速
+//! 淡出——消除单窗口反复重绘造成的快速闪烁。
 //!
-//! 窗口置顶、点击穿透、不抢焦点、所有桌面空间与全屏应用上可见，由
-//! overlay 主循环（进程主线程）创建与驱动：`show` 重建内容并定位，
-//! `tick` 每帧推进淡出。
-use std::time::{Duration, Instant};
+//! 每张卡片一个窗口（淡出后回收复用），置顶、点击穿透、不抢焦点、所有
+//! 桌面空间与全屏应用上可见，由 overlay 主循环（进程主线程）创建与驱动：
+//! `show` 压栈并重建内容，`tick` 每帧推进淡入淡出与上挤动画。
+use std::time::Instant;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::{MainThreadMarker, class, msg_send};
@@ -23,11 +23,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
-/// 完全显示时长，之后开始淡出。
-const HOLD: Duration = Duration::from_millis(1200);
-/// 每帧（≈16ms）淡出步长，约 200ms 完全消失。
-const FADE_STEP: f64 = 0.08;
-/// HUD 底边距屏幕可见区域底边的比例（中下部）。
+use super::keycast_stack::{Pushed, Stack};
+
+/// HUD 底部槽位底边距屏幕可见区域底边的比例（中下部）。
 const BOTTOM_RATIO: f64 = 0.18;
 
 // ── 尺寸（points）──
@@ -108,90 +106,123 @@ fn place_label(label: &NSTextField, text_size: NSSize, x: f64, width: f64, conta
     ));
 }
 
-/// 按键 HUD 窗口。
-pub struct KeyCastHud {
+/// 创建隐藏的卡片窗口（置顶、点击穿透、不抢焦点、全空间可见）。
+fn create_card_window() -> Retained<NSWindow> {
+    let frame = NSRect::new(NSPoint::new(-1000.0, -1000.0), NSSize::new(10.0, 10.0));
+    unsafe {
+        // SAFETY：NSWindow 类存在，alloc 后立即 init。
+        let allocated: Allocated<NSWindow> = msg_send![class!(NSWindow), alloc];
+        let window = NSWindow::initWithContentRect_styleMask_backing_defer(
+            allocated,
+            frame,
+            NSWindowStyleMask::empty(),
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        window.setLevel(NSStatusWindowLevel);
+        // 所有桌面空间可见、可覆盖全屏应用（VS Code 等全屏时仍能看到）。
+        window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setIgnoresMouseEvents(true);
+        window.setHasShadow(true);
+        window.setAlphaValue(0.0);
+        window.setReleasedWhenClosed(false);
+        window
+    }
+}
+
+/// 一张卡片的窗口资源。
+struct CardWindow {
+    id: u64,
     window: Retained<NSWindow>,
-    last: Vec<String>,
-    repeat: u32,
-    hide_at: Option<Instant>,
-    alpha: f64,
+    width: f64,
+}
+
+/// 按键 HUD：卡片栈 + 每张卡片一个窗口（淡出后回收复用）。
+pub struct KeyCastHud {
+    stack: Stack,
+    windows: Vec<CardWindow>,
+    pool: Vec<Retained<NSWindow>>,
 }
 
 impl KeyCastHud {
-    /// 创建隐藏的 HUD 窗口（必须在主线程调用）。
+    /// 创建 HUD（必须在主线程调用）。预建一个窗口确认可用。
     pub fn new(_mtm: MainThreadMarker) -> Option<Self> {
-        let frame = NSRect::new(NSPoint::new(-1000.0, -1000.0), NSSize::new(10.0, 10.0));
-        unsafe {
-            // SAFETY：NSWindow 类存在，alloc 后立即 init。
-            let allocated: Allocated<NSWindow> = msg_send![class!(NSWindow), alloc];
-            let window = NSWindow::initWithContentRect_styleMask_backing_defer(
-                allocated,
-                frame,
-                NSWindowStyleMask::empty(),
-                NSBackingStoreType::Buffered,
-                false,
-            );
-            window.setLevel(NSStatusWindowLevel);
-            // 所有桌面空间可见、可覆盖全屏应用（VS Code 等全屏时仍能看到）。
-            window.setCollectionBehavior(
-                NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary
-                    | NSWindowCollectionBehavior::Stationary
-                    | NSWindowCollectionBehavior::IgnoresCycle,
-            );
-            window.setOpaque(false);
-            window.setBackgroundColor(Some(&NSColor::clearColor()));
-            window.setIgnoresMouseEvents(true);
-            window.setHasShadow(true);
-            window.setAlphaValue(0.0);
-            window.setReleasedWhenClosed(false);
-            // 不抢 key/main 状态：用户当前操作零干扰。
-            window.orderFrontRegardless();
-            Some(Self {
-                window,
-                last: Vec::new(),
-                repeat: 0,
-                hide_at: None,
-                alpha: 0.0,
-            })
-        }
+        Some(Self {
+            stack: Stack::new(1.0),
+            windows: Vec::new(),
+            pool: vec![create_card_window()],
+        })
     }
 
-    /// 显示一组键帽：重建内容视图，居中于主屏可见区域中下部，重置淡出计时。
+    /// 显示一组键帽：新卡片进入底部槽位，已有卡片向上挤；与最新卡片
+    /// 相同的按键合并为 ×N 并重置其计时。
     pub fn show(&mut self, keys: &[String], mtm: MainThreadMarker) {
         if keys.is_empty() {
             return;
         }
-        let visible = self.hide_at.is_some();
-        if visible && keys == self.last.as_slice() {
-            self.repeat += 1;
-        } else {
-            self.repeat = 1;
-            self.last = keys.to_vec();
+        match self.stack.push(keys, PANEL_HEIGHT, Instant::now()) {
+            Pushed::Merged(id) => {
+                let Some(card) = self.stack.cards.iter().find(|c| c.id == id) else {
+                    return;
+                };
+                let (content, width) = build_content(&card.keys, card.repeat, mtm);
+                if let Some(slot) = self.windows.iter_mut().find(|w| w.id == id) {
+                    slot.window.setContentView(Some(&content));
+                    slot.width = width;
+                }
+            }
+            Pushed::New(id) => {
+                let (content, width) = build_content(keys, 1, mtm);
+                let window = self.pool.pop().unwrap_or_else(create_card_window);
+                window.setContentView(Some(&content));
+                window.setAlphaValue(0.0);
+                window.orderFrontRegardless();
+                self.windows.push(CardWindow { id, window, width });
+            }
         }
-        let (content, width) = build_content(keys, self.repeat, mtm);
-        self.window.setContentView(Some(&content));
-        let origin = NSScreen::mainScreen(mtm)
-            .map(|screen| hud_origin(screen.visibleFrame(), width))
-            .unwrap_or_else(|| NSPoint::new(0.0, 0.0));
-        self.window
-            .setFrame_display(NSRect::new(origin, NSSize::new(width, PANEL_HEIGHT)), true);
-        self.window.orderFrontRegardless();
-        self.alpha = 1.0;
-        self.window.setAlphaValue(1.0);
-        self.hide_at = Some(Instant::now() + HOLD);
+        self.present_all(mtm);
     }
 
-    /// 每帧推进：超过显示时长后逐帧淡出。
-    pub fn tick(&mut self) {
-        if let Some(deadline) = self.hide_at
-            && Instant::now() >= deadline
-        {
-            self.alpha = (self.alpha - FADE_STEP).max(0.0);
-            self.window.setAlphaValue(self.alpha);
-            if self.alpha == 0.0 {
-                self.hide_at = None;
+    /// 每帧推进：各卡片独立淡入/淡出，上挤滑动，淡出完毕的窗口回收。
+    pub fn tick(&mut self, mtm: MainThreadMarker) {
+        if self.stack.cards.is_empty() {
+            return;
+        }
+        for id in self.stack.advance(Instant::now()) {
+            if let Some(index) = self.windows.iter().position(|w| w.id == id) {
+                let slot = self.windows.remove(index);
+                slot.window.setAlphaValue(0.0);
+                slot.window.orderOut(None);
+                self.pool.push(slot.window);
             }
+        }
+        self.present_all(mtm);
+    }
+
+    /// 按卡片当前偏移与透明度摆放全部窗口。
+    fn present_all(&self, mtm: MainThreadMarker) {
+        let Some(visible) = NSScreen::mainScreen(mtm).map(|s| s.visibleFrame()) else {
+            return;
+        };
+        for card in &self.stack.cards {
+            let Some(slot) = self.windows.iter().find(|w| w.id == card.id) else {
+                continue;
+            };
+            let base = hud_origin(visible, slot.width);
+            // 栈偏移以屏幕向下为正；AppKit 原点在左下，向上为正，取反。
+            let origin = NSPoint::new(base.x, (base.y - card.offset).round());
+            slot.window.setFrame_display(
+                NSRect::new(origin, NSSize::new(slot.width, PANEL_HEIGHT)),
+                true,
+            );
+            slot.window.setAlphaValue(card.alpha);
         }
     }
 }

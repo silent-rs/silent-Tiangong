@@ -95,6 +95,8 @@ pub fn perform(
     to: Option<(f64, f64)>,
     scroll: (f64, f64),
 ) -> Result<String, String> {
+    // 与键盘共用手势锁：并发调用时点击/拖拽不与按键事件交错。
+    let _guard = super::keyboard::input_guard();
     let io = MouseIo::new()?;
     match gesture {
         MouseGesture::Move => {

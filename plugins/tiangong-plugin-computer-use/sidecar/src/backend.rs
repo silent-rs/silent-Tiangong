@@ -200,6 +200,9 @@ pub mod ax;
 pub mod keyboard;
 #[cfg(target_os = "macos")]
 pub mod keycast;
+/// 按键 HUD 卡片栈（平台无关逻辑）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod keycast_stack;
 /// 键名归一化与 HUD 显示符号（平台无关）。
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod keys;

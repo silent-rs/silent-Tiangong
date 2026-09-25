@@ -752,13 +752,13 @@ impl Backend for MacosBackend {
                 });
             }
         };
-        match super::mouse::perform(
-            req.gesture,
-            req.x,
-            req.y,
-            to,
-            (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0)),
-        ) {
+        let (gesture, x, y) = (req.gesture, req.x, req.y);
+        let scroll = (req.delta_y.unwrap_or(0.0), req.delta_x.unwrap_or(0.0));
+        let outcome =
+            tokio::task::spawn_blocking(move || super::mouse::perform(gesture, x, y, to, scroll))
+                .await
+                .unwrap_or_else(|e| Err(format!("鼠标手势执行线程异常：{e}")));
+        match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::MouseResult {
                 performed: true,
                 summary,
@@ -775,12 +775,18 @@ impl Backend for MacosBackend {
                 reason: "尚未授予辅助功能权限".to_string(),
             });
         }
-        match super::keyboard::perform(
+        let (action, text, key, keys) = (
             req.action,
             req.text.clone(),
             req.key.clone(),
             req.keys.clone(),
-        ) {
+        );
+        // 手势内含阻塞等待与进程级互斥锁，放到阻塞线程池执行。
+        let outcome =
+            tokio::task::spawn_blocking(move || super::keyboard::perform(action, text, key, keys))
+                .await
+                .unwrap_or_else(|e| Err(format!("键盘输入执行线程异常：{e}")));
+        match outcome {
             Ok(summary) => DesktopResult::Ok(crate::backend::KeyboardResult {
                 performed: true,
                 summary,
