@@ -28,6 +28,8 @@ enum RuminationJob {
 /// 反刍 worker 的 LLM 提炼并发上限：保守值，避免高频多轮对话时打爆
 /// 模型端点限流；积压由有界队列（64）兜底。
 const RUMINATION_CONCURRENCY: usize = 2;
+/// 向量回填节拍：空闲该时长即推进一批；命令不断时也保证每个节拍至少一批。
+const BACKFILL_IDLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Memory Actor（独立运行时）
 pub(crate) struct MemoryActor {
@@ -64,8 +66,29 @@ impl MemoryActor {
             )
             .await;
         tracing::info!("Memory Actor 已启动");
+        let mut last_backfill = tokio::time::Instant::now();
         let shutdown_reply = loop {
-            match self.rx.recv().await {
+            // 有待回填向量时分批推进：空闲窗口内无命令即推进；命令持续不断时
+            // 也保证每个窗口至少推进一批，避免被高频请求饿死。
+            let next = if self.store.has_pending_backfill() {
+                if last_backfill.elapsed() >= BACKFILL_IDLE_WINDOW {
+                    self.store.run_backfill_batch().await;
+                    last_backfill = tokio::time::Instant::now();
+                    continue;
+                }
+                let wait = BACKFILL_IDLE_WINDOW.saturating_sub(last_backfill.elapsed());
+                match tokio::time::timeout(wait, self.rx.recv()).await {
+                    Ok(message) => message,
+                    Err(_) => {
+                        self.store.run_backfill_batch().await;
+                        last_backfill = tokio::time::Instant::now();
+                        continue;
+                    }
+                }
+            } else {
+                self.rx.recv().await
+            };
+            match next {
                 Some(MemoryCommand::Shutdown { reply }) => {
                     tracing::info!("Memory Actor 收到 Shutdown 命令，正在关闭");
                     break Some(reply);

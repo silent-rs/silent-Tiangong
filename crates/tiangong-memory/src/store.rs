@@ -24,18 +24,44 @@ use crate::recall::RecallEngine;
 use crate::search::TantivyIndex;
 use crate::search::lancedb_search::LanceDbIndex;
 use crate::search::vector::VectorIndex;
+use crate::search::vector_meta::{VectorIdentity, VectorIndexMeta};
 use crate::types::{
     Decision, Entity, Episode, EpisodeOutcome, Evidence, ExpandedMemory, ManualMemoryDraft,
     MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
     MemoryRelationDraft, MemoryRelationKind, MemoryScopeType, MemoryStatus, RecallAnchors,
     RecallHit,
 };
+
+/// 每批回填的节点数（一次 embedding 请求）。
+const VECTOR_BACKFILL_BATCH: usize = 32;
+
+/// 向量索引回填进度（新指纹表建立后由 actor 分批驱动）。
+struct VectorBackfill {
+    fingerprint: String,
+    cursor: Option<String>,
+    meta_path: PathBuf,
+    written: usize,
+}
+
+/// 把回填进度写回元数据；失败只告警（最坏情况重跑一批，upsert 幂等）。
+fn persist_backfill_progress(backfill: &VectorBackfill, cursor: Option<&str>, complete: bool) {
+    let result = VectorIndexMeta::load(&backfill.meta_path).and_then(|mut meta| {
+        meta.record_progress(&backfill.fingerprint, cursor, complete);
+        meta.save(&backfill.meta_path)
+    });
+    if let Err(err) = result {
+        tracing::warn!("Memory 写入向量回填进度失败: {err}");
+    }
+}
+
 /// Memory 存储协调器
 pub(crate) struct MemoryStore {
     db: MemoryDb,
     /// Tantivy 全文索引，多实例锁冲突时降级为 None（纯 SQLite 模式）
     tantivy: Option<TantivyIndex>,
     recall_engine: RecallEngine,
+    /// 待完成的向量回填。
+    vector_backfill: Option<VectorBackfill>,
 }
 
 impl MemoryStore {
@@ -59,6 +85,7 @@ impl MemoryStore {
             db,
             tantivy,
             recall_engine,
+            vector_backfill: None,
         })
     }
 
@@ -68,8 +95,9 @@ impl MemoryStore {
         vector_index: Box<dyn VectorIndex>,
         embedding: Arc<dyn EmbeddingProvider>,
         rerank: Option<Arc<dyn RerankProvider>>,
+        semantic_ready: bool,
     ) {
-        self.recall_engine = RecallEngine::dual(vector_index, embedding, rerank);
+        self.recall_engine = RecallEngine::dual(vector_index, embedding, rerank, semantic_ready);
     }
 
     pub(crate) fn enable_rerank_only(&mut self, rerank: Arc<dyn RerankProvider>) {
@@ -87,6 +115,7 @@ impl MemoryStore {
         vector_mode: MemoryVectorMode,
     ) {
         self.recall_engine = RecallEngine::bm25_only();
+        self.vector_backfill = None;
         self.try_enable_recall_engine(embedding, rerank, vector_mode)
             .await;
     }
@@ -169,7 +198,8 @@ impl MemoryStore {
             MemoryVectorMode::EmbeddedLanceDb => {
                 let base = memory_base_dir();
                 let needs_migration = migration::needs_vector_migration(&self.db, &base);
-                let opened = AssertUnwindSafe(LanceDbIndex::open(&base, embedding.dimension))
+                let identity = VectorIdentity::new(&embedding.model, embedding.dimension);
+                let opened = AssertUnwindSafe(LanceDbIndex::open(&base, &identity))
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|panic| {
@@ -179,10 +209,23 @@ impl MemoryStore {
                         ))
                     });
                 match opened {
-                    Ok(index) => {
+                    Ok((index, state)) => {
                         if needs_migration {
                             migration::migrate_vectors(&self.db, &index, embedding.dimension).await;
                         }
+                        self.vector_backfill = (!state.complete).then(|| {
+                            tracing::info!(
+                                fingerprint = %state.fingerprint,
+                                resume_from = ?state.cursor,
+                                "Memory 向量索引需要回填，完成前语义召回暂停"
+                            );
+                            VectorBackfill {
+                                fingerprint: state.fingerprint.clone(),
+                                cursor: state.cursor.clone(),
+                                meta_path: state.meta_path.clone(),
+                                written: 0,
+                            }
+                        });
                         (Box::new(index), "embedded_lancedb")
                     }
                     Err(err) => {
@@ -219,15 +262,78 @@ impl MemoryStore {
         let rerank_model = rerank_provider
             .as_ref()
             .map(|provider| provider.model().to_string());
-        self.enable_vector_index(vector_index, embedding_provider, rerank_provider);
+        let semantic_ready = self.vector_backfill.is_none();
+        self.enable_vector_index(
+            vector_index,
+            embedding_provider,
+            rerank_provider,
+            semantic_ready,
+        );
         tracing::info!(
-            "Memory 向量双引擎召回已启用: backend={} embedding_model={} dimension={} timeout_ms={} rerank_model={}",
+            "Memory 向量双引擎召回已启用: backend={} embedding_model={} dimension={} timeout_ms={} rerank_model={} semantic_ready={}",
             backend,
             embedding.model,
             embedding.dimension,
             embedding.timeout.as_millis(),
-            rerank_model.as_deref().unwrap_or("none")
+            rerank_model.as_deref().unwrap_or("none"),
+            semantic_ready
         );
+    }
+
+    /// 是否仍有待回填的向量。
+    pub(crate) fn has_pending_backfill(&self) -> bool {
+        self.vector_backfill.is_some()
+    }
+
+    /// 执行一批向量回填；返回 true 表示仍有剩余。
+    ///
+    /// 由 actor 在空闲时分批驱动，单批失败保留游标，下次重试（断点续传）。
+    pub(crate) async fn run_backfill_batch(&mut self) -> bool {
+        let Some(mut backfill) = self.vector_backfill.take() else {
+            return false;
+        };
+        let nodes = match self
+            .db
+            .list_vector_backfill_nodes(backfill.cursor.as_deref(), VECTOR_BACKFILL_BATCH)
+        {
+            Ok(nodes) => nodes,
+            Err(err) => {
+                tracing::warn!("Memory 向量回填读取节点失败，稍后重试: {err}");
+                self.vector_backfill = Some(backfill);
+                return true;
+            }
+        };
+
+        if nodes.is_empty() {
+            persist_backfill_progress(&backfill, None, true);
+            self.recall_engine.set_semantic_ready(true);
+            tracing::info!(
+                fingerprint = %backfill.fingerprint,
+                written = backfill.written,
+                "Memory 向量索引回填完成，语义召回已启用"
+            );
+            return false;
+        }
+
+        match self.recall_engine.upsert_nodes_batch(&nodes).await {
+            Ok(written) => {
+                backfill.written += written;
+                let last = nodes.last().map(|node| node.id.clone());
+                persist_backfill_progress(&backfill, last.as_deref(), false);
+                backfill.cursor = last;
+                tracing::debug!(
+                    fingerprint = %backfill.fingerprint,
+                    batch = nodes.len(),
+                    total_written = backfill.written,
+                    "Memory 向量回填进度"
+                );
+            }
+            Err(err) => {
+                tracing::warn!("Memory 向量回填批次失败，保留进度稍后重试: {err}");
+            }
+        }
+        self.vector_backfill = Some(backfill);
+        true
     }
 
     /// 加载三级注入上下文
@@ -1058,6 +1164,7 @@ mod tests {
             db,
             tantivy: None,
             recall_engine: RecallEngine::bm25_only(),
+            vector_backfill: None,
         };
         let anchors = RecallAnchors {
             keywords: vec!["Windows".to_string()],

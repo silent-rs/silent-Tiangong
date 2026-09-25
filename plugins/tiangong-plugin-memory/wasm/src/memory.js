@@ -69,12 +69,14 @@
     activeCount: 0,
     weekCount: 0,
     config: {
-      model_key: null,
-      embedding_key: null,
-      rerank_key: null,
+      local_tier: 'mid',
+      llm: { source: 'models_ref', key: null },
+      embedding: { source: 'disabled', remote: null },
+      rerank: { source: 'disabled', remote: null },
       vector_mode: 'auto',
     },
     models: [],
+    defaultLlm: null,
     loadVersion: 0,
   };
 
@@ -221,13 +223,9 @@
     try {
       const raw = await callHost('bootstrap', '');
       const bootstrap = raw ? JSON.parse(raw) : {};
-      state.config = {
-        model_key: bootstrap.config?.model_key ?? null,
-        embedding_key: bootstrap.config?.embedding_key ?? null,
-        rerank_key: bootstrap.config?.rerank_key ?? null,
-        vector_mode: bootstrap.config?.vector_mode || 'auto',
-      };
+      state.config = normalizeConfig(bootstrap.config);
       state.models = Array.isArray(bootstrap.models) ? bootstrap.models : [];
+      state.defaultLlm = bootstrap.default_llm || null;
       state.configLoaded = true;
       renderConfig();
       byId('config-status').textContent = '';
@@ -854,64 +852,225 @@
     }
   }
 
-  function eligibleModels(capabilities) {
-    const accepted = Array.isArray(capabilities) ? capabilities : [capabilities];
-    return state.models.filter((model) => {
-      const modelCapabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
-      return modelCapabilities.length === 0
-        || accepted.some((capability) => modelCapabilities.includes(capability));
-    });
+  function normalizeRemote(remote) {
+    if (!remote) return null;
+    return {
+      base_url: remote.base_url || '',
+      model: remote.model || '',
+      protocol: remote.protocol || '',
+      timeout_ms: Number(remote.timeout_ms || 0),
+      dimension: remote.dimension ?? null,
+      has_api_key: Boolean(remote.has_api_key),
+    };
   }
 
-  function fillModelSelect(id, capabilities, selectedKey) {
-    const select = byId(id);
-    const candidates = eligibleModels(capabilities);
-    const known = candidates.some((model) => model.key === selectedKey);
-    const selectedMissing = selectedKey && !known
-      ? `<option value="${escapeHtml(selectedKey)}">${escapeHtml(selectedKey)}（当前不可用）</option>`
+  function normalizeConfig(config) {
+    return {
+      local_tier: config?.local_tier || 'mid',
+      llm: {
+        source: config?.llm?.source || 'models_ref',
+        key: config?.llm?.key ?? null,
+        remote: normalizeRemote(config?.llm?.remote),
+      },
+      embedding: {
+        source: config?.embedding?.source || 'disabled',
+        remote: normalizeRemote(config?.embedding?.remote),
+      },
+      rerank: {
+        source: config?.rerank?.source || 'disabled',
+        remote: normalizeRemote(config?.rerank?.remote),
+      },
+      vector_mode: config?.vector_mode || 'auto',
+    };
+  }
+
+  // LLM 下拉：首项"跟随默认（lite → chat）"，其后为路由与 chat 模型；
+  // 在线端点（旧配置迁移而来）只读展示，重新选择后即改为模型引用。
+  function renderLlmSelect() {
+    const select = byId('config-model');
+    const llm = state.config.llm;
+    const follow = state.defaultLlm
+      ? `跟随默认（lite → chat，当前 ${escapeHtml(state.defaultLlm)}）`
+      : '跟随默认（lite → chat，当前未配置）';
+    const known = state.models.some((model) => model.key === llm.key);
+    const missing = llm.source === 'models_ref' && llm.key && !known
+      ? `<option value="${escapeHtml(llm.key)}">${escapeHtml(llm.key)}（当前不可用）</option>`
       : '';
-    select.innerHTML = `<option value="">未配置</option>${selectedMissing}${candidates.map((model) => (
-      `<option value="${escapeHtml(model.key)}">${escapeHtml(model.key)} · ${escapeHtml(model.provider)} / ${escapeHtml(model.model)}</option>`
-    )).join('')}`;
-    select.value = selectedKey || '';
+    const remote = llm.source === 'remote' && llm.remote
+      ? `<option value="__remote__">在线端点 · ${escapeHtml(llm.remote.model)}（旧配置）</option>`
+      : '';
+    const options = state.models.map((model) => {
+      const kind = model.kind === 'route' ? '路由' : '模型';
+      return `<option value="${escapeHtml(model.key)}">${escapeHtml(model.key)} · ${kind} · ${escapeHtml(model.provider)} / ${escapeHtml(model.model)}</option>`;
+    }).join('');
+    select.innerHTML = `<option value="">${follow}</option>${remote}${missing}${options}`;
+    select.value = llm.source === 'remote' ? '__remote__' : (llm.key || '');
   }
 
-  function renderConfig() {
-    fillModelSelect('config-model', ['chat', 'lite'], state.config.model_key);
-    fillModelSelect('config-embedding', 'embedding', state.config.embedding_key);
-    fillModelSelect('config-rerank', 'rerank', state.config.rerank_key);
-    byId('config-vector-mode').value = state.config.vector_mode || 'auto';
-    renderEmbeddingMeta();
-  }
-
-  function renderEmbeddingMeta() {
-    const selectedKey = byId('config-embedding').value;
-    const model = state.models.find((entry) => entry.key === selectedKey);
-    const meta = byId('embedding-meta');
-    if (!selectedKey) {
-      meta.textContent = '语义检索和向量索引';
-      meta.classList.remove('warning');
-    } else if (Number(model?.dimension || 0) > 0) {
-      meta.textContent = `向量维度 ${model.dimension}`;
-      meta.classList.remove('warning');
-    } else {
-      meta.textContent = '当前模型缺少向量维度';
-      meta.classList.add('warning');
+  function renderRemoteFields(prefix, component) {
+    const remote = component.remote || {};
+    byId(`${prefix}-remote`).classList.toggle('hidden', component.source !== 'remote');
+    byId(`${prefix}-url`).value = remote.base_url || '';
+    byId(`${prefix}-model`).value = remote.model || '';
+    byId(`${prefix}-key`).value = '';
+    byId(`${prefix}-key`).placeholder = remote.has_api_key
+      ? 'API Key 已保存（留空保留，支持 ${ENV}）'
+      : 'API Key（可留空，支持 ${ENV}）';
+    if (prefix === 'embedding') {
+      byId('embedding-dimension').value = remote.dimension || '';
     }
   }
 
+  function renderConfig() {
+    renderLlmSelect();
+    byId('config-tier').value = state.config.local_tier || 'mid';
+    byId('config-embedding-source').value = state.config.embedding.source;
+    byId('config-rerank-source').value = state.config.rerank.source;
+    renderRemoteFields('embedding', state.config.embedding);
+    renderRemoteFields('rerank', state.config.rerank);
+    byId('config-vector-mode').value = state.config.vector_mode || 'auto';
+    renderComponentMeta();
+  }
+
+  function renderComponentMeta() {
+    const tierLabel = { low: '低', mid: '中', high: '高' }[byId('config-tier').value] || '中';
+    const embeddingSource = byId('config-embedding-source').value;
+    const embeddingMeta = byId('embedding-meta');
+    embeddingMeta.classList.remove('warning');
+    if (embeddingSource === 'builtin') {
+      embeddingMeta.textContent = `内置 · ${tierLabel}档（本地推理即将提供，暂不启用向量层）`;
+      embeddingMeta.classList.add('warning');
+    } else if (embeddingSource === 'remote') {
+      const dimension = Number(byId('embedding-dimension').value || 0);
+      embeddingMeta.textContent = dimension > 0 ? `在线端点 · 向量维度 ${dimension}` : '在线端点 · 缺少向量维度';
+      if (dimension <= 0) embeddingMeta.classList.add('warning');
+    } else {
+      embeddingMeta.textContent = '语义检索和向量索引';
+    }
+    const rerankSource = byId('config-rerank-source').value;
+    const rerankMeta = byId('rerank-meta');
+    rerankMeta.classList.remove('warning');
+    if (rerankSource === 'builtin') {
+      rerankMeta.textContent = `内置 · ${tierLabel}档（本地推理即将提供，暂不启用精排）`;
+      rerankMeta.classList.add('warning');
+    } else if (rerankSource === 'remote') {
+      rerankMeta.textContent = '在线端点';
+    } else {
+      rerankMeta.textContent = '召回结果精排';
+    }
+    byId('embedding-remote').classList.toggle('hidden', embeddingSource !== 'remote');
+    byId('rerank-remote').classList.toggle('hidden', rerankSource !== 'remote');
+  }
+
+  const CONFIG_CONTROL_IDS = [
+    'config-model', 'config-tier', 'config-embedding-source', 'embedding-url', 'embedding-model',
+    'embedding-dimension', 'embedding-key', 'embedding-probe', 'config-rerank-source', 'rerank-url',
+    'rerank-model', 'rerank-key', 'rerank-probe', 'config-vector-mode', 'save-config',
+  ];
+
   function setConfigControlsDisabled(disabled) {
-    ['config-model', 'config-embedding', 'config-rerank', 'config-vector-mode', 'save-config']
-      .forEach((id) => { byId(id).disabled = disabled; });
+    CONFIG_CONTROL_IDS.forEach((id) => { byId(id).disabled = disabled; });
+  }
+
+  function readRemote(prefix, previous, withDimension) {
+    const key = byId(`${prefix}-key`).value.trim();
+    const remote = {
+      base_url: byId(`${prefix}-url`).value.trim(),
+      model: byId(`${prefix}-model`).value.trim(),
+      protocol: previous?.protocol || 'openai_chatcompletions',
+      timeout_ms: previous?.timeout_ms || 0,
+      has_api_key: Boolean(previous?.has_api_key),
+    };
+    if (withDimension) {
+      const dimension = Number(byId('embedding-dimension').value || 0);
+      remote.dimension = dimension > 0 ? dimension : null;
+    }
+    if (key) remote.api_key = key;
+    return remote;
   }
 
   function currentConfig() {
+    const llmValue = byId('config-model').value;
+    const llm = llmValue === '__remote__'
+      ? { source: 'remote', remote: state.config.llm.remote }
+      : { source: 'models_ref', key: llmValue || null };
+    const embeddingSource = byId('config-embedding-source').value;
+    const rerankSource = byId('config-rerank-source').value;
     return {
-      model_key: byId('config-model').value || null,
-      embedding_key: byId('config-embedding').value || null,
-      rerank_key: byId('config-rerank').value || null,
+      local_tier: byId('config-tier').value || 'mid',
+      llm,
+      embedding: {
+        source: embeddingSource,
+        remote: embeddingSource === 'remote'
+          ? readRemote('embedding', state.config.embedding.remote, true)
+          : null,
+      },
+      rerank: {
+        source: rerankSource,
+        remote: rerankSource === 'remote'
+          ? readRemote('rerank', state.config.rerank.remote, false)
+          : null,
+      },
       vector_mode: byId('config-vector-mode').value || 'auto',
     };
+  }
+
+  function validateConfig(config) {
+    if (config.embedding.source === 'remote') {
+      const remote = config.embedding.remote;
+      if (!remote.base_url || !remote.model) return '嵌入模型在线端点需要地址与模型名';
+      if (!(remote.dimension > 0)) return '嵌入模型缺少向量维度，可点击"探测"自动获取';
+    }
+    if (config.rerank.source === 'remote') {
+      const remote = config.rerank.remote;
+      if (!remote.base_url || !remote.model) return '重排模型在线端点需要地址与模型名';
+    }
+    return null;
+  }
+
+  // 保存成功后：已填写的密钥视为已保存，清空输入框避免重复提交。
+  function afterConfigSaved(config) {
+    ['embedding', 'rerank'].forEach((prefix) => {
+      const remote = config[prefix].remote;
+      if (remote?.api_key) remote.has_api_key = true;
+      if (remote) delete remote.api_key;
+    });
+    state.config = normalizeConfig(config);
+    renderRemoteFields('embedding', state.config.embedding);
+    renderRemoteFields('rerank', state.config.rerank);
+    renderComponentMeta();
+  }
+
+  async function probeRemote(component) {
+    const prefix = component;
+    const previous = state.config[component].remote;
+    const remote = readRemote(prefix, previous, component === 'embedding');
+    if (!remote.base_url || !remote.model) {
+      showToast('请先填写地址与模型名', 'error');
+      return;
+    }
+    const button = byId(`${prefix}-probe`);
+    button.disabled = true;
+    button.textContent = '探测中';
+    try {
+      const raw = await callHost('probe_config', JSON.stringify({ component, remote }));
+      const result = raw ? JSON.parse(raw) : {};
+      if (!result.ok) {
+        showToast(`探测失败：${result.message || '未知错误'}`, 'error');
+        return;
+      }
+      if (component === 'embedding' && result.dimension > 0) {
+        byId('embedding-dimension').value = result.dimension;
+        renderComponentMeta();
+        scheduleConfigSave();
+      }
+      showToast(result.message || '连接成功');
+    } catch (error) {
+      showToast(`探测失败：${errorText(error)}`, 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = '探测';
+    }
   }
 
   function scheduleConfigSave() {
@@ -928,12 +1087,7 @@
     window.clearTimeout(configSaveTimer);
     configSaveTimer = null;
     const config = currentConfig();
-    const embedding = state.models.find((model) => model.key === config.embedding_key);
-    if (
-      durable
-      && hostChannel
-      && (!config.embedding_key || Number(embedding?.dimension || 0) > 0)
-    ) {
+    if (durable && hostChannel && !validateConfig(config)) {
       const id = `memory-flush-${Date.now()}-${++requestSequence}`;
       window.parent.postMessage({
         type: 'plugin_call',
@@ -942,7 +1096,7 @@
         method: 'save_config',
         payload: JSON.stringify(config),
       }, '*');
-      state.config = config;
+      afterConfigSaved(config);
       configRevision += 1;
       configPending = false;
       return;
@@ -955,14 +1109,14 @@
     window.clearTimeout(configSaveTimer);
     configSaveTimer = null;
     const config = currentConfig();
-    const embedding = state.models.find((model) => model.key === config.embedding_key);
-    if (config.embedding_key && Number(embedding?.dimension || 0) <= 0) {
+    const invalid = validateConfig(config);
+    if (invalid) {
       const button = byId('save-config');
       button.disabled = false;
       button.textContent = '保存配置';
-      byId('config-status').textContent = '配置无效';
+      byId('config-status').textContent = '配置未完成';
       byId('config-status').classList.add('error');
-      showToast('嵌入模型缺少向量维度', 'error');
+      if (!automatic) showToast(invalid, 'error');
       return;
     }
 
@@ -977,7 +1131,7 @@
     configSaveQueue = configSaveQueue.catch(() => {}).then(async () => {
       if (revision !== configRevision) return;
       await callHost('save_config', JSON.stringify(config));
-      state.config = config;
+      afterConfigSaved(config);
       if (revision === configRevision) configPending = false;
       setRuntimeStatus('已连接');
       if (!automatic) showToast('配置已保存');
@@ -1322,12 +1476,21 @@
     });
 
     byId('config-form').addEventListener('submit', (event) => saveConfig(event, false));
-    ['config-model', 'config-embedding', 'config-rerank', 'config-vector-mode'].forEach((id) => {
-      byId(id).addEventListener('change', () => {
-        if (id === 'config-embedding') renderEmbeddingMeta();
-        scheduleConfigSave();
+    ['config-model', 'config-tier', 'config-embedding-source', 'config-rerank-source', 'config-vector-mode']
+      .forEach((id) => {
+        byId(id).addEventListener('change', () => {
+          renderComponentMeta();
+          scheduleConfigSave();
+        });
       });
-    });
+    // 在线端点文本字段：失焦时保存，避免输入过程中频繁热更新。
+    ['embedding-url', 'embedding-model', 'embedding-dimension', 'embedding-key', 'rerank-url', 'rerank-model', 'rerank-key']
+      .forEach((id) => {
+        byId(id).addEventListener('input', renderComponentMeta);
+        byId(id).addEventListener('change', scheduleConfigSave);
+      });
+    byId('embedding-probe').addEventListener('click', () => probeRemote('embedding'));
+    byId('rerank-probe').addEventListener('click', () => probeRemote('rerank'));
 
     byId('recall-open').addEventListener('click', openRecall);
     byId('recall-close').addEventListener('click', closeRecall);

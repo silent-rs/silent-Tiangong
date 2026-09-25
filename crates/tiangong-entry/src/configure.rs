@@ -141,8 +141,6 @@ fn prompt_model(
         ("video_generation", ModelCapability::VideoGeneration),
         ("stt", ModelCapability::Stt),
         ("tts", ModelCapability::Tts),
-        ("embedding", ModelCapability::Embedding),
-        ("rerank", ModelCapability::Rerank),
     ];
     let cap_labels: Vec<&str> = caps.iter().map(|(k, _)| *k).collect();
     // 默认勾选 chat（caps[0]），降低误操作概率
@@ -180,8 +178,6 @@ fn prompt_route(
         ("video_generation", RoutingSlot::VideoGeneration),
         ("stt", RoutingSlot::Stt),
         ("tts", RoutingSlot::Tts),
-        ("embedding", RoutingSlot::Embedding),
-        ("rerank", RoutingSlot::Rerank),
     ];
     // 默认推荐 chat
     let default_slot = if capabilities.contains(&ModelCapability::Chat) {
@@ -268,7 +264,8 @@ pub fn run_server_configure() -> Result<()> {
 
 // ── Memory 配置向导 ──
 
-/// Memory 配置向导：引导选择 Memory 端点模型。
+/// Memory 配置向导：LLM 推荐从模型列表选择（默认跟随 lite → chat），
+/// Embedding / Rerank 选择 不启用 / 内置 / 在线端点。
 pub fn run_memory_configure() -> Result<()> {
     ui::ensure_terminal()?;
     println!("=== Memory 配置向导 ===\n");
@@ -282,87 +279,125 @@ pub fn run_memory_configure() -> Result<()> {
             println!("已保持禁用状态，向导结束");
             return Ok(());
         }
-    } else if !ui::confirm("Memory 当前已启用，继续配置端点？", true)? {
+    } else if !ui::confirm("Memory 当前已启用，继续配置？", true)? {
         println!("已跳过，向导结束");
         return Ok(());
     }
 
-    if bootstrap.models.is_empty() {
-        println!("⚠️  models.json 中没有已注册模型，请先运行 `tiangong model configure`");
-        println!("（Memory 端点引用 models.json 中的模型）");
-        return Ok(());
-    }
-
-    bootstrap.config.model_key = Some(pick_memory_model(&bootstrap.models, "chat", "Memory LLM")?);
+    pick_memory_llm(&mut bootstrap)?;
     println!();
 
-    if ui::confirm("是否配置 Embedding 端点？", false)? {
-        bootstrap.config.embedding_key =
-            pick_optional_memory_model(&bootstrap.models, "embedding", "Embedding")?;
-    }
+    let tiers = ["low", "mid", "high"];
+    let current_tier = tiers
+        .iter()
+        .position(|tier| *tier == bootstrap.config.local_tier)
+        .unwrap_or(1);
+    let tier_labels = ["低（能效优先）", "中（推荐）", "高（效果优先）"];
+    let tier = ui::select_with_default("本地内置模型档位", &tier_labels, current_tier)?;
+    bootstrap.config.local_tier = tiers[tier].to_string();
     println!();
 
-    if ui::confirm("是否配置 Rerank 端点？", false)? {
-        bootstrap.config.rerank_key =
-            pick_optional_memory_model(&bootstrap.models, "rerank", "Rerank")?;
-    }
+    configure_memory_component(&mut bootstrap.config.embedding, "Embedding", true)?;
+    println!();
+    configure_memory_component(&mut bootstrap.config.rerank, "Rerank", false)?;
 
     crate::memory::save_selection(&bootstrap.config)?;
     println!();
     println!("✅ Memory 配置已保存");
-    println!("提示：可用 `tiangong memory test` 检查端点有效性");
+    println!("提示：可用 `tiangong memory test` 检查配置有效性");
     Ok(())
 }
 
-fn pick_memory_model(
-    models: &[crate::memory::MemoryUiModel],
-    capability: &str,
-    label: &str,
-) -> Result<String> {
-    let mut candidates = models
-        .iter()
-        .filter(|model| {
-            model
-                .capabilities
-                .iter()
-                .any(|current| current == capability)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.key.cmp(&right.key));
-    if candidates.is_empty() {
-        return Err(anyhow!("没有具备 {capability} 能力的已注册模型"));
-    }
-    let labels = candidates
-        .iter()
-        .map(|model| {
-            let dimension = model
-                .dimension
-                .map(|value| format!(" / dim={value}"))
-                .unwrap_or_default();
-            format!(
-                "{} ({} / {}{})",
-                model.key, model.provider, model.model, dimension
-            )
-        })
-        .collect::<Vec<_>>();
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
-    Ok(candidates[idx].key.clone())
+fn pick_memory_llm(bootstrap: &mut crate::memory::MemoryBootstrap) -> Result<()> {
+    let follow_label = match bootstrap.default_llm.as_deref() {
+        Some(current) => format!("跟随默认（lite → chat，当前：{current}）"),
+        None => "跟随默认（lite → chat，当前未配置）".to_string(),
+    };
+    let mut labels = vec![follow_label];
+    labels.extend(bootstrap.models.iter().map(|model| {
+        let kind = if model.kind == "route" {
+            "路由"
+        } else {
+            "模型"
+        };
+        format!(
+            "{} [{kind}] ({} / {})",
+            model.key, model.provider, model.model
+        )
+    }));
+    let current = bootstrap
+        .config
+        .llm
+        .key
+        .as_deref()
+        .and_then(|key| bootstrap.models.iter().position(|model| model.key == key))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let idx = ui::select_with_default("选择 Memory LLM", &label_refs, current)?;
+    bootstrap.config.llm = crate::memory::MemoryLlmSelection {
+        source: "models_ref".to_string(),
+        key: (idx > 0).then(|| bootstrap.models[idx - 1].key.clone()),
+        remote: None,
+    };
+    Ok(())
 }
 
-fn pick_optional_memory_model(
-    models: &[crate::memory::MemoryUiModel],
-    capability: &str,
+fn configure_memory_component(
+    component: &mut crate::memory::MemoryComponentSelection,
     label: &str,
-) -> Result<Option<String>> {
-    if !models.iter().any(|model| {
-        model
-            .capabilities
-            .iter()
-            .any(|current| current == capability)
-    }) {
-        println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
-        return Ok(None);
+    needs_dimension: bool,
+) -> Result<()> {
+    let sources = ["disabled", "builtin", "remote"];
+    let source_labels = ["不启用", "内置（按档位本地运行）", "在线端点"];
+    let current = sources
+        .iter()
+        .position(|source| *source == component.source)
+        .unwrap_or(0);
+    let idx = ui::select_with_default(&format!("{label} 来源"), &source_labels, current)?;
+    component.source = sources[idx].to_string();
+    if component.source != "remote" {
+        component.remote = None;
+        return Ok(());
     }
-    pick_memory_model(models, capability, label).map(Some)
+
+    let previous = component.remote.clone().unwrap_or_default();
+    let base_url = ui::input(&format!("{label} 地址（OpenAI 兼容）"), &previous.base_url)?;
+    let model = ui::input(&format!("{label} 模型名"), &previous.model)?;
+    let dimension = if needs_dimension {
+        let default = previous
+            .dimension
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "1024".to_string());
+        let raw = ui::input("向量维度", &default)?;
+        Some(
+            raw.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| anyhow!("向量维度必须是正整数，实际输入：{raw}"))?,
+        )
+    } else {
+        None
+    };
+    let key_prompt = if previous.has_api_key {
+        format!("{label} API Key（留空保留原值，支持 ${{ENV}}）")
+    } else {
+        format!("{label} API Key（可留空，支持 ${{ENV}}）")
+    };
+    let api_key = ui::password(&key_prompt)?;
+    component.remote = Some(crate::memory::MemoryRemoteSelection {
+        base_url: base_url.trim().to_string(),
+        model: model.trim().to_string(),
+        protocol: if previous.protocol.is_empty() {
+            "openai_chatcompletions".to_string()
+        } else {
+            previous.protocol
+        },
+        timeout_ms: previous.timeout_ms,
+        dimension,
+        api_key: Some(api_key.trim().to_string()).filter(|value| !value.is_empty()),
+        has_api_key: previous.has_api_key,
+    });
+    Ok(())
 }

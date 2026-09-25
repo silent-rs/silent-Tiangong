@@ -192,7 +192,7 @@ pub(crate) enum ModelSubcommand {
         model_id: String,
         #[arg(
             long = "capability",
-            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
+            help = "模型能力（可重复）：chat/multimodal/image_generation/video_generation/stt/tts（embedding/rerank 已迁至 `tiangong memory config set`）"
         )]
         capability: Vec<String>,
     },
@@ -223,9 +223,7 @@ pub(crate) enum RouteSubcommand {
     List,
     #[command(about = "设置 capability 路由指向某个已注册模型")]
     Set {
-        #[arg(
-            help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts/embedding/rerank"
-        )]
+        #[arg(help = "能力槽位：chat/lite/multimodal/image_generation/video_generation/stt/tts")]
         capability: String,
         #[arg(help = "模型名称（本地别名）")]
         model: String,
@@ -261,15 +259,70 @@ pub(crate) enum MemorySubcommand {
 pub(crate) enum MemoryConfigSubcommand {
     #[command(about = "查看 Memory 配置")]
     Show,
-    #[command(about = "从 models.json 引用模型填充 Memory 端点")]
+    #[command(
+        about = "修改 Memory 配置（LLM 从模型列表选择；Embedding/Rerank 选择内置或在线端点）"
+    )]
     Set {
-        #[arg(long, help = "Memory LLM 模型名（models.json 中的别名）")]
+        #[arg(
+            long,
+            help = "Memory LLM：models.json 中的 chat 模型 key 或 chat/lite 路由；default 表示跟随 lite → chat"
+        )]
         llm: Option<String>,
-        #[arg(long, help = "Embedding 模型名")]
-        embedding: Option<String>,
-        #[arg(long, help = "Rerank 模型名")]
-        rerank: Option<String>,
+        #[arg(long, value_enum, help = "本地内置模型档位")]
+        tier: Option<MemoryTierArg>,
+        #[arg(long, value_enum, help = "Embedding 来源")]
+        embedding: Option<MemoryComponentSourceArg>,
+        #[arg(long, help = "Embedding 在线端点地址（OpenAI 兼容）")]
+        embedding_url: Option<String>,
+        #[arg(long, help = "Embedding 在线模型名")]
+        embedding_model: Option<String>,
+        #[arg(long, help = "Embedding 向量维度")]
+        embedding_dimension: Option<usize>,
+        #[arg(long, help = "Embedding API Key（留空保留原值，支持 ${ENV}）")]
+        embedding_key: Option<String>,
+        #[arg(long, value_enum, help = "Rerank 来源")]
+        rerank: Option<MemoryComponentSourceArg>,
+        #[arg(long, help = "Rerank 在线端点地址（OpenAI 兼容）")]
+        rerank_url: Option<String>,
+        #[arg(long, help = "Rerank 在线模型名")]
+        rerank_model: Option<String>,
+        #[arg(long, help = "Rerank API Key（留空保留原值，支持 ${ENV}）")]
+        rerank_key: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum MemoryTierArg {
+    Low,
+    Mid,
+    High,
+}
+
+impl MemoryTierArg {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Mid => "mid",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum MemoryComponentSourceArg {
+    Disabled,
+    Builtin,
+    Remote,
+}
+
+impl MemoryComponentSourceArg {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Builtin => "builtin",
+            Self::Remote => "remote",
+        }
+    }
 }
 
 /// 解析 ProviderProtocol 字符串

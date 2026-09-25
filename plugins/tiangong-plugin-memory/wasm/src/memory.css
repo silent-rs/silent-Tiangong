@@ -889,6 +889,23 @@ input[type="range"] {
   color: var(--danger);
 }
 
+.config-remote {
+  display: grid;
+  gap: 8px;
+  padding: 0 18px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-remote.hidden {
+  display: none;
+}
+
+.config-remote-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .config-footer {
   display: flex;
   min-height: 64px;
