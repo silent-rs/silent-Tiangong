@@ -178,6 +178,8 @@ diffy = "0.5"
 dirs = "6"
 dunce = "1"
 eventsource-stream = "0.2"
+# 本地 Embedding / Rerank 推理（ONNX Runtime）；仅 Memory 使用
+fastembed = { version = "7.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures-util = "0.3"
 fs2 = "0.4"
 hex = "0.4"
