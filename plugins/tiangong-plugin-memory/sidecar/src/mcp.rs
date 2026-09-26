@@ -1,8 +1,12 @@
 //! `--mcp` 模式：以 stdio MCP Server 向第三方 Agent 提供记忆工具。
 //!
-//! 工具设计遵循"对话生命周期"：回合开始前 `memory_recall`，回合结束后
-//! `memory_record_turn`，会话结束时 `memory_end_session`；另提供显式写入、
-//! 快速检索、列表与归档。
+//! MCP 只暴露模型需要主动决策的两个工具：`memory_recall`（回忆）与
+//! `memory_remember`（记忆）。轮次上报、会话结束、列表、归档、状态等属于
+//! 生命周期与管理操作，不占用模型的工具上下文，只通过 daemon 的 REST 接口
+//! 提供（由 Agent 的 hook 或脚本调用）。
+//!
+//! [`tool_definitions`] 是全部操作的注册表（REST `/tools` 使用），
+//! [`MCP_TOOLS`] 是其中暴露给 MCP 的子集。
 
 use std::sync::Arc;
 
@@ -16,19 +20,28 @@ use serde_json::{Value, json};
 
 use crate::service::{MemoryService, ServiceError, ServiceResult, parse_input};
 
-const INSTRUCTIONS: &str = "天工 Memory：跨会话的长期记忆。建议接入方式：\
-1) 用户提到之前、上次、继续、那个等历史指代，或任务依赖历史背景时，先调用 memory_recall；\
-2) 每轮回复完成后调用 memory_record_turn 上报本轮（用户输入、最终回复、关键工具调用），由记忆系统异步提炼；\
-3) 会话结束时调用 memory_end_session 触发工作区级整理；\
-4) 用户明确要求记住的偏好或事实用 memory_remember 立即写入。\
+const INSTRUCTIONS: &str = "天工 Memory：跨会话的长期记忆。\
+1) 用户提到之前、上次、继续、那个等历史指代，或任务依赖历史背景、项目约定时，先调用 memory_recall；\
+2) 用户明确要求记住的偏好、约定或事实，或本次对话得出值得长期保留的结论时，调用 memory_remember。\
 workspace 可传项目绝对路径，会按末级目录名归一，与天工同项目记忆共享。";
 
-/// 所有 MCP 工具定义：名称、描述、输入 Schema。
+/// 暴露给 MCP 的工具（模型主动调用）。其余操作只走 REST。
+pub const MCP_TOOLS: [&str; 2] = ["memory_recall", "memory_remember"];
+
+/// MCP 工具定义。
+pub fn mcp_tool_definitions() -> Vec<Tool> {
+    tool_definitions()
+        .into_iter()
+        .filter(|tool| MCP_TOOLS.contains(&tool.name.as_ref()))
+        .collect()
+}
+
+/// 全部操作定义（名称、描述、输入 Schema），REST `/tools` 与 MCP 共用。
 pub fn tool_definitions() -> Vec<Tool> {
     vec![
         tool(
             "memory_recall",
-            "按需回忆历史上下文（规划检索 + 召回 + 整理）。用户提到之前、上次、继续、那个等历史指代，或任务依赖跨会话背景时调用。返回可直接阅读的整理结果与命中列表。",
+            "回忆：按需找回跨会话的历史上下文（关键词 + 语义检索，配置了记忆 LLM 时还会规划查询并整理结果）。用户提到之前、上次、继续、那个等历史指代，或任务依赖历史背景、项目约定时调用。返回可直接阅读的整理结果与命中列表。",
             json!({
                 "type": "object",
                 "properties": {
@@ -56,7 +69,7 @@ pub fn tool_definitions() -> Vec<Tool> {
         ),
         tool(
             "memory_remember",
-            "立即写入一条长期记忆，用于用户明确要求记住的偏好、约定或事实。",
+            "记忆：立即写入一条长期记忆，用于用户明确要求记住的偏好、约定或事实，以及对话中得出的值得长期保留的结论。",
             json!({
                 "type": "object",
                 "properties": {
@@ -222,11 +235,11 @@ impl ServerHandler for MemoryMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(tool_definitions()))
+        Ok(ListToolsResult::with_all_items(mcp_tool_definitions()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tool_definitions()
+        mcp_tool_definitions()
             .into_iter()
             .find(|tool| tool.name == name)
     }
@@ -236,6 +249,12 @@ impl ServerHandler for MemoryMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        if !MCP_TOOLS.contains(&request.name.as_ref()) {
+            return Err(McpError::invalid_params(
+                format!("未知工具：{}", request.name),
+                None,
+            ));
+        }
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let Some(result) = call_tool(&self.service, &request.name, arguments).await else {
             return Err(McpError::invalid_params(
@@ -296,5 +315,20 @@ mod tests {
             );
             assert!(tool.description.as_deref().is_some_and(|d| !d.is_empty()));
         }
+    }
+
+    #[test]
+    fn mcp_exposes_only_recall_and_remember() {
+        let names = mcp_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["memory_recall", "memory_remember"]);
+        // MCP 子集必须都在完整注册表中（REST 与 MCP 同一实现）。
+        let all = tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(MCP_TOOLS.iter().all(|name| all.iter().any(|n| n == name)));
     }
 }

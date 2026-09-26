@@ -21,7 +21,7 @@ cargo run -p xtask -- build-plugin memory
 sidecar 二进制也可脱离天工使用，与天工共享同一份记忆：
 
 ```bash
-tiangong-memory-sidecar --mcp                        # stdio MCP Server
+tiangong-memory-sidecar --mcp                        # stdio MCP Server（回忆 / 记忆两个工具）
 tiangong-memory-sidecar --daemon --token <令牌>      # 后台 HTTP REST（默认 127.0.0.1:7717）
 tiangong-memory-sidecar --stop                       # 停止后台 daemon
 tiangong-memory-sidecar --config                     # 浏览器配置页，点击"完成并关闭"后退出
