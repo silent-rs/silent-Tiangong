@@ -622,7 +622,11 @@ impl MemoryDb {
         Ok(nodes)
     }
 
-    /// 按 ID 升序分页列出需要向量化的活跃 Episode（向量索引回填使用）。
+    /// 按 ID 升序分页列出需要向量化的活跃节点（向量索引回填使用）。
+    ///
+    /// 覆盖所有 kind：手动记忆、语义/程序性记忆等在写入时同样进向量索引
+    /// （见 `MemoryStore::upsert_node` 调用点），只回填 episode 会让它们在
+    /// 换模型后永久缺失语义索引。
     ///
     /// `after` 为上一批最后一个节点 ID（不含），None 表示从头开始。
     pub(crate) fn list_vector_backfill_nodes(
@@ -634,7 +638,7 @@ impl MemoryDb {
             "SELECT id, kind, memory_type, scope_type, scope_id, title, summary, keywords, importance,
                     confidence, status, source, usage_count, last_used_at, created_at, updated_at
              FROM memory_nodes
-             WHERE kind = 'episode' AND status = 'active' AND id > ?1
+             WHERE status = 'active' AND id > ?1
              ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(

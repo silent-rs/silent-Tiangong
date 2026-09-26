@@ -116,7 +116,7 @@ impl SelfUpdater {
         ensure_standalone_install(target)?;
         let parent = target.parent().context("可执行文件缺少父目录")?;
         let _lock = UpdateLock::acquire(parent)?;
-        cleanup_stale_transactions(parent);
+        cleanup_stale_transactions(parent, target);
 
         let release = self.fetch_release().await?;
         let latest = Version::parse(&release.version).context("目录中的版本号非法")?;
@@ -397,19 +397,42 @@ fn replace_executable(candidate: &Path, target: &Path) -> Result<()> {
     }
 }
 
-fn cleanup_stale_transactions(directory: &Path) {
+/// 清理上次更新遗留：本程序的事务目录，以及 Windows 上本程序自己的旧版本备份。
+///
+/// 备份名形如 `<可执行文件主名>.old-<scru128>`（`with_extension` 会替换原扩展名），
+/// 只清理严格符合该命名的文件——同目录可能放着其他程序的文件，
+/// 按 `.old-` 子串匹配会误删无关文件。
+fn cleanup_stale_transactions(directory: &Path, target: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
+    let backup_prefix = target
+        .file_stem()
+        .map(|stem| format!("{}.old-", stem.to_string_lossy()));
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(TRANSACTION_PREFIX) {
             let _ = std::fs::remove_dir_all(entry.path());
-        } else if cfg!(windows) && name.contains(".old-") {
+        } else if cfg!(windows)
+            && backup_prefix
+                .as_deref()
+                .is_some_and(|prefix| is_own_backup(&name, prefix))
+        {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// 是否为本程序生成的旧版本备份：前缀匹配且后缀是 scru128（25 位 0-9a-z）。
+fn is_own_backup(name: &str, backup_prefix: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(backup_prefix) else {
+        return false;
+    };
+    suffix.len() == 25
+        && suffix
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch.is_ascii_lowercase())
 }
 
 struct UpdateLock(std::fs::File);
@@ -634,6 +657,23 @@ mod tests {
         let error = updater.update_target(&fx.target).await.unwrap_err();
         assert!(error.to_string().contains("插件管理器"), "{error:#}");
         fx.server.join().unwrap();
+    }
+
+    #[test]
+    fn own_backup_matching_is_strict() {
+        let prefix = "tiangong-memory.old-";
+        let id = scru128::new().to_string();
+        assert_eq!(id.len(), 25, "scru128 文本长度应为 25：{id}");
+        assert!(is_own_backup(&format!("{prefix}{id}"), prefix));
+        // 其他程序的备份、手工备份和非法后缀都不该被清理。
+        assert!(!is_own_backup(&format!("other.old-{id}"), prefix));
+        assert!(!is_own_backup(&format!("{prefix}manual"), prefix));
+        assert!(!is_own_backup(
+            &format!("{prefix}{}", id.to_uppercase()),
+            prefix
+        ));
+        assert!(!is_own_backup(&format!("{prefix}{id}.zip"), prefix));
+        assert!(!is_own_backup("notes.old-backup.txt", prefix));
     }
 
     #[test]

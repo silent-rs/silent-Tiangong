@@ -32,12 +32,33 @@ use crate::types::{
 /// 每批回填的节点数（一次 embedding 请求）。
 const VECTOR_BACKFILL_BATCH: usize = 32;
 
+/// 同一批回填连续失败后的重试间隔（秒）。
+///
+/// embedding 端点故障时立刻重试只会持续打无效请求；用尽后跳过该批，
+/// 避免个别节点或一次性坏数据把整表回填永久卡住。
+const BACKFILL_RETRY_SECS: [u64; 4] = [1, 5, 15, 60];
+
 /// 向量索引回填进度（新指纹表建立后由 actor 分批驱动）。
 struct VectorBackfill {
     fingerprint: String,
     cursor: Option<String>,
     meta_path: PathBuf,
     written: usize,
+    /// 已有批次在后台计算 embedding，避免重复提交同一批。
+    in_flight: bool,
+    /// 当前批次连续失败次数（成功或跳过后归零）。
+    failures: usize,
+    /// 退避到期时间；None 表示可立即推进。
+    retry_at: Option<tokio::time::Instant>,
+    /// 反复失败后被跳过的节点数（仅用于诊断）。
+    skipped: usize,
+}
+
+/// 一批待计算 embedding 的回填任务（由 actor 交给后台执行）。
+pub(crate) struct BackfillBatch {
+    pub(crate) nodes: Vec<MemoryNode>,
+    pub(crate) texts: Vec<String>,
+    pub(crate) embedding: Arc<dyn EmbeddingProvider>,
 }
 
 /// 把回填进度写回元数据；失败只告警（最坏情况重跑一批，upsert 幂等）。
@@ -198,6 +219,10 @@ impl MemoryStore {
                                 cursor: state.cursor.clone(),
                                 meta_path: state.meta_path.clone(),
                                 written: 0,
+                                in_flight: false,
+                                failures: 0,
+                                retry_at: None,
+                                skipped: 0,
                             }
                         });
                         (Box::new(index), "embedded_lancedb")
@@ -253,17 +278,41 @@ impl MemoryStore {
         );
     }
 
-    /// 是否仍有待回填的向量。
-    pub(crate) fn has_pending_backfill(&self) -> bool {
-        self.vector_backfill.is_some()
+    /// 距下一次可推进回填的等待时长。
+    ///
+    /// `None` 表示当前无需 actor 唤醒：没有回填任务，或已有批次在后台计算
+    /// （结果会经命令通道回送）。`Some(Duration::ZERO)` 表示可立即推进。
+    pub(crate) fn backfill_due_in(&self) -> Option<std::time::Duration> {
+        let backfill = self.vector_backfill.as_ref()?;
+        if backfill.in_flight {
+            return None;
+        }
+        let Some(retry_at) = backfill.retry_at else {
+            return Some(std::time::Duration::ZERO);
+        };
+        Some(retry_at.saturating_duration_since(tokio::time::Instant::now()))
     }
 
-    /// 执行一批向量回填；返回 true 表示仍有剩余。
+    /// 取出下一批回填节点，交给后台计算 embedding。
     ///
-    /// 由 actor 在空闲时分批驱动，单批失败保留游标，下次重试（断点续传）。
-    pub(crate) async fn run_backfill_batch(&mut self) -> bool {
-        let Some(mut backfill) = self.vector_backfill.take() else {
-            return false;
+    /// 只做 SQLite 读取这类快操作；embedding 请求可能耗时数十秒，放在
+    /// actor 主循环里同步等待会让召回、写入和重配置一起排队。
+    pub(crate) fn take_backfill_batch(&mut self) -> Option<BackfillBatch> {
+        let embedding = self.recall_engine.embedding_provider();
+        let backfill = self.vector_backfill.as_mut()?;
+        if backfill.in_flight {
+            return None;
+        }
+        if backfill
+            .retry_at
+            .is_some_and(|at| at > tokio::time::Instant::now())
+        {
+            return None;
+        }
+        let Some(embedding) = embedding else {
+            tracing::warn!("Memory 无可用 embedding provider，停止向量回填");
+            self.vector_backfill = None;
+            return None;
         };
         let nodes = match self
             .db
@@ -271,29 +320,79 @@ impl MemoryStore {
         {
             Ok(nodes) => nodes,
             Err(err) => {
-                tracing::warn!("Memory 向量回填读取节点失败，稍后重试: {err}");
-                self.vector_backfill = Some(backfill);
-                return true;
+                let index = backfill.failures.min(BACKFILL_RETRY_SECS.len() - 1);
+                let delay = BACKFILL_RETRY_SECS[index];
+                backfill.retry_at =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(delay));
+                backfill.failures = backfill.failures.saturating_add(1);
+                tracing::warn!("Memory 向量回填读取节点失败，{delay}s 后重试: {err}");
+                return None;
             }
         };
-
         if nodes.is_empty() {
-            persist_backfill_progress(&backfill, None, true);
-            self.recall_engine.set_semantic_ready(true);
+            persist_backfill_progress(backfill, None, true);
             tracing::info!(
                 fingerprint = %backfill.fingerprint,
                 written = backfill.written,
+                skipped = backfill.skipped,
                 "Memory 向量索引回填完成，语义召回已启用"
             );
-            return false;
+            self.vector_backfill = None;
+            self.recall_engine.set_semantic_ready(true);
+            return None;
         }
+        backfill.in_flight = true;
+        let texts = RecallEngine::backfill_texts(&nodes);
+        Some(BackfillBatch {
+            nodes,
+            texts,
+            embedding,
+        })
+    }
 
-        match self.recall_engine.upsert_nodes_batch(&nodes).await {
-            Ok(written) => {
+    /// 落库后台算好的回填向量；失败按批退避，重试用尽后跳过该批。
+    pub(crate) async fn apply_backfill_vectors(
+        &mut self,
+        nodes: Vec<MemoryNode>,
+        vectors: Result<Vec<Vec<f32>>, String>,
+    ) {
+        let Some(backfill) = self.vector_backfill.as_mut() else {
+            return;
+        };
+        backfill.in_flight = false;
+        let outcome = match vectors {
+            Ok(vectors) => self.recall_engine.upsert_nodes_batch(&nodes, vectors).await,
+            Err(err) => Err(anyhow::anyhow!(err)),
+        };
+        // 整批全部写入失败视为批次失败（走退避重试）；部分失败只记账，
+        // 避免个别坏节点卡住整表回填。
+        let written = outcome.and_then(|(written, failed)| {
+            if written == 0 && failed > 0 {
+                anyhow::bail!("批次内 {failed} 条向量全部写入失败");
+            }
+            Ok((written, failed))
+        });
+        // 上一步 await 期间可能已重配置，回填任务随之作废。
+        let Some(backfill) = self.vector_backfill.as_mut() else {
+            return;
+        };
+        match written {
+            Ok((written, failed)) => {
                 backfill.written += written;
+                backfill.skipped += failed;
+                backfill.failures = 0;
+                backfill.retry_at = None;
                 let last = nodes.last().map(|node| node.id.clone());
-                persist_backfill_progress(&backfill, last.as_deref(), false);
+                persist_backfill_progress(backfill, last.as_deref(), false);
                 backfill.cursor = last;
+                if failed > 0 {
+                    tracing::warn!(
+                        fingerprint = %backfill.fingerprint,
+                        failed,
+                        total_skipped = backfill.skipped,
+                        "Memory 向量回填有节点写入失败，已跳过（可重建索引补齐）"
+                    );
+                }
                 tracing::debug!(
                     fingerprint = %backfill.fingerprint,
                     batch = nodes.len(),
@@ -301,12 +400,34 @@ impl MemoryStore {
                     "Memory 向量回填进度"
                 );
             }
-            Err(err) => {
-                tracing::warn!("Memory 向量回填批次失败，保留进度稍后重试: {err}");
-            }
+            Err(err) => match BACKFILL_RETRY_SECS.get(backfill.failures) {
+                Some(delay) => {
+                    backfill.failures += 1;
+                    backfill.retry_at =
+                        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(*delay));
+                    tracing::warn!(
+                        fingerprint = %backfill.fingerprint,
+                        attempt = backfill.failures,
+                        retry_in_secs = *delay,
+                        "Memory 向量回填批次失败，保留进度稍后重试: {err}"
+                    );
+                }
+                None => {
+                    // 重试用尽：跳过该批继续后续节点，否则整表回填永久停滞。
+                    backfill.failures = 0;
+                    backfill.retry_at = None;
+                    backfill.skipped += nodes.len();
+                    let last = nodes.last().map(|node| node.id.clone());
+                    persist_backfill_progress(backfill, last.as_deref(), false);
+                    backfill.cursor = last;
+                    tracing::warn!(
+                        fingerprint = %backfill.fingerprint,
+                        skipped = backfill.skipped,
+                        "Memory 向量回填批次多次失败，跳过该批继续: {err}"
+                    );
+                }
+            },
         }
-        self.vector_backfill = Some(backfill);
-        true
     }
 
     /// 加载三级注入上下文
@@ -1149,5 +1270,103 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node_id, expected_id);
+    }
+
+    /// 构造一个最小回填节点（字段值与调度逻辑无关）。
+    fn backfill_test_node(id: &str) -> MemoryNode {
+        let now = chrono::Local::now().naive_local().to_string();
+        MemoryNode {
+            id: id.to_string(),
+            kind: MemoryKind::Episode,
+            memory_type: MemoryCognitiveType::default(),
+            scope_type: MemoryScopeType::Global,
+            scope_id: None,
+            title: "回填节点".to_string(),
+            summary: "用于校验回填调度".to_string(),
+            keywords: Vec::new(),
+            importance: 0.5,
+            confidence: 0.5,
+            status: MemoryStatus::Active,
+            source: None,
+            usage_count: 0,
+            last_used_at: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    /// 构造一个处于回填中的 store（不带向量索引，仅验证调度状态机）。
+    fn store_with_backfill(dir: &std::path::Path) -> MemoryStore {
+        MemoryStore {
+            db: open_in_memory().unwrap(),
+            tantivy: None,
+            recall_engine: RecallEngine::bm25_only(),
+            vector_backfill: Some(VectorBackfill {
+                fingerprint: "test-model@8".to_string(),
+                cursor: None,
+                meta_path: dir.join("index_meta.json"),
+                written: 0,
+                in_flight: false,
+                failures: 0,
+                retry_at: None,
+                skipped: 0,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn backfill_batch_failure_backs_off_then_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_backfill(dir.path());
+        let node = backfill_test_node("node-1");
+
+        // 连续失败：每次都排一个递增的退避，不会立刻重试。
+        for expected in BACKFILL_RETRY_SECS {
+            store.vector_backfill.as_mut().unwrap().in_flight = true;
+            store
+                .apply_backfill_vectors(vec![node.clone()], Err("端点超时".to_string()))
+                .await;
+            let backfill = store.vector_backfill.as_ref().unwrap();
+            assert!(!backfill.in_flight, "失败后应释放在途标记");
+            assert_eq!(backfill.cursor, None, "失败不得推进游标");
+            let due = store.backfill_due_in().expect("应仍有回填任务");
+            assert!(
+                due > std::time::Duration::ZERO && due <= std::time::Duration::from_secs(expected),
+                "退避应约为 {expected}s，实际 {due:?}"
+            );
+        }
+
+        // 退避用尽：跳过该批并推进游标，避免整表回填永久停滞。
+        store.vector_backfill.as_mut().unwrap().in_flight = true;
+        store
+            .apply_backfill_vectors(vec![node.clone()], Err("端点超时".to_string()))
+            .await;
+        let backfill = store.vector_backfill.as_ref().unwrap();
+        assert_eq!(backfill.cursor.as_deref(), Some("node-1"));
+        assert_eq!(backfill.skipped, 1);
+        assert_eq!(backfill.failures, 0);
+        assert_eq!(store.backfill_due_in(), Some(std::time::Duration::ZERO));
+    }
+
+    #[tokio::test]
+    async fn backfill_in_flight_batch_is_not_resubmitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_backfill(dir.path());
+        store.vector_backfill.as_mut().unwrap().in_flight = true;
+
+        // 在途期间主循环不该被唤醒，也不该再取批次。
+        assert_eq!(store.backfill_due_in(), None);
+        assert!(store.take_backfill_batch().is_none());
+    }
+
+    #[tokio::test]
+    async fn backfill_without_embedding_provider_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_backfill(dir.path());
+
+        // BM25-only 时没有 embedding，回填只能放弃而不是空转。
+        assert!(store.take_backfill_batch().is_none());
+        assert!(store.vector_backfill.is_none());
+        assert_eq!(store.backfill_due_in(), None);
     }
 }

@@ -1047,6 +1047,11 @@
         const percent = model.size ? Math.floor((model.downloaded / model.size) * 100) : 0;
         return { text: `${name} · 下载中 ${percent}%（共 ${size}）`, warning: false };
       }
+      case 'interrupted': {
+        // 有残留临时文件但当前无人下载：上次中断，保存后会断点续传。
+        const percent = model.size ? Math.floor((model.downloaded / model.size) * 100) : 0;
+        return { text: `${name} · 下载已中断 ${percent}%，保存后继续（共 ${size}）`, warning: false };
+      }
       case 'failed':
         return { text: `${name} · ${model.error || '不可用'}`, warning: true };
       default:
@@ -1127,13 +1132,20 @@
   }
 
   // 保存成功后：已填写的密钥视为已保存，清空输入框避免重复提交。
-  function afterConfigSaved(config) {
+  // 保存成功后同步已知状态；`stale` 表示期间用户又改了表单，
+  // 此时只记录后端已保存的内容，不能用旧配置重绘表单覆盖新输入。
+  function afterConfigSaved(config, stale = false) {
     ['llm', 'embedding', 'rerank'].forEach((prefix) => {
       const remote = config[prefix].remote;
       if (remote?.api_key) remote.has_api_key = true;
       if (remote) delete remote.api_key;
     });
     state.config = normalizeConfig(config);
+    if (stale) {
+      // 仅刷新与表单输入无关的状态（本地模型下载进度）。
+      scheduleLocalModelPoll();
+      return;
+    }
     renderRemoteFields('llm', state.config.llm);
     renderRemoteFields('embedding', state.config.embedding);
     renderRemoteFields('rerank', state.config.rerank);
@@ -1150,7 +1162,8 @@
     const pending = ['embedding', 'rerank'].some((kind) => {
       if (state.config[kind]?.source !== 'builtin') return false;
       const model = (state.localModels || []).find((item) => item.tier === tier && item.kind === kind);
-      return !model || !['ready', 'failed'].includes(model.state);
+      // ready/failed 是终态；interrupted 表示当前无人下载，等用户保存后再动。
+      return !model || !['ready', 'failed', 'interrupted'].includes(model.state);
     });
     if (!pending) return;
     localModelPollTimer = window.setTimeout(async () => {
@@ -1256,10 +1269,15 @@
     configSaveQueue = configSaveQueue.catch(() => {}).then(async () => {
       if (revision !== configRevision) return;
       await callHost('save_config', JSON.stringify(config));
-      afterConfigSaved(config);
-      if (revision === configRevision) configPending = false;
-      setRuntimeStatus('已连接');
-      if (!automatic) showToast('配置已保存');
+      // 等待响应期间用户可能继续编辑：此时不得重绘表单，
+      // 未保存的新修改由 scheduleConfigSave 排队的下一次保存处理。
+      const stale = revision !== configRevision;
+      afterConfigSaved(config, stale);
+      if (!stale) {
+        configPending = false;
+        setRuntimeStatus('已连接');
+        if (!automatic) showToast('配置已保存');
+      }
     });
 
     try {

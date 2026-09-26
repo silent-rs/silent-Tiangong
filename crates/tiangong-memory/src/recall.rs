@@ -65,17 +65,31 @@ impl RecallEngine {
         self.semantic_ready = ready;
     }
 
-    /// 批量向量化并写入（回填使用）。返回成功写入条数。
-    pub(crate) async fn upsert_nodes_batch(&self, nodes: &[MemoryNode]) -> anyhow::Result<usize> {
-        let (vector_index, emb_ref) = match (self.vector_index.as_ref(), self.embedding.as_ref()) {
-            (Some(q), Some(e)) => (q, e),
-            _ => return Ok(0),
+    /// 当前 embedding provider（回填在后台线程复用它计算向量）。
+    pub(crate) fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding.clone()
+    }
+
+    /// 把节点的回填文本取出来，交给后台计算 embedding。
+    pub(crate) fn backfill_texts(nodes: &[MemoryNode]) -> Vec<String> {
+        nodes.iter().map(node_embedding_text).collect()
+    }
+
+    /// 写入已在后台算好的回填向量。
+    ///
+    /// 返回 (成功条数, 失败条数)：单条失败不该让整批回滚，但也不能被忽略，
+    /// 否则游标继续推进后这些节点会永久缺索引。
+    pub(crate) async fn upsert_nodes_batch(
+        &self,
+        nodes: &[MemoryNode],
+        vectors: Vec<Vec<f32>>,
+    ) -> anyhow::Result<(usize, usize)> {
+        let Some(vector_index) = self.vector_index.as_ref() else {
+            return Ok((0, 0));
         };
         if nodes.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        let texts = nodes.iter().map(node_embedding_text).collect::<Vec<_>>();
-        let vectors = emb_ref.embed(texts).await?;
         if vectors.len() != nodes.len() {
             anyhow::bail!(
                 "Memory 回填 embedding 数量不一致: expected={} actual={}",
@@ -84,6 +98,7 @@ impl RecallEngine {
             );
         }
         let mut written = 0;
+        let mut failed = 0;
         for (node, vector) in nodes.iter().zip(vectors) {
             match vector_index
                 .upsert(VectorPoint {
@@ -97,10 +112,13 @@ impl RecallEngine {
                 .await
             {
                 Ok(()) => written += 1,
-                Err(err) => tracing::warn!(node_id = %node.id, "Memory 回填写入向量失败: {err}"),
+                Err(err) => {
+                    failed += 1;
+                    tracing::warn!(node_id = %node.id, "Memory 回填写入向量失败: {err}");
+                }
             }
         }
-        Ok(written)
+        Ok((written, failed))
     }
 
     /// 将节点写入可选语义索引。未启用向量索引时直接跳过。

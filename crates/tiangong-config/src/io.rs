@@ -255,17 +255,20 @@ pub fn extract_legacy_memory_models_at(dir: &Path) -> Result<bool> {
 
     if let Some(routing) = root.get_mut("routing").and_then(Value::as_object_mut) {
         for key in retired_keys {
-            let Some(route) = routing.remove(*key) else {
+            let Some(route) = routing.get(*key) else {
                 continue;
             };
+            // 解析不出完整端点时保留原路由：直接移除会让用户彻底失去这份
+            // 配置，且无法在 Memory 页面看到迁移前的值。
+            let Some(endpoint) = legacy_endpoint_from_route(route, &providers, &registry) else {
+                tracing::warn!("models.json 旧 {key} 路由无法解析为完整端点，保留原值待人工处理");
+                continue;
+            };
+            routing.remove(*key);
             changed = true;
-            let endpoint = legacy_endpoint_from_route(&route, &providers, &registry);
-            if endpoint.is_none() {
-                tracing::warn!("models.json 旧 {key} 路由无法解析为完整端点，已原样移除");
-            }
             match *key {
-                "embedding" => legacy.embedding = endpoint,
-                _ => legacy.rerank = endpoint,
+                "embedding" => legacy.embedding = Some(endpoint),
+                _ => legacy.rerank = Some(endpoint),
             }
         }
     }
@@ -303,11 +306,15 @@ pub fn extract_legacy_memory_models_at(dir: &Path) -> Result<bool> {
     }
 
     let handoff_path = legacy_memory_models_path(dir);
+    // 交接文件是旧 embedding / rerank 配置的唯一副本，读不出来时宁可整体
+    // 放弃本次迁出，也不能覆盖写入把里面的内容冲掉。
     let mut merged = load_legacy_memory_models(&handoff_path)
-        .unwrap_or_else(|error| {
-            tracing::warn!("旧交接文件不可读，将覆盖写入：{error}");
-            None
-        })
+        .with_context(|| {
+            format!(
+                "Memory 旧模型交接文件无法解析，已跳过 models.json 迁出：{}",
+                handoff_path.display()
+            )
+        })?
         .unwrap_or_default();
     merged.embedding = merged.embedding.or(legacy.embedding);
     merged.rerank = merged.rerank.or(legacy.rerank);

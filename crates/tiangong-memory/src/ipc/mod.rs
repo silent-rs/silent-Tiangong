@@ -470,7 +470,10 @@ async fn dispatch_plugin_request(
             let selection: plugin_ui::MemorySelection = serde_json::from_value(request.payload)
                 .with_context(|| "解析 Memory 页面配置失败")?;
             let selection: crate::MemoryConfigSelection = transcode(selection)?;
-            let previous = crate::MemoryConfig::load_or_default();
+            // 保存路径必须读到真实旧配置：回退默认值会让"密钥留空=保留原值"
+            // 语义失效，把已保存的密钥清空。读取失败时拒绝写入。
+            let previous = crate::MemoryConfig::load()
+                .with_context(|| "读取现有 Memory 配置失败，为避免覆盖已保存内容已取消保存")?;
             let config = selection.to_memory(&previous)?;
             config.save()?;
             handle.reconfigure(config.to_options()).await?;
@@ -905,7 +908,8 @@ async fn memory_config_probe(probe: plugin_ui::ProbeRequest) -> plugin_ui::Probe
 }
 
 async fn run_config_probe(probe: plugin_ui::ProbeRequest) -> Result<plugin_ui::ProbeResponse> {
-    let saved = crate::MemoryConfig::load_or_default();
+    // 同保存路径：读不到真实配置时不能用默认值当 previous，否则密钥继承语义错乱。
+    let saved = crate::MemoryConfig::load().with_context(|| "读取现有 Memory 配置失败")?;
     let previous = match probe.component.as_str() {
         "llm" => match &saved.model {
             Some(crate::MemoryLlmSource::Remote(endpoint)) => Some(endpoint.clone()),

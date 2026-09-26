@@ -17,7 +17,8 @@ use lancedb::{DistanceType, Table, connect};
 
 use crate::search::vector::VectorIndex;
 use crate::search::vector_meta::{
-    LEGACY_TABLE_NAME, VectorIdentity, VectorIndexMeta, VectorTableMeta, meta_path,
+    LEGACY_TABLE_NAME, LEGACY_UNKNOWN_MODEL, VectorIdentity, VectorIndexMeta, VectorTableMeta,
+    meta_path,
 };
 use crate::types::{MemoryKind, RecallHit, VectorPoint};
 
@@ -83,7 +84,10 @@ impl LanceDbIndex {
             .await
             .with_context(|| "获取 LanceDB 表列表失败")?;
 
-        // 旧版单表接管：只在元数据中尚未登记时处理一次。
+        // 旧版单表（无元数据）无法确认生成它的模型：维度相同也可能来自不同
+        // 模型，语义空间不通用，直接当成当前模型的索引会让查询向量与存量向量
+        // 不匹配，且不会再触发回填。因此一律登记为来源未知的上一代，当前指纹
+        // 另建新表并回填；旧表保留（不删），回填完成前语义召回降级。
         let legacy_registered = meta
             .tables
             .values()
@@ -95,28 +99,20 @@ impl LanceDbIndex {
                 .await
                 .with_context(|| "打开旧版 LanceDB 表失败")?;
             let legacy_dimension = vector_dimension(&legacy).await;
-            let legacy_identity = if legacy_dimension == Some(dimension) {
-                tracing::info!(
-                    fingerprint = %fingerprint,
-                    "Memory 接管旧版向量表，维度一致，沿用现有向量"
-                );
-                identity.clone()
-            } else {
-                tracing::info!(
-                    legacy_dimension = ?legacy_dimension,
-                    dimension,
-                    "Memory 旧版向量表维度与当前模型不同，保留为上一代并新建索引"
-                );
-                VectorIdentity::new("legacy-unknown", legacy_dimension.unwrap_or(0))
-            };
+            let legacy_identity =
+                VectorIdentity::new(LEGACY_UNKNOWN_MODEL, legacy_dimension.unwrap_or(0));
+            tracing::info!(
+                legacy_dimension = ?legacy_dimension,
+                dimension,
+                fingerprint = %fingerprint,
+                "Memory 发现旧版向量表但无法确认来源模型，保留为上一代并为当前模型新建索引"
+            );
             meta.tables
                 .entry(legacy_identity.fingerprint())
                 .or_insert_with(|| {
                     VectorTableMeta::new(LEGACY_TABLE_NAME.to_string(), &legacy_identity, true)
                 });
-            if legacy_identity != *identity {
-                meta.activate(&legacy_identity.fingerprint());
-            }
+            meta.activate(&legacy_identity.fingerprint());
         }
 
         let entry = meta
@@ -139,7 +135,11 @@ impl LanceDbIndex {
 
         for stale in meta.activate(&fingerprint) {
             match db.drop_table(&stale, &[]).await {
-                Ok(()) => tracing::info!(table = %stale, "Memory 已清理过期向量表"),
+                Ok(()) => {
+                    meta.mark_dropped(&stale);
+                    tracing::info!(table = %stale, "Memory 已清理过期向量表");
+                }
+                // 删除失败保留在 pending_drop 中，下次打开时继续重试。
                 Err(err) => tracing::warn!(table = %stale, "Memory 清理过期向量表失败: {err}"),
             }
         }

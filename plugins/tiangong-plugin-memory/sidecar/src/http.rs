@@ -24,7 +24,7 @@ const CONFIG_PAGE_TEMPLATE: &str = include_str!("../../wasm/src/memory.html");
 const CONFIG_PAGE_CSS: &str = include_str!("../../wasm/src/memory.css");
 const CONFIG_PAGE_JS: &str = include_str!("../../wasm/src/memory.js");
 /// 独立配置页注入的宿主标记：memory.js 据此改走 HTTP 而非 postMessage。
-const STANDALONE_SHIM: &str = "window.__MEMORY_STANDALONE__ = { token: '__TOKEN__' };";
+const STANDALONE_SHIM: &str = "window.__MEMORY_STANDALONE__ = { token: __TOKEN__ };";
 const TOKEN_HEADER: &str = "x-memory-token";
 
 /// 路由共享状态。
@@ -191,11 +191,23 @@ fn daemon_routes() -> Route {
 // ── 配置页 ────────────────────────────────────────────────────────
 
 fn config_page_html(token: &str) -> String {
-    // token 只含 scru128 字符集（0-9a-z），可安全内联进脚本字符串。
-    let shim = STANDALONE_SHIM.replace("__TOKEN__", token);
+    // 自动生成的 token 只含 scru128 字符集，但 --token 允许用户自定义任意
+    // 字符串，必须按 JS 字面量序列化再内联，避免破坏脚本或自注入。
+    let shim = STANDALONE_SHIM.replace("__TOKEN__", &js_string_literal(token));
     CONFIG_PAGE_TEMPLATE
         .replace("/*__MEMORY_CSS__*/", CONFIG_PAGE_CSS)
         .replace("/*__MEMORY_JS__*/", &format!("{shim}\n{CONFIG_PAGE_JS}"))
+}
+
+/// 把任意字符串序列化为可安全内联进 `<script>` 的 JS 字面量。
+///
+/// JSON 字符串是合法的 JS 字符串字面量；额外把 `<`、`>`、`&` 转成
+/// Unicode 转义，防止内容里出现 `</script>` 提前结束脚本块。
+fn js_string_literal(value: &str) -> String {
+    let json = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
 }
 
 async fn config_page(mut req: Request) -> Result<Response> {
@@ -380,11 +392,7 @@ pub async fn run_daemon(service: MemoryService, options: DaemonOptions) -> anyho
     let (listener, local) = bind(addr).await?;
     let url = browse_base(&local);
     let info_path = daemon::info_path();
-    let info = DaemonInfo {
-        pid: std::process::id(),
-        url: url.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
+    let info = DaemonInfo::current(url.clone());
     write_private_json(&info_path, &info)?;
     let _guard = DaemonInfoGuard(info_path.clone());
 
@@ -397,6 +405,11 @@ pub async fn run_daemon(service: MemoryService, options: DaemonOptions) -> anyho
         })
         .append(daemon_routes());
     eprintln!("tiangong-memory daemon 已启动：{url}/api/v1");
+    if !is_loopback(&local) {
+        // 与 --config 保持一致的风险提示：daemon 同样是明文 HTTP，token 与
+        // 请求体（含记忆内容）会在网络上传输。
+        print_plaintext_warning(&local, "daemon");
+    }
     tracing::info!(%url, "memory daemon 已启动");
     serve_until(listener, route, shutdown).await
 }
@@ -481,11 +494,7 @@ pub async fn run_config(service: MemoryService, options: ConfigOptions) -> anyho
             );
             eprintln!("  http://<本机地址>:{}/?token={token}", local.port());
         }
-        eprintln!("注意：远程配置使用明文 HTTP，页面中填写的 API Key 会在网络上传输；");
-        eprintln!(
-            "      请仅在可信网络中使用，或改用 SSH 隧道：ssh -L {0}:127.0.0.1:{0} <主机>",
-            local.port()
-        );
+        print_plaintext_warning(&local, "配置");
     }
     eprintln!("配置完成后在页面点击\"完成并关闭\"，或按 Ctrl+C 退出。");
     if options.open_browser
@@ -496,6 +505,17 @@ pub async fn run_config(service: MemoryService, options: ConfigOptions) -> anyho
     serve_until(listener, route, shutdown).await?;
     eprintln!("配置页已关闭。");
     Ok(())
+}
+
+/// 非回环监听时的明文传输提示（配置页与 daemon 共用）。
+fn print_plaintext_warning(local: &SocketAddr, scene: &str) {
+    // 远程会话的调用者只持有一个令牌，不应能让后端解析任意环境变量。
+    tiangong_memory::config::restrict_env_refs();
+    eprintln!("注意：远程{scene}使用明文 HTTP，访问令牌与请求内容会在网络上传输；");
+    eprintln!(
+        "      请仅在可信网络中使用，或改用 SSH 隧道：ssh -L {0}:127.0.0.1:{0} <主机>",
+        local.port()
+    );
 }
 
 fn write_private_json<T: Serialize>(path: &std::path::Path, value: &T) -> anyhow::Result<()> {
@@ -579,7 +599,7 @@ mod tests {
     #[test]
     fn config_page_injects_standalone_shim() {
         let html = config_page_html("tok123");
-        assert!(html.contains("__MEMORY_STANDALONE__ = { token: 'tok123' }"));
+        assert!(html.contains("__MEMORY_STANDALONE__ = { token: \"tok123\" }"));
         assert!(!html.contains("/*__MEMORY_JS__*/"));
         assert!(!html.contains("/*__MEMORY_CSS__*/"));
     }
@@ -597,5 +617,31 @@ mod tests {
         assert_eq!(payload["node_id"], "n1");
         assert!(view_operation("unknown", "").is_err());
         assert!(view_operation("save_config", "not json").is_err());
+    }
+}
+
+#[cfg(test)]
+mod config_page_tests {
+    use super::*;
+
+    #[test]
+    fn custom_token_is_escaped_into_js_literal() {
+        // 自定义 token 里的引号与标签都必须被转义，脚本结构保持完整。
+        let html = config_page_html("a'b\"</script><img src=x>");
+        assert!(
+            !html.contains("</script><img"),
+            "不得原样内联标签：{html:?}"
+        );
+        assert!(html.contains("\\u003c/script\\u003e"), "`<`/`>` 应转义");
+        assert!(
+            html.contains("window.__MEMORY_STANDALONE__ = { token: \""),
+            "shim 仍应是合法赋值"
+        );
+    }
+
+    #[test]
+    fn plain_token_round_trips() {
+        let html = config_page_html("0abcdef0123456789abcdefg");
+        assert!(html.contains("token: \"0abcdef0123456789abcdefg\" }"));
     }
 }

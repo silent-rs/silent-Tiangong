@@ -293,9 +293,11 @@ impl MemoryConfig {
                 None
             }
         };
-        let merged = handoff
+        let outcome = handoff
             .as_ref()
-            .is_some_and(|legacy| config.merge_legacy_models(legacy));
+            .map(|legacy| config.merge_legacy_models(legacy))
+            .unwrap_or_default();
+        let merged = outcome.changed;
 
         if upgraded || merged {
             if upgraded && config_path.exists() {
@@ -312,7 +314,8 @@ impl MemoryConfig {
                 "Memory 配置已迁移到 v{MEMORY_CONFIG_VERSION}"
             );
         }
-        if handoff.is_some() {
+        // 仍有未并入的旧配置时保留交接文件，等用户补全后再消费。
+        if handoff.is_some() && !outcome.pending {
             archive_handoff(handoff_path);
         }
         Ok(config)
@@ -340,8 +343,8 @@ impl MemoryConfig {
 
     /// 并入宿主迁出的旧 embedding / rerank；仅在对应项未配置时生效。
     /// 返回配置是否发生变化。
-    pub fn merge_legacy_models(&mut self, legacy: &LegacyMemoryModels) -> bool {
-        let mut changed = false;
+    pub fn merge_legacy_models(&mut self, legacy: &LegacyMemoryModels) -> LegacyMergeOutcome {
+        let mut outcome = LegacyMergeOutcome::default();
         if self.embedding.is_none()
             && let Some(endpoint) = legacy.embedding.as_ref()
         {
@@ -351,12 +354,17 @@ impl MemoryConfig {
                         endpoint: MemoryRemoteEndpoint::from_legacy(endpoint),
                         dimension,
                     });
-                    changed = true;
+                    outcome.changed = true;
                 }
-                None => tracing::warn!(
-                    model = %endpoint.model,
-                    "旧 embedding 路由缺少 options.dimension，未自动并入，请在 Memory 页面重新配置"
-                ),
+                None => {
+                    // 缺维度无法构造运行配置；标记未消费，交接文件保持原地，
+                    // 用户在 Memory 页面补全维度后下次启动仍可并入。
+                    outcome.pending = true;
+                    tracing::warn!(
+                        model = %endpoint.model,
+                        "旧 embedding 路由缺少 options.dimension，未自动并入，请在 Memory 页面重新配置"
+                    );
+                }
             }
         }
         if self.rerank.is_none()
@@ -365,9 +373,9 @@ impl MemoryConfig {
             self.rerank = Some(MemoryRerankSource::Remote(
                 MemoryRemoteEndpoint::from_legacy(endpoint),
             ));
-            changed = true;
+            outcome.changed = true;
         }
-        changed
+        outcome
     }
 
     pub fn save(&self) -> Result<()> {
@@ -382,10 +390,15 @@ impl MemoryConfig {
         let mut config = self.clone();
         config.version = MEMORY_CONFIG_VERSION;
         let content = serde_json::to_string_pretty(&config).context("序列化 Memory 配置失败")?;
-        let tmp = path.with_extension("json.tmp");
+        // 临时文件名带唯一后缀：多个进程同时保存时不会互相截断对方的半成品。
+        let tmp = path.with_extension(format!("json.tmp.{}", scru128::new_string()));
         fs::write(&tmp, content)
             .with_context(|| format!("写入 Memory 配置失败：{}", tmp.display()))?;
-        fs::rename(&tmp, path).with_context(|| format!("替换 Memory 配置失败：{}", path.display()))
+        if let Err(error) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(error).with_context(|| format!("替换 Memory 配置失败：{}", path.display()));
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -635,6 +648,15 @@ fn find_model_key(
 }
 
 /// 交接文件并入后归档，避免重复并入；归档失败仅告警（并入逻辑本身幂等）。
+/// 交接文件并入结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyMergeOutcome {
+    /// 配置是否发生变化（需要写回磁盘）。
+    pub changed: bool,
+    /// 是否仍有旧配置无法并入（信息不足），交接文件需保留。
+    pub pending: bool,
+}
+
 fn archive_handoff(path: &Path) {
     let archived = path.with_extension("json.migrated");
     if let Err(error) = fs::rename(path, &archived) {
@@ -847,14 +869,42 @@ impl MemoryRemoteSelection {
                 .parse()
                 .with_context(|| format!("{label} 协议无效：{}", self.protocol))?
         };
+        // 密钥留空表示"保留原值"，但只在端点身份未变时成立：地址或协议变了
+        // 就是换了服务方，继续沿用旧凭据会把密钥发往新地址。此时要求重新填写。
+        let same_endpoint = previous.is_some_and(|endpoint| {
+            endpoint.base_url.trim().eq_ignore_ascii_case(&base_url)
+                && endpoint.protocol == protocol
+        });
         let api_key = match self.api_key.as_deref().map(str::trim) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => previous
+            Some(value) if !value.is_empty() => {
+                // `${VAR}` 会在运行时读环境变量。本机配置页的使用者就是本机
+                // 用户，允许自由引用；但远程配置（--host 非回环）的调用者只
+                // 持有一个配置令牌，不应借此把任意环境变量发往任意端点，
+                // 因此远程会话只接受已在本机配置里登记过的引用。
+                if env_ref_policy() == EnvRefPolicy::RegisteredOnly
+                    && let Some(name) = env_ref_name(value)
+                    && !is_registered_env_ref(name, previous)
+                {
+                    bail!(
+                        "{label} API Key 引用了未登记的环境变量 ${{{name}}}；\
+                         请直接填写密钥，或先在 models.json 中登记该引用"
+                    );
+                }
+                value.to_string()
+            }
+            _ if same_endpoint => previous
                 .map(|endpoint| endpoint.api_key.clone())
                 .unwrap_or_default(),
+            _ if previous.is_some_and(|endpoint| !endpoint.api_key.trim().is_empty()) => {
+                bail!("{label} 端点地址或协议已更改，请重新填写 API Key")
+            }
+            _ => String::new(),
         };
         Ok(MemoryRemoteEndpoint {
-            provider_key: previous.and_then(|endpoint| endpoint.provider_key.clone()),
+            // provider_key 只是来源标注，跨端点不再沿用。
+            provider_key: previous
+                .filter(|_| same_endpoint)
+                .and_then(|endpoint| endpoint.provider_key.clone()),
             base_url,
             api_key,
             model,
@@ -866,6 +916,53 @@ impl MemoryRemoteSelection {
             },
         })
     }
+}
+
+/// 环境变量引用策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvRefPolicy {
+    /// 允许任意 `${VAR}` 引用（本机配置页，调用者即本机用户）。
+    Any,
+    /// 只允许已在本机配置中登记过的引用（远程配置会话）。
+    RegisteredOnly,
+}
+
+static ENV_REF_POLICY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 收紧环境变量引用策略；远程监听的配置服务在启动时调用。
+pub fn restrict_env_refs() {
+    ENV_REF_POLICY.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn env_ref_policy() -> EnvRefPolicy {
+    if ENV_REF_POLICY.load(std::sync::atomic::Ordering::SeqCst) {
+        EnvRefPolicy::RegisteredOnly
+    } else {
+        EnvRefPolicy::Any
+    }
+}
+
+/// 取出 `${VAR}` 中的变量名（不是该形式时返回 None）。
+fn env_ref_name(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
+/// 该环境变量引用是否已在本机配置中登记过（当前端点的旧值或 models.json 的 provider）。
+fn is_registered_env_ref(name: &str, previous: Option<&MemoryRemoteEndpoint>) -> bool {
+    let matches_ref = |raw: &str| env_ref_name(raw).is_some_and(|existing| existing == name);
+    if previous.is_some_and(|endpoint| matches_ref(&endpoint.api_key)) {
+        return true;
+    }
+    // models.json 中任一 provider 已使用该引用即视为已登记。
+    let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
+    models
+        .providers
+        .values()
+        .any(|provider| matches_ref(&provider.api_key))
 }
 
 impl MemoryConfigSelection {
@@ -1263,8 +1360,66 @@ mod tests {
             }),
             ..Default::default()
         });
-        assert!(!changed);
+        assert!(!changed.changed, "缺维度不构成配置变化");
+        assert!(changed.pending, "缺维度应标记为待处理，交接文件不归档");
         assert!(config.embedding.is_none());
+    }
+
+    #[test]
+    fn handoff_is_kept_when_legacy_embedding_cannot_be_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let handoff = dir.path().join("legacy-models.json");
+        let legacy = LegacyMemoryModels {
+            embedding: Some(LegacyMemoryEndpoint {
+                provider: "p".into(),
+                base_url: "http://x/v1".into(),
+                api_key: String::new(),
+                protocol: ProviderProtocol::OpenAiChatCompletions,
+                timeout_ms: 60_000,
+                model: "e".into(),
+                dimension: None,
+            }),
+            ..Default::default()
+        };
+        std::fs::write(&handoff, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let config =
+            MemoryConfig::load_and_migrate(&path, &handoff, &ModelsConfig::default()).unwrap();
+
+        assert!(config.embedding.is_none(), "缺维度不应并入");
+        assert!(handoff.exists(), "未消费的交接文件必须保留待人工补全");
+        assert!(
+            !dir.path().join("legacy-models.json.migrated").exists(),
+            "未消费完不应归档"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn remote_session_rejects_unregistered_env_ref() {
+        let selection = MemoryRemoteSelection {
+            base_url: "https://api.example/v1".into(),
+            model: "m".into(),
+            api_key: Some("${UNREGISTERED_KEY}".into()),
+            protocol: String::new(),
+            timeout_ms: 0,
+            dimension: None,
+            has_api_key: false,
+        };
+        // 本机配置页：允许任意引用。
+        assert!(selection.endpoint_for_probe(None).is_ok());
+
+        // 远程配置会话：未登记的引用必须被拒绝。
+        restrict_env_refs();
+        let error = selection
+            .endpoint_for_probe(None)
+            .expect_err("远程会话应拒绝未登记引用");
+        assert!(
+            format!("{error:#}").contains("未登记的环境变量"),
+            "{error:#}"
+        );
+        ENV_REF_POLICY.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]

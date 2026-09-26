@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) const META_FILE: &str = "index_meta.json";
 /// 旧版固定表名。
 pub(crate) const LEGACY_TABLE_NAME: &str = "memory_vectors";
+/// 旧版表来源模型未知时使用的占位模型名（指纹与任何真实模型都不同）。
+pub(crate) const LEGACY_UNKNOWN_MODEL: &str = "legacy-unknown";
 
 /// 生成向量的模型身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +76,10 @@ pub(crate) struct VectorIndexMeta {
     /// 指纹 → 表信息。
     #[serde(default)]
     pub(crate) tables: BTreeMap<String, VectorTableMeta>,
+    /// 已从 `tables` 摘除但尚未成功删除的表名：删表失败时留在这里，
+    /// 下次打开索引继续重试，避免留下永远无人清理的孤儿表。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pending_drop: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -145,10 +151,28 @@ impl VectorIndexMeta {
             .filter(|key| !keep.iter().flatten().any(|kept| kept == *key))
             .cloned()
             .collect::<Vec<_>>();
-        stale
-            .into_iter()
-            .filter_map(|key| self.tables.remove(&key).map(|entry| entry.table))
-            .collect()
+        // 摘除记录的同时登记待删列表：删表是易失败的外部操作，元数据里留一份
+        // 待办才能在下次打开时继续清理。
+        for key in stale {
+            if let Some(entry) = self.tables.remove(&key)
+                && !self.pending_drop.contains(&entry.table)
+            {
+                self.pending_drop.push(entry.table);
+            }
+        }
+        // 仍在册的表不该出现在待删列表里（可能上次删除失败后又被重新登记）。
+        let live = self
+            .tables
+            .values()
+            .map(|entry| entry.table.clone())
+            .collect::<Vec<_>>();
+        self.pending_drop.retain(|table| !live.contains(table));
+        self.pending_drop.clone()
+    }
+
+    /// 标记某个表已成功删除（从待删列表移除）。
+    pub(crate) fn mark_dropped(&mut self, table: &str) {
+        self.pending_drop.retain(|value| value != table);
     }
 
     /// 更新某指纹的回填进度。
@@ -218,13 +242,20 @@ mod tests {
         );
         let dropped = meta.activate("b@1");
         assert_eq!(meta.previous.as_deref(), Some("a@1"));
+        // tb 已重新登记，只剩 tc 待删。
         assert_eq!(dropped, vec!["tc".to_string()]);
+        assert_eq!(meta.pending_drop, vec!["tc".to_string()]);
 
         // 切回上一代：直接复用，旧 active 成为上一代。
         let dropped = meta.activate("a@1");
-        assert!(dropped.is_empty());
+        // tc 上次没删成功，仍在待删列表里继续重试。
+        assert_eq!(dropped, vec!["tc".to_string()]);
         assert_eq!(meta.active.as_deref(), Some("a@1"));
         assert_eq!(meta.previous.as_deref(), Some("b@1"));
+
+        // 删除成功后不再重复返回。
+        meta.mark_dropped("tc");
+        assert!(meta.activate("a@1").is_empty());
     }
 
     #[test]

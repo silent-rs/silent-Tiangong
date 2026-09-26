@@ -19,6 +19,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tiangong_llm::{EmbeddingProvider, RerankProvider};
 
+pub(crate) use download::CancelToken;
 pub use download::MODEL_MIRROR_ENV;
 
 use crate::config::MemoryLocalTier;
@@ -52,9 +53,12 @@ fn runtime_state(spec: &LocalModelSpec) -> Option<RuntimeState> {
 }
 
 /// 下载（如需）并加载本地 Embedding 模型。
-pub(crate) async fn load_embedding(tier: MemoryLocalTier) -> Result<Arc<dyn EmbeddingProvider>> {
+pub(crate) async fn load_embedding(
+    tier: MemoryLocalTier,
+    cancel: &download::CancelToken,
+) -> Result<Arc<dyn EmbeddingProvider>> {
     let spec = catalog::embedding_model(tier);
-    let dir = prepare(spec).await?;
+    let dir = prepare(spec, cancel).await?;
     let loaded = load_blocking(spec, move || {
         provider::LocalEmbeddingProvider::load(&dir, spec)
     })
@@ -63,9 +67,12 @@ pub(crate) async fn load_embedding(tier: MemoryLocalTier) -> Result<Arc<dyn Embe
 }
 
 /// 下载（如需）并加载本地 Rerank 模型。
-pub(crate) async fn load_rerank(tier: MemoryLocalTier) -> Result<Arc<dyn RerankProvider>> {
+pub(crate) async fn load_rerank(
+    tier: MemoryLocalTier,
+    cancel: &download::CancelToken,
+) -> Result<Arc<dyn RerankProvider>> {
     let spec = catalog::rerank_model(tier);
-    let dir = prepare(spec).await?;
+    let dir = prepare(spec, cancel).await?;
     let loaded = load_blocking(spec, move || {
         provider::LocalRerankProvider::load(&dir, spec)
     })
@@ -76,16 +83,19 @@ pub(crate) async fn load_rerank(tier: MemoryLocalTier) -> Result<Arc<dyn RerankP
 /// 集成测试入口：下载并加载内置 Embedding（真实模型冒烟用）。
 #[doc(hidden)]
 pub async fn load_embedding_for_test(tier: MemoryLocalTier) -> Result<Arc<dyn EmbeddingProvider>> {
-    load_embedding(tier).await
+    load_embedding(tier, &download::CancelToken::default()).await
 }
 
 /// 集成测试入口：下载并加载内置 Rerank。
 #[doc(hidden)]
 pub async fn load_rerank_for_test(tier: MemoryLocalTier) -> Result<Arc<dyn RerankProvider>> {
-    load_rerank(tier).await
+    load_rerank(tier, &download::CancelToken::default()).await
 }
 
-async fn prepare(spec: &'static LocalModelSpec) -> Result<std::path::PathBuf> {
+async fn prepare(
+    spec: &'static LocalModelSpec,
+    cancel: &download::CancelToken,
+) -> Result<std::path::PathBuf> {
     let root = download::models_dir();
     if !download::is_installed(&root, spec) {
         set_state(spec, RuntimeState::Downloading);
@@ -95,13 +105,42 @@ async fn prepare(spec: &'static LocalModelSpec) -> Result<std::path::PathBuf> {
             "Memory 内置模型未下载，开始后台下载"
         );
     }
-    match download::ensure_model(&root, spec).await {
+    match download::ensure_model(&root, spec, cancel).await {
         Ok(dir) => Ok(dir),
-        Err(error) => {
+        // 锁竞争与取消都不是故障：不写 Failed 状态（页面继续显示下载进度），
+        // 也不该让调用方按「加载失败」计入退避次数。
+        Err(download::DownloadError::Busy) => Err(BusyOrCancelled::Busy.into_error()),
+        Err(download::DownloadError::Cancelled) => Err(BusyOrCancelled::Cancelled.into_error()),
+        Err(download::DownloadError::Failed(error)) => {
             set_state(spec, RuntimeState::Failed(format!("下载失败：{error:#}")));
             Err(error)
         }
     }
+}
+
+/// 非故障中断：调用方据此跳过失败计数。
+enum BusyOrCancelled {
+    Busy,
+    Cancelled,
+}
+
+impl BusyOrCancelled {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Busy => anyhow::anyhow!(TRANSIENT_BUSY),
+            Self::Cancelled => anyhow::anyhow!(TRANSIENT_CANCELLED),
+        }
+    }
+}
+
+/// 非故障中断标记（供调用方识别，不作为失败计数）。
+pub(crate) const TRANSIENT_BUSY: &str = "另一个 Memory 进程正在下载内置模型，稍后重试";
+pub(crate) const TRANSIENT_CANCELLED: &str = "内置模型下载已取消";
+
+/// 错误是否属于「暂时中断」而非真正失败。
+pub(crate) fn is_transient(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains(TRANSIENT_BUSY) || text.contains(TRANSIENT_CANCELLED)
 }
 
 async fn load_blocking<T, F>(spec: &'static LocalModelSpec, load: F) -> Result<T>
@@ -188,8 +227,15 @@ fn status_of(root: &Path, tier: MemoryLocalTier, spec: &LocalModelSpec) -> Local
         Some(RuntimeState::Failed(message)) => ("failed", Some(message)),
         _ if installed => ("installed", None),
         Some(RuntimeState::Downloading) => ("downloading", None),
-        // 其他进程（如 Leader）正在下载：以磁盘上的临时文件判断。
-        None if downloaded > 0 => ("downloading", None),
+        // 本进程没在下载：只有确认存在活跃下载者才算「下载中」，否则残留的
+        // 临时文件是上次中断留下的，标记为 interrupted 让页面提示可继续。
+        None if downloaded > 0 => {
+            if download::has_active_downloader(root) {
+                ("downloading", None)
+            } else {
+                ("interrupted", None)
+            }
+        }
         None => ("not_downloaded", None),
     };
     LocalModelStatus {
@@ -221,6 +267,38 @@ mod tests {
         let high_rerank = local_model_status(MemoryLocalTier::High, false);
         assert_eq!(high_rerank.model, "bge-reranker-v2-m3");
         assert_eq!(high_rerank.dimension, None);
+    }
+
+    #[test]
+    fn stale_partial_reports_interrupted_not_downloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = &catalog::BGE_SMALL_ZH;
+        let files = spec.files();
+        let file = files.first().expect("模型至少一个文件");
+        let partial = dir.path().join(format!(".partial-{}", spec.id));
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join(format!("{}.part", file.local_name())), b"abc").unwrap();
+
+        // 无进程持有下载锁：残留的 .part 是上次中断留下的，不该显示「下载中」。
+        let status = status_of(dir.path(), MemoryLocalTier::Low, spec);
+        assert_eq!(status.state, "interrupted");
+        assert_eq!(status.downloaded, 3);
+
+        // 有下载者持锁时才算下载中。
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let lock = download::test_hooks::acquire_lock(&root).expect("取得下载锁");
+            tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            drop(lock);
+        });
+        rx.recv().unwrap();
+        let status = status_of(dir.path(), MemoryLocalTier::Low, spec);
+        assert_eq!(status.state, "downloading");
+        done_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 
     #[test]

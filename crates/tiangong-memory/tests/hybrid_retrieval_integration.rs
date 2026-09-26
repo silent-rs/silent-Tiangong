@@ -486,7 +486,7 @@ async fn vector_index_is_bound_to_model_fingerprint_and_rebuilt_on_switch() {
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn legacy_single_table_is_adopted_without_reembedding() {
+async fn legacy_single_table_is_not_claimed_by_current_model() {
     let embedding_server = DeterministicEmbeddingServer::start();
     let home = TempDir::new().expect("创建 fake home 失败");
     let workspace = TempDir::new().expect("创建 workspace 失败");
@@ -525,17 +525,37 @@ async fn legacy_single_table_is_adopted_without_reembedding() {
     )
     .expect("重命名为旧表名");
 
-    // 重启：旧表按当前模型接管，标记为已完成，不触发回填。
+    // 重启：旧表来源模型未知，只能登记为上一代；当前模型另建新表并回填。
+    // 维度相同不代表语义空间相同，直接认领会让查询向量与存量向量不匹配。
     let handle = start_with_options(options()).expect("重启 memory 失败");
-    let meta = wait_for_meta(&lancedb_dir, |meta| meta["active"].is_string()).await;
-    assert_eq!(meta["active"], "bge-m3@4");
-    assert_eq!(meta["tables"]["bge-m3@4"]["table"], "memory_vectors");
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["active"].as_str() == Some("bge-m3@4")
+    })
+    .await;
+    assert_eq!(
+        meta["previous"], "legacy-unknown@4",
+        "旧表登记为来源未知的上一代：{meta}"
+    );
+    assert_eq!(
+        meta["tables"]["legacy-unknown@4"]["table"], "memory_vectors",
+        "旧表保留不删：{meta}"
+    );
+    assert_ne!(
+        meta["tables"]["bge-m3@4"]["table"], "memory_vectors",
+        "当前模型应使用独立的新表：{meta}"
+    );
+
+    // 回填完成后仍可召回（数据来自新表，不是直接复用旧向量）。
+    let meta = wait_for_meta(&lancedb_dir, |meta| {
+        meta["tables"]["bge-m3@4"]["complete"] == true
+    })
+    .await;
     assert_eq!(meta["tables"]["bge-m3@4"]["complete"], true);
     let hits = wait_for_expected_hit(&handle, "automatic form dimension discovery", &node_id).await;
     handle.shutdown().await;
     assert!(
         hits.iter().any(|hit| hit.node_id == node_id),
-        "接管后直接可用"
+        "回填完成后应能召回"
     );
 }
 

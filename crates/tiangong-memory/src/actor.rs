@@ -32,8 +32,6 @@ enum RuminationJob {
 /// 反刍 worker 的 LLM 提炼并发上限：保守值，避免高频多轮对话时打爆
 /// 模型端点限流；积压由有界队列（64）兜底。
 const RUMINATION_CONCURRENCY: usize = 2;
-/// 向量回填节拍：空闲该时长即推进一批；命令不断时也保证每个节拍至少一批。
-const BACKFILL_IDLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Memory Actor（独立运行时）
 pub(crate) struct MemoryActor {
@@ -46,6 +44,9 @@ pub(crate) struct MemoryActor {
     self_tx: mpsc::WeakSender<MemoryCommand>,
     /// 配置代号：每次（重新）配置递增，丢弃过期的本地模型加载结果。
     generation: Arc<AtomicU64>,
+    /// 当前本地模型下载任务的取消令牌：重新配置时取消上一轮，避免旧档位
+    /// 继续占用带宽和下载锁。
+    local_model_cancel: Option<crate::local_model::CancelToken>,
 }
 
 impl MemoryActor {
@@ -64,6 +65,7 @@ impl MemoryActor {
             rumination_tx,
             self_tx,
             generation: Arc::new(AtomicU64::new(0)),
+            local_model_cancel: None,
         }
     }
 
@@ -71,24 +73,19 @@ impl MemoryActor {
     pub(crate) async fn run(mut self) {
         self.apply_recall_options(false).await;
         tracing::info!("Memory Actor 已启动");
-        let mut last_backfill = tokio::time::Instant::now();
         let shutdown_reply = loop {
-            // 有待回填向量时分批推进：空闲窗口内无命令即推进；命令持续不断时
-            // 也保证每个窗口至少推进一批，避免被高频请求饿死。
-            let next = if self.store.has_pending_backfill() {
-                if last_backfill.elapsed() >= BACKFILL_IDLE_WINDOW {
-                    self.store.run_backfill_batch().await;
-                    last_backfill = tokio::time::Instant::now();
+            // 有待回填向量时先把下一批交给后台算 embedding：主循环只做
+            // SQLite 取批与向量落库，端点慢或超时都不会拖住命令处理。
+            let next = if let Some(due) = self.store.backfill_due_in() {
+                if due.is_zero() {
+                    if let Some(batch) = self.store.take_backfill_batch() {
+                        self.spawn_backfill_batch(batch);
+                    }
                     continue;
                 }
-                let wait = BACKFILL_IDLE_WINDOW.saturating_sub(last_backfill.elapsed());
-                match tokio::time::timeout(wait, self.rx.recv()).await {
+                match tokio::time::timeout(due, self.rx.recv()).await {
                     Ok(message) => message,
-                    Err(_) => {
-                        self.store.run_backfill_batch().await;
-                        last_backfill = tokio::time::Instant::now();
-                        continue;
-                    }
+                    Err(_) => continue,
                 }
             } else {
                 self.rx.recv().await
@@ -433,6 +430,18 @@ impl MemoryActor {
                 rumination::apply_meta(&mut self.store, *outcome).await;
             }
 
+            MemoryCommand::BackfillVectorsReady {
+                generation,
+                nodes,
+                vectors,
+            } => {
+                if generation != self.generation.load(Ordering::SeqCst) {
+                    tracing::debug!("Memory 丢弃过期的向量回填结果");
+                    return;
+                }
+                self.store.apply_backfill_vectors(nodes, vectors).await;
+            }
+
             MemoryCommand::LocalModelsReady {
                 generation,
                 embedding,
@@ -473,10 +482,42 @@ impl MemoryActor {
         Ok(())
     }
 
+    /// 把一批回填节点的 embedding 计算交给后台任务，算完经命令通道回送。
+    ///
+    /// 计算完成前 `in_flight` 为真，主循环不会再取新批次，天然限流为单批在途。
+    fn spawn_backfill_batch(&self, batch: crate::store::BackfillBatch) {
+        let Some(tx) = self.self_tx.upgrade() else {
+            return;
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let crate::store::BackfillBatch {
+            nodes,
+            texts,
+            embedding,
+        } = batch;
+        tokio::task::spawn_local(async move {
+            let vectors = embedding
+                .embed(texts)
+                .await
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx
+                .send(MemoryCommand::BackfillVectorsReady {
+                    generation,
+                    nodes,
+                    vectors,
+                })
+                .await;
+        });
+    }
+
     /// 按当前选项启用召回增强层：在线组件立即生效；内置本地模型在独立线程
     /// 下载并加载，完成后经 `LocalModelsReady` 回到 Actor 再整体启用。
     async fn apply_recall_options(&mut self, reset: bool) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // 先取消上一轮下载：换档位后旧模型不再需要，让它尽快释放下载锁。
+        if let Some(cancel) = self.local_model_cancel.take() {
+            cancel.cancel();
+        }
         let (embedding, rerank) = remote_providers(&self.options);
         if reset {
             self.store
@@ -499,14 +540,19 @@ impl MemoryActor {
         if local_embedding.is_none() && local_rerank.is_none() {
             return;
         }
-        if let Err(error) = spawn_local_model_loader(
+        let cancel = crate::local_model::CancelToken::default();
+        match spawn_local_model_loader(
             self.self_tx.clone(),
             self.generation.clone(),
             generation,
             local_embedding,
             local_rerank,
+            cancel.clone(),
         ) {
-            tracing::warn!("Memory 启动内置模型加载线程失败，保持降级召回: {error}");
+            Ok(()) => self.local_model_cancel = Some(cancel),
+            Err(error) => {
+                tracing::warn!("Memory 启动内置模型加载线程失败，保持降级召回: {error}")
+            }
         }
     }
 }
@@ -538,6 +584,8 @@ fn remote_providers(options: &MemoryOptions) -> RecallProviders {
 
 /// 本地模型加载失败后的重试间隔（秒），用尽后停止，等待下次配置变更。
 const LOCAL_MODEL_RETRY_SECS: [u64; 5] = [30, 60, 120, 300, 600];
+/// 下载锁被其他进程占用时的等待间隔（秒）：不算失败，一直等到锁释放。
+const LOCAL_MODEL_BUSY_WAIT_SECS: u64 = 15;
 
 /// 在独立线程下载并加载内置模型：下载与 ONNX 初始化耗时且含阻塞 IO，
 /// 放在 Actor 的单线程 runtime 外执行，避免阻塞记忆读写。
@@ -547,6 +595,7 @@ fn spawn_local_model_loader(
     generation: u64,
     embedding_tier: Option<crate::config::MemoryLocalTier>,
     rerank_tier: Option<crate::config::MemoryLocalTier>,
+    cancel: crate::local_model::CancelToken,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("tiangong-memory-local-model".into())
@@ -570,11 +619,19 @@ fn spawn_local_model_loader(
                 if stale() {
                     return;
                 }
+                // 本轮是否只遇到「锁被占用 / 已取消」这类暂时中断：不计入失败
+                // 退避次数，否则等别的进程下载完时本轮已经放弃了。
+                let mut transient = false;
                 if let Some(tier) = embedding_tier.filter(|_| embedding.is_none()) {
-                    match runtime.block_on(crate::local_model::load_embedding(tier)) {
+                    match runtime.block_on(crate::local_model::load_embedding(tier, &cancel)) {
                         Ok(provider) => embedding = Some(provider),
                         Err(error) => {
-                            tracing::warn!("Memory 内置 Embedding 暂不可用: {error:#}")
+                            if crate::local_model::is_transient(&error) {
+                                transient = true;
+                                tracing::debug!("Memory 内置 Embedding 暂时不可用: {error:#}");
+                            } else {
+                                tracing::warn!("Memory 内置 Embedding 暂不可用: {error:#}");
+                            }
                         }
                     }
                 }
@@ -582,9 +639,16 @@ fn spawn_local_model_loader(
                     return;
                 }
                 if let Some(tier) = rerank_tier.filter(|_| rerank.is_none()) {
-                    match runtime.block_on(crate::local_model::load_rerank(tier)) {
+                    match runtime.block_on(crate::local_model::load_rerank(tier, &cancel)) {
                         Ok(provider) => rerank = Some(provider),
-                        Err(error) => tracing::warn!("Memory 内置 Rerank 暂不可用: {error:#}"),
+                        Err(error) => {
+                            if crate::local_model::is_transient(&error) {
+                                transient = true;
+                                tracing::debug!("Memory 内置 Rerank 暂时不可用: {error:#}");
+                            } else {
+                                tracing::warn!("Memory 内置 Rerank 暂不可用: {error:#}");
+                            }
+                        }
                     }
                 }
                 let done = (embedding_tier.is_none() || embedding.is_some())
@@ -609,11 +673,17 @@ fn spawn_local_model_loader(
                 if done {
                     return;
                 }
-                let Some(delay) = LOCAL_MODEL_RETRY_SECS.get(attempt) else {
-                    tracing::warn!("Memory 内置模型多次加载失败，保持降级召回，修改配置后重试");
-                    return;
+                // 只有真正的故障才推进退避序列；锁竞争按固定短间隔等待。
+                let delay = if transient {
+                    &LOCAL_MODEL_BUSY_WAIT_SECS
+                } else {
+                    let Some(delay) = LOCAL_MODEL_RETRY_SECS.get(attempt) else {
+                        tracing::warn!("Memory 内置模型多次加载失败，保持降级召回，修改配置后重试");
+                        return;
+                    };
+                    attempt += 1;
+                    delay
                 };
-                attempt += 1;
                 // 分段休眠，配置变更后能尽快退出。
                 for _ in 0..*delay {
                     if stale() {
